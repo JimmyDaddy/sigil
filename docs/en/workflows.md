@@ -1,181 +1,52 @@
+<!-- public-doc-role: workflows; authority: task-workflow-authority; sections: explore-an-unfamiliar-repository,make-a-small-change-safely,plan-a-larger-feature-or-refactor,debug-a-failing-command,review-local-changes,resume-previous-work,use-code-intelligence,connect-external-tools-with-mcp,what-to-review-yourself; cta: use-cookbook -->
+
 # Common Workflows
 
-[Docs home](README.md) · [简体中文](../zh-CN/workflows.md)
+[Docs home](README.md) · [Cookbook](cookbook.md) · [简体中文](../zh-CN/workflows.md)
 
-These examples are starting points for day-to-day repository work. They assume you are running the TUI with:
-
-```bash
-cd /path/to/workspace
-sigil
-```
+These workflows describe the checkpoints and decisions around a task. Copyable prompt-only versions live in the [Cookbook](cookbook.md).
 
 ## Explore An Unfamiliar Repository
 
-Start read-only:
-
-```text
-Explain the repository structure. Identify the main entrypoints, test layout, configuration files, and user documentation.
-```
-
-Follow up with a focused question:
-
-```text
-Explain how Sigil handles this request. Identify the user-visible stages, likely files it needs to inspect, and where it will show errors or approvals.
-```
-
-Good signs:
-
-- Sigil cites concrete files it read.
-- Tool activity stays read-only.
-- You can ask it to narrow the answer to a component, directory, or path.
+Ask Sigil to stay read-only and identify entrypoints, tests, configuration, and user docs. A useful result cites concrete files and makes uncertainty visible. Narrow the next question to one directory or behavior before asking for changes.
 
 ## Make A Small Change Safely
 
-Give the goal, scope, and verification expectation:
-
-```text
-Update docs/en/quickstart.md so the first-run path is clearer for new users.
-Keep the change docs-only.
-After editing, check links and run the static docs checks if available.
-```
-
-When approval appears, review the diff before allowing it. After the run:
-
-```bash
-git diff
-```
-
-If the edit is too broad, deny it and restate the scope.
+State the goal, allowed files, what must stay untouched, and how to verify the result. Review the approval diff before allowing an edit. Finish with `git diff` and the smallest relevant project check; deny and narrow any proposal that grows beyond the stated scope.
 
 ## Plan A Larger Feature Or Refactor
 
-Use `/task` when the task crosses multiple files or needs durable sequencing:
+Use `/plan <prompt>` when you want a read-only plan before committing to execution. Accept the Plan ready card only after the steps and boundaries look right. Use `/task <task>` when you already want a multi-step task, and `/task continue` when the latest task should proceed without new guidance.
+
+Keep steering instructions concrete, for example:
 
 ```text
-/task add a troubleshooting section for terminal copy failures and link it from the TUI guide
+Keep this docs-only. Update English and Chinese together. Do not edit Rust code.
 ```
-
-Then review the generated task plan before letting execution continue. You can steer the next step:
-
-```text
-Keep this docs-only. Do not edit Rust code. Update both English and Chinese docs.
-```
-
-Use:
-
-```text
-/task continue
-```
-
-when the latest task should continue without extra guidance.
 
 ## Debug A Failing Command
 
-Paste the failing command and the relevant output:
-
-```text
-cargo test failed. The failing assertion says the help text is missing Alt-D.
-Find the source of that help text, explain the likely cause, and propose the smallest fix before editing.
-```
-
-For safer debugging, ask Sigil to inspect first and edit second:
-
-```text
-Read the failing test and implementation first. Summarize the root cause and wait before changing files.
-```
+Provide the command, relevant output, and expected behavior. Ask Sigil to read the failing test and implementation, explain the likely cause, and wait before editing. Once the cause is clear, request the smallest fix and rerun the same failing check.
 
 ## Review Local Changes
 
-Ask for a review stance:
-
-```text
-Review the current diff for user-facing regressions, stale docs, and missing validation. List findings by severity with file references.
-```
-
-Then decide whether to apply fixes:
-
-```text
-Fix the high-severity docs findings only. Leave unrelated Rust changes untouched.
-```
+Ask for findings by severity with file references. Decide which findings to fix, and keep unrelated working-tree changes out of scope. After fixes, review the live diff again rather than relying on the earlier report.
 
 ## Resume Previous Work
 
-Use:
-
-```text
-/resume
-```
-
-Select a session from the list. Restored sessions rebuild visible conversation and durable task state. Tools that were interrupted are shown as interrupted; Sigil does not silently replay them.
-
-If the latest planned task is still unfinished:
-
-```text
-/task continue
-```
-
-or type guidance in the composer.
+Open `/resume`, choose a session, and read the restored context before continuing. Interrupted tools remain visibly interrupted and are not rerun automatically. Give new guidance in the composer or use `/task continue` for an unfinished task.
 
 ## Use Code Intelligence
 
-Enable it in config:
-
-```toml
-[code_intelligence]
-enabled = true
-server_startup = "lazy"
-```
-
-In the TUI, use:
-
-```text
-Alt-D
-```
-
-to run diagnostics over changed source files. Code intelligence can also provide symbols, definitions, references, code actions, and rename previews when an LSP server is available.
-
-If no LSP server is available, normal chat and file tools still work. See [Sigil Configuration Guide](configuration.md) and [Troubleshooting](troubleshooting.md).
+When enabled, code intelligence can help with symbols, definitions, references, diagnostics, code actions, and rename previews. Press `Alt-D` for diagnostics on changed source files. If no language server is available, normal chat and file tools still work; use [Configuration](configuration.md) and [Troubleshooting](troubleshooting.md) for setup.
 
 ## Connect External Tools With MCP
 
-Use MCP when Sigil needs tool-backed access to external systems or specialized local capabilities.
-
-Typical pattern:
-
-1. Configure a server in `[[mcp_servers]]`.
-2. Set a conservative trust policy.
-3. Start with `approval_default = "ask"`.
-4. Use `/doctor` to check command and trust configuration.
-5. Let Sigil list and call MCP tools only after you understand what the server can access.
-
-See [Sigil MCP Guide](mcp.md).
-
-## Prompt Patterns That Work Well
-
-Good prompts include:
-
-- The exact goal.
-- Relevant files, modules, or commands.
-- What not to touch.
-- How to verify the result.
-- Whether Sigil should propose first or edit immediately.
-
-Example:
-
-```text
-Improve docs/en/configuration.md for new users.
-Keep provider-specific advanced fields, but move the common path before the full reference.
-Update the Chinese mirror if needed.
-Run docs link/path checks after editing.
-```
+Configure one server, start with conservative trust, run `/doctor`, and inspect what the server can access before allowing calls or credentials. Setup and authentication belong in the [MCP guide](mcp.md).
 
 ## What To Review Yourself
 
-Sigil can inspect, edit, and run commands, but you should still review:
+Always review the final diff, changed tests, command output, configuration files that may contain secrets, and any external service allowed to receive data.
 
-- `git diff`
-- generated or changed tests
-- command output
-- approval diffs
-- config files that may contain secrets
-- MCP servers before allowing secret egress or write actions
+<!-- public-doc-cta: use-cookbook -->
+Next: [Open the Cookbook for copyable prompts](cookbook.md).

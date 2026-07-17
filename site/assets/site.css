@@ -332,16 +332,17 @@ a {
 }
 
 .brand-mark {
+  width: 36px;
+  height: 40px;
+  object-fit: contain;
   border-radius: 6px;
 }
 
 .brand-wordmark {
   display: block;
-  width: 78px;
-  height: 34px;
-  background: var(--brand-wordmark);
-  mask: url("logo/sigil-wordmark-header.svg") center / contain no-repeat;
-  -webkit-mask: url("logo/sigil-wordmark-header.svg") center / contain no-repeat;
+  width: 88px;
+  height: 38px;
+  background: url("logo/sigil-wordmark.svg") center / contain no-repeat;
 }
 
 .hero-logo-on-dark,
@@ -2438,11 +2439,17 @@ footer a {
 }
 
 :root[data-theme="dark"] .brand-mark {
-  filter: brightness(1.22) saturate(1.12) contrast(1.08) drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
+  content: url("logo/sigil-mark-dark-mode.svg");
+  filter: drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
 }
 
 :root[data-theme="dark"] .brand-wordmark {
+  background-image: url("logo/sigil-wordmark-dark-mode.svg");
   filter: drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
+}
+
+:root[data-theme="dark"] .hero::before {
+  background-image: url("logo/sigil-mark-staff-glow-dark-mode.svg");
 }
 
 :root[data-theme="dark"] .hero-logo-on-light,
@@ -2839,13 +2846,13 @@ footer a {
   }
 
   .brand-mark {
-    width: 29px;
-    height: auto;
+    width: 31px;
+    height: 34px;
   }
 
   .brand-wordmark {
-    width: 68px;
-    height: 30px;
+    width: 78px;
+    height: 34px;
   }
 
   .hero {
@@ -2991,11 +2998,17 @@ footer a {
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .brand-mark {
-    filter: brightness(1.22) saturate(1.12) contrast(1.08) drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
+    content: url("logo/sigil-mark-dark-mode.svg");
+    filter: drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
   }
 
   :root:not([data-theme="light"]) .brand-wordmark {
+    background-image: url("logo/sigil-wordmark-dark-mode.svg");
     filter: drop-shadow(0 3px 8px rgb(0 0 0 / 34%));
+  }
+
+  :root:not([data-theme="light"]) .hero::before {
+    background-image: url("logo/sigil-mark-staff-glow-dark-mode.svg");
   }
 
   :root:not([data-theme="light"]) .hero-logo-on-light,

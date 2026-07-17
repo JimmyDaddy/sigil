@@ -1,177 +1,136 @@
+<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts; cta: return-user-guide -->
+
 # Command And Key Reference
 
-[Docs home](README.md) · [简体中文](../zh-CN/reference.md)
+[Docs home](README.md) · [User guide](user-guide.md) · [Configuration Reference](configuration-reference.md) · [简体中文](../zh-CN/reference.md)
 
-This page collects user-facing commands, keys, paths, shared config sections, approval outcomes, and recovery facts. Provider selection and credentials stay in the provider documentation so this reference does not duplicate them.
+Use this page for exact user-facing commands, keys, paths, outputs, and recovery behavior.
 
 ## TUI Keys
 
 | Action | Key |
 | --- | --- |
-| Open help | `F1` |
-| Open slash command selector | `/` |
-| Submit prompt or selected slash command | `Enter` |
-| Toggle right info rail compact/detail | `F2` |
+| Open help / slash selector | `F1` / `/` |
+| Submit | `Enter` |
+| Show or hide info rail | `F2` |
+| Switch visible rail compact/detail | `Shift-F2` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
-| Insert composer newline | `Ctrl-J`; `Shift-Enter` / `Alt-Enter` when terminal keyboard enhancement is active and reports modifiers |
-| Move composer cursor by line or character | `Ctrl-A/E`, `Ctrl-B/F`, `Left/Right` |
-| Move composer cursor by word | `Alt-B/F`, `Ctrl-Left/Right` |
-| Delete composer text | `Backspace/Delete`, `Ctrl-H`, `Ctrl-W`, `Ctrl/Alt-Backspace`, `Ctrl/Alt-Delete` |
-| Kill/yank composer line tail | `Ctrl-K/Y` |
-| Restore last draft cleared with Esc | `Ctrl-Z` |
-| Request cooperative cancellation of the current run | `Ctrl-C` |
-| Leave overlay or clear activity focus | `Esc` |
-| Focus latest activity | `Ctrl-G` |
-| Move between activities | `Alt-J` / `Alt-K` |
-| Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
-| Open latest checkpoint restore | `Ctrl-R` opens and loads the reverse-diff dialog; `Enter` restores controlled files, `F` forks conversation without changing files, `Esc` closes |
-| Open actions for a saved session | Select a `/resume` candidate, then press `Ctrl-O` or right-click it |
-| Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A` |
-| Expand or collapse thinking / activity | `Ctrl-T` |
-| Run code diagnostics for changed source files | `Alt-D` |
-| Cancel focused running terminal task | `Alt-X` |
-| Select or activate an MCP server in `/config` | `Enter` cycles the inspected server; `Down` enters footer actions; choose `activate` and press `Enter` to activate or refresh |
+| Insert composer newline | `Ctrl-J`; `Shift-Enter` / `Alt-Enter` when supported |
+| Move composer cursor | `Ctrl-A/E`, `Ctrl-B/F`, `Alt-B/F`, arrows |
+| Delete composer text | `Backspace/Delete`, `Ctrl-H/W`, modified Backspace/Delete |
+| Kill/yank line tail | `Ctrl-K/Y` |
+| Restore the last draft cleared with `Esc` | `Ctrl-Z` |
+| Copy selected transcript text | `Ctrl-C` when a selection is active |
+| Copy selection, or latest assistant reply when no selection is active | `Ctrl-L`; info rail is excluded |
+| Cancel current run / close overlay | `Ctrl-C` with no selection / `Esc` |
+| Focus and move through activity | `Ctrl-G`, `Alt-J` / `Alt-K` |
+| Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
+| Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
+| Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
+| Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
+| Expand/collapse thinking or activity | `Ctrl-T` |
+| Run diagnostics on changed source | `Alt-D` |
+| Cancel focused terminal task | `Alt-X` |
 
-When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. If child agents exist, `Down` from the last composer input row focuses the composer agent panel. `Ctrl-Z` is a single draft restore for text cleared by `Esc`, not a general undo stack.
+`Up/Down` first handles composer history or multiline movement. `Ctrl-Z` restores one cleared draft; it is not a general undo stack.
 
 ## Slash Commands
 
 | Command | Purpose |
 | --- | --- |
-| `/config` | Open the TUI config panel |
-| `/doctor` | Run local setup diagnostics inside the transcript |
-| `/feedback` | Preview and save a private support report; after export, `Enter` reviews the JSON, `O` reveals the file, `B` opens the bug form, `C` copies the report path, and `U` copies the form URL |
-| `/new` | Start a fresh session with the current provider and model |
-| `/resume` | Select and restore a previous session; `Ctrl-O` or right-click opens its lifecycle actions |
-| `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
-| `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
-| `/agent cancel <child-id|current>` | Cancel a running background child agent that still has a live runtime handle |
-| `/queue` | Advanced follow-up controls |
-| `/queue next|interrupt|edit|delete [item]` | Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it |
-| `/plan` / `/plan <prompt>` | Run a read-only planning prompt; accept the plan card to create and run a durable task |
-| `/task <task>` | Create a durable plan and execute the task step by step |
-| `/task continue` | Continue the latest planned task without extra guidance |
-| `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
-| `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
-| `/compact` | Review the V2 fold plan; confirm one manual apply when exact local admission is ready |
+| `/config` | Open configuration |
+| `/doctor` | Run diagnostics |
+| `/feedback` | Preview and export a local support report |
+| `/new` | Start a fresh session |
+| `/resume` | Select a saved session |
+| `/agent <main|child-id>` | Switch visible transcript |
+| `/agent rename <child-id|current> <name>` | Name a child transcript |
+| `/agent cancel <child-id|current>` | Cancel a running child with a live handle |
+| `/queue` | Show advanced follow-up controls |
+| `/queue next|interrupt|edit|delete [item]` | Reorder, interrupt for, edit, or remove a follow-up |
+| `/plan [prompt]` | Run a read-only plan; accept its card to start a task |
+| `/task <task>` | Start multi-step execution |
+| `/task continue` | Continue the latest unfinished task |
+| `/model <flash|pro|id>` | Switch model for the next run and start a fresh session |
+| `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
+| `/compact` | Review and, when ready, apply one context reduction |
 | `/quit` | Quit the TUI |
 
-Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
-
-Workspace trust is handled by the startup workspace trust gate, not a slash command. Trust decisions are recorded in the session audit log. They allow repository-local verification candidates to be promoted for task readiness and permit an exact-workspace LSP with `trust_required = true` to start. They do not grant shell, plugin, MCP, or file-write permissions, and LSP write tools still require diff approval.
-
-`/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
+Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`. Candidate commands use `Up/Down`, `Tab`, and `Enter`.
 
 ## CLI Commands
 
 | Command | Use |
 | --- | --- |
 | `sigil` | Open the TUI in the current workspace |
-| `sigil doctor [--output text|json]` | Run local diagnostics; JSON produces one versioned, redacted report on stdout |
-| `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task; machine modes keep stdout parseable |
-| `sigil resume [session-id]` | Open the TUI and restore the latest or requested session; TUI exit prints a copyable resume command |
-| `sigil serve` | Start the loopback-only, bearer-authenticated local HTTP/SSE service |
+| `sigil doctor [--output text|json]` | Run local diagnostics |
+| `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task |
+| `sigil resume [session-id]` | Open the TUI and restore a session |
+| `sigil serve` | Start the authenticated loopback-only local service |
 | `sigil --version` | Print the installed version |
-| `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
-
-Subcommands are for automation, diagnostics, scripts, and setup checks. The full product surface is the TUI.
+| `sigil --config <path> doctor` | Diagnose an explicit config |
 
 ## Machine Output And Local Server
 
-`sigil run --output json` writes one versioned terminal record to stdout. `--output jsonl` writes ordered versioned event records and then exactly one terminal result or error. Human progress and safe network-disclosure notices stay on stderr. Stable exit codes are `0` for success, `1` for execution failure, `2` for invalid invocation or configuration, and `130` for a cooperatively cancelled run.
+`sigil run --output json` writes one result to stdout. `jsonl` writes ordered events followed by one result or error. Human progress and safe network notices stay on stderr. Exit codes are `0` success, `1` execution failure, `2` invalid invocation/configuration, and `130` cancellation.
 
-The local server is an advanced interface for a local client; it does not replace the TUI. Start it with a token stored in an environment variable:
+Start the local service with a high-entropy environment token:
 
 ```bash
 export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
 sigil serve
 ```
 
-The command prints the actual loopback address selected by the OS. `GET /health` is unauthenticated; `GET /openapi.json`, `GET /disclosures`, and every session, run, event, cancellation, or approval route require `Authorization: Bearer <token>`. V1 rejects non-loopback hosts, a missing token, and `--no-token` before opening a listener. It does not enable cookie auth, wildcard CORS, remote access, daemon auto-start, or multi-user isolation.
-
-Run events replay durable history and then remain live until a terminal event, disconnect, stream gap, or server shutdown. `Last-Event-ID` resumes retained durable events; transient text and reasoning progress is best effort and has no replay id. `Ctrl-C` closes command admission, cooperatively cancels active runs, drains owned workers and connections, and then exits.
+The service prints its selected loopback address. `GET /health` is unauthenticated; OpenAPI, disclosure, session, run, event, cancellation, and approval routes require `Authorization: Bearer <token>`. It is not a remote or multi-user service, does not use cookie auth or wildcard CORS, and shuts down on `Ctrl-C`.
 
 ## Config Resolution
 
-Sigil resolves config in this order:
-
-1. `--config <path>`
-2. `sigil.toml` in the user-visible Sigil config directory
-
-Default user config path:
-
-- `~/.sigil/sigil.toml`
+Sigil uses `--config <path>` when supplied; otherwise it loads `~/.sigil/sigil.toml`. A workspace-root `sigil.toml` is not loaded automatically.
 
 ## Important Paths
 
 | Path | Meaning |
 | --- | --- |
-| User state root `workspaces/<workspace-id>/sessions/` | Default append-only session logs |
-| User state root `workspaces/<workspace-id>/input-history.jsonl` | Composer input history |
-| User state root `workspaces/<workspace-id>/artifacts/` | Terminal and changeset artifacts |
-| User state root `workspaces/<workspace-id>/http-server-v1/` | Local-server recovery and audit data |
-| User cache root `workspaces/<workspace-id>/tmp/` | Shell scratch directory exposed as `$SIGIL_SCRATCH_DIR` and shown as `cache/tmp` |
-| User config `sigil.toml` | Default local machine config |
-| `.sigil/agents/`, `.sigil/commands/`, `.sigil/skills/`, `.sigil/plugins/` | Optional workspace project assets |
-| `SIGIL.md` | Stable workspace memory file |
-| `AGENTS.md` | Agent collaboration instructions that Sigil can load as memory |
-| `SIGIL.local.md` | Local-only memory file |
+| State root `workspaces/<workspace-id>/sessions/` | Session logs |
+| State root `workspaces/<workspace-id>/input-history.jsonl` | Composer history |
+| State root `workspaces/<workspace-id>/artifacts/` | Terminal and change artifacts |
+| Cache root `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
+| User config `~/.sigil/sigil.toml` | Default local config |
+| `.sigil/agents`, `.sigil/commands`, `.sigil/skills`, `.sigil/plugins` | Workspace resources |
+| `SIGIL.md`, `AGENTS.md`, `SIGIL.local.md` | Workspace instructions |
 
-Do not commit real secrets in `sigil.toml` or local memory files. A workspace-root `sigil.toml` is not loaded by default; pass `--config <path>` explicitly if you need one for an experiment.
-
-## Provider Setup
-
-Use the [Provider guide](providers.md) for the supported provider values, model selection, and authentication priority. Each linked provider page owns its copyable config block and complete environment-variable list. Shared model-request timeout overrides are documented in [Advanced configuration](advanced-configuration.md#terminal-and-model-request-overrides).
-
-## Common Config Sections
-
-| Section | Purpose |
-| --- | --- |
-| `[workspace]` | Workspace root |
-| `[agent]` | Shared agent settings |
-| `[permission]` | Default approval policy |
-| `[web]` | Stable search route, network policy, destination rules, and budgets |
-| `[memory]` | Workspace memory loading |
-| `[compaction]` | Context compaction thresholds |
-| `[task]` | Planned task behavior and role settings |
-| `[verification]` | Explicit user-approved verification checks |
-| `[code_intelligence]` | LSP and code intelligence tools |
-| `[terminal]` | Mouse, OSC52 clipboard, scroll behavior, and optional attention notifications |
-| `[appearance]` | TUI theme, usage cost currency, and semantic color overrides |
-| `[[mcp_servers]]` | Explicit `stdio` or user-root `streamable_http` MCP server configuration |
-
-See [Sigil Configuration Guide](configuration.md) for examples.
-Provider and model selection, `[providers.*]` blocks, and authentication variables are indexed in the [Provider guide](providers.md).
+Do not commit real secrets in config or local instruction files.
 
 ## Web Tool Inputs
 
-| Tool | Required input | Important boundary |
+| Tool | Input | Boundary |
 | --- | --- | --- |
-| `websearch` | `query`; optional `max_results` | Route resolution is provider-hosted, authoritative configured MCP, or bundled Exa. A failed selected route does not silently change destination. |
-| `webfetch` | `source_id`; optional `format` (`markdown` or `text`) and `max_content_bytes` | Accepts only a session-local exact URL capability; it does not accept a novel raw `url` argument. |
+| `websearch` | `query`; optional `max_results` | Uses the selected provider-hosted, configured MCP, or bundled route. |
+| `webfetch` | observed `source_id`; optional `format`, `max_content_bytes` | Opens only a URL already observed in the current session. |
 
-Both tools are `Read` operations with an independent `NetworkRead` effect. `[web].network_mode = "deny"` blocks them even if the local permission mode is permissive. `ask` requires an explicit interactive action and therefore fails closed in headless/eager contexts that cannot ask.
+Both also follow `[web].network_mode`. `deny` blocks them; an unresolved `ask` cannot proceed headlessly.
 
 ## Approval Outcomes
 
 | Outcome | Meaning |
 | --- | --- |
-| allow | Run the tool call |
-| deny | Return a structured denial to the model |
-| timeout | Deny automatically after waiting too long |
-| approval_required | Headless mode needed a decision but could not ask interactively |
+| `allow` | Run the action |
+| `deny` | Reject it |
+| `timeout` | Deny after no decision |
+| `approval_required` | A non-interactive run needed a decision it could not request |
 
 ## Session Recovery Facts
 
-- Session logs are append-only JSONL.
-- Restarting restores visible session state.
-- Started tools without terminal records are restored as interrupted.
-- Cancellation is durable and exact-once per run scope: `cancel requested` is followed by either cleanup-confirmed `cancelled` or cleanup-unconfirmed `interrupted`; recovery never upgrades an unconfirmed cancellation to `cancelled`.
-- Restore does not silently replay unfinished tools.
-- `/new` starts a fresh append-only session log.
-- `/resume` selects older sessions.
-- A selected `/resume` row exposes resume, finalized-turn fork, safe export, pin/unpin, and exact delete preview through `Ctrl-O` or right-click. The modal keeps exclusive keyboard focus.
-- The `Storage` section in `/config` exposes retention as an explicit preview and confirmation. Normal startup, runs, resume, and `sigil serve` never apply it automatically.
-- Exiting the TUI prints the current session id and a `sigil resume <session-id>` command.
-- `/task continue` continues the latest unfinished planned task when one exists.
+- Restart restores supported visible session and task state.
+- An unfinished tool returns as interrupted and is not silently rerun.
+- `/new` starts a fresh session; `/resume` selects an older one.
+- Saved-session actions include resume, conversation fork, safe export, pin/unpin, and reviewed delete.
+- Retention cleanup requires an explicit preview and confirmation under `/config` → **Storage**.
+- Exiting prints the session id and `sigil resume <session-id>`.
+- `/task continue` continues the latest unfinished task when one exists.
+
+Provider credentials belong in [Providers](providers.md); config fields belong in [Configuration Reference](configuration-reference.md).
+
+<!-- public-doc-cta: return-user-guide -->
+Next: [Return to the User Guide](user-guide.md).

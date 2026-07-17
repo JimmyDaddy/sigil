@@ -3,8 +3,6 @@
 
 require "cgi"
 
-SITE_BASE_PATH = "/sigil/"
-
 site_dir = File.expand_path(ARGV.fetch(0))
 
 unless Dir.exist?(site_dir)
@@ -29,8 +27,6 @@ end
 def target_file_for(site_dir, source_file, path)
   if path.empty?
     source_file
-  elsif path.start_with?(SITE_BASE_PATH)
-    File.join(site_dir, path.delete_prefix(SITE_BASE_PATH))
   elsif path.start_with?("/")
     File.join(site_dir, path.sub(%r{\A/+}, ""))
   else

@@ -1,6 +1,8 @@
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+
 # User Changelog
 
-[Docs home](README.md) · [Supported status](status.md) · [简体中文](../zh-CN/changelog.md)
+[Docs home](README.md) · [Installation](installation.md) · [Supported status](status.md) · [简体中文](../zh-CN/changelog.md)
 
 This page lists user-facing release notes. For support boundaries and early-preview caveats, see [Supported Today And Future Work](status.md).
 
@@ -8,9 +10,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Changed
 
-- Windows shell and terminal tools now use native PowerShell by default, disclose the resolved dialect in Doctor and tool cards, keep non-POSIX approval analysis conservative, and use Job Object process-tree ownership for cancellation and timeout. Local execution remains explicitly unconfined.
-- Remote Streamable HTTP MCP servers now support explicit TUI-first OAuth sign-in with PKCE, loopback or manual callback, native credential storage, bounded refresh/revocation, and typed authentication failures. Every OAuth destination still passes the normal network disclosure and destination checks; headless startup never opens a browser.
-- Remote MCP activation and refresh now replace tool generations transactionally, while Windows stdio MCP process trees use native Job Object ownership for bounded cleanup.
+- Windows shell and terminal tools now use PowerShell by default, show the detected shell in Doctor and tool cards, and stop child processes more reliably after a timeout. Local execution remains unconfined.
+- Remote Streamable HTTP MCP servers now support explicit OAuth sign-in from the TUI, automatic or manual callback, native credential storage, refresh, sign-out, and specific recovery errors. Every destination still passes the normal network disclosure and destination checks; headless startup never opens a browser.
+- Activating or refreshing a remote MCP server now updates its available tools without leaving stale duplicates. Windows also cleans up stopped local MCP process trees more reliably.
 
 ## v0.0.1-alpha.4 - 2026-07-16
 
@@ -19,8 +21,8 @@ These changes are included in the packaged `v0.0.1-alpha.4` release.
 ### Added
 
 - Added default-off, privacy-bounded terminal attention notifications for completed long work, approvals, failures, and user-input requests, with automatic OSC 9/OSC 777/BEL selection.
-- Added bounded request-local repository context for Rust, Python, JavaScript/TypeScript, and Go, preferring relevant warm LSP snapshots and falling back to bundled Tree-sitter adapters.
-- Added TUI image attachments for bounded PNG, JPEG, and WebP input through local paths or the system image clipboard, with removable metadata chips, controlled cache storage, safe session projections, and exact provider/model admission.
+- Added bounded repository context for Rust, Python, JavaScript/TypeScript, and Go, using available language services with a built-in parser fallback.
+- Added TUI image attachments for PNG, JPEG, and WebP through local paths or the system image clipboard, with removable attachment chips and clear provider/model compatibility checks.
 - Added `sigil doctor --output json`, a versioned and redacted local diagnostics format for support requests.
 - Added `/feedback`, which previews included and excluded data before an explicit local-only JSON export; reports are never uploaded automatically.
 - Added structured GitHub forms for bugs, feature requests, and documentation issues.
@@ -49,8 +51,8 @@ These changes are included in the packaged `v0.0.1-alpha.2` release.
 ### Added
 
 - Added the OpenAI Responses provider through `[providers.openai_responses]`.
-- Added stable `websearch` and capability-backed `webfetch` routes with separate network policy and source provenance.
-- Added a task Verification card, `Alt-V` focus, recommended checks, and inspectable snapshot and changeset evidence.
+- Added stable `websearch` and supported `webfetch` routes with separate network controls and visible sources.
+- Added a task Verification card, `Alt-V` focus, recommended checks, and inspectable evidence tied to the reviewed files and changes.
 - Added `Ctrl-R` checkpoint review with controlled restore or conversation fork choices.
 - Added a read-only Context Compaction V2 preview through `/compact`.
 
@@ -82,7 +84,7 @@ These changes are included in the packaged `v0.0.1-alpha.2` release.
 
 - Self-update is not available.
 - Stable plugin API compatibility is not promised for the alpha line.
-- Sandbox coverage and execution receipts vary by platform and backend.
+- Sandbox coverage varies by platform and backend.
 - Headless automation cannot show interactive approval modals.
 
 ## v0.0.1-alpha - 2026-07-07
@@ -92,11 +94,14 @@ These changes are included in the packaged `v0.0.1-alpha.2` release.
 - First public alpha release for the Sigil TUI.
 - TUI entrypoint through the `sigil` command.
 - Quick Setup, `/config`, `sigil doctor`, and `/doctor`.
-- Durable task and planning flows through `/task` and `/plan`.
+- Multi-step task and planning flows through `/task` and `/plan`.
 - Approval-backed file changes, shell execution, MCP usage, and code-intelligence edits.
-- Session recovery from append-only local state.
+- Recovery of saved local sessions after a restart.
 
 ### Known Limitations
 
 - This release was an initial preview and was superseded by `v0.0.1-alpha.1`.
 - Users should prefer the `alpha` install channel or the latest documented release tag.
+
+<!-- public-doc-cta: open-installation -->
+Next: [Review installation and update paths](installation.md).

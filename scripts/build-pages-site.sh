@@ -20,10 +20,11 @@ case "${out_dir}" in
 esac
 
 rm -rf "${out_dir}"
-mkdir -p "${out_dir}/assets/logo"
+mkdir -p "${out_dir}/assets/logo" "${out_dir}/assets/social"
 cp -R site/. "${out_dir}/"
 rm -f "${out_dir}/README.md"
 cp assets/logo/*.{png,svg} "${out_dir}/assets/logo/"
+cp assets/social/*.{png,svg} "${out_dir}/assets/social/"
 mkdir -p "${out_dir}/examples"
 cp -R docs/examples/. "${out_dir}/examples/"
 scripts/build-docs-site.rb "${out_dir}" >/dev/null

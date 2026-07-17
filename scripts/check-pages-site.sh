@@ -4,6 +4,13 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "${repo_root}"
 
+ruby_compat="${repo_root}/scripts/ruby-compat.rb"
+if [[ -n "${RUBYOPT:-}" ]]; then
+  export RUBYOPT="-r${ruby_compat} ${RUBYOPT}"
+else
+  export RUBYOPT="-r${ruby_compat}"
+fi
+
 stage_root="$(mktemp -d)"
 trap 'rm -rf "${stage_root}"' EXIT
 stage_dir="${stage_root}/public"
@@ -11,12 +18,18 @@ stage_dir="${stage_root}/public"
 scripts/check-docs.sh >/dev/null
 scripts/build-pages-site.sh "${stage_dir}" >/dev/null
 ruby scripts/check-site-structure.rb "${stage_dir}" >/dev/null
+node scripts/check-site-search-ranking.js "${stage_dir}/search.json" dev/docs/public-documentation-content-policy.json >/dev/null
 scripts/check-site-metadata.rb "${stage_dir}" >/dev/null
 scripts/check-site-accessibility.rb "${stage_dir}" >/dev/null
 scripts/test-docs-table-render.rb >/dev/null
 scripts/check-site-viewport.rb "${stage_dir}" >/dev/null
 scripts/check-site-artifact-links.rb "${stage_dir}" >/dev/null
 scripts/check-site-repo-links.rb "${stage_dir}" >/dev/null
+
+if grep -R -n -E 'public-doc-(role|topic|cta)' "${stage_dir}/docs" "${stage_dir}/zh-CN/docs"; then
+  echo "public documentation metadata leaked into rendered pages" >&2
+  exit 1
+fi
 
 required_files=(
   "index.html"
@@ -61,6 +74,21 @@ required_files=(
   "assets/site.js"
   "assets/code.js"
   "assets/search.js"
+  "assets/search-ranking.js"
+  "assets/logo/sigil-lockup.svg"
+  "assets/logo/sigil-lockup-dark-mode.svg"
+  "assets/logo/sigil-lockup.png"
+  "assets/logo/sigil-lockup-2x.png"
+  "assets/logo/sigil-mark.svg"
+  "assets/logo/sigil-mark-dark-mode.svg"
+  "assets/logo/sigil-mark-micro.svg"
+  "assets/logo/sigil-mark-micro-dark-mode.svg"
+  "assets/logo/sigil-mark.png"
+  "assets/logo/sigil-mark-2x.png"
+  "assets/logo/sigil-wordmark.svg"
+  "assets/logo/sigil-wordmark-dark-mode.svg"
+  "assets/logo/sigil-wordmark.png"
+  "assets/logo/sigil-wordmark-2x.png"
   "assets/logo/sigil-full-staff-glow.svg"
   "assets/logo/sigil-full-staff-glow-dark-mode.svg"
   "assets/logo/sigil-full-staff-glow-2x.png"
@@ -72,6 +100,8 @@ required_files=(
   "assets/logo/sigil-mark-staff-glow-watermark-4x.png"
   "assets/logo/sigil-wordmark-header.svg"
   "assets/logo/sigil-wordmark-header-2x.png"
+  "assets/social/sigil-social-preview.svg"
+  "assets/social/sigil-social-preview.png"
   "assets/screenshots/tui-session.svg"
   "assets/screenshots/approval-review.svg"
   "assets/screenshots/config-panel.svg"
@@ -147,6 +177,23 @@ for file in "${required_files[@]}"; do
   fi
 done
 
+social_preview="${stage_dir}/assets/social/sigil-social-preview.png"
+ruby -e '
+  data = File.binread(ARGV.fetch(0), 24)
+  signature = "\x89PNG\r\n\x1A\n".b
+  abort "social preview is not a PNG" unless data.start_with?(signature)
+  width, height = data.byteslice(16, 8).unpack("NN")
+  abort "social preview must be 1280x640, found #{width}x#{height}" unless [width, height] == [1280, 640]
+' "${social_preview}"
+if [[ "$(wc -c < "${social_preview}")" -ge 1048576 ]]; then
+  echo "social preview must remain below 1 MiB for GitHub upload" >&2
+  exit 1
+fi
+if grep -q '<image' "${stage_dir}/assets/social/sigil-social-preview.svg"; then
+  echo "social preview SVG must remain self-contained" >&2
+  exit 1
+fi
+
 for file in "${source_docs[@]}"; do
   if [[ ! -f "${repo_root}/${file}" ]]; then
     echo "missing source documentation file: ${file}" >&2
@@ -159,17 +206,21 @@ grep -q 'href="../"' "${stage_dir}/zh-CN/index.html"
 grep -q 'href="docs/#quickstart"' "${stage_dir}/index.html"
 grep -q 'href="docs/#quickstart"' "${stage_dir}/zh-CN/index.html"
 grep -q 'href="quickstart/"' "${stage_dir}/docs/index.html"
-grep -q 'href="visual-tour/"' "${stage_dir}/docs/index.html"
+grep -q 'href="user-guide/"' "${stage_dir}/docs/index.html"
+grep -q 'href="workflows/"' "${stage_dir}/docs/index.html"
+grep -q 'href="configuration/"' "${stage_dir}/docs/index.html"
 grep -q 'href="safety/"' "${stage_dir}/docs/index.html"
 grep -q 'href="providers/"' "${stage_dir}/docs/index.html"
-grep -q 'href="privacy/"' "${stage_dir}/docs/index.html"
-grep -q 'href="status/"' "${stage_dir}/docs/index.html"
+grep -q 'href="troubleshooting/"' "${stage_dir}/docs/index.html"
+grep -q 'href="reference/"' "${stage_dir}/docs/index.html"
 grep -q 'href="quickstart/"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'href="visual-tour/"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'href="user-guide/"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'href="workflows/"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'href="configuration/"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'href="safety/"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'href="providers/"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'href="privacy/"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'href="status/"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'href="troubleshooting/"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'href="reference/"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'href="../zh-CN/docs/"' "${stage_dir}/docs/index.html"
 grep -q 'href="../../docs/"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'https://sigil.corerobin.com/' "${stage_dir}/sitemap.xml"
@@ -184,6 +235,15 @@ grep -qx 'sigil.corerobin.com' "${stage_dir}/CNAME"
 grep -q 'property="og:image"' "${stage_dir}/index.html"
 grep -q 'property="og:image"' "${stage_dir}/docs/index.html"
 grep -q 'property="og:image"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png"' "${stage_dir}/index.html"
+grep -q 'content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png"' "${stage_dir}/docs/index.html"
+grep -q 'content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png"' "${stage_dir}/zh-CN/docs/index.html"
+grep -q 'content="1280"' "${stage_dir}/index.html"
+grep -q 'content="640"' "${stage_dir}/index.html"
+if grep -Eq '<(changefreq|priority)>' "${stage_dir}/sitemap.xml"; then
+  echo "sitemap contains metadata ignored by Google" >&2
+  exit 1
+fi
 grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/index.html"
 grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/docs/index.html"
 grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/zh-CN/docs/index.html"
@@ -202,6 +262,9 @@ grep -q 'src="../assets/site.js"' "${stage_dir}/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/docs/quickstart/index.html"
 grep -q 'src="../../assets/code.js"' "${stage_dir}/docs/quickstart/index.html"
+grep -q 'src="../../assets/search-ranking.js"' "${stage_dir}/docs/quickstart/index.html"
+grep -q 'src="../assets/search-ranking.js"' "${stage_dir}/docs/index.html"
+grep -q 'src="../../assets/search-ranking.js"' "${stage_dir}/zh-CN/docs/index.html"
 if grep -R -n 'class="brand-mark" src="[^"]*sigil-mark-square-1024.png"' "${stage_dir}/index.html" "${stage_dir}/docs" "${stage_dir}/zh-CN"; then
   echo "square package icon leaked into Pages header brand mark" >&2
   exit 1

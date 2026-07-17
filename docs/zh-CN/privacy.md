@@ -1,117 +1,48 @@
+<!-- public-doc-role: privacy; authority: data-and-credential-authority; sections: what-can-leave-your-machine,what-stays-local,api-keys,session-logs,mcp-and-web-data,doctor-and-feedback-output,before-sharing-logs-or-reports; cta: review-safety -->
+
 # 隐私与数据处理
 
-[文档首页](README.md) · [安全](safety.md) · [配置](configuration.md) · [English](../en/privacy.md)
+[文档首页](README.md) · [安全](safety.md) · [权限](permissions-and-sandbox.md) · [English](../en/privacy.md)
 
-Sigil 在本地运行，但它可以把 prompt context 和 tool results 发送给配置的模型 provider，也可以调用已配置的 MCP servers。使用 Sigil 处理敏感仓库前，请先理解这些边界。
+Sigil 在本机运行，但 model provider、Web route、MCP server 和获准命令可能接收数据。在敏感仓库中使用前，请检查这些目标。
 
 ## 什么可能离开本机
 
-以下情况数据可能离开本机：
+<!-- public-doc-topic: data-egress -->
 
-- provider request 包含你的 prompt、system context、选中的 session history 和 model-visible tool results；
-- 模型请求包含文件片段、搜索结果、diagnostics 或 command output 的 tool results；
-- 已审批的 MCP tool/resource/prompt call 被发送给 MCP server；
-- 已接受的 MCP elicitation response；
-- 你审批的 shell command 通过网络发送数据。
+根据配置与审批，外发数据可能包含 prompt、选中的对话上下文、`AGENTS.md` 或 `SIGIL.md` 等 workspace 指令、文件片段、搜索结果、诊断、命令输出、Web query、MCP input 和已接受的 elicitation response。启用的 workspace 指令会成为模型请求的一部分。Sigil 不会自行发布仓库，但获准的 provider、tool 或 command 可以传输你交给它的内容。
 
-Sigil 不会自动发布仓库数据，但 provider 和 MCP 配置决定了已审批 context 可以发送到哪里。
+模型请求遵守对应 provider 的政策；外部工具遵守所选 Web 或 MCP 服务的政策。不需要的 route 应关闭，目标不明确时应拒绝动作。
 
-## 默认留在本地的内容
+## 什么默认留在本机
 
-这些默认在本地：
-
-- 用户配置目录中的 `sigil.toml`；
-- Sigil 用户态 state 目录中的 session logs 和 input history；
-- Sigil 用户态 state 目录中的 terminal 和 changeset artifacts；
-- Sigil 用户态 cache 目录中的 scratch/cache 文件；
-- `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等 local memory files；
-- 本地构建的 release archives 和 checksums；
-- doctor output，除非你主动复制到别处。
-- `/feedback` 支持报告，除非你主动附加或复制到别处。
+用户配置、输入历史、session 日志、变更 artifact、cache、workspace 指令文件的磁盘副本和 `/feedback` export 默认存放在本机；但其中的内容仍可能通过模型上下文或其他获准动作离开本机。Memory 启用时，workspace 指令会发送给已配置的 model provider。
 
 ## API Keys
 
-优先使用环境变量。先选择 provider，再使用 [provider 认证映射](providers.md#认证优先级)中的准确变量；Sigil 不会让所有 provider 共用一个 API key 环境变量。
+<!-- public-doc-topic: credentials-plaintext -->
 
-如果通过 Quick Setup 或 `/config` 保存 API key，它会以明文保存到用户配置目录中的 `sigil.toml`。不要把包含 secret 的真实 config 复制进仓库。
+优先使用 [Provider 指南](providers.md#认证优先级)列出的 provider 专项环境变量。通过 Quick Setup 或 `/config` 保存的 key 会以明文写入用户态 `sigil.toml`；不要提交或分享真实配置。`sigil doctor` 会报告凭据来源，但不打印值。
 
-`sigil doctor` 会报告 key 来源，但不会打印 key 值。
+为远端 MCP server 配置的 OAuth 凭据存放在系统原生 credential store，而不是 TOML。登录、退出与本机清除行为见 [MCP](mcp.md)。
 
-## Session Logs
+## Session 日志
 
-默认 session 和 control state 是 Sigil 用户态 state 目录下的 append-only JSONL。里面可能包含：
+<!-- public-doc-topic: session-log-local -->
 
-- prompts 和 assistant responses；
-- tool call summaries；
-- tool result previews；
-- approval 和 execution records；
-- interrupted tool records；
-- compaction records；
-- task planning state。
+本机 session 日志可能包含 prompt、assistant 回复、工具摘要与预览、审批决定、中断活动、任务状态和上下文管理记录。即使源仓库公开，也应把日志视为敏感内容。分享前检查任何 export。
 
-请把 session logs 当作敏感本地 artifacts，分享前先 review。
+## MCP 与 Web 数据
 
-## MCP And Secret Egress
+MCP server 是外部工具提供方。除非 server 确实需要且目标可信，否则保持 secret access 关闭。Web search 会把 query 发送到选中的 provider-hosted、configured MCP 或 bundled route；网络服务可以观察 query 与连接 metadata。返回内容仍属于外部不可信输入。Route 与关闭方式见[权限与沙箱](permissions-and-sandbox.md#网络与-web-工具)。
 
-MCP server 是外部工具 provider。明确配置 trust：
+## Doctor 与 Feedback 输出
 
-```toml
-[mcp_servers.trust]
-approval_default = "ask"
-egress_logging = true
-allow_secrets = false
-```
+Doctor 输出经过脱敏，但仍可能包含路径、provider label 和本机环境事实。`/feedback` 会先预览包含的类别，只写入一个本机 JSON 报告，不会自动上传。附加到 issue 前请检查 export JSON。
 
-`allow_secrets = false` 时，Sigil 会阻断识别到的 MCP secret-like egress。除非 server 确实需要 secret material 且你信任它，否则保持默认。
+## 分享日志或报告前
 
-## Web Search 数据
+删除凭据、私有路径、专有源码、敏感 prompt 或工具预览、内部 endpoint，以及与私密使用相关的 identifier。无法判断时，在不敏感的 workspace 中复现问题，再分享该输出。
 
-Provider-hosted search 由所选模型 provider 生成并执行 query；Sigil 可能只能在执行后收到 provider 上报的 query。Configured MCP search 会把规范化 query 发送到精确 server/tool binding。Bundled anonymous route 会在不使用 Sigil-supplied API key 的情况下发送到 `https://mcp.exa.ai/mcp`。“Anonymous”只描述认证方式：Exa 与网络路径仍可观察 Query Data 以及源 IP/代理出口 IP。截至 2026-07-12，Exa 的公开[隐私政策](https://exa.ai/privacy-policy)说明 Query Data 可能用于改进产品，包括训练和微调其模型；其公开[安全文档](https://exa.ai/docs/reference/security)把 Zero Data Retention 列为企业/定制能力。因此 Sigil 不假设该匿名 route 具有 ZDR，也不承诺 free-tier quota、retention、处理 region、availability 或 SLA。
-
-Client-side query 出站前，Sigil 会阻止已识别的配置 secret，以及高置信 email、phone、SSN 和 payment-card pattern。返回文本按 external/untrusted 处理，并在持久化或进入模型前清洗。可通过 `[web].enabled = false`、`search_route = "disabled"` 或 `network_mode = "deny"` 关闭；使用 `[web.search_mcp]` 选择自有兼容 MCP binding。
-
-## Doctor Output
-
-Doctor 会报告：
-
-- config resolution；
-- workspace path；
-- session log location；
-- provider/auth source；
-- MCP command 和 trust state；
-- code-intelligence readiness；
-- terminal profile 和 compatibility risk。
-
-它不应该打印 secret 值，但 path、provider name 和本地环境事实仍可能敏感。
-
-可选 terminal attention notification 默认关闭。其 OSC/BEL payload 只来自固定 signal 文案，不包含 prompt、reply、path、tool/MCP 详情、错误文本、provider、model 或 session id。它只是临时 terminal output，不会创建 session/control event 或 state/cache artifact。
-
-需要带版本的脱敏结构、而不是默认文本报告时，使用 `sigil doctor --output json`。它仍然只在本机离线运行。
-
-## 私密反馈报告
-
-`/feedback` 会先打开预览，此时不会写入任何内容。预览会说明包含和排除的诊断类别。按 `Enter` 后只会在 Sigil cache 目录下写入一份 JSON 报告；它不会写进 workspace、改变 session log、联系 provider 或上传报告。在 Unix 上，报告目录只允许当前用户访问，文件也只允许 owner 读写。
-
-报告可能包含 build、操作系统和架构信息、脱敏 doctor checks、provider 与 model 标签、MCP alias，以及 capability 或 sandbox 状态。它会排除对话、tool input/output、文件内容和 diff、配置文件正文、credential 与环境变量名称及值、私有 endpoint、本地路径和 session log 内容。
-
-导出后，TUI 会显示准确的本地目录和文件名。按 `Enter` 可在弹窗中检查实际写盘的脱敏 JSON，按 `O` 定位文件，按 `B` 打开结构化 GitHub Bug 表单。`C` 复制本地报告路径，`U` 复制表单链接。这些显式动作都不会上传或附加报告；决定分享前仍应完成检查。
-
-## 分享 Log 或 Report 前
-
-移除：
-
-- API keys 和 tokens；
-- 私有仓库路径；
-- proprietary source excerpts；
-- 能识别 private usage 的 provider request IDs；
-- 包含敏感 prompts 或 file snippets 的 session logs；
-- 包含内部 URL 或 credential 的 MCP server arguments。
-
-## 推荐默认值
-
-- 真实 secret 放在环境变量。
-- 学习工具时保持 `permission.mode = "manual"`。
-- MCP 保持 `allow_secrets = false`。
-- External directory access 默认关闭。
-- 允许文件变更前 review approval diff。
-- 从预期 workspace root 启动 Sigil。
+<!-- public-doc-cta: review-safety -->
+下一步：[查看安全指南](safety.md)。

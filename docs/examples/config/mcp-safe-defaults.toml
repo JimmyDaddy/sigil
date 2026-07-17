@@ -1,5 +1,6 @@
 [[mcp_servers]]
 name = "filesystem"
+transport = "stdio"
 command = "node"
 args = ["/absolute/path/to/server.js"]
 startup_timeout_secs = 5

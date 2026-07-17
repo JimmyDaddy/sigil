@@ -1,80 +1,47 @@
+<!-- public-doc-role: provider-openai-responses; authority: provider-specific-setup; sections: minimal-setup,authentication,options-and-visible-limits,verify,common-problems; cta: return-providers -->
+
 # OpenAI Responses Provider
 
-[文档首页](README.md) · [Provider 指南](providers.md) · [配置](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [English](../en/provider-openai-responses.md)
+[Provider 指南](providers.md) · [OpenAI-compatible](provider-openai-compatible.md) · [English](../en/provider-openai-responses.md)
 
-当所选模型由 OpenAI Responses API（`/v1/responses`）提供时，使用此 provider。它与 [OpenAI-compatible provider](provider-openai-compatible.md) 不同：后者使用 Chat Completions 协议，面向兼容网关。
-
-## 最小配置
-
-临时本地使用：
+## 最小设置
 
 ```bash
 export SIGIL_OPENAI_RESPONSES_API_KEY="sk-..."
 sigil
 ```
 
-可复用配置：
-
 ```toml
 [agent]
 provider = "openai_responses"
 model = "gpt-4.1"
-tool_timeout_secs = 30
-
-[model_request]
-request_timeout_secs = 120
-stream_idle_timeout_secs = 180
 
 [providers.openai_responses]
 base_url = "https://api.openai.com/v1"
-# 优先使用 SIGIL_OPENAI_RESPONSES_API_KEY。
-# api_key = "sk-..."
-organization = "org_..."
-project = "proj_..."
 ```
 
-完整起点模板见 [openai-responses.toml](../examples/config/openai-responses.toml)。
+可复制文件见 [openai-responses.toml](../examples/config/openai-responses.toml)。
 
 ## 认证
 
-Sigil 按这个顺序解析 Responses 认证：
+`SIGIL_OPENAI_RESPONSES_API_KEY` 优先于 `[providers.openai_responses].api_key`。`organization` 与 `project` 是可选 account 字段。
 
-1. `SIGIL_OPENAI_RESPONSES_API_KEY`
-2. `[providers.openai_responses].api_key`
+## 选项与可见限制
 
-`organization` 和 `project` 只在账号要求时才需要。
+`SIGIL_OPENAI_RESPONSES_BASE_URL` 临时覆盖 `base_url`。该 provider 使用 Responses route，不是 Chat Completions。Background request 与 provider-hosted tool 未启用。
 
-## 环境变量覆盖
-
-| 变量 | 覆盖 |
-| --- | --- |
-| `SIGIL_OPENAI_RESPONSES_BASE_URL` | `[providers.openai_responses].base_url` |
-
-## 行为说明
-
-该 provider 从 Responses event stream 输出 text、已支持的 reasoning delta、tool call 和 usage。每个完成的原生 output-item array 会作为不解释的 provider state 保存，并在后续请求中原样替换对应 assistant turn；这可以保留 encrypted reasoning content 等 provider 私有 item，而不会改动 Chat Completions provider 的契约。
-
-普通请求使用完整本地 session context，不使用远端 response-handle continuation。此 provider 未启用 background request 与 provider-hosted tool。原生 compact endpoint 不是用户操作。
-
-只有 Sigil 明确识别为支持图片的 model id（包括已支持的日期 snapshot）才能使用图片附件。未知 id、格式错误或未识别的 alias 会在 provider transport 前失败；Sigil 不会只根据 endpoint 猜测图片能力。输入方式、本地上限、cache 行为与 resume 建议见[图片附件](user-guide.md#图片附件)。
-
-受控 overflow recovery 仅对官方 `https://api.openai.com/v1` endpoint 与精确的 `gpt-4.1-2025-04-14` snapshot 启用，并且必须是 provider 确认尚未产生 output 或 side effect 的 context-window rejection。request/session-owned preparation 会分别记录被拒请求与压缩后 target 的无生成 measurement；只有 exact before/after savings 与 target-fit proof 都通过后才进行一次 frozen retry。alias、兼容 endpoint、普通错误、计数失败、stale frontier、恢复后的 session 与递归恢复仍被排除。
+只有 Sigil 识别为支持图片的 model ID 才能接收附件；未知名称与 alias 会在发送前被拒绝。对 official endpoint 和受支持的 dated snapshot，一次发生在输出前的 context-window rejection 可能触发一次精简后重试；compatible endpoint、alias、恢复的 session 和重复失败不会使用该路径。
 
 ## 验证
 
-运行：
-
-```bash
-sigil doctor
-```
-
-确认 `[agent].provider` 是 `openai_responses`，base URL 包含预期 `/v1` 路径，且 key 来源是 `SIGIL_OPENAI_RESPONSES_API_KEY` 或本地配置。
+运行 `sigil doctor`，确认 `openai_responses`、`/v1` base URL、model 和凭据来源。
 
 ## 常见问题
 
-| 现象 | 检查 |
-| --- | --- |
-| 404 或 route 错误 | 确认服务在配置的 `/v1` root 下暴露 Responses route，而不是只支持 Chat Completions。 |
-| 认证失败 | 确认已设置 `SIGIL_OPENAI_RESPONSES_API_KEY` 或 `[providers.openai_responses].api_key`。 |
-| stream 在最终回复前结束 | provider 要求终结 `response.completed` event；检查 endpoint 或网关的 SSE 兼容性。 |
-| Tool call 不被接受 | 确认所选模型支持 Responses function tool。 |
+- 404：确认服务提供 `/v1/responses`，而不只提供 Chat Completions。
+- 认证失败：检查环境变量或 config fallback。
+- Stream 提前结束：确认 endpoint 发出 completed Responses event。
+- Tool 或图片输入失败：确认所选 model 支持该输入。
+
+<!-- public-doc-cta: return-providers -->
+下一步：[返回 Provider 指南](providers.md)。

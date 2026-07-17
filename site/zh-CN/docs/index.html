@@ -4,10 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sigil 文档</title>
-    <meta
-      name="description"
-      content="Sigil 文档入口，覆盖安装、TUI 工作流、配置、verification、terminal 兼容性、MCP、agents 和用户支持。"
-    >
+    <meta name="description" content="按任务选择 Sigil 文档：首次使用、日常 TUI、工作流、配置、provider、安全、排障或参考。">
     <link rel="canonical" href="https://sigil.corerobin.com/zh-CN/docs/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/docs/">
     <link rel="alternate" hreflang="zh-CN" href="https://sigil.corerobin.com/zh-CN/docs/">
@@ -17,20 +14,18 @@
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
     <meta property="og:title" content="Sigil 文档">
-    <meta
-      property="og:description"
-      content="按安装、TUI 工作流、配置、verification、MCP、agents 和用户支持选择对应的 Sigil 文档。"
-    >
+    <meta property="og:description" content="按当前任务选择对应的 Sigil 指南。">
     <meta property="og:url" content="https://sigil.corerobin.com/zh-CN/docs/">
-    <meta property="og:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
-    <meta property="og:image:alt" content="Sigil 标志">
+    <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Sigil 文档">
-    <meta
-      name="twitter:description"
-      content="按安装、TUI 工作流、配置、verification、MCP、agents 和用户支持选择对应的 Sigil 文档。"
-    >
-    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
+    <meta name="twitter:description" content="按当前任务选择对应的 Sigil 指南。">
+    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta name="twitter:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
     <script>
       (() => {
         try {
@@ -43,6 +38,7 @@
     </script>
     <link rel="stylesheet" href="../../assets/site.css">
     <script defer src="../../assets/site.js"></script>
+    <script defer src="../../assets/search-ranking.js"></script>
     <script defer src="../../assets/search.js"></script>
   </head>
   <body>
@@ -70,37 +66,26 @@
     <main id="main-content">
       <section class="docs-hero">
         <div class="docs-brand-lockup">
-          <img
-            class="docs-logo docs-logo-on-light"
-            src="../../assets/logo/sigil-full-staff-glow.svg"
-            alt="Sigil"
-          >
-          <img
-            class="docs-logo docs-logo-on-dark"
-            src="../../assets/logo/sigil-full-staff-glow-dark-mode.svg"
-            alt=""
-            aria-hidden="true"
-          >
+          <img class="docs-logo docs-logo-on-light" src="../../assets/logo/sigil-full-staff-glow.svg" alt="Sigil">
+          <img class="docs-logo docs-logo-on-dark" src="../../assets/logo/sigil-full-staff-glow-dark-mode.svg" alt="" aria-hidden="true">
         </div>
         <div class="docs-hero-copy">
           <p class="eyebrow">文档</p>
-          <h1>按任务找到对应指南。</h1>
-          <p class="lede">
-            Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档的稳定入口。
-          </p>
+          <h1>你现在想完成什么？</h1>
+          <p class="lede">从下面选择一个任务，或者搜索精确命令、设置、provider 与问题。</p>
           <aside class="docs-version-notice" aria-label="开发版本文档">
             <strong>开发版本文档</strong>
-            <span>这些页面跟随 main。已打包发布的 alpha 是 v0.0.1-alpha.4；较新的能力可能需要从源码安装。</span>
-            <a href="changelog/">查看 Unreleased</a>
+            <span>这些页面跟随 <code>main</code>，已发布的软件包可能稍晚。</span>
+            <a href="installation/">查看安装支持</a>
           </aside>
           <div class="docs-search-panel">
             <form class="site-search docs-command-palette" role="search" data-locale="zh-CN" data-index="../../search.json">
-              <label for="docs-search-zh-cn">搜索文档</label>
+              <label for="docs-search-zh">搜索文档</label>
               <div class="docs-command-line">
                 <span class="docs-command-prefix" aria-hidden="true">sigil docs &gt;</span>
-                <input id="docs-search-zh-cn" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh-cn" aria-autocomplete="list">
+                <input id="docs-search-zh" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh" aria-autocomplete="list">
               </div>
-              <div class="search-results" id="docs-search-results-zh-cn" aria-label="搜索结果" aria-live="polite"></div>
+              <div class="search-results" id="docs-search-results-zh" aria-label="搜索结果" aria-live="polite"></div>
             </form>
           </div>
         </div>
@@ -108,106 +93,49 @@
 
       <section class="section docs-section" id="user-docs">
         <div class="section-heading">
-          <p class="eyebrow">用户文档</p>
-          <h2>先按任务选择路径，再用参考文档查细节。</h2>
+          <p class="eyebrow">按任务选择</p>
+          <h2>八个入口，每个只解决一类问题。</h2>
         </div>
-        <h3 class="resource-group-heading">从这里开始</h3>
         <div class="resource-grid resource-grid-featured task-router">
-          <a class="resource-card task-card" id="install" href="installation/" data-step="01">
-            <span class="resource-kicker">安装</span>
-            <h3>安装与更新</h3>
-            <p>通过 npm、Homebrew、Cargo git tag、源码 checkout 或 release archive 安装，并在需要时更新或卸载已有 binary。</p>
+          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="01">
+            <span class="resource-kicker">首次使用</span>
+            <h3>试用 Sigil</h3>
+            <p>安装、完成 Quick Setup、执行只读任务，再检查一个小改动。</p>
           </a>
-          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="02">
-            <span class="resource-kicker">首次运行</span>
-            <h3>完成第一个任务</h3>
-            <p>在 workspace 启动 Sigil，完成 Quick Setup，运行 doctor，并完成第一个安全编辑。</p>
-          </a>
-          <a class="resource-card task-card" id="daily-work" href="user-guide/" data-step="03">
+          <a class="resource-card task-card" id="user-guide" href="user-guide/" data-step="02">
             <span class="resource-kicker">日常工作</span>
-            <h3>在 TUI 中工作</h3>
-            <p>在日常仓库工作中使用 composer、计划、verification 证据、checkpoint recovery、context controls、session 和 transcript 控制。</p>
+            <h3>使用 TUI</h3>
+            <p>了解工作界面、常用操作、审批、session 与恢复。</p>
           </a>
-        </div>
-        <h3 class="resource-group-heading">使用 Sigil</h3>
-        <div class="resource-grid">
-          <a class="resource-card" id="workflows" href="workflows/">
-            <span class="resource-kicker">例子</span>
-            <h3>常见工作流</h3>
-            <p>探索仓库、做小改动、计划任务、调试失败、review diff 和恢复工作时可直接套用的提示词。</p>
+          <a class="resource-card task-card" id="workflows" href="workflows/" data-step="03">
+            <span class="resource-kicker">任务模式</span>
+            <h3>运行工作流</h3>
+            <p>探索、修改、调试、评审、规划或恢复仓库工作。</p>
           </a>
-          <a class="resource-card" id="cookbook" href="cookbook/">
-            <span class="resource-kicker">提示词</span>
-            <h3>Cookbook</h3>
-            <p>用于仓库探索、文档编辑、review、调试、planning、MCP 和终端问题的可复制 prompt。</p>
+          <a class="resource-card task-card" id="configuration" href="configuration/" data-step="04">
+            <span class="resource-kicker">设置</span>
+            <h3>配置 Sigil</h3>
+            <p>进入权限、外观、高级选项或精确字段对应的指南。</p>
           </a>
-          <a class="resource-card" id="visual-tour" href="visual-tour/">
-            <span class="resource-kicker">预览</span>
-            <h3>视觉导览</h3>
-            <p>在第一个仓库任务前，了解主会话、approval、配置、verification、checkpoint recovery 和 compaction preview 界面。</p>
+          <a class="resource-card task-card" id="providers" href="providers/" data-step="05">
+            <span class="resource-kicker">模型与工具</span>
+            <h3>选择 provider 或集成</h3>
+            <p>设置模型 provider、认证方式和 MCP 连接。</p>
           </a>
-          <a class="resource-card" id="safety" href="safety/">
-            <span class="resource-kicker">控制权</span>
-            <h3>安全与权限</h3>
-            <p>什么能运行、什么需要审批，如何 review diff，以及 workspace/MCP trust 边界如何工作。</p>
+          <a class="resource-card task-card" id="safety" href="safety/" data-step="06">
+            <span class="resource-kicker">决策与数据</span>
+            <h3>理解安全与隐私</h3>
+            <p>查看风险模型、权限限制、沙箱预期和数据处理方式。</p>
           </a>
-          <a class="resource-card" id="config" href="configuration/">
-            <span class="resource-kicker">运行环境</span>
-            <h3>配置</h3>
-            <p>Config 解析、permissions、appearance、agents、skills、plugins、verification、code intelligence、terminal 集成和示例。</p>
+          <a class="resource-card task-card" id="troubleshooting" href="troubleshooting/" data-step="07">
+            <span class="resource-kicker">解决问题</span>
+            <h3>故障排查</h3>
+            <p>从症状进入检查、处理动作和对应的详细指南。</p>
           </a>
-          <a class="resource-card" id="providers" href="providers/">
-            <span class="resource-kicker">模型</span>
-            <h3>Provider 指南</h3>
-            <p>选择并配置 DeepSeek、OpenAI-compatible、OpenAI Responses、Anthropic 或 Gemini provider，包含 key 优先级和排障路径。</p>
-          </a>
-          <a class="resource-card" id="mcp" href="mcp/">
-            <span class="resource-kicker">集成</span>
-            <h3>MCP 接入指南</h3>
-            <p>配置本地 stdio 或用户根 Streamable HTTP MCP server，理解 trust level，并用显式策略约束外部数据和 secret。</p>
-          </a>
-        </div>
-        <h3 class="resource-group-heading">参考与支持</h3>
-        <div class="resource-grid resource-grid-compact">
-          <a class="resource-card" id="overview" href="overview/">
-            <span class="resource-kicker">地图</span>
-            <h3>文档路径地图</h3>
-            <p>按首次使用、日常工作流、配置、排障、集成和参考资料找到最短阅读路径。</p>
-          </a>
-          <a class="resource-card" id="privacy" href="privacy/">
-            <span class="resource-kicker">数据</span>
-            <h3>隐私与数据</h3>
-            <p>Provider context、MCP egress、API keys、本地 session logs、doctor output 和分享建议。</p>
-          </a>
-          <a class="resource-card" id="troubleshooting" href="troubleshooting/">
-            <span class="resource-kicker">修复问题</span>
-            <h3>排障指南</h3>
-            <p>诊断 setup、认证、workspace、approval、terminal、session、MCP 和 code-intelligence 问题。</p>
-          </a>
-          <a class="resource-card" id="reference" href="reference/">
-            <span class="resource-kicker">查阅</span>
-            <h3>参考</h3>
-            <p>集中查看命令、键位、config 解析、重要路径、环境变量、approval 和恢复事实。</p>
-          </a>
-          <a class="resource-card" id="terminal" href="terminal-compatibility/">
-            <span class="resource-kicker">终端行为</span>
-            <h3>Terminal 兼容性</h3>
-            <p>渲染、鼠标、剪贴板、alternate screen 行为和本地 smoke test 检查清单。</p>
-          </a>
-          <a class="resource-card" id="status" href="status/">
-            <span class="resource-kicker">支持状态</span>
-            <h3>当前支持</h3>
-            <p>用户今天可以依赖什么、哪些属于有限或高级用法、哪些仍是未来 packaging work。</p>
-          </a>
-          <a class="resource-card" id="changelog" href="changelog/">
-            <span class="resource-kicker">版本说明</span>
-            <h3>用户 Changelog</h3>
-            <p>面向用户的能力和文档变化，不混入只对实现有意义的细节。</p>
-          </a>
-          <a class="resource-card" id="report-bug" href="https://github.com/JimmyDaddy/sigil/issues/new/choose">
-            <span class="resource-kicker">反馈</span>
-            <h3>提交问题</h3>
-            <p>通过 GitHub issue chooser 提交 bug、功能建议或文档问题。</p>
+          <a class="resource-card task-card" id="reference" href="reference/" data-step="08">
+            <span class="resource-kicker">精确查询</span>
+            <h3>打开参考</h3>
+            <p>查找命令、键位、路径、机器输出和恢复行为。</p>
           </a>
         </div>
       </section>

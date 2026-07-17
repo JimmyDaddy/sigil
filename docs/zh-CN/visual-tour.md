@@ -1,53 +1,46 @@
+<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
+
 # 视觉导览
 
-[文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/visual-tour.md)
+[文档首页](README.md) · [快速开始](quickstart.md) · [English](../en/visual-tour.md)
 
-本页通过真实 TUI renderer 生成的 SVG 截图介绍 Sigil 的主要界面。
+这些截图展示 TUI 中主要的工作与决策界面。
 
 ## 主 TUI 会话
 
 ![Sigil TUI 主会话预览](../../site/assets/screenshots/tui-session.svg)
 
-常规流程：
-
-1. 在 workspace 中启动 `sigil`。
-2. 在输入框中输入任务。
-3. 在会话记录中查看仓库读取、搜索和工具活动。
-4. 通过信息栏检查会话、权限、模型、LSP、用量和操作提示。
+在输入框中提出任务，在会话记录中查看工具活动，通过信息栏确认当前 session 与权限状态。
 
 ## 审批检查
 
 ![Sigil 工具审批预览](../../site/assets/screenshots/approval-review.svg)
 
-高风险动作运行前，检查：
-
-- 工具摘要；
-- 受影响文件；
-- diff 预览；
-- `allow` 或 `deny` 操作。
-
-如果 diff 不符合预期，选择 `deny`，并要求更窄的改动。
+允许高风险工具调用前，检查操作、受影响文件和 diff。
 
 ## 配置面板
 
 ![Sigil 配置面板预览](../../site/assets/screenshots/config-panel.svg)
 
-使用 `/config` 修改常用的 provider、权限、memory、compaction、code intelligence、终端、Agents、Skills、插件信任和 MCP 设置。低频 provider 细节仍留在 `sigil.toml` 和环境变量中。
+常用设置使用 `/config`；需要精确字段时打开对应参考页。
 
 ## 任务验证
 
 ![Sigil 任务 Verification card 预览](../../site/assets/screenshots/verification-card.svg)
 
-Durable task 需要完成证据时，Verification card 会把当前 verdict、推荐检查与证据放在一起。按 `Alt-V` 聚焦，按 `I` 查看 snapshot 与 changeset 细节；如果存在绑定检查，可按 `Enter` 运行。
+Verification card 显示推荐检查与当前结果。按 `Alt-V` 聚焦。
 
 ## Checkpoint 恢复
 
 ![Sigil checkpoint 恢复预览](../../site/assets/screenshots/checkpoint-restore.svg)
 
-空闲时按 `Ctrl-R`，Sigil 会从 durable evidence 重建最新受控 checkpoint。Restore 前先 review 精确 reverse diff；如果只想回到较早对话上下文而不改变共享 workspace 文件，可选择 conversation fork。Shell 与远端副作用不在该文件恢复边界内。
+按 `Ctrl-R` 检查文件恢复，或者只 fork 对话而不修改共享文件。
 
 ## 上下文压缩预览
 
 ![Sigil 上下文压缩预览](../../site/assets/screenshots/compaction-preview.svg)
 
-用 `/compact` review 哪些旧消息会被折叠，以及目标请求为何可用或不可用。打开 review 本身是只读操作；本地 exact admission ready 时，按 `Enter` 可确认一次手动 V2 apply。完成的 hard-threshold chat turn 完全进入 idle 后，也可以使用同一验证路径。
+使用 `/compact`，在应用前检查建议的上下文精简方案。
+
+<!-- public-doc-cta: start-quickstart -->
+下一步：[从快速开始入门](quickstart.md)。

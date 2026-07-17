@@ -1,287 +1,114 @@
-# Sigil TUI 使用指南
+<!-- public-doc-role: user-guide; authority: tui-daily-use-authority; sections: start,headless-and-local-api-workflows,main-screen,common-controls,image-attachments,slash-commands,config-panel,web-search-and-fetch,planned-tasks,approvals-and-file-changes,sessions-and-recovery,long-context-and-compaction,code-intelligence; cta: open-reference -->
 
-[文档首页](README.md) · [快速上手](quickstart.md) · [常见工作流](workflows.md) · [参考](reference.md) · [English](../en/user-guide.md)
+# Sigil TUI 用户指南
 
-本文面向 Sigil 的日常使用者，重点说明 TUI 里能看到和能操作的内容。
+[文档首页](README.md) · [快速开始](quickstart.md) · [常见工作流](workflows.md) · [参考](reference.md) · [English](../en/user-guide.md)
 
-如果你是第一次使用 Sigil，先读 [快速上手](quickstart.md)。如果你已经熟悉界面、想看真实任务提示词和流程，读 [常见工作流](workflows.md)。
+本指南介绍每天使用的 TUI。完整命令和键位表只在[参考](reference.md)维护。
 
 ## 启动
 
-启动 TUI：
-
-```bash
-sigil
-```
-
-如果没有可用配置，Sigil 会进入 Quick Setup。首配流程只要求确认当前工作区、选择模型并填写认证。完成后会写入 `workspace.root = "."`，表示启动 TUI 时所在目录就是当前工作区。
-
-如果还没有安装，见 [安装](installation.md)。在 checkout 内做开发时，`cargo run -p sigil` 等价。
-
-认证方式和环境变量配置见 [Sigil 配置指南](configuration.md)。
+在要处理的仓库中运行 `sigil`。缺少配置时，Quick Setup 会要求确认 workspace、provider、model 和认证。找不到命令时见[安装](installation.md)，可重复设置见[配置](configuration.md)。
 
 ## Headless 与本地 API 工作流
 
-TUI 仍是日常使用的主要表面。脚本可以使用 `sigil run "<task>"`，默认输出人类可读文本；`--output json` 输出唯一 terminal record，`--output jsonl` 输出有序 event stream 和唯一 terminal record。Machine stdout 不包含人类可读进度行，可以直接交给标准 JSON parser。Headless run 无法打开 approval modal；未解决的 `ask` decision 会 fail closed。
-
-`sigil serve` 是供受信任本机 client 使用的高级 loopback-only HTTP/SSE 接口。默认必须提供 `SIGIL_HTTP_TOKEN`，启动后会打印 OS 实际选择的地址，按 `Ctrl-C` graceful stop。不要通过 public bind 暴露它，也不要把它当作 multi-user daemon。启动、route、认证、replay 和 exit code 见 [Machine Output 与本地服务](reference.md#machine-output-与本地服务)。
+TUI 是常规用户界面。`sigil run` 为脚本提供文本、JSON 或 JSONL 输出；未解决的审批会失败，不会打开浮层。`sigil serve` 是面向受信任本机 client 的高级接口，只监听 loopback 并要求认证。命令、认证、输出和 exit behavior 见[机器输出与本地服务](reference.md#machine-output-与本地服务)。
 
 ## 主界面
 
-Sigil 的主界面围绕这几个区域组织：
+- **会话记录：** 用户消息、assistant 回复和工具活动。
+- **输入框：** 底部任务输入区域。
+- **信息栏：** 宽度允许时显示 session、权限、model、用量、code intelligence 与操作状态。
+- **活动：** 文件读取、搜索、命令、编辑、诊断和结果。
+- **审批浮层：** 高风险工具调用的操作、受影响文件、预览与决策。
 
-- Chat / transcript：展示用户消息、assistant 回复、thinking 摘要和工具活动。
-- Composer：底部输入区，默认保持可见，发送后会清空并继续可输入。
-- Info rail：右侧状态栏，展示 session、权限、模型、LSP、usage 和 controls。
-- Activity：工具调用结果，例如读文件、搜索、执行命令、文件修改和 code diagnostics。
-- Approval modal：工具需要确认时出现的审批卡片，展示 summary、files、diff 和 actions。
-
-工具调用前流出的文字会作为可折叠的 thinking/progress preamble，而不是一条已经完成的
-assistant 回复；transcript 因此只把 final answer 展示为最终 reply。
-
-主路径是直接在 composer 输入任务。不要把 Sigil 当成命令集合使用；slash command 只处理少数高频控制动作。
+普通任务直接在输入框中提出；slash command 只承担少量控制动作。
 
 ## 高频操作
 
-| 操作 | 快捷键 |
-| --- | --- |
-| 打开帮助 | `F1` |
-| 打开 slash command selector | `/` |
-| 切换右侧 info rail 精简/详情 | `F2` |
-| 回看 transcript | `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` |
-| 切换默认权限模式 | `Shift-Tab` |
-| 编辑 composer 文本 | `Ctrl-A/E`、`Ctrl-B/F`、`Alt-B/F`、`Ctrl-K/Y`、`Ctrl-Z` |
-| 取消当前运行 | `Ctrl-C` |
-| 退出当前浮层或清除 activity focus | `Esc` |
-| 聚焦最近 activity | `Ctrl-G` |
-| 切换 activity | `Alt-J` / `Alt-K` |
-| 聚焦 task verification | `Alt-V`；随后用 `Enter` 执行精确 action，`I` 查看证据 |
-| 打开 checkpoint 恢复 | `Ctrl-R` 打开并加载反向 diff 弹窗；`Enter` 恢复受控文件，`F` 在不改文件的情况下 fork 会话，`Esc` 关闭 |
-| 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`），`Alt-A` / `Shift-Alt-A` |
-| 聚焦 follow-up 面板 | 有 follow-up 时，在 composer 按 `Tab` |
-| 下一轮运行选中的 follow-up | 选中 follow-up 后按 `Enter` 默认使用安全的 `next` action |
-| 切换 follow-up action | follow-up 面板聚焦时按 `Tab`；只有确实要停止当前 run 时才选择 `Interrupt` |
-| 展开或收起 thinking / activity | `Ctrl-T` |
+按 `F1` 或 `/` 打开帮助与命令；`F2` 显示或隐藏信息栏，`Shift-F2` 切换详细程度。`Ctrl-G` 聚焦活动，`Alt-V` 聚焦任务验证，`Ctrl-R` 打开最近一次受控恢复，`Ctrl-T` 展开或折叠 thinking 与活动。未选中文本时，`Ctrl-C` 取消运行；`Esc` 关闭当前浮层。完整键位矩阵见[参考](reference.md#tui-键位)。
 
-Composer 聚焦时，`Up/Down` 会优先处理输入历史或多行输入里的光标移动。`Ctrl-J` 会稳定插入换行；当 terminal keyboard enhancement 已启用且能上报这些 modifier 时，`Shift-Enter` 和 `Alt-Enter` 也会插入换行。`Ctrl-Z` 只恢复最近一次被 `Esc` 清空的非空 draft，它不是通用 undo 栈。
+终端宽度足够时，信息栏默认显示。`F2` 只改变当前运行。要修改启动默认值，打开 `/config`，选择 **Appearance**，切换 **Info rail**，再用 `Ctrl-S` 保存；窄终端仍会自动收起。
 
-当 `[terminal].mouse_capture = true` 时，TUI 支持鼠标滚动 transcript、点击 composer 定位光标、操作审批控件、点击 slash 候选、setup/config 行、session 选择、activity 选择，以及点击 tool card header 或 hidden-preview 提示行展开/收起。拖选 transcript 文本时按显示列建立选区，然后按 `Ctrl-C` 通过 OSC52 复制。
+拖选会话文本后按 `Ctrl-C`，可以在剪贴板集成可用时复制选区。`Ctrl-L` 会优先复制现有选区；没有选区时才复制最新 assistant 回复。这两条路径都使用会话内容，因此不会包含信息栏。没有选区时，`Ctrl-C` 保持原有取消或退出语义。
 
-可以在 `/config` 的 `Terminal` 区块开启 attention notification、选择 `auto` / `osc9` / `osc777` / `bell`，并设置长任务阈值。该区块也会把 keyboard enhancement、mouse capture、OSC52 复制和滚轮灵敏度显示为兼容性事实；这些低频覆盖仍在 `sigil.toml` 中编辑。通知默认关闭，只使用固定的隐私安全文案；当可靠的 terminal focus telemetry 表明 Sigil 正处于前台时会抑制通知。
-
-终端专项 smoke 检查和 tmux/SSH 建议见 [Terminal 兼容性检查清单](terminal-compatibility.md)。
+鼠标还支持滚动、输入框定位、审批控件、菜单、session 行、活动和工具卡片展开。终端复制、键盘、鼠标、tmux 与 SSH 检查见[终端兼容性](terminal-compatibility.md)。
 
 ## 图片附件
 
-在空闲的 Build composer 中，粘贴一个本地 PNG、JPEG 或 WebP 路径（也支持 `file://` URL），或者在系统剪贴板里有图片时按 `Ctrl-V`。Sigil 会把每张已准入图片显示为文本输入框上方的 metadata chip，不会把原始路径写入 conversation。
+在空闲输入框中粘贴本机 PNG、JPEG 或 WebP 路径，或在剪贴板有图片时按 `Ctrl-V`。发送前检查 metadata chip；用 `Up` 选中 chip，`Left/Right` 切换，`Backspace` 或 `Delete` 删除。
 
-输入光标位于第一行时按 `Up` 可选中最后一个 chip，`Left/Right` 在 chip 之间移动，`Down` 或 `Esc` 返回文本输入，`Backspace/Delete` 删除已选图片。按 `Enter` 可以发送文字加图片，也可以只发送图片。
-
-V1 对图片输入有明确限制：
-
-- 每轮最多 4 张，每张最多 8 MiB，合计最多 24 MiB。
-- 单边最多 8192 像素，每张最多 1600 万像素；合计 visual-token 估算也必须在本地限制内。
-- 图片只能作为空闲 Build 的直接输入发送，不能进入 follow-up queue，也不能随 Plan、slash command、skill、task 或 agent 输入发送。Sigil 阻止这些路径时会保留草稿。
-- 只有 OpenAI Responses、Anthropic 和 Gemini 中明确识别为支持图片的精确 model id 会被准入。DeepSeek、OpenAI-compatible endpoint、未知 model id 和无法识别的 alias 都会在 provider transport 前失败。
-
-Session 只保留有边界的图片 metadata，编码后的 bytes 位于 workspace-local attachment cache。Resume 后，Sigil 会在下一次 provider request 前重新校验 cache 内容。必需的 cache entry 缺失或损坏时，Sigil 不会静默只发送文字 placeholder：可以重新粘贴完全相同的原图以恢复 content-addressed entry，或者从不包含该图片 turn 的位置 fork/新建 conversation。安全 session export 只包含 metadata，不包含图片 bytes。
+每轮最多 4 张图片，每张 8 MiB、总计 24 MiB，并限制尺寸。图片不能排队，也不能附加到 plan、command、skill、task 或 agent 输入。只有明确支持图片的 OpenAI Responses、Anthropic 和 Gemini model 可以接收。恢复的 session 如果缺少本机图片，请重新粘贴原图，或从不需要该图片的对话继续。
 
 ## Slash Commands
 
-| 命令 | 用途 |
-| --- | --- |
-| `/config` | 打开 TUI 配置页 |
-| `/doctor` | 运行本地环境和外观诊断，显示汇总和修复清单 |
-| `/feedback` | 预览并保存有明确隐私边界的报告，检查 JSON 后打开 Bug 表单或定位文件 |
-| `/resume` | 选择并恢复历史 session |
-| `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
-| `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
-| `/agent cancel <child-id|current>` | 取消仍有 live runtime handle 的运行中后台 child agent |
-| `/queue` | 高级 follow-up 控制 |
-| `/queue next|interrupt|edit|delete [item]` | 保留 follow-up 到下一轮、interrupt 并立即运行、编辑或取消 |
-| `/plan` / `/plan <prompt>` | 进入 plan mode，或运行一次只读 planning prompt；结构化 plan 可以被接受为 durable task |
-| `/task <任务>` | 先生成 durable plan，再按步骤执行复杂任务 |
-| `/task continue` | 不带额外指引地继续最近一个计划任务 |
-| `/model <flash|pro|id>` | 切换下一轮使用的模型，并开启 fresh session |
-| `/effort <low|medium|high|max>` | 切换下一轮 reasoning effort |
-| `/compact` | 审查 V2 折叠计划；本地 exact proof 可用时确认一次手动压缩 |
-| `/quit` | 退出 TUI |
+常用控制命令：
 
-`/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会显示候选项。可以用 `Up/Down` 选中，`Tab` 接受，`Enter` 执行。`/agent rename` 和 `/agent cancel` 会在参数补全前展示 child agent 候选项。
+- `/config` — 修改常用设置。
+- `/doctor` — 诊断 setup、认证、集成和终端支持。
+- `/resume` — 选择已保存 session。
+- `/plan <prompt>` — 执行前请求只读计划。
+- `/task <任务>` 与 `/task continue` — 启动或继续多步骤工作。
+- `/compact` — 检查上下文精简方案。
+- `/feedback` — 预览并保存本机支持报告。
+- `/quit` — 关闭 TUI。
 
-Sigil 正在运行时，普通 chat 输入会变成可见 Follow-ups item，不会丢失，也不会提前写入 timeline 或 provider-visible history。Follow-up 会在当前 turn 完整结束后按 FIFO 自动 dispatch；正常 user message 只会在 item dispatch 时追加。发送前，Sigil 会冻结 queued exact request，并使用已准入的本地 token profile 检查它；超过 verified budget 时可以先应用一次 portable compaction。compaction CAS、queue revision CAS、promotion 与 provider dispatch 始终是相互独立且有序的 barrier。本地 proof 不可用时，Sigil 会明确报告，并且只能 dispatch 未改变的 frozen request。重启或传输失败后如果无法证明某个 follow-up 是否已到达模型，Sigil 会把它标记为 stale，绝不会自动重发。`next` 只把 item 移到队首等待下一轮；`interrupt` 会先停止当前 run，再 dispatch 选中项。busy 状态下的 agent mention 不会被静默转换成 main-thread follow-up；请等待当前 turn 结束，或使用专门的 agent message 入口。
+Model、agent、follow-up 和其他所有命令形式见[参考](reference.md#slash-commands)。
 
-`/plan` 只有在 planner 返回至少一个可执行 step 的结构化 plan 时，才会创建 Plan ready 卡片。普通 review 文本或未结构化 summary 会作为普通 assistant 输出展示，不会创建 task approval surface。Plan ready 上按 `Enter` 会创建并运行 durable task，按 `Esc` 丢弃。
+运行进行中时，普通输入会成为可见 follow-up，通常在当前 turn 结束后执行。按 `Tab` 聚焦 follow-up 面板；只有明确要中断时才选择对应动作。交付状态不确定时，Sigil 不会自动重发 follow-up。
 
 ## 配置面板
 
-`/config` 面板按 provider、permission、Web、memory、compaction、code intelligence、terminal、appearance、Agents、Skills、Plugins 和 MCP 组织配置。`Web` 区块可启用/关闭 Web tools、循环独立 network policy 与 search route，并关闭 bundled Exa profile；更细的 destination 与 budget 限制仍在 `sigil.toml` 中编辑。`Appearance` 区块里按 `Enter` 可以循环内置 theme、syntax theme 和 usage cost currency；theme draft 会立即预览，`Ctrl-S` 会把选中的偏好保存到 `sigil.toml`。`Plugins` 区块会发现工作区里的 `.sigil/plugins/<id>/plugin.toml` manifest。
+`/config` 汇总常用 provider、权限、Web、memory、上下文、code intelligence、terminal、appearance、agent、skill、plugin 和 MCP 设置。Theme 修改会立即预览；按 `Ctrl-S` 保存。精确字段和默认值只在[配置字段参考](configuration-reference.md)维护。
 
-可以用 `PgUp/PgDn` 在已发现 plugin 之间切换。detail view 会展示当前 trust 状态、manifest 路径、完整 manifest hash、skills、带 args 和 approval mode 的 hook command，以及带 args、startup 和 required 状态的 MCP server command。footer 的 `approve` 会信任当前展示的 manifest hash；`deny` 会禁用这个 hash。写入 review 决策前，Sigil 会先刷新 manifest，并把 review 追加到 session log。
+为 Streamable HTTP MCP server 配置 OAuth 后，打开详情并选择 **Authentication**。浮层可以显示状态、开始登录、打开或复制授权 URL、接收临时 callback URL、刷新、退出登录，或清除保留的本机凭据。连接 server 前请阅读 [MCP](mcp.md)。
 
 ## Web Search 与 Fetch
 
-启用 `[web]` 后，Sigil 会通过 provider-hosted search 或 client `websearch` tool 提供 stable search。Client query 或 remote transport 出站前，TUI 会在 live panel 顶部保留一个不覆盖 transcript/status/composer 的 disclosure strip，展示 destination 与 data category；同一 destination 的 MCP handshake、query 与 tool call 会聚合在一张连续的 operation card 中，底层每条消息仍分别取得成功 frame receipt，对应 tool/activation 结束或 run 终止后再移除。CLI `run` 会把相同的 safe disclosure 写入并 flush 到 stderr。搜索结果按 external/untrusted 处理；存在 source metadata 时，activity/audit view 会展示其安全投影。Route、limit 与关闭方式见[权限与沙箱](permissions-and-sandbox.md#网络与-web-工具)。
-
-`webfetch` 只读取 Sigil 在当前 session 已观察到的一个精确 HTTP(S) URL。模型传入 session-local `source_id`，不能新造 raw URL。搜索摘要足以回答时应直接使用摘要；只有用户明确要求读取页面，或某个具体事实无法由现有摘要回答时，才应调用 `webfetch`，默认不得对搜索结果批量 fan-out。`network_mode = "allow"` 时只读 fetch 不逐次审批；`network_mode = "ask"` 时可以选择 `Allow session`，只对当前 session 中同一只读 Web tool 生效。用户消息 URL、结构化搜索结果、provider-hosted source、之前的 fetch 和跨 origin redirect target 都可以产生 capability。带 query 或签名的 URL 只留在进程内，重启后不可用；Sigil 不会从脱敏 display URL 反推原值。每次 fetch 都重新执行 disclosure、SSRF/DNS、redirect、byte budget、bounded decode 与 external/untrusted provenance 规则。
+启用后，search 与 fetch 活动会显示数据发往哪里。搜索结果属于外部不可信内容。Fetch 只打开当前 session 已观察到的 URL，并重新应用网络限制。Route、关闭方式和目标规则见[权限与沙箱](permissions-and-sandbox.md#网络与-web-工具)。
 
 ## 计划任务
 
-普通 composer 输入始终保持 chat-first，不会因为当前 session 存在未完成任务而自动继续 durable task。需要继续任务时，使用 `/task continue` 或 task UI action。需要编辑前只读规划时，使用 `/plan` 或 `/plan <prompt>`；只有在 plan-ready 卡片上按 `Enter` 显式接受时，Sigil 才会从该计划创建并运行普通 durable task。遇到较大的任务时，也可以直接用 `/task <任务>` 让 Sigil 先拆成 durable steps，再逐步执行。
+使用 `/plan` 获取只读计划；只有需要开始执行时才接受 Plan ready card。已经确定需要多步骤执行时使用 `/task`。普通 chat 保持 chat-first，不会自行继续未完成任务。
 
-计划任务会使用不同 role：
-
-- Planner：读取上下文并写入 task plan。
-- Executor：执行普通 workspace 变更步骤。
-- Subagent read/write：把委派步骤放进 child session 执行，并在 parent task 中记录 child session link。
-
-Task run、plan、step 状态、child-session link 和 subagent approval route 摘要都会写入 append-only control entry。右侧 Info rail 会从 durable state 显示最新 task 状态、plan 版本和当前步骤；存在 child agent 时，composer 输入框下方会显示紧凑 agent 面板，并展示每个 agent 的状态。在 composer 输入光标位于最后一行时按 `Down` 可聚焦这个面板，继续用 `Up/Down` 选择 agent，按 `Enter` 切换主聊天区。`Alt-A` / `Shift-Alt-A` 仍可在 `main` 和具体 child agent 之间循环切换，`/agent` 可精确选择目标。Child agent 展示名优先来自显式 plan metadata，其次由持久化的 `/agent rename` 覆盖；都没有时才退回 `read 1`、`write 1` 这类通用 role 编号。
-
-当计划任务需要验证时，task status band 会显示一张紧凑的 Verification card，其中只有一项推荐 check 和简短原因。它只提供已经受信任的 task check，或运行 check 前必须先处理的审批；不会自行启动检查。点击卡片或按 `Alt-V` 聚焦后，按 `Enter` 执行当前渲染状态绑定的精确 action；按 `I` 查看终态原因、receipt、workspace snapshot，以及有证据支持的 changeset/command/artifact link。缺少证据时明确显示 `not linked`，不会推断关联。检查已经 queued 或 running 时，界面会显示进行中的状态，不会再次把它推荐出来。
-
-恢复 session 只会重建可见 task 状态，不会自动继续未完成任务。需要继续时，直接在 composer 输入下一步指引；如果不需要额外指引，也可以输入 `/task continue`。
+任务界面显示步骤、当前状态、child agent 工作，并在需要检查时显示 Verification card。按 `Alt-V` 聚焦。恢复 session 只显示已保存任务状态，不会自动继续。
 
 ## 审批和文件变更
 
-读文件和搜索这类只读工具通常可以直接执行。写文件、编辑文件、删除文件、shell 执行和外部 MCP 工具会按权限策略进入审批或拒绝。
+只读文件与搜索工具通常直接运行。写入、删除、命令、网络和外部工具遵守配置的权限策略。
 
-审批卡片里重点看：
+允许高风险动作前，检查：
 
-- Summary：这次工具调用要做什么。
-- Files：可能影响哪些文件。
-- Diff：写操作的变更预览。
-- Actions：选择 allow 或 deny。
+- 将要执行什么；
+- 涉及哪些文件或目标；
+- 可见 diff 或请求预览；
+- **allow**、**allow for this session** 或 **deny** 是否符合意图。
 
-审批支持 `Left/Right` 选择动作后 `Enter` 确认，也保留 `Y/N` 快捷确认。长时间不决策会自动 deny，避免后台 worker 一直等待。
-
-文件变更工具执行后，activity 会保留 bounded diff。大 diff 会截断并提示隐藏行数。
+活动视图可能缩短大型 diff；提交前仍要检查仓库最终 diff。
 
 ## Session 和恢复
 
-默认 session log 写入 Sigil 用户态 state 目录：
+Session 日志保存在 Sigil 用户态状态目录。重启后，Sigil 可以恢复最新受支持的 session，包括可见消息、任务状态、已完成活动摘要和中断工具结果。中断工具不会被静默重跑。退出时会打印 session id 和 `sigil resume <session-id>` 命令。
 
-```text
-<state-root>/workspaces/<workspace-id>/sessions/
-```
+取消操作会停止接收新工作，并短暂等待活动工作结束。**Cancelled** 表示清理完成；**Interrupted** 表示在限制时间内无法确认。已经保存的消息和结果仍会保留。
 
-Sigil 使用 append-only JSONL 保存 session 和控制状态。对使用者来说，这意味着：
+### 管理已保存的 Session
 
-- 重启 TUI 后默认恢复最近一次 session。
-- 当前版本只恢复 V2 session JSONL。若发现旧的 raw session 格式，Sigil 会明确提示该文件不受支持且保持原样；请先归档该文件并新建 session。Sigil 不迁移旧格式。
-- 退出 TUI 后会打印当前 session id 和 `sigil resume <session-id>`，可直接从命令行恢复。
-- 取消运行时会先关闭新的 provider、tool、process、socket、retry、redirect 和 child-work effect 准入，再在有界清理期限内等待收敛。活动工作收口期间 UI 显示 `Cancelling`；只有清理得到确认才显示 `Cancelled`，超过期限或无法证明清理完成时显示 `Interrupted`。
-- 取消运行后，已经写入的消息和工具结果不会因为内存状态丢失而消失。`/queue interrupt` 只有在前一个 run 写入 durable cancellation 终态后才会 dispatch follow-up。
-- 已开始但未完成的工具执行会在恢复后显示为 interrupted。
-- 文件变更 activity 会随 session restore 恢复，仍可回看当时捕获的 diff 摘要。
-- `/config` 保存新的默认 provider/model 不会改写当前 session identity；新默认值用于后续新 session。
-- Prompt、queued follow-up、tool 参数、task 控制或外部 URL 写入 session 记录前，Sigil 会保存经过脱敏且有大小上限的描述。敏感的精确值只用于当前动作，重启后不会被重建；如果某项操作再次需要精确值，Sigil 会要求你重新执行该动作。
-- 外部材料经过 compaction 和 recovery 后仍明确标记为 untrusted。Source record 与 claim citation 分开保存，citation 只绑定它实际支持的最终安全 assistant 文本。
+打开 `/resume` 并选择一行。`Enter` 恢复；`Ctrl-O` 或右键打开操作，可以 fork 对话、导出安全 transcript、pin session 或检查删除。删除需要二次确认，并且只作用于已经检查的非活动文件。Retention cleanup 是 `/config` → **Storage** 下的显式操作；普通启动不会自动删除 session。
 
-### 管理已保存的 session
+### 受控 Checkpoint 与会话 Fork
 
-打开 `/resume` 浏览已保存的 session。用 `Up/Down` 切换选中行，按 `Enter` 恢复。选中一行后按 `Ctrl-O`，或右键单击该行，可以打开独占焦点的 Session Actions 弹窗。弹窗关闭前会保留 composer draft，并独占键盘输入。
-
-- `Enter` 恢复选中的 session。
-- `F` 从最近一个已完成 turn fork conversation，并切换到新会话；文件和其他副作用仍然共享。
-- `E` 把安全 JSON transcript 导出到当前 workspace state 目录的 `session-exports/` 文件夹。导出内容包含安全的 conversation 消息，不包含内部控制状态、工具参数、凭据或私有 continuation 数据。
-- `P` pin 或 unpin session。已 pin 的 session 不会进入显式 cleanup 候选。
-- `D` 打开精确 delete preview；再次按 `Enter` 时，只会删除仍未变化且不活动的已审查文件。当前 session 不能删除。
-
-需要批量清理时，打开 `/config`，选择 `Storage`，移动到名为 `sessions` 的 footer action 后按 `Enter`。Sigil 会先展示配置的 retention 限制、受保护数量、候选和预计释放字节，之后才接受第二次显式确认。普通启动、run、resume 和 `sigil serve` 都不会自动应用 retention。限制字段见 [`[session.retention]`](configuration.md#storage-与-session-路径)。
-
-### 受控 checkpoint 与会话 fork
-
-最近一个已完成 turn 包含受控普通文件修改时，按 `Ctrl-R` 直接打开恢复弹窗。Sigil 会立即让
-worker 根据 durable log 重建精确预览，不再需要先按一次 `Enter`。弹窗独占键盘焦点，并直接
-展示反向 diff、文件恢复方向、冲突和不会被覆盖的 unknown side effect；没有 durable 行级 diff
-时则展示当前 hash 与恢复目标 hash 证据。用 `Up/Down`、`PageUp/PageDown` 或鼠标滚轮滚动，
-`Ctrl-R` 刷新，`Esc` 在不修改文件的情况下关闭。弹窗打开期间会保留 composer draft，操作键
-也不会写入 composer。
-
-弹窗进入 `READY` 后，按 `Enter` 才会恢复受控文件。预览或恢复正在执行时，重复操作会被忽略。
-恢复成功后弹窗关闭，并在 timeline 留下一条 `RESTORED` 结果；旧弹窗迟到的异步回包会被忽略。
-
-恢复会在第一次写入前检查当前文件 hash 和已保存 snapshot。文件已变化、snapshot 缺失或
-敏感、workspace 不匹配、预览过期时，整批操作都会阻止。成功恢复后，旧 verification 会变成
-stale，需要重新运行检查。该操作只恢复受控普通文件 mutation；不会撤销 shell、MCP/plugin、
-network、database、remote service、directory、rename 或 symlink 副作用。
-
-恢复弹窗为 ready 或 blocked 时按 `F`，可以从这个完整 turn fork conversation。新 fork 会成为当前
-session，只保留安全的 user/assistant/tool history，并把 source provenance 重新绑定到新 session；
-active approval、task、queue、continuation handle 和 mutation state 都不会复制。parent session
-仍保持 append-only。Conversation fork 不会隔离或恢复 workspace，两个 session 仍共享同一组文件。
+最近完成的 turn 包含受支持文件编辑时，按 `Ctrl-R` 检查 reverse diff。`Enter` 恢复已检查文件；`F` 只 fork 对话，不修改共享文件。文件已变化或预览过期会阻止恢复。Shell 命令、远端服务、目录、rename、symlink 和其他外部效果不会被撤销。成功恢复后要重新运行验证。
 
 ## 长上下文和压缩
 
-Info rail 会显示上一轮 provider 返回的 prompt token 相对模型 context window 的使用状态。`ctx` 行会标明窗口来自 provider metadata 还是 `fallback_context_window_tokens`，Sigil 也用同一个窗口计算 soft / hard threshold：
-
-- soft threshold：提示上下文压力变高。
-- hard threshold：上下文压力已到临界值。一次成功 chat turn 完全进入 idle 后，Sigil 可以在后台准备并应用一次通过本地验证的 portable compaction。
-- `/compact`：打开 V2 折叠审查，显示 fold、keep 与 protection。所选 profile 已安装 checksum-pinned tokenizer 且能生成本地 exact target-fit proof 时，按 `Enter` 可确认一次手动应用。
-- 如果窗口未知，可以配置 `fallback_context_window_tokens`，让 TUI 显示百分比和 threshold 提示。
-
-打开审查本身是只读操作：不会改写旧历史或追加 compaction record，也不会下载 tokenizer。只有审查明确显示 target ready 时才能应用；确认后会追加 V2 lifecycle 并激活已验证 boundary，raw history 始终不被改写。不可用的审查不能应用。
-
-如需在不改变任何 session state 的前提下提前准备经过验证的本地 DeepSeek V4 Flash tokenizer，可运行 `sigil tokenizer install deepseek-v4-flash`。命令会在开始 public network 下载前披露该操作。安装只会启用本地 admission，不会自行改变 session。
-
-idle 自动化不会抢占 streaming work、排队输入、agent continuation、手动 review、model switch 或 overflow recovery。Preparation 由 request/session owner 管理；idle frontier 一旦变化，结果会被丢弃。只有 exact local admission 通过后才会追加 lifecycle 并激活 boundary；admission 不可用时 session 保持不变，并进入短暂的进程内 cooldown。queued pre-turn preparation 使用同一后台 owner；queue 发生变化会取消它，stale source 或 queue revision 会在 provider dispatch 前失败。
-
-对于官方 OpenAI Responses endpoint 与精确受支持 snapshot，只有 provider 确认尚未产生 output 或 side effect 的 context-window rejection，才可能进入受控 overflow recovery。Sigil 会对被拒请求与压缩后 target 执行两次受审计、无生成的 input-token measurement，要求 exact fit 与 minimum-savings evidence，重新核对 session/rejection frontier，并只重试一次 retained request。计数失败、stale state、alias、兼容 endpoint、恢复后的 session 或第二次 overflow 都会 fail closed，不会 replay。
+信息栏显示已报告的上下文用量，并在 model window 接近上限时提醒。`/compact` 打开只读预览，显示哪些内容会精简、哪些会保留；只在界面显示 ready 时应用。上下文大小未知时，可设置 `fallback_context_window_tokens`。设置与恢复方式见[高级配置](advanced-configuration.md)。
 
 ## Code Intelligence
 
-对于新请求，Sigil 可以附带少量 request-local 的相关仓库片段。已有且与当前 query 相关的
-language-server warm snapshot 会优先使用；否则回退到内置 Tree-sitter adapter，覆盖 Rust、
-Python、JavaScript/JSX、TypeScript/TSX 和 Go。该过程不会为了组装上下文而启动 language
-server，不会建立持久仓库索引，也不会在请求时下载 grammar。ignore 规则、secret-like 与
-generated 路径、symlink、文件大小上限和最终 context budget 仍然生效。Info rail 的 detail
-模式会显示最近一次 included source 与 excluded reason，但不会暴露 raw prefix。Queued
-follow-up 和 compaction preparation 会保留其 frozen request 已选中的 context，不会在 dispatch
-时静默重选。
+启用后，Sigil 可以利用仓库结构和可用 language server 提供符号、定义、引用、诊断、code action 与 rename preview。`Alt-D` 检查已修改源码。编辑动作仍需要 diff 审批。Language server 不可用时，普通 chat 和文件工具继续工作。见[高级配置](advanced-configuration.md#compaction-与代码智能)。
 
-Code intelligence 默认关闭。开启后，Sigil 会注册代码查询工具：
+Setup、凭据告警、终端问题或集成失败请进入[故障排查](troubleshooting.md)。
 
-- `code_symbols`
-- `code_workspace_symbols`
-- `code_definition`
-- `code_references`
-- `code_diagnostics`
-- `code_actions`
-
-同时会注册需要审批 diff 才能写入的 LSP edit 工具：
-
-- `code_action`
-- `code_rename`
-
-使用默认 `trust_required = true` 的 language server，只有在当前 session 中存在与当前 workspace 精确匹配的 durable `Trusted` decision 后才会启动。decision 缺失、受限或被拒绝时会阻止 LSP 进程，但不影响普通 chat、文件工具或 Rust Tree-sitter fallback。Workspace trust 也不会批准 `code_action` 或 `code_rename`；它们仍需单独通过 diff 审批。
-
-TUI 里可以用 `Alt-D` 对当前 git changed source files 触发 diagnostics 检查。结果会作为普通 activity 展示，并在 Info rail 的 LSP 区保留摘要。
-
-没有可用 LSP server 时，独立的 `code_*` 工具仍只为 Rust outline / syntax diagnostics 提供
-fallback；这个范围比上面的多语言自动请求上下文更窄。失败不会阻塞普通 chat 和工具调用。
-
-配置方式见 [Sigil 配置指南](configuration.md)。
-
-## 常见问题
-
-### 启动后直接进入 Quick Setup
-
-说明没有找到可用配置，或者配置加载失败。完成 Quick Setup 后再进入主界面。
-
-### API key 要不要写入配置文件
-
-临时或 CI 场景先选择 provider，再使用 [provider 认证映射](providers.md#认证优先级)中的对应环境变量。如果通过 Quick Setup 或 `/config` 写入本地配置，`api_key` 会以 plaintext 保存；`doctor` 会把这个状态作为 warning 并给出修复建议。不要提交真实 `sigil.toml`。
-
-### 终端鼠标或剪贴板支持不正常怎么办
-
-可以在 `/config` 的 `Terminal` 区块查看当前值，或在 `sigil.toml` 里设置 `[terminal].keyboard_enhancement = "off"` / `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3`。keyboard enhancement 会在下一次启动时解析；mouse capture 下一次启动生效；OSC52 剪贴板开关从下一次复制开始生效；scroll sensitivity 用于调整 transcript 和 approval diff 的滚轮步长。
-
-运行 `/doctor` 可以查看检测到的终端 profile、multiplexer / remote 层，以及剪贴板桥接风险提示。
-
-### 为什么子命令很少
-
-直接运行 `sigil` 会打开 TUI。`sigil run`、`sigil doctor` 这类子命令主要用于自动化、脚本和调试，不承载完整产品心智。
-
-### 为什么有些工具需要审批
-
-Sigil 的 permission layer 负责 allow / ask / deny 判断。写文件、执行命令和外部工具默认更保守，目的是让用户在关键变更前看到预览和风险。
+<!-- public-doc-cta: open-reference -->
+下一步：[在参考中查找精确操作](reference.md)。

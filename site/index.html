@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sigil - TUI-first Rust coding agent</title>
+    <title>Sigil - repository work in one terminal</title>
     <meta
       name="description"
-      content="Sigil is a TUI-first Rust coding agent with durable tasks, bounded repository context, image input, approvals, verification, attention signals, and session recovery."
+      content="Sigil is a TUI-first coding agent for reviewing, changing, and verifying real repositories from one terminal workspace."
     >
     <link rel="canonical" href="https://sigil.corerobin.com/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/">
@@ -16,21 +16,25 @@
     <meta name="theme-color" content="#1ecfc5">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
-    <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
+    <meta property="og:title" content="Sigil - repository work in one terminal">
     <meta
       property="og:description"
-      content="Repository work with bounded code context, image input, durable tasks, approvals, verification, and attention signals inside one terminal interface."
+      content="Review, change, and verify real repositories from one terminal workspace."
     >
     <meta property="og:url" content="https://sigil.corerobin.com/">
-    <meta property="og:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
-    <meta property="og:image:alt" content="Sigil logo">
+    <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
+    <meta name="twitter:title" content="Sigil - repository work in one terminal">
     <meta
       name="twitter:description"
-      content="Repository work with bounded code context, image input, durable tasks, approvals, verification, and attention signals inside one terminal interface."
+      content="Review, change, and verify real repositories from one terminal workspace."
     >
-    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
+    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta name="twitter:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
     <script>
       (() => {
         try {
@@ -91,20 +95,19 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first coding agent</p>
           <h1>Repository work,<br><span class="hero-accent">inside one terminal.</span></h1>
           <p class="lede">
-            Sigil brings bounded repository context, image input, durable tasks, approvals, diffs, verification, attention signals, and session recovery into a terminal product built for real coding sessions.
+            Follow the task, inspect the proposed change, and decide what happens next without leaving your terminal.
           </p>
           <div class="alpha-status" aria-label="Release status">
-            <strong>v0.0.1-alpha.4 preview</strong>
-            <span>Core TUI workflows are usable today. Config, plugin APIs, advanced sandbox coverage, and automation surfaces may still change.</span>
-            <span>The site tracks <code>main</code>, which can be newer than the package. <a href="docs/changelog/#unreleased-main">Review Unreleased</a>.</span>
+            <strong>Early preview</strong>
+            <span>The site follows <code>main</code>; packaged releases can lag behind. Review <a href="docs/status/">current support</a> before adopting Sigil.</span>
           </div>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="#quickstart">Install</a>
             <a class="button secondary" href="docs/visual-tour/">Visual tour</a>
-            <a class="button secondary" href="docs/status/">Status</a>
+            <a class="button secondary" href="docs/">Read the docs</a>
           </div>
         </div>
         <div class="terminal-stage" data-terminal-stage>
@@ -117,98 +120,52 @@
               <span class="terminal-prompt" aria-hidden="true">&gt;</span>
               <code>/task audit the release docs</code>
             </div>
-            <ol class="session-timeline" aria-label="Task execution phases">
+            <ol class="session-timeline" aria-label="Task progress">
               <li class="session-phase session-phase-planner" data-phase="planner">
-                <span class="session-role">planner</span>
-                <span class="session-description">Wrote durable steps for the release audit</span>
-                <span class="session-state session-state-complete">complete</span>
+                <span class="session-role">request</span>
+                <span class="session-description">Audit the release documentation</span>
+                <span class="session-state session-state-complete">received</span>
               </li>
               <li class="session-phase session-phase-worker" data-phase="worker">
-                <span class="session-role">worker</span>
-                <span class="session-description">Ran a read-only documentation review</span>
-                <span class="session-state session-state-complete">complete</span>
+                <span class="session-role">review</span>
+                <span class="session-description">Found outdated and repeated guidance</span>
+                <span class="session-state session-state-complete">done</span>
               </li>
               <li class="session-phase session-phase-tool" data-phase="tool">
-                <span class="session-role">tool</span>
-                <span class="session-description">Prepared the edit_file preview for approval</span>
-                <span class="session-state session-state-ready">ready</span>
+                <span class="session-role">change</span>
+                <span class="session-description">Prepared a focused documentation update</span>
+                <span class="session-state session-state-ready">review</span>
               </li>
               <li class="session-phase session-phase-verify" data-phase="verify">
-                <span class="session-role">verify</span>
-                <span class="session-description">Ran Pages checks and link validation</span>
+                <span class="session-role">checks</span>
+                <span class="session-description">Pages layout and links are healthy</span>
                 <span class="session-state session-state-passed">passed</span>
               </li>
               <li class="session-phase session-phase-status" data-phase="status">
-                <span class="session-role">status</span>
-                <span class="session-description">Published the alpha release</span>
-                <span class="session-state session-state-live">live</span>
+                <span class="session-role">result</span>
+                <span class="session-description">Documentation is ready to publish</span>
+                <span class="session-state session-state-live">ready</span>
               </li>
             </ol>
-            <div class="terminal-signals" aria-label="Workflow guarantees">
-              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>session durable</span>
-              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>approval gated</span>
-              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>verification passed</span>
+            <div class="terminal-signals" aria-label="Task status">
+              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>work saved</span>
+              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>changes reviewed</span>
+              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>checks passed</span>
             </div>
           </div>
         </div>
       </section>
 
-      <div class="capability-rail">
-        <div class="capability-track">
-          <div class="capability-set" role="list" aria-label="Sigil capabilities">
-            <span role="listitem">Durable sessions</span>
-            <span role="listitem">Approval previews</span>
-            <span role="listitem">Child agents</span>
-            <span role="listitem">MCP tools</span>
-            <span role="listitem">Code intelligence</span>
-            <span role="listitem">Image input</span>
-            <span role="listitem">Attention signals</span>
-            <span role="listitem">Verification</span>
-            <span role="listitem">Recovery</span>
-          </div>
-          <div class="capability-set" aria-hidden="true">
-            <span>Durable sessions</span>
-            <span>Approval previews</span>
-            <span>Child agents</span>
-            <span>MCP tools</span>
-            <span>Code intelligence</span>
-            <span>Image input</span>
-            <span>Attention signals</span>
-            <span>Verification</span>
-            <span>Recovery</span>
-          </div>
-        </div>
-        <button
-          class="capability-motion-toggle"
-          type="button"
-          data-capability-motion-toggle
-          data-pause-label="Pause capability animation"
-          data-resume-label="Resume capability animation"
-          aria-label="Pause capability animation"
-          title="Pause capability animation"
-        ><span aria-hidden="true">Ⅱ</span></button>
-      </div>
-
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">Quickstart</p>
-          <h2>Install the preview release and launch from a workspace.</h2>
+          <h2>Install once, then launch inside a repository.</h2>
         </div>
-        <div class="install-options" aria-label="Install options">
+        <div class="install-options" aria-label="Recommended install">
           <article class="install-card install-card-primary">
             <span class="resource-kicker">Recommended</span>
             <h3>npm alpha</h3>
             <pre><code>npm install -g @sigil-ai/sigil@alpha</code></pre>
-          </article>
-          <article class="install-card">
-            <span class="resource-kicker">macOS</span>
-            <h3>Homebrew tap</h3>
-            <pre><code>brew install JimmyDaddy/sigil/sigil-ai</code></pre>
-          </article>
-          <article class="install-card">
-            <span class="resource-kicker">Source</span>
-            <h3>Cargo git tag</h3>
-            <pre><code>cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --locked sigil</code></pre>
           </article>
         </div>
         <div class="steps">
@@ -221,7 +178,7 @@ sigil</code></pre>
           <div class="step">
             <span>2</span>
             <h3>Set up</h3>
-            <p>Quick Setup opens when Sigil cannot find a usable config. Confirm the workspace, choose a provider/model, and enter authentication. v0.0.1-alpha.4 is an early preview.</p>
+            <p>Quick Setup opens when configuration is missing. Choose a provider and model, then add authentication. See <a href="docs/installation/">Installation</a> for every supported package path.</p>
           </div>
         </div>
       </section>
@@ -229,7 +186,7 @@ sigil</code></pre>
       <section class="section contrast" id="visual-preview">
         <div class="section-heading">
           <p class="eyebrow">Visual tour</p>
-          <h2>The main surfaces are inspectable before you install.</h2>
+          <h2>See the work and the decision points.</h2>
         </div>
         <div class="visual-grid terminal-deck">
           <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/">
@@ -240,21 +197,9 @@ sigil</code></pre>
             <img src="assets/screenshots/approval-review.svg" alt="Sigil approval review screenshot" loading="lazy" decoding="async">
             <span>Approval review</span>
           </a>
-          <a class="visual-card terminal-window-config" href="docs/visual-tour/#configuration-panel">
-            <img src="assets/screenshots/config-panel.svg" alt="Sigil configuration panel screenshot" loading="lazy" decoding="async">
-            <span>Config panel</span>
-          </a>
           <a class="visual-card terminal-window-verification" href="docs/visual-tour/#task-verification">
             <img src="assets/screenshots/verification-card.svg" alt="Sigil task verification card screenshot" loading="lazy" decoding="async">
             <span>Task verification</span>
-          </a>
-          <a class="visual-card terminal-window-checkpoint" href="docs/visual-tour/#checkpoint-restore">
-            <img src="assets/screenshots/checkpoint-restore.svg" alt="Sigil checkpoint restore review screenshot" loading="lazy" decoding="async">
-            <span>Checkpoint restore</span>
-          </a>
-          <a class="visual-card terminal-window-compaction" href="docs/visual-tour/#context-compaction-preview">
-            <img src="assets/screenshots/compaction-preview.svg" alt="Sigil context compaction preview screenshot" loading="lazy" decoding="async">
-            <span>Compaction review</span>
           </a>
         </div>
       </section>
@@ -262,44 +207,24 @@ sigil</code></pre>
       <section class="section" id="workflow">
         <div class="section-heading">
           <p class="eyebrow">Workflow</p>
-          <h2>Designed for auditable coding sessions.</h2>
+          <h2>Four things that matter during real work.</h2>
         </div>
         <div class="feature-grid">
           <article>
-            <h3>Workspace TUI</h3>
-            <p>Use the composer for ordinary coding work, inspect streamed output, and keep sessions, usage, permissions, agents, LSP, and controls visible.</p>
+            <h3>One working surface</h3>
+            <p>Keep the conversation, tool activity, changes, and next action visible in the TUI.</p>
           </article>
           <article>
-            <h3>Durable tasks and agents</h3>
-            <p>Use <code>/task</code> for multi-step work, <code>/plan</code> for read-only planning, and child agents for scoped delegated work.</p>
+            <h3>Review before risk</h3>
+            <p>Inspect approvals and diffs before writes, commands, network access, or integrations proceed.</p>
           </article>
           <article>
-            <h3>Approval and verification</h3>
-            <p>Review structured previews and receipts, then focus the Verification card with <code>Alt-V</code> to run checks or inspect completion evidence.</p>
+            <h3>Resume with context</h3>
+            <p>Return to saved sessions and recover interrupted work without silently rerunning an unfinished tool.</p>
           </article>
           <article>
-            <h3>Web data with boundaries</h3>
-            <p>Search through provider-hosted, configured MCP, or bundled routes, then fetch only exact session-observed URLs under disclosure, SSRF, and budget controls.</p>
-          </article>
-          <article>
-            <h3>TUI-first automation</h3>
-            <p>Keep daily work in the TUI, use stable JSON or JSONL output for scripts, and connect trusted local clients through the authenticated loopback-only service.</p>
-          </article>
-          <article>
-            <h3>Sessions and relevant context</h3>
-            <p>Keep session lifecycle explicit while bounded Rust, Python, JavaScript/TypeScript, and Go context follows ignore, secret, size, and budget limits.</p>
-          </article>
-          <article>
-            <h3>Image-aware composer</h3>
-            <p>Paste bounded PNG, JPEG, or WebP input, review metadata chips, and send image-only or text-plus-image turns to explicitly supported OpenAI Responses, Anthropic, and Gemini models.</p>
-          </article>
-          <article>
-            <h3>Attention without prompt leakage</h3>
-            <p>Opt in to terminal signals for completed long work, approvals, failures, or MCP input requests; fixed notification text never includes prompts, paths, tool details, or session identifiers.</p>
-          </article>
-          <article>
-            <h3>Native shell, visible boundary</h3>
-            <p>Use PowerShell on Windows and POSIX shell elsewhere, with the resolved dialect and unconfined local-backend boundary visible in diagnostics and tool receipts.</p>
+            <h3>Models and tools that fit</h3>
+            <p>Choose a supported provider, connect MCP tools, and enable repository-aware assistance as needed.</p>
           </article>
         </div>
       </section>
@@ -307,21 +232,9 @@ sigil</code></pre>
       <section class="section" id="safety">
         <div class="section-heading">
           <p class="eyebrow">Safety model</p>
-          <h2>Auditable control before risky actions.</h2>
+          <h2>Keep control where a decision matters.</h2>
         </div>
-        <div class="split-list">
-          <ul>
-            <li>Permission decisions for write, execute, network, MCP, LSP edit, and external-directory access.</li>
-            <li>Bounded previews, diffs, and verification evidence before risky work is treated as complete.</li>
-            <li>Provider-specific behavior stays in provider crates, not in the generic kernel.</li>
-          </ul>
-          <ul>
-            <li>Tool, task, agent, approval, and execution lifecycle events are durable control records.</li>
-            <li>Interrupted tools restore as interrupted results, not hidden retries.</li>
-            <li>MCP servers, plugins, workspace agents, and external data run under explicit trust policy.</li>
-            <li><code>/feedback</code> previews its privacy boundary, exports locally, and lets you review the JSON or open the bug form; nothing is uploaded automatically.</li>
-          </ul>
-        </div>
+        <p class="lede">Different actions have different limits. The <a href="docs/safety/">Safety guide</a> explains what to inspect before deciding; <a href="docs/permissions-and-sandbox/">Permissions and sandbox</a> covers the exact controls and platform boundaries.</p>
       </section>
 
       <section class="section contrast" id="docs">
@@ -338,9 +251,9 @@ sigil</code></pre>
             <span>Workflows</span>
             Prompt patterns for exploring, editing, debugging, reviewing, and resuming work.
           </a>
-          <a href="docs/#config">
+          <a href="docs/#configuration">
             <span>Config</span>
-            Provider, permission, appearance, agents, skills, plugins, verification, terminal attention, and environment settings.
+            Find the focused guide for providers, permissions, appearance, or advanced settings.
           </a>
           <a href="docs/#troubleshooting">
             <span>Troubleshooting</span>

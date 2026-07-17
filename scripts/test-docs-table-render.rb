@@ -19,10 +19,10 @@ reference = File.read(File.join(REPO_ROOT, "docs", "en", "reference.md"))
 rendered_reference, = render_markdown(reference, "en")
 required_rows = [
   "<tr><th>Action</th><th>Key</th></tr>",
-  "<tr><td>Open help</td><td><code>F1</code></td></tr>",
+  "<tr><td>Open help / slash selector</td><td><code>F1</code> / <code>/</code></td></tr>",
   "<tr><th>Command</th><th>Purpose</th></tr>",
-  "<tr><td><code>/agent &lt;main|child-id&gt;</code></td><td>Switch the main chat area between the parent session and child agent transcripts</td></tr>",
-  "<tr><td><code>/queue next|interrupt|edit|delete [item]</code></td><td>Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it</td></tr>"
+  "<tr><td><code>/agent &lt;main|child-id&gt;</code></td><td>Switch visible transcript</td></tr>",
+  "<tr><td><code>/queue next|interrupt|edit|delete [item]</code></td><td>Reorder, interrupt for, edit, or remove a follow-up</td></tr>"
 ]
 
 missing_rows = required_rows.reject { |row| rendered_reference.include?(row) }
@@ -56,6 +56,33 @@ end
 
 if rendered_escaping.include?("&amp;amp;")
   warn "docs inline rendering double-escaped an HTML entity"
+  exit 1
+end
+
+comment_fixture = <<~MARKDOWN
+  <!-- public-doc-role: fixture -->
+
+  # Visible title
+
+  <!--
+  hidden implementation note
+  -->
+
+  Visible prose.
+MARKDOWN
+rendered_comment, = render_markdown(comment_fixture, "en")
+if rendered_comment.include?("public-doc-role") || rendered_comment.include?("hidden implementation note")
+  warn "docs renderer leaked an HTML comment into public output"
+  exit 1
+end
+unless rendered_comment.include?("Visible title") && rendered_comment.include?("Visible prose.")
+  warn "docs renderer removed visible prose while stripping comments"
+  exit 1
+end
+
+search_comment = plain_text_from_markdown(comment_fixture)
+if search_comment.include?("public-doc-role") || search_comment.include?("hidden implementation note")
+  warn "docs search text leaked an HTML comment"
   exit 1
 end
 

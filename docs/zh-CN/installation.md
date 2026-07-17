@@ -1,3 +1,5 @@
+<!-- public-doc-role: installation; authority: install-update-uninstall-authority; sections: requirements,supported-install-channels,install-with-npm,install-with-homebrew,install-with-cargo,install-from-source,start,install-from-a-release-archive,update,uninstall; cta: start-quickstart -->
+
 # 安装
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
@@ -65,7 +67,7 @@ cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --l
 
 这会把 `sigil` binary 安装到 Cargo 的 binary 目录。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
 
-crates.io 上 `sigil` 包名已被其他 crate 使用，因此 crates.io 分发需要后续再决定 package name；binary 仍然可以保持 `sigil`。
+crates.io 上 `sigil` 包名已被其他 package 使用，因此 crates.io 分发需要后续再决定 package name；binary 仍然可以保持 `sigil`。
 
 ## 从源码安装
 
@@ -128,3 +130,6 @@ npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```
+
+<!-- public-doc-cta: start-quickstart -->
+下一步：[从快速开始入门](quickstart.md)。

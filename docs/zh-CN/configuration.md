@@ -1,47 +1,34 @@
+<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
+
 # Sigil 配置指南
 
-[文档首页](README.md) · [权限与沙箱](permissions-and-sandbox.md) · [外观](appearance.md) · [高级配置](advanced-configuration.md) · [字段参考](configuration-reference.md) · [Provider 指南](providers.md) · [English](../en/configuration.md)
+[文档首页](README.md) · [权限](permissions-and-sandbox.md) · [外观](appearance.md) · [高级配置](advanced-configuration.md) · [字段参考](configuration-reference.md) · [English](../en/configuration.md)
 
-这是 Sigil 共享配置的推荐入口。本文说明配置在哪里、最小可用设置、workspace 与存储选择，以及应该去哪里查找具体设置。Provider 凭据和 provider 专项选项由 [Provider 指南](providers.md)维护。
+常规配置从这里开始。Provider 凭据和服务专项设置只在 [Provider 指南](providers.md)维护。
 
 ## 选择正确的页面
 
-| 你想要… | 从这里开始 |
+| 目标 | 页面 |
 | --- | --- |
-| 设置 Sigil、选择 workspace 或找到配置文件 | 本文 |
-| 修改批准、网络、外部路径或 sandbox | [权限与沙箱](permissions-and-sandbox.md) |
-| 修改 TUI 主题、代码高亮或颜色 | [外观](appearance.md) |
-| 配置 task、检查、memory、代码智能、终端、plugin 或 MCP | [高级配置](advanced-configuration.md) |
-| 查询精确的 `sigil.toml` 字段或值 | [配置字段参考](configuration-reference.md) |
-| 选择 model service、endpoint 或凭据 | [Provider 指南](providers.md) |
+| 找到配置、选择 workspace 或设置存储 | 本指南 |
+| 修改审批、网络、外部路径或沙箱 | [权限与沙箱](permissions-and-sandbox.md) |
+| 修改主题、代码配色或信息栏 | [外观](appearance.md) |
+| 配置任务、检查、memory、agent、上下文、terminal、plugin 或 MCP | [高级配置](advanced-configuration.md) |
+| 查询精确字段或默认值 | [配置字段参考](configuration-reference.md) |
 
-## 配置查找顺序
+## 解析顺序
 
-Sigil 按以下顺序解析配置：
-
-1. `--config <path>`
-2. 用户可见 Sigil 配置目录中的 `sigil.toml`
-
-默认用户配置为：
+提供 `--config <path>` 时，Sigil 加载该文件；否则使用用户配置：
 
 ```text
 ~/.sigil/sigil.toml
 ```
 
-Quick Setup 会写入这个用户配置。workspace 中的 `sigil.toml` 不会被自动加载；只有明确想使用本地实验配置时，才传入 `--config <path>`。
+Quick Setup 写入用户配置。Workspace 中的 `sigil.toml` 不会自动加载；只有明确需要时才通过参数指定。
 
-## 最小路径
+## 最小配置路径
 
-日常交互使用时，在希望工作的项目中启动 Sigil 并完成 Quick Setup：
-
-```bash
-cd /path/to/workspace
-sigil
-```
-
-临时使用或 CI 时，先选择 provider，并在启动前设置对应的 provider 凭据。[Provider 指南](providers.md#认证优先级)提供每项服务正确的变量与可复制示例；不存在一个对所有 provider 通用的 API key 变量。
-
-如果希望手写一份很小的共享配置，可以从这里开始：
+进入仓库并运行 `sigil`。Quick Setup 会处理 workspace、provider、model 与认证。最小手写基础配置为：
 
 ```toml
 [workspace]
@@ -51,72 +38,29 @@ root = "."
 tool_timeout_secs = 30
 
 [appearance]
+info_rail = true
 theme = "sigil_dark"
-syntax_theme = "auto"
-usage_cost_currency = "auto"
 ```
 
-然后从所选 provider 页面加入 provider 区块。可复制示例位于 [docs/examples/config](../examples/config)。
+再从所选 provider 页面加入一个 provider block。可复制起点在 [`docs/examples/config`](../examples/config)。
 
 ## Workspace
 
-```toml
-[workspace]
-root = "."
-```
+`workspace.root = "."` 跟随 `sigil` 的启动目录。文件工具会留在该 workspace 内；只有显式开启窄范围 external-directory rule 时才例外。修改前请阅读[权限与沙箱](permissions-and-sandbox.md)。
 
-`workspace.root = "."` 会解析为启动 `sigil` 时所在的目录，因此一份用户配置可以跟随你打开的仓库。文件工具受限于这个 workspace，会拒绝父路径逃逸、绝对路径以及指向 workspace 外的 symlink。
+Shell 选择和终端行为见[终端兼容性](terminal-compatibility.md)；可移植读写优先使用文件工具。
 
-允许 workspace 外路径或修改本地命令行为之前，请先阅读[权限与沙箱](permissions-and-sandbox.md)。
+## 存储与 Session 路径
 
-## 本地命令 Shell
+`[storage].state_root` 存放用户态 session 与 artifact；`[storage].cache_root` 存放可重建数据。`SIGIL_STATE_HOME` 和 `SIGIL_CACHE_HOME` 会覆盖对应 root。`[session].log_dir` 只改变当前 workspace 的 session 日志位置。
 
-注册内置工具时，Sigil 会解析并冻结一个 native shell。Windows 优先使用 `pwsh.exe`，找不到时回退到 Windows PowerShell（`powershell.exe`）；macOS 与 Linux 使用 `sh`。为了 provider 兼容，工具名仍是 `bash`，但工具说明、批准分析、结果 metadata 与 terminal card 都会显示实际 program 和 dialect。
+Retention limit 只通过 `/config` → **Storage** 下的显式预览与确认应用。普通启动、恢复、运行和 `sigil serve` 不会自动删除 session。见[管理已保存的 Session](user-guide.md#管理已保存的-session)。
 
-PowerShell 命令必须使用 `$env:NAME`、`$null` 等 PowerShell 语法；Sigil 不会翻译 Bash 语法。显式 `terminal_start.shell` 只接受已建模的 POSIX shell、PowerShell 或 `cmd.exe`，未知 shell 会在 spawn 前失败。跨平台读取和编辑应优先使用 Sigil file tools。如果命令语法与预期 host 不一致，运行 `sigil doctor` 并查看 `terminal:shell`。
+## Setup 异常时使用 Doctor
 
-## Storage 与 Session 路径
+运行 `sigil doctor`，或在 TUI 中运行 `/doctor`。它会检查配置、workspace、session 位置、provider 凭据来源、MCP、code intelligence 和终端支持，但不会打印 secret value。使用备用配置时，请带上同一个 `--config <path>` 参数。
 
-```toml
-[storage]
-state_root = "auto"
-cache_root = "auto"
+接下来按需要进入[权限](permissions-and-sandbox.md)、[外观](appearance.md)、[高级配置](advanced-configuration.md)或[字段参考](configuration-reference.md)。
 
-[session]
-# log_dir = "sessions"
-
-[session.retention]
-max_sessions = 500
-max_bytes = 2147483648
-expire_older_than_ms = 15552000000 # 180 天
-```
-
-`state_root` 保存持久的每用户 Sigil state，例如 session 相关记录和 artifact。`cache_root` 保存可重建的 scratch data。`session.log_dir` 只修改当前 workspace 的 session log 位置，不会取代 state root。
-
-Session retention 只为显式 maintenance preview 与确认提供 policy；普通启动、run、resume 和 `sigil serve` 都不会自动应用。current、active、pinned、unsupported 或发生 drift 的 session 会受保护。TUI 操作见[管理已保存的 session](user-guide.md#管理已保存的-session)。
-
-`SIGIL_STATE_HOME` 与 `SIGIL_CACHE_HOME` 可覆盖对应 root。在 `sigil.toml` 中覆盖时，优先使用绝对路径。仓库内可复用资源固定放在 `.sigil/` 下；这些资源见[高级配置](advanced-configuration.md#memoryskills-与-agents)。
-
-## Setup 出问题时使用 Doctor
-
-运行：
-
-```bash
-sigil doctor
-```
-
-在 TUI 内使用 `/doctor` 可看到同一份报告。它检查配置加载、workspace 解析、session 位置、provider 与凭据来源、已配置 MCP server、代码智能 readiness 和终端兼容性。它绝不打印 secret 值，并为 warning 与 error 提供修复建议。
-
-使用非默认配置启动时，也要带上同一个覆盖：
-
-```bash
-sigil --config ./sigil.toml doctor
-```
-
-## 下一步
-
-- 在 [Provider 指南](providers.md)中选择 model service。
-- 在[权限与沙箱](permissions-and-sandbox.md)中选择安全的编辑与网络策略。
-- 在[外观](appearance.md)中自定义 TUI。
-- 在[高级配置](advanced-configuration.md)中设置 task、检查、MCP 或终端行为。
-- 在[配置字段参考](configuration-reference.md)中查询字段。
+<!-- public-doc-cta: open-configuration-reference -->
+下一步：[查找精确配置字段](configuration-reference.md)。

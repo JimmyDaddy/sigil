@@ -1,6 +1,8 @@
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+
 # 用户 Changelog
 
-[文档首页](README.md) · [当前支持状态](status.md) · [English](../en/changelog.md)
+[文档首页](README.md) · [安装](installation.md) · [当前支持状态](status.md) · [English](../en/changelog.md)
 
 这一页只列面向用户的 release notes。当前支持边界和 early-preview 说明见 [当前支持状态与未来工作](status.md)。
 
@@ -8,9 +10,9 @@
 
 ### 调整
 
-- Windows shell 与 terminal 工具现在默认使用 native PowerShell，在 Doctor 和 tool card 中显示解析后的 dialect，对非 POSIX 命令保持保守批准分析，并通过 Job Object 持有取消与超时的进程树；本地执行仍明确标记为 unconfined。
-- 远端 Streamable HTTP MCP server 现在支持显式、TUI-first 的 OAuth 登录，包括 PKCE、loopback 或手动 callback、原生凭据存储、有边界的 refresh/revoke 与 typed authentication failure。每个 OAuth 目标仍经过常规 network disclosure 与 destination check；headless 启动不会打开浏览器。
-- 远端 MCP activation/refresh 现在以 transaction 方式替换 tool generation；Windows stdio MCP process tree 使用原生 Job Object ownership 进行有边界清理。
+- Windows shell 与 terminal 工具现在默认使用 PowerShell，在 Doctor 和 tool card 中显示检测到的 shell，并能在超时后更可靠地停止子进程；本地执行仍不提供隔离。
+- 远端 Streamable HTTP MCP server 现在支持从 TUI 显式完成 OAuth 登录、自动或手动 callback、原生凭据存储、刷新、退出和具体的恢复错误。每个目标仍经过常规网络提示与目标检查；headless 启动不会打开浏览器。
+- 激活或刷新远端 MCP server 时，可用工具会同步更新，不再留下旧的重复项。Windows 也能更可靠地清理已停止的本机 MCP 进程树。
 
 ## v0.0.1-alpha.4 - 2026-07-16
 
@@ -19,8 +21,8 @@
 ### 新增
 
 - 增加默认关闭且有隐私边界的 terminal attention notification，用于长任务完成、等待审批、执行失败和需要用户输入，并可自动选择 OSC 9、OSC 777 或 BEL。
-- 增加适用于 Rust、Python、JavaScript/TypeScript 与 Go 的有边界 request-local 仓库上下文：优先复用相关的 warm LSP snapshot，否则回退到内置 Tree-sitter adapter。
-- 增加 TUI 图片附件：可通过本地路径或系统图片剪贴板输入有边界的 PNG、JPEG 与 WebP，提供可删除的 metadata chip、受控 cache、安全 session projection 和精确 provider/model 准入。
+- 增加适用于 Rust、Python、JavaScript/TypeScript 与 Go 的有边界仓库上下文：使用可用的语言服务，并在不可用时回退到内置解析器。
+- 增加 TUI 图片附件：可通过本地路径或系统图片剪贴板输入 PNG、JPEG 与 WebP，提供可删除的附件 chip 和明确的 provider/model 兼容性检查。
 - 增加 `sigil doctor --output json`，为支持请求提供带版本且脱敏的本地诊断格式。
 - 增加 `/feedback`：先预览包含和排除的数据，再显式导出仅保存在本机的 JSON；报告绝不会自动上传。
 - 增加 bug、feature request 和 documentation issue 的结构化 GitHub 表单。
@@ -49,8 +51,8 @@
 ### 新增
 
 - 通过 `[providers.openai_responses]` 增加 OpenAI Responses provider。
-- 增加 stable `websearch` 与 capability-backed `webfetch` route，并使用独立 network policy 和来源 provenance。
-- 增加任务 Verification card、`Alt-V` 聚焦、推荐检查，以及可检查的 snapshot 与 changeset 证据。
+- 增加 stable `websearch` 与受支持的 `webfetch` route，并提供独立网络控制和可见来源。
+- 增加任务 Verification card、`Alt-V` 聚焦、推荐检查，以及与已检查文件和修改对应的可查看证据。
 - 增加 `Ctrl-R` checkpoint 检查，并提供受控 restore 或 conversation fork 选择。
 - 增加通过 `/compact` 打开的只读 Context Compaction V2 preview。
 
@@ -82,7 +84,7 @@
 
 - 暂不支持自更新。
 - alpha 阶段暂不承诺稳定 plugin API 兼容。
-- Sandbox 覆盖和 execution receipt 会随平台与后端不同而不同。
+- Sandbox 覆盖会随平台与后端不同而不同。
 - Headless automation 不能展示交互式审批弹窗。
 
 ## v0.0.1-alpha - 2026-07-07
@@ -92,11 +94,14 @@
 - Sigil TUI 的首个公开 alpha release。
 - 通过 `sigil` 命令进入 TUI。
 - Quick Setup、`/config`、`sigil doctor` 和 `/doctor`。
-- 通过 `/task` 和 `/plan` 使用 durable task 与 planning flow。
+- 通过 `/task` 和 `/plan` 使用多步骤 task 与 planning flow。
 - 文件变更、shell execution、MCP 使用和 code-intelligence edit 通过 approval 控制。
-- 从 append-only 本地状态恢复 session。
+- 重启后恢复已保存的本机 session。
 
 ### 已知限制
 
 - 这是初始 preview，已经被 `v0.0.1-alpha.1` 取代。
 - 用户应优先使用 `alpha` 安装渠道或最新文档中的 release tag。
+
+<!-- public-doc-cta: open-installation -->
+下一步：[查看安装与更新方式](installation.md)。

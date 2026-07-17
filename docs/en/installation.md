@@ -1,3 +1,5 @@
+<!-- public-doc-role: installation; authority: install-update-uninstall-authority; sections: requirements,supported-install-channels,install-with-npm,install-with-homebrew,install-with-cargo,install-from-source,start,install-from-a-release-archive,update,uninstall; cta: start-quickstart -->
+
 # Installation
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
@@ -65,7 +67,7 @@ cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --l
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
 
-The crates.io package name `sigil` is already used by another crate, so crates.io distribution needs a later package-name decision. The binary can still remain `sigil`.
+The crates.io package name `sigil` is already used by another package, so crates.io distribution needs a later package-name decision. The binary can still remain `sigil`.
 
 ## Install From Source
 
@@ -128,3 +130,6 @@ npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```
+
+<!-- public-doc-cta: start-quickstart -->
+Next: [Start with Quickstart](quickstart.md).

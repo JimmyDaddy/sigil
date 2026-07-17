@@ -1,10 +1,10 @@
-# Sigil MCP Guide
+<!-- public-doc-role: mcp; authority: mcp-setup-and-use-authority; sections: minimal-config,streamable-http,process-environment-and-credentials,startup-and-refresh,compatibility-and-limits,trust-and-identity,roots-resources-prompts-and-input,troubleshooting; cta: open-troubleshooting -->
 
-[Docs home](README.md) · [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/mcp.md)
+# MCP Guide
 
-Sigil can connect local stdio and user-root Streamable HTTP MCP servers as external tool providers. Connected MCP tools, resources, and prompts enter the same tool registry and use the same approval, activity, session control, and secret-egress rules as built-in tools. Plugin manifests remain stdio-only.
+[Docs home](README.md) · [Configuration](configuration.md) · [Privacy](privacy.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/mcp.md)
 
-Start conservative: configure one server, keep `approval_default = "ask"`, run `/doctor`, and only loosen trust settings after you understand what the server can read or mutate.
+Sigil connects local stdio and user-root Streamable HTTP MCP servers. Start with one server, keep approval at `ask`, run `/doctor`, and inspect what it can read, change, or transmit.
 
 ## Minimal Config
 
@@ -14,11 +14,8 @@ name = "filesystem"
 transport = "stdio"
 command = "node"
 args = ["/absolute/path/to/server.js"]
-startup_timeout_secs = 5
-required = true
 startup = "eager"
-# Add only the parent variables this server actually needs.
-# inherit_env = ["MY_MCP_API_KEY"]
+required = true
 
 [mcp_servers.trust]
 trust_class = "self_hosted"
@@ -28,17 +25,11 @@ allow_secrets = false
 pin_version = false
 ```
 
-Remote tools are exposed to the provider with sanitized names, for example:
-
-```text
-mcp__filesystem__read_file
-```
-
-Name conflicts or overly long names get a stable hash suffix.
+Use an absolute command when possible. Exposed tool names look like `mcp__filesystem__read_file`; conflicts receive a stable suffix.
 
 ## Streamable HTTP
 
-Remote MCP is allowed only in the user root config and must use HTTPS. Header names are public config metadata, while credential values should normally come from environment variables:
+Remote MCP is allowed only in the user-root config. Prefer HTTPS; plain HTTP is accepted only without environment-backed headers, bearer credentials, or OAuth, and should be limited to a trusted local setup.
 
 ```toml
 [[mcp_servers]]
@@ -47,23 +38,19 @@ transport = "streamable_http"
 url = "https://mcp.example.com/mcp"
 startup = "lazy"
 env_http_headers = { "X-API-Key" = "MY_SEARCH_API_KEY" }
-# bearer_token_env_var = "MY_MCP_BEARER_TOKEN"
-# client_capabilities = ["roots", "elicitation"]
+client_capabilities = ["roots", "elicitation"]
 
 [mcp_servers.trust]
 trust_class = "third_party"
 approval_default = "ask"
-egress_logging = true
 allow_secrets = false
 ```
 
-Every protocol message receives a fresh durable transport authorization and disclosure before DNS or socket activity. Direct connections validate and pin the complete resolved address set; environment-proxy routes identify the proxy destination as `proxy_remote`. Redirects are not followed. An OAuth challenge becomes an actionable `authentication required` state and never causes an automatic browser launch or request replay.
-
-`roots` exposes only the canonical workspace root as a `file:` URI. `elicitation` accepts only bounded forms through the existing TUI form/audit flow; URL elicitation, sampling, and tasks remain unsupported. Headless CLI activation fails closed when an interactive form has no handler. `/doctor` and `/config` display only safe origins, header/environment names, capabilities, and fingerprint state—never resolved credentials.
+Use `bearer_token_env_var` for a static bearer token. Sigil checks every destination, does not follow redirects automatically, bounds response size, and shows safe origin and credential-source names without displaying values.
 
 ### OAuth Authentication
 
-OAuth is mutually exclusive with a static `Authorization` header or `bearer_token_env_var`:
+Use OAuth instead of a static Authorization or bearer credential:
 
 ```toml
 [mcp_servers.oauth]
@@ -71,222 +58,56 @@ OAuth is mutually exclusive with a static `Authorization` header or `bearer_toke
 scopes = ["mcp:tools"]
 ```
 
-OAuth requires HTTPS and an explicit **Sign in** action. Eager or headless startup reports `authentication required` without opening a browser. In `/config`, select the server and open **Authentication**. The modal can sign in, open or copy the authorization URL, accept a complete callback URL for headless/manual return, cancel, refresh, sign out, or explicitly clear a retained local credential. The automatic callback listens only on the IPv4 loopback interface at a random port.
+OAuth requires HTTPS and an explicit **sign in** action. Eager or headless startup reports `authentication required` without opening a browser. In `/config`, select the server and open **Authentication**. From the modal you can sign in, open or copy the authorization URL, paste a complete callback URL when the browser callback cannot return automatically, refresh, revoke remotely, or explicitly clear only the local credential. The automatic callback listens only on the IPv4 loopback interface at a random port. Callback text stays transient. Tokens are stored in the native system credential store, not TOML; there is no plaintext fallback.
 
-Discovery, dynamic registration, token exchange, refresh, and revocation may use different HTTPS destinations. Every physical request repeats the normal network policy, disclosure, destination guard, and shared budget checks. Redirects and automatic retries remain disabled. A `401` after a request is sent marks authentication stale but does not replay that request.
+OAuth can contact separate HTTPS authorization endpoints, all subject to the configured Network controls. Redirects and automatic retries are disabled. A `401` marks authentication stale but does not replay the request.
 
-Tokens and registration secrets are stored only in the native system credential store. Sigil does not write them to TOML, session history, logs, or support bundles, and it does not fall back to a plaintext file. Sign-out first attempts remote revocation; if that cannot be proven, the local credential remains. You may retry or choose **clear local only**, which makes no remote-revocation claim.
+Remote sign-out tries revocation and never deletes the local credential implicitly. If revocation fails, the modal reports an error and keeps the credential. You may then retry or choose **clear local only**; that explicit action makes no remote-revocation claim. After a successful revocation—or when the server advertises no revocation endpoint—the modal enters **remote handled, local retained** and still lets you clear or keep the local credential.
 
-## Process Environment and Credentials
+## Process Environment And Credentials
 
-Local stdio MCP processes do not inherit Sigil's full environment. Sigil clears the parent environment before spawn, adds a small allowlisted runtime baseline such as `PATH`, locale, temporary-directory, and required Windows system variables, and then injects only names explicitly listed in the user root config:
+Local stdio servers start with a small runtime environment, not Sigil's full parent environment. Grant only required variable names from the user-root config:
 
 ```toml
-[[mcp_servers]]
-name = "credentialed-search"
-transport = "stdio"
-command = "/absolute/path/to/search-mcp"
-args = ["--stdio"]
 inherit_env = ["MY_MCP_API_KEY"]
-startup = "lazy"
-
-[mcp_servers.trust]
-approval_default = "ask"
-allow_secrets = false
 ```
 
-`inherit_env` entries must match `[A-Za-z_][A-Za-z0-9_]*`; Sigil de-duplicates and sorts them. Every listed variable must exist when the server is activated. A missing or non-UTF-8 value is a pre-spawn `configuration_invalid` error, so no child process receives a partial credential set.
+Every listed variable must exist when the server starts. Provider keys, cloud credentials, proxy settings, and other sensitive variables are not inherited automatically. `inherit_env` controls process startup; `allow_secrets` separately controls recognized secret-like data in later MCP calls.
 
-Variables such as `HOME`, `SSH_AUTH_SOCK`, proxy settings, provider keys, and cloud credentials are not inherited automatically. Prefer an absolute `command` path for executables outside the baseline `PATH`.
+## Startup And Refresh
 
-Only user root `[[mcp_servers]]` entries may use `inherit_env` or declare Streamable HTTP. Plugin manifests cannot request environment/credential grants or remote transport; discovery returns typed remediation directing remote MCP to root config.
+- `startup = "eager"` connects and registers tools during startup.
+- `startup = "lazy"` waits until you activate the server from `/config` or an allowed activation tool call.
+- `required = true` makes startup failure fatal in strict/headless setup; optional TUI servers can fail without stopping built-in tools.
 
-Sigil stores and displays grant names, source metadata, and static/live fingerprint status, never the resolved value. The live fingerprint uses a process-random key and cannot be used as an offline secret verifier. If a granted value changes or disappears, the old MCP process binding is invalidated and the server must be restarted or refreshed.
+The TUI reports deferred, authentication required, activating, ready, stale, or failed. Use `/config` → MCP → **activate** to start or refresh a server after fixing it. OAuth servers open **Authentication** instead of pretending that an unauthenticated zero-tool connection is ready.
 
-`inherit_env` and `allow_secrets` are independent controls. The first authorizes a value only for child-process startup. The second controls whether later MCP tool/resource/prompt payloads may contain recognized secrets. Enabling either one does not enable the other.
+## Compatibility And Limits
 
-## Startup Modes
+Stdio servers must use newline-delimited JSON for MCP `2025-06-18`; `Content-Length` framing is not supported. Startup and calls have finite timeouts. Oversized, invalid, or timed-out input closes that connection and is reported as a failure. Tool, resource, and prompt results are redacted and shortened before model use.
 
-`startup` supports:
+## Trust And Identity
 
-- `eager`: start the server, list tools, and register them during startup.
-- `lazy`: record the config only; do not start the server and do not register fake tools.
+`trust_class` records whether a server is official, self-hosted, or third-party. `approval_default` controls its normal prompt behavior. Keep `allow_secrets = false` unless a trusted server genuinely needs sensitive data.
 
-`required` controls failure behavior:
+`pin_version = true` can bind the expected command and reported server identity. A stale or missing pin prevents startup. Pinning helps detect unexpected changes but is not protection against another same-user process that can replace an executable during launch.
 
-- `required = true`: startup or `tools/list` failure fails strict registry construction.
-- `required = false`: an eager server failure can be skipped with a warning.
+## Roots, Resources, Prompts, And Input
 
-In the TUI, eager MCP servers are activated in the background after the core agent worker starts. If one MCP server is slow, missing, or times out, normal chat and `/plan` runs continue with built-in and code-intelligence tools; only that MCP server is marked `failed` until it is fixed or refreshed.
+Sigil exposes only the active workspace through `roots/list`. Resources and prompts are listed or read only through explicit MCP tools; they are not injected automatically. Elicitation forms appear in the TUI with the server, requested fields, and defaults. Headless use reports unsupported when interactive input is required. Progress updates refresh the live panel without flooding the transcript.
 
-A lazy server can be activated manually from the TUI `/config` MCP section. The `Server` row follows the same cycle interaction as theme choices: `Enter` selects the next server for lifecycle inspection without modifying the config. `Down` moves to the footer; select `activate` and press `Enter` to activate or refresh that server. `PageUp/PageDown` remain compatibility aliases for cycling the inspected server. The model can also call `mcp_activate_server` to start a named lazy server on demand. After activation succeeds, real MCP tools are added to the current agent registry.
+## Troubleshooting
 
-Model-triggered server activation is classified as local `Execute` plus `NetworkEffect::Unknown` and goes through the complete tool permission decision. Configured eager startup, direct lifecycle activation, and refresh keep their existing lifecycle/source semantics, but carry the current run-scoped network policy to the spawn boundary: network `Ask` without explicit approval does not silently start a process, and network `Deny` is admitted only when the selected backend proves both network and process-tree isolation. Once connected, a generic MCP tool call is local `Read` plus network `Unknown`; resource and prompt surfaces are local `Read` plus network `Read`. These local labels do not mean that data stays on the machine.
+- **Lazy tools missing:** activate the server from `/config`.
+- **Startup failed:** check command path, arguments, required variables, timeout, and any pin.
+- **Authentication required:** open **Authentication**; confirm HTTPS, scopes, and system credential-store availability.
+- **Callback rejected:** paste the complete callback URL, and do not reuse an old tab or callback after cancelling or restarting sign-in.
+- **Credential store unavailable:** unlock or enable the native platform credential store; Sigil will not fall back to a file.
+- **Destination rejected or budget exhausted:** review the Network disclosure and Web policy; retry only after correcting the destination or limit.
+- **Secret blocked:** keep the block unless you understand why this server needs the data.
+- **Server stale:** refresh it after configuration or capability changes.
 
-The TUI shows lifecycle states:
+See [Troubleshooting](troubleshooting.md#mcp-server-is-missing-failed-or-deferred) for the symptom path and [Configuration Reference](configuration-reference.md#code-intelligence-terminal-plugins-and-mcp) for fields.
 
-- `deferred`
-- `authentication required`
-- `activating`
-- `refreshing`
-- `stale <capability>`
-- `ready`
-- `failed`
-
-## Stdio Compatibility And Deadlines
-
-Sigil uses the newline-delimited JSON stdio transport defined by MCP `2025-06-18`. MCP servers that use LSP-style `Content-Length` headers are not compatible and must be updated to the current transport. Sigil does not guess or switch formats on a live connection.
-
-Startup has one absolute budget covering `initialize`, `initialized`, and the first `tools/list`. Each tool, resource, or prompt call uses the active tool timeout. A zero timeout uses the finite 30-second project default, and larger configured values are clamped to a 24-hour hard maximum. A timeout or invalid/oversized frame permanently closes that client generation, attempts to terminate its process group/tree, and reaps the direct child; incomplete cleanup is reported rather than presented as successful. On Windows, the stdio child is assigned to a native kill-on-close Job Object immediately after spawn; assignment, termination, wait, or drain failure is reported instead of being presented as clean shutdown. Limit failures use structured resource-limit details, including the applicable limit and observed lower bound.
-
-Each NDJSON frame is limited to 4 MiB; one operation may consume at most 256 inbound messages and 8 MiB of framed input, while MCP stderr has an 8 MiB hard limit. Tool, resource, and prompt content is redacted before JSON escaping and bounded to 32 KiB or 2,000 lines before it reaches the model-input limit. Truncation is reported without adding text that could reintroduce a configured secret.
-
-Use `/config` → MCP → `activate` to refresh the server. Registry ownership uses the exact unsanitized server identity plus a unique process-generation id, never a provider-visible name prefix, so sanitized or hashed name collisions cannot retire another server. Explicit activation and refresh require a callable replacement even when the server is optional. Refresh reports success only after the replacement is registered and every distinct retired generation has been explicitly shut down; if replacement startup fails, the old generation is restored, and if retirement cleanup fails, the replacement is removed and shut down as a fail-closed rollback. Multi-server registration is transactional and rolls back generations started earlier in the same failed operation. Duplicate exact server names are rejected before launch. The closed generation is never reused, so a late response cannot become the next call's response.
-
-## Trust Policy
-
-```toml
-[mcp_servers.trust]
-trust_class = "self_hosted"
-approval_default = "ask"
-egress_logging = true
-allow_secrets = false
-pin_version = false
-```
-
-Fields:
-
-- `trust_class`: server trust class, one of `official`, `self_hosted`, or `third_party`.
-- `approval_default`: default approval mode for tools from this server; explicit tool/rule overrides still win.
-- `egress_logging`: after approval and before execution, append a safe summary of server, trust class, remote tool, and argument shape to control state.
-- `allow_secrets`: when `false`, blocks MCP tool/resource/prompt arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
-- `pin_version`: when `true`, validates the command/args/environment-grant fingerprint before spawn, then validates protocol and server identity after initialize. For a credentialed server, the pre-spawn fingerprint also binds the canonical execution base and the bytes of the executable resolved through the isolated baseline `PATH`.
-
-MCP tool permission subjects include `mcp_trust_class:<class>`, so permission rules can match trust class.
-
-## Pinned Identity
-
-When `pin_version` is enabled, provide the expected identity:
-
-```toml
-[[mcp_servers]]
-name = "filesystem"
-transport = "stdio"
-command = "node"
-args = ["/absolute/path/to/server.js"]
-startup = "eager"
-
-[mcp_servers.trust]
-trust_class = "self_hosted"
-approval_default = "ask"
-egress_logging = true
-allow_secrets = false
-pin_version = true
-
-[mcp_servers.trust.pinned]
-transport_fingerprint = "sha256:..."
-protocol_version = "2025-06-18"
-server_name = "filesystem"
-server_version = "1.0.0"
-```
-
-If pinned identity is missing or the command fingerprint is stale, startup fails before the server receives environment grants and prints the pre-spawn command fingerprint. After that fingerprint matches, Sigil initializes the server and validates the remaining protocol/name/version fields. Existing pins for servers with no `inherit_env` keep their previous command fingerprint; adding or changing grant names intentionally requires a new pin.
-
-For a server with `inherit_env`, replacing the resolved executable at the same path changes the pre-spawn fingerprint. Command arguments are bound as exact text, but Sigil does not interpret them or attest files named inside them. In particular, `command = "python3"` with a script path in `args` pins the Python executable and the argument string, not the script contents. Prefer a dedicated executable for credentialed servers, or separately review and protect interpreter scripts and modules.
-
-This fingerprint detects the executable bytes observed during pre-spawn validation; it is not a hostile same-user host attestation. Sigil ultimately starts the executable by path, so another process that can rewrite that file concurrently may race validation and launch. Keep credentialed MCP executables and their parent directories outside untrusted write scope. A future OS-specific handle-bound execution primitive would be required to remove that host-level race.
-
-## Roots
-
-Sigil exposes only the resolved workspace root through MCP `roots/list`. Do not infer workspace from the config file path.
-
-If `allow_secrets = false`, secret-like content in the `roots/list` payload is blocked.
-
-## Resources
-
-When a server declares the MCP `resources` capability during `initialize`, Sigil registers two provider-visible tools with local `Read` access and network `Read` effect:
-
-```text
-mcp__<server>__resources_list
-mcp__<server>__resources_read
-```
-
-`resources_list` calls MCP `resources/list`. It accepts an optional `cursor` string for pagination.
-
-`resources_read` calls MCP `resources/read`. It requires a `uri` string returned by `resources_list`.
-
-Resource tools use the same MCP trust policy as remote tools:
-
-- permission subjects include `mcp_trust_class:<class>`;
-- `approval_default` is applied per call;
-- `egress_logging = true` records only a safe argument-shape summary;
-- `allow_secrets = false` blocks secret-like resource arguments before they leave Sigil;
-- returned resource content is redacted locally before it is shown to the model.
-
-Sigil does not inject MCP resources into the system prompt. The model must explicitly list and read resources through these tools.
-
-## Prompts
-
-When a server declares the MCP `prompts` capability during `initialize`, Sigil registers two provider-visible tools with local `Read` access and network `Read` effect:
-
-```text
-mcp__<server>__prompts_list
-mcp__<server>__prompts_get
-```
-
-`prompts_list` calls MCP `prompts/list`. It accepts an optional `cursor` string for pagination.
-
-`prompts_get` calls MCP `prompts/get`. It requires a `name` returned by `prompts_list` and accepts an optional `arguments` object.
-
-Prompt tools use the same MCP trust policy, approval defaults, egress logging, and `allow_secrets = false` gate as other MCP surfaces. Sigil does not inject MCP prompts into the system prompt; the model must explicitly list and get prompts through these tools.
-
-## Output Limits
-
-MCP tool, resource, and prompt results are redacted locally and then bounded before becoming model-visible. Large outputs are truncated with metadata such as `truncated`, `limit_bytes`, `limit_lines`, `returned_bytes`, and MCP details including server, remote tool/surface, trust class, operation, and observed server identity.
-
-## Elicitation
-
-The TUI runtime declares and handles `elicitation/create`. When a server requests user input, Sigil shows a modal with the server, requested fields, and defaults.
-
-User actions map to:
-
-- accept: send only the flat primitive object fields confirmed in the modal.
-- decline: return `decline`.
-- cancel: return `cancel`.
-
-TUI elicitation decisions are appended to control state. Audit records include server, request message/schema hash, field names, and action, but not user-provided values.
-
-The non-TUI default runtime returns explicit unsupported responses. It does not hang and does not fake user input.
-
-## Progress Notifications
-
-`notifications/progress` updates the TUI live panel instead of writing repeated timeline entries. `notifications/tools/list_changed`, `notifications/resources/list_changed`, and `notifications/prompts/list_changed` mark the server as stale and trigger a safe refresh at the next idle worker boundary.
-
-## FAQ
-
-### A lazy server is configured but tools are not visible
-
-This is expected. `startup = "lazy"` does not register fake tools during startup. Activate it from TUI `/config`, or let the model call `mcp_activate_server`.
-
-### Server startup fails
-
-Check:
-
-- Whether `command` is available on `PATH`, or use an absolute path.
-- Whether paths inside `args` exist.
-- Whether `required` should be `false` for optional servers in strict/headless registry construction.
-- Whether pinned identity matches the observed pin when `pin_version = true`.
-
-In the TUI, this should not stop ordinary tasks. The failing server appears as `failed` in MCP status, and built-in tools remain available.
-
-### OAuth sign-in fails
-
-- `authentication required`: open **Authentication** and choose **Sign in** explicitly.
-- Callback rejected: restart sign-in and use only the newest browser tab, or paste the complete callback URL.
-- Credential store unavailable: unlock or enable the native Keychain, Credential Manager, or Secret Service. There is no plaintext fallback.
-- Destination rejected or budget exhausted: review the Network disclosure and Web policy before retrying the explicit action.
-- Remote revoke failed: retry sign-out or explicitly clear the retained local credential after reviewing the warning.
-
-### Secret egress is blocked
-
-When `allow_secrets = false`, Sigil blocks recognized secret egress. This means the safety policy is working. Only adjust the server trust policy after confirming the server really needs that secret.
+<!-- public-doc-cta: open-troubleshooting -->
+Next: [Use the MCP troubleshooting path](troubleshooting.md).

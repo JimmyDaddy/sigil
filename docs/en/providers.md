@@ -1,42 +1,28 @@
-# Sigil Provider Guide
+<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
 
-[Docs home](README.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [OpenAI Responses](provider-openai-responses.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [简体中文](../zh-CN/providers.md)
+# Provider Guide
 
-Sigil separates provider choice from the rest of the user workflow. This guide and the linked provider pages are the source of truth for provider selection, authentication variables, model endpoints, and provider-specific options. Shared workspace, permission, task, terminal, and tool settings remain in [Configuration](configuration.md).
+[Docs home](README.md) · [Configuration](configuration.md) · [简体中文](../zh-CN/providers.md)
+
+Choose the model service here, then use its page for setup and visible limits. Shared permissions, sessions, and tools do not need to be relearned for each provider.
 
 ## Choose A Provider
 
-| Provider | Best fit | Image input V1 | Config value | Guide |
-| --- | --- | --- | --- | --- |
-| DeepSeek | Default Quick Setup path, DeepSeek chat, FIM, and DeepSeek-specific endpoint options. | Not supported | `deepseek` | [DeepSeek provider](provider-deepseek.md) |
-| OpenAI-compatible | OpenAI or a compatible Chat Completions `/v1` gateway. | Not supported | `openai_compat` | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| OpenAI Responses | OpenAI Responses `/v1/responses` models and event stream. | Explicit recognized model IDs | `openai_responses` | [OpenAI Responses provider](provider-openai-responses.md) |
-| Anthropic | Claude models through Anthropic Messages streaming. | Explicit recognized Claude IDs | `anthropic` | [Anthropic provider](provider-anthropic.md) |
-| Gemini | Gemini models through `streamGenerateContent` and function calling. | Explicit recognized Gemini IDs | `gemini` | [Gemini provider](provider-gemini.md) |
+| Provider | Use it for | Image input | Config value |
+| --- | --- | --- | --- |
+| [DeepSeek](provider-deepseek.md) | Default Quick Setup path and DeepSeek-specific options | No | `deepseek` |
+| [OpenAI-compatible](provider-openai-compatible.md) | Chat Completions-compatible `/v1` gateways | No | `openai_compat` |
+| [OpenAI Responses](provider-openai-responses.md) | OpenAI Responses models | Recognized model IDs | `openai_responses` |
+| [Anthropic](provider-anthropic.md) | Claude through Anthropic Messages | Recognized Claude IDs | `anthropic` |
+| [Gemini](provider-gemini.md) | Gemini and function calling | Recognized Gemini IDs | `gemini` |
 
-For first use, run `sigil` and complete Quick Setup. Use manual config when you need repeatable local defaults, CI automation, or a provider not exposed by your current Quick Setup path.
-
-## Provider Selection
-
-Set `[agent].provider` and configure the matching `[providers.*]` block:
-
-```toml
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-tool_timeout_secs = 30
-
-[providers.deepseek]
-# Provider block contains endpoint/auth/provider-specific fields.
-```
-
-`[agent].model` is the single chat-model setting. Role-specific task settings can still override the inherited agent provider/model for planner, executor, or subagent roles.
+Quick Setup is the shortest first-use path. Use manual config for repeatable local or CI defaults.
 
 ## Authentication Priority
 
-Prefer environment variables for credentials. Plaintext `api_key` fields are supported for local-only configs, but `doctor` warns when a key is resolved only from config.
+Prefer environment variables. A config `api_key` fallback is plaintext in `sigil.toml`.
 
-| Provider | Environment key | Config fallback |
+| Provider | Environment variable | Config fallback |
 | --- | --- | --- |
 | DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
 | OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
@@ -44,41 +30,15 @@ Prefer environment variables for credentials. Plaintext `api_key` fields are sup
 | Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `[providers.anthropic].api_key` |
 | Gemini | `SIGIL_GEMINI_API_KEY` | `[providers.gemini].api_key` |
 
-Run this after changing credentials:
-
-```bash
-sigil doctor
-```
-
-Inside the TUI, `/doctor` shows the same provider and key-source checks in the transcript without printing secret values.
+Run `sigil doctor` after changing a credential. It reports the source without printing the value.
 
 ## Copyable Starting Points
 
-Config templates live in [docs/examples/config](../examples/config):
-
-- [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
-- [openai-compatible.toml](../examples/config/openai-compatible.toml)
-- [openai-responses.toml](../examples/config/openai-responses.toml)
-- [anthropic.toml](../examples/config/anthropic.toml)
-- [gemini.toml](../examples/config/gemini.toml)
-
-Use them as starting points, then review model names, base URLs, key sources, and permission policy before running in a real workspace.
-
-## Behavior Boundaries
-
-Provider-specific options stay on the matching provider page. The shared Sigil workflow remains consistent:
-
-- Tool calls still go through the same approval and preview flow.
-- Session and control records remain append-only.
-- MCP trust and secret-egress policy do not change by provider.
-- Provider-only options should not change your normal approval, privacy, or session workflow.
+Templates are available under [`docs/examples/config`](../examples/config). Review the model, base URL, credential source, and permission settings before use.
 
 ## Troubleshooting Path
 
-If a provider fails:
+Check, in order: the `[agent].provider` value, selected model, provider block, base URL, credential visibility in the launching shell, and provider-specific limits. Keep `permission.mode = "manual"` while diagnosing, then use [Troubleshooting](troubleshooting.md) for shared symptoms.
 
-1. Run `sigil doctor` and check provider name, model, base URL, and API key source.
-2. Confirm `[agent].provider` matches the configured `[providers.*]` block.
-3. Confirm the expected environment variable is visible in the same shell where `sigil` starts.
-4. Check the provider-specific page for endpoint and timeout fields.
-5. Keep `[permission].mode = "manual"` while diagnosing so write actions remain visible.
+<!-- public-doc-cta: open-provider-guide -->
+Next: [Set up DeepSeek or choose another provider](provider-deepseek.md).

@@ -11,6 +11,8 @@ REPO_ROOT = File.expand_path("..", __dir__)
 OUT_DIR = File.expand_path(ARGV.fetch(0), REPO_ROOT) if $PROGRAM_NAME == __FILE__
 SITE_URL = "https://sigil.corerobin.com"
 SOURCE_LAST_MODIFIED_CACHE = {}
+CONTENT_POLICY = JSON.parse(File.read(File.join(REPO_ROOT, "dev", "docs", "public-documentation-content-policy.json")))
+SEARCH_FIRST_RESULT = CONTENT_POLICY.fetch("search_first_result")
 
 PAGES = [
   ["overview", "README.md", "User docs"],
@@ -128,7 +130,7 @@ LOCALES = {
     search_results_label: "Search results",
     search_placeholder: "Search providers, config, approvals...",
     version_notice_label: "Development documentation",
-    version_notice_text: "These pages track main. The packaged alpha is v0.0.1-alpha.4; newer features may require a source install.",
+    version_notice_text: "These pages track main. Packaged releases can lag behind.",
     version_notice_link: "Review Unreleased"
   },
   "zh-CN" => {
@@ -155,7 +157,7 @@ LOCALES = {
     search_results_label: "搜索结果",
     search_placeholder: "搜索 provider、配置、审批...",
     version_notice_label: "开发版本文档",
-    version_notice_text: "这些页面跟随 main。已打包发布的 alpha 是 v0.0.1-alpha.4；较新的能力可能需要从源码安装。",
+    version_notice_text: "这些页面跟随 main，已打包版本可能稍有滞后。",
     version_notice_link: "查看 Unreleased"
   }
 }.freeze
@@ -401,6 +403,10 @@ def close_table(html, state)
   state[:table] = false
 end
 
+def without_html_comments(markdown)
+  markdown.gsub(/<!--.*?-->/m, "")
+end
+
 def render_markdown(markdown, locale)
   html = []
   toc = []
@@ -423,7 +429,7 @@ def render_markdown(markdown, locale)
     paragraph.clear
   end
 
-  markdown.each_line do |raw_line|
+  without_html_comments(markdown).each_line do |raw_line|
     line = raw_line.chomp
 
     if state[:code]
@@ -565,7 +571,7 @@ def sibling_nav(locale, active_slug)
 end
 
 def plain_text_from_markdown(markdown)
-  markdown
+  without_html_comments(markdown)
     .gsub(/```[a-zA-Z0-9_-]*\n/, " ")
     .gsub(/```/, " ")
     .gsub(/!\[[^\]]*\]\([^)]+\)/, " ")
@@ -588,7 +594,7 @@ def truncate_text(text, limit = 180)
 end
 
 def page_description(markdown, fallback_title)
-  markdown.lines.each do |line|
+  without_html_comments(markdown).lines.each do |line|
     stripped = line.strip
     next if stripped.empty?
     next if stripped.start_with?("#", "[", "```", "|")
@@ -605,7 +611,7 @@ def section_search_items(markdown, locale, page_title, base_url)
   current = nil
   in_code = false
 
-  markdown.each_line do |raw_line|
+  without_html_comments(markdown).each_line do |raw_line|
     line = raw_line.chomp
     if line.start_with?("```")
       in_code = !in_code
@@ -692,16 +698,22 @@ def rendered_page(locale, slug, source_file, fallback_title)
         <meta property="og:title" content="#{html_escape(title)} - Sigil">
         <meta property="og:description" content="#{html_escape(description)}">
         <meta property="og:url" content="#{canonical}">
-        <meta property="og:image" content="#{SITE_URL}/assets/logo/sigil-full-staff-glow.png">
+        <meta property="og:image" content="#{SITE_URL}/assets/social/sigil-social-preview.png">
+        <meta property="og:image:type" content="image/png">
+        <meta property="og:image:width" content="1280">
+        <meta property="og:image:height" content="640">
+        <meta property="og:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
         <meta name="twitter:card" content="summary_large_image">
         <meta name="twitter:title" content="#{html_escape(title)} - Sigil">
         <meta name="twitter:description" content="#{html_escape(description)}">
-        <meta name="twitter:image" content="#{SITE_URL}/assets/logo/sigil-full-staff-glow.png">
+        <meta name="twitter:image" content="#{SITE_URL}/assets/social/sigil-social-preview.png">
+        <meta name="twitter:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
         <script type="application/ld+json">#{JSON.generate(json_ld)}</script>
         #{theme_boot_script}
         <link rel="stylesheet" href="#{asset_prefix}/assets/site.css">
         <script defer src="#{asset_prefix}/assets/site.js"></script>
         <script defer src="#{asset_prefix}/assets/code.js"></script>
+        <script defer src="#{asset_prefix}/assets/search-ranking.js"></script>
         <script defer src="#{asset_prefix}/assets/search.js"></script>
       </head>
       <body class="doc-page">
@@ -770,13 +782,17 @@ def write_search_index
       source_path = File.join(REPO_ROOT, locale_config.fetch(:source_dir), file)
       markdown = File.read(source_path)
       page_title = markdown[/^#\s+(.+)$/, 1] || (locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, title) : title)
+      authority_queries = SEARCH_FIRST_RESULT.fetch(locale, {}).select do |_query, authority_slug|
+        authority_slug == slug
+      end.keys
       items << {
         "kind" => "page",
         "locale" => locale,
         "title" => page_title,
         "description" => page_description(markdown, page_title),
         "url" => page_url(locale, slug),
-        "text" => plain_text_from_markdown(markdown)
+        "text" => plain_text_from_markdown(markdown),
+        "authority_queries" => authority_queries
       }
       items.concat(section_search_items(markdown, locale, page_title, page_url(locale, slug)))
     end
@@ -796,23 +812,21 @@ end
 
 def write_sitemap
   urls = [
-    ["", 1.0, File.join(REPO_ROOT, "site", "index.html")],
-    ["zh-CN/", 0.9, File.join(REPO_ROOT, "site", "zh-CN", "index.html")],
-    ["docs/", 0.9, File.join(REPO_ROOT, "site", "docs", "index.html")],
-    ["zh-CN/docs/", 0.9, File.join(REPO_ROOT, "site", "zh-CN", "docs", "index.html")]
+    ["", File.join(REPO_ROOT, "site", "index.html")],
+    ["zh-CN/", File.join(REPO_ROOT, "site", "zh-CN", "index.html")],
+    ["docs/", File.join(REPO_ROOT, "site", "docs", "index.html")],
+    ["zh-CN/docs/", File.join(REPO_ROOT, "site", "zh-CN", "docs", "index.html")]
   ]
   PAGES.each do |slug, file, _title|
-    urls << [page_url("en", slug), 0.75, File.join(REPO_ROOT, "docs", "en", file)]
-    urls << [page_url("zh-CN", slug), 0.75, File.join(REPO_ROOT, "docs", "zh-CN", file)]
+    urls << [page_url("en", slug), File.join(REPO_ROOT, "docs", "en", file)]
+    urls << [page_url("zh-CN", slug), File.join(REPO_ROOT, "docs", "zh-CN", file)]
   end
-  body = urls.map do |path, priority, source_path|
+  body = urls.map do |path, source_path|
     loc = path.empty? ? "#{SITE_URL}/" : "#{SITE_URL}/#{path}"
     <<~XML
       <url>
         <loc>#{loc}</loc>
         <lastmod>#{source_last_modified(source_path)}</lastmod>
-        <changefreq>weekly</changefreq>
-        <priority>#{priority}</priority>
       </url>
     XML
   end.join

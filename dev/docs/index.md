@@ -42,6 +42,8 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 
 ## Release and Distribution
 
+- [45-second demo script](launch/45-second-demo-script.md): canonical launch
+  story, capture setup, exact prompt, timing, and acceptance checklist.
 - [Alpha dogfood campaigns](alpha-dogfood.md): public distribution smoke,
   isolated production-binary acceptance, privacy boundaries, and local evidence.
 - [Alpha dogfood campaign（中文）](alpha-dogfood.zh-CN.md)：公开分发 smoke、

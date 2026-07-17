@@ -1,177 +1,136 @@
+<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts; cta: return-user-guide -->
+
 # 命令与键位参考
 
-[文档首页](README.md) · [English](../en/reference.md)
+[文档首页](README.md) · [用户指南](user-guide.md) · [配置字段参考](configuration-reference.md) · [English](../en/reference.md)
 
-这一页集中列出用户可见命令、键位、路径、共享配置区块、审批结果和恢复事实。Provider 选择与凭据留在 provider 文档中，避免参考页再次复制。
+本页用于精确查询用户可见命令、键位、路径、输出和恢复行为。
 
 ## TUI 键位
 
-| 动作 | 键位 |
+| 操作 | 键位 |
 | --- | --- |
-| 打开帮助 | `F1` |
-| 打开 slash command selector | `/` |
-| 提交 prompt 或已选 slash command | `Enter` |
-| 切换右侧 info rail 精简/详情 | `F2` |
-| 滚动 transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
+| 打开帮助 / slash selector | `F1` / `/` |
+| 提交 | `Enter` |
+| 显示或隐藏信息栏 | `F2` |
+| 切换可见信息栏紧凑/详细模式 | `Shift-F2` |
+| 滚动 transcript | `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` |
 | 切换默认 permission mode | `Shift-Tab` |
-| 插入 composer 换行 | `Ctrl-J`；terminal keyboard enhancement 已启用且能上报 modifier 时也支持 `Shift-Enter` / `Alt-Enter` |
-| 按行或字符移动 composer 光标 | `Ctrl-A/E`、`Ctrl-B/F`、`Left/Right` |
-| 按词移动 composer 光标 | `Alt-B/F`、`Ctrl-Left/Right` |
-| 删除 composer 文本 | `Backspace/Delete`、`Ctrl-H`、`Ctrl-W`、`Ctrl/Alt-Backspace`、`Ctrl/Alt-Delete` |
-| kill/yank composer 行尾 | `Ctrl-K/Y` |
-| 恢复最近一次被 Esc 清空的 draft | `Ctrl-Z` |
-| 请求协作式取消当前 run | `Ctrl-C` |
-| 离开 overlay 或清除 activity focus | `Esc` |
-| 聚焦最新 activity | `Ctrl-G` |
-| 在 activities 间移动 | `Alt-J` / `Alt-K` |
-| 聚焦 task verification | `Alt-V`；随后用 `Enter` 执行精确 action，`I` 查看证据 |
-| 打开最新 checkpoint 恢复 | `Ctrl-R` 打开并加载反向 diff 弹窗；`Enter` 恢复受控文件，`F` 在不改文件的情况下 fork 会话，`Esc` 关闭 |
-| 打开已保存 session 的 actions | 选中 `/resume` 候选后按 `Ctrl-O`，或右键单击该候选 |
-| 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A` |
-| 展开或折叠 thinking / activity | `Ctrl-T` |
-| 对 changed source files 运行 code diagnostics | `Alt-D` |
-| 取消聚焦的运行中 terminal task | `Alt-X` |
-| 在 `/config` 中选择或启动 MCP server | `Enter` 循环切换当前查看的 server；`Down` 进入 footer actions；选择 `activate` 后按 `Enter` 启动或刷新 |
+| 输入换行 | `Ctrl-J`；终端支持时用 `Shift-Enter` / `Alt-Enter` |
+| 移动输入光标 | `Ctrl-A/E`、`Ctrl-B/F`、`Alt-B/F`、方向键 |
+| 删除输入内容 | `Backspace/Delete`、`Ctrl-H/W`、modified Backspace/Delete |
+| 删除/粘贴行尾 | `Ctrl-K/Y` |
+| 恢复最近一次由 `Esc` 清空的 draft | `Ctrl-Z` |
+| 复制选中的 transcript 文本 | 有选区时按 `Ctrl-C` |
+| 复制选区；没有选区时复制最新 assistant 回复 | `Ctrl-L`；不包含信息栏 |
+| 取消当前运行 / 关闭浮层 | 无选区时按 `Ctrl-C` / `Esc` |
+| 聚焦并切换活动 | `Ctrl-G`、`Alt-J` / `Alt-K` |
+| 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |
+| 打开最近 checkpoint restore | `Ctrl-R`；`Enter` 恢复，`F` fork，`Esc` 关闭 |
+| 打开 saved-session actions | 选择 `/resume` 行，再按 `Ctrl-O` 或右键 |
+| 切换可见 agent transcript | Agent panel、`Alt-A`、`Shift-Alt-A` |
+| 展开/折叠 thinking 或活动 | `Ctrl-T` |
+| 检查已修改源码 | `Alt-D` |
+| 取消聚焦的 terminal task | `Alt-X` |
 
-当 composer 聚焦时，`Up/Down` 会优先处理 prompt history 或 multiline input 内的光标移动。如果存在 child agent，输入光标位于 composer 最后一行时按 `Down` 会聚焦 composer agent 面板。`Ctrl-Z` 只恢复被 `Esc` 清空的单个 draft，不是通用 undo 栈。
+`Up/Down` 优先处理输入历史或多行移动。`Ctrl-Z` 只恢复一次被清空 draft，不是通用 undo stack。
 
 ## Slash Commands
 
-| Command | 作用 |
+| Command | 用途 |
 | --- | --- |
-| `/config` | 打开 TUI config panel |
-| `/doctor` | 在 transcript 中运行本地 setup diagnostics |
-| `/feedback` | 预览并保存私密支持报告；导出后用 `Enter` 检查 JSON、`O` 定位文件、`B` 打开 Bug 表单、`C` 复制报告路径、`U` 复制表单链接 |
-| `/new` | 使用当前 provider 和 model 开始新 session |
-| `/resume` | 选择并恢复历史 session；`Ctrl-O` 或右键打开 lifecycle actions |
-| `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
-| `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
-| `/agent cancel <child-id|current>` | 取消仍有 live runtime handle 的运行中后台 child agent |
-| `/queue` | 高级 follow-up 控制 |
-| `/queue next|interrupt|edit|delete [item]` | 保留 follow-up 到下一轮、interrupt 并立即运行、编辑或取消 |
-| `/plan` / `/plan <prompt>` | 运行一次只读 planning prompt；接受 plan card 后创建并运行 durable task |
-| `/task <task>` | 创建 durable plan，并分步骤执行任务 |
-| `/task continue` | 不带额外 guidance 继续最新 planned task |
-| `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |
-| `/effort <low|medium|high|max>` | 切换下一轮 run 的 reasoning effort |
-| `/compact` | 审查 V2 折叠计划；本地 exact admission ready 时确认一次手动应用 |
+| `/config` | 打开配置 |
+| `/doctor` | 运行诊断 |
+| `/feedback` | 预览并导出本机支持报告 |
+| `/new` | 新建 session |
+| `/resume` | 选择已保存 session |
+| `/agent <main|child-id>` | 切换可见 transcript |
+| `/agent rename <child-id|current> <name>` | 命名 child transcript |
+| `/agent cancel <child-id|current>` | 取消仍有 live handle 的 child |
+| `/queue` | 显示高级 follow-up 控制 |
+| `/queue next|interrupt|edit|delete [item]` | 调整顺序、中断后执行、编辑或删除 follow-up |
+| `/plan [prompt]` | 运行只读计划；接受 card 后开始 task |
+| `/task <任务>` | 开始多步骤执行 |
+| `/task continue` | 继续最新未完成 task |
+| `/model <flash|pro|id>` | 为下一轮切换 model，并新建 session |
+| `/effort <low|medium|high|max>` | 修改下一轮 reasoning effort |
+| `/compact` | Review 上下文精简方案，并在 ready 时应用一次 |
 | `/quit` | 退出 TUI |
 
-Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
-
-Workspace trust 由启动时的 workspace trust gate 处理，不是 slash command。trust decision 会记录进 session audit log；它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，也允许精确匹配 workspace 且 `trust_required = true` 的 LSP 启动。它不会单独授予 shell、plugin、MCP 或文件写入权限，LSP 写工具仍需 diff 审批。
-
-`/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
+Alias：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。候选命令使用 `Up/Down`、`Tab` 与 `Enter`。
 
 ## CLI Commands
 
 | Command | 用途 |
 | --- | --- |
 | `sigil` | 在当前 workspace 打开 TUI |
-| `sigil doctor [--output text|json]` | 运行本地诊断；JSON 会在 stdout 输出唯一一份带版本的脱敏报告 |
-| `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务；machine mode 保持 stdout 可直接解析 |
-| `sigil resume [session-id]` | 打开 TUI 并恢复 latest 或指定 session；TUI 退出时会打印可复制的恢复命令 |
-| `sigil serve` | 启动只允许 loopback、要求 bearer auth 的本机 HTTP/SSE 服务 |
-| `sigil --version` | 打印安装版本 |
-| `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
-
-子命令用于自动化、诊断、脚本和设置检查。完整产品表面是 TUI。
+| `sigil doctor [--output text|json]` | 运行本机诊断 |
+| `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务 |
+| `sigil resume [session-id]` | 打开 TUI 并恢复 session |
+| `sigil serve` | 启动带认证且只监听 loopback 的本机服务 |
+| `sigil --version` | 打印已安装版本 |
+| `sigil --config <path> doctor` | 诊断显式配置 |
 
 ## Machine Output 与本地服务
 
-`sigil run --output json` 向 stdout 写入唯一一条带版本的 terminal record。`--output jsonl` 写入有序的带版本 event records，并以唯一 terminal result 或 error 结束。人类可读进度和安全的 network-disclosure notice 保留在 stderr。稳定 exit code 为：成功 `0`、执行失败 `1`、调用或配置无效 `2`、cooperative cancellation `130`。
+`sigil run --output json` 向 stdout 写入一条结果；`jsonl` 写入有序 event，最后写入一条结果或错误。人类可读进度与安全网络提示留在 stderr。Exit code：`0` 成功、`1` 执行失败、`2` 调用/配置无效、`130` 取消。
 
-本地服务是供本机 client 使用的高级接口，不替代 TUI。使用保存在环境变量中的 token 启动：
+使用高熵环境 token 启动本机服务：
 
 ```bash
 export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
 sigil serve
 ```
 
-命令会打印 OS 实际选择的 loopback 地址。`GET /health` 不要求认证；`GET /openapi.json`、`GET /disclosures`，以及所有 session、run、event、cancel 和 approval route 都要求 `Authorization: Bearer <token>`。V1 会在打开 listener 前拒绝 non-loopback host、缺失 token 和 `--no-token`。它不启用 cookie auth、wildcard CORS、remote access、daemon auto-start 或 multi-user isolation。
-
-Run event 会先 replay durable history，再保持 live，直到 terminal event、client disconnect、stream gap 或 server shutdown。`Last-Event-ID` 用于继续读取 retained durable events；transient text/reasoning progress 是 best effort，没有 replay id。按 `Ctrl-C` 后，服务会关闭新 command admission、cooperatively cancel active runs、drain owned workers 和 connections，然后退出。
+服务会打印选中的 loopback 地址。`GET /health` 无需认证；OpenAPI、disclosure、session、run、event、取消和审批 route 都要求 `Authorization: Bearer <token>`。它不是远端或多用户服务，不使用 cookie auth 或 wildcard CORS，并在 `Ctrl-C` 时关闭。
 
 ## Config 解析顺序
 
-Sigil 按以下顺序解析 config：
-
-1. `--config <path>`
-2. 用户可见 Sigil 配置目录下的 `sigil.toml`
-
-默认用户配置路径：
-
-- `~/.sigil/sigil.toml`
+提供 `--config <path>` 时使用该文件；否则加载 `~/.sigil/sigil.toml`。Workspace root 下的 `sigil.toml` 不会自动加载。
 
 ## 重要路径
 
-| Path | 含义 |
+| 路径 | 含义 |
 | --- | --- |
-| 用户态 state root `workspaces/<workspace-id>/sessions/` | 默认 append-only session logs |
-| 用户态 state root `workspaces/<workspace-id>/input-history.jsonl` | composer input history |
-| 用户态 state root `workspaces/<workspace-id>/artifacts/` | terminal 和 changeset artifacts |
-| 用户态 state root `workspaces/<workspace-id>/http-server-v1/` | 本地服务的恢复与审计数据 |
-| 用户态 cache root `workspaces/<workspace-id>/tmp/` | shell scratch 目录，通过 `$SIGIL_SCRATCH_DIR` 暴露，对模型显示为 `cache/tmp` |
-| 用户配置目录 `sigil.toml` | 默认本机配置 |
-| `.sigil/agents/`、`.sigil/commands/`、`.sigil/skills/`、`.sigil/plugins/` | 可选 workspace project assets |
-| `SIGIL.md` | 稳定 workspace memory file |
-| `AGENTS.md` | Sigil 可作为 memory 加载的 agent 协作说明 |
-| `SIGIL.local.md` | 本地专用 memory file |
+| State root `workspaces/<workspace-id>/sessions/` | Session 日志 |
+| State root `workspaces/<workspace-id>/input-history.jsonl` | 输入历史 |
+| State root `workspaces/<workspace-id>/artifacts/` | Terminal 与变更 artifact |
+| Cache root `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
+| 用户配置 `~/.sigil/sigil.toml` | 默认本机配置 |
+| `.sigil/agents`、`.sigil/commands`、`.sigil/skills`、`.sigil/plugins` | Workspace 资源 |
+| `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` | Workspace 指令 |
 
-不要提交包含真实 secret 的 `sigil.toml` 或本地 memory 文件。workspace 根目录的 `sigil.toml` 默认不会被读取；如需实验配置，请显式传入 `--config <path>`。
-
-## Provider 设置
-
-支持的 provider value、model 选择和认证优先级见 [Provider 指南](providers.md)。其中链接的各 provider 专页分别维护可复制的配置 block 和完整环境变量清单。共享的模型请求 timeout 覆盖见[高级配置](advanced-configuration.md#终端与模型请求环境变量覆盖)。
-
-## 常见 Config Sections
-
-| Section | 作用 |
-| --- | --- |
-| `[workspace]` | Workspace root |
-| `[agent]` | 共享 agent 设置 |
-| `[permission]` | 默认审批策略 |
-| `[web]` | Stable search route、网络策略、destination rule 与预算 |
-| `[memory]` | Workspace memory loading |
-| `[compaction]` | Context compaction 阈值 |
-| `[task]` | Planned task 行为和 role settings |
-| `[verification]` | 显式用户批准的 verification checks |
-| `[code_intelligence]` | LSP 和 code intelligence tools |
-| `[terminal]` | Mouse、OSC52 clipboard、scroll 行为和可选 attention notification |
-| `[appearance]` | TUI 主题、usage cost currency 和语义颜色覆盖 |
-| `[[mcp_servers]]` | 显式 `stdio` 或用户根 `streamable_http` MCP server 配置 |
-
-示例见 [Sigil 配置指南](configuration.md)。
-Provider 与 model 选择、`[providers.*]` block 和认证环境变量统一由 [Provider 指南](providers.md)索引。
+不要在 config 或本机指令文件中提交真实 secret。
 
 ## Web Tool 输入
 
-| Tool | 必填输入 | 关键边界 |
+| Tool | 输入 | 边界 |
 | --- | --- | --- |
-| `websearch` | `query`；可选 `max_results` | Route 由 provider-hosted、authoritative configured MCP 或 bundled Exa 解析；已选 route 失败后不会静默换 destination。 |
-| `webfetch` | `source_id`；可选 `format`（`markdown`/`text`）和 `max_content_bytes` | 只接受 session-local 精确 URL capability，不接受新造的 raw `url` 参数。 |
+| `websearch` | `query`；可选 `max_results` | 使用选中的 provider-hosted、configured MCP 或 bundled route。 |
+| `webfetch` | 已观察到的 `source_id`；可选 `format`、`max_content_bytes` | 只打开当前 session 已观察到的 URL。 |
 
-两个工具都是带独立 `NetworkRead` effect 的 `Read` 操作。即使本地 permission mode 较宽松，`[web].network_mode = "deny"` 仍会阻断；`ask` 必须来自显式交互动作，因此在无法询问的 headless/eager 场景会 fail closed。
+两者还遵守 `[web].network_mode`。`deny` 会阻止；未解决的 `ask` 无法在 headless 中继续。
 
 ## Approval Outcomes
 
 | Outcome | 含义 |
 | --- | --- |
-| allow | 执行 tool call |
-| deny | 向模型返回结构化 denial |
-| timeout | 等待过久后自动 deny |
-| approval_required | Headless mode 需要决策但无法交互询问 |
+| `allow` | 运行动作 |
+| `deny` | 拒绝动作 |
+| `timeout` | 长时间无决定后拒绝 |
+| `approval_required` | 非交互运行需要但无法请求决定 |
 
 ## Session Recovery Facts
 
-- Session logs 是 append-only JSONL。
-- 重启会恢复可见 session state。
-- Started tools 没有 terminal records 时会恢复为 interrupted。
-- 取消按 run scope durable 且终态唯一：`cancel requested` 后只能进入清理已确认的 `cancelled`，或清理未确认的 `interrupted`；恢复流程不会把未确认的取消升级成 `cancelled`。
-- 恢复不会静默重放未完成工具。
-- `/new` 会开始一条新的 append-only session log。
-- `/resume` 选择历史 session。
-- 选中的 `/resume` 行可以通过 `Ctrl-O` 或右键打开 resume、从已完成 turn fork、安全导出、pin/unpin 和精确 delete preview；弹窗会独占键盘焦点。
-- `/config` 的 `Storage` 区块只通过显式 preview 与确认执行 retention；普通启动、run、resume 和 `sigil serve` 都不会自动应用。
-- 退出 TUI 会打印当前 session id 和 `sigil resume <session-id>` 恢复命令。
-- 存在未完成 planned task 时，`/task continue` 会继续最新任务。
+- 重启会恢复受支持的可见 session 与 task state。
+- 未完成工具恢复为 interrupted，不会静默重跑。
+- `/new` 新建 session；`/resume` 选择旧 session。
+- Saved-session action 包括恢复、conversation fork、安全 export、pin/unpin 与经过检查的删除。
+- Retention cleanup 需要 `/config` → **Storage** 下的显式预览与确认。
+- 退出会打印 session id 和 `sigil resume <session-id>`。
+- 存在未完成 task 时，`/task continue` 会继续最新一项。
+
+Provider 凭据见 [Provider 指南](providers.md)，配置字段见[配置字段参考](configuration-reference.md)。
+
+<!-- public-doc-cta: return-user-guide -->
+下一步：[返回用户指南](user-guide.md)。

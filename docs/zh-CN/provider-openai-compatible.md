@@ -1,80 +1,47 @@
+<!-- public-doc-role: provider-openai-compatible; authority: provider-specific-setup; sections: minimal-setup,authentication,options-and-visible-limits,verify,common-problems; cta: return-providers -->
+
 # OpenAI-Compatible Provider
 
-[文档首页](README.md) · [Provider 指南](providers.md) · [配置](configuration.md) · [DeepSeek](provider-deepseek.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [English](../en/provider-openai-compatible.md)
+[Provider 指南](providers.md) · [配置](configuration.md) · [English](../en/provider-openai-compatible.md)
 
-当你的 endpoint 实现 Chat Completions streaming 形态时，使用 OpenAI-compatible provider。这包括 OpenAI `/v1` endpoint 和兼容网关。
-
-## 最小配置
-
-临时本地使用：
+## 最小设置
 
 ```bash
 export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
 sigil
 ```
 
-可复用配置：
-
 ```toml
 [agent]
 provider = "openai_compat"
 model = "gpt-4.1"
-tool_timeout_secs = 30
-
-[model_request]
-request_timeout_secs = 120
-stream_idle_timeout_secs = 180
 
 [providers.openai_compat]
 base_url = "https://api.openai.com/v1"
-# 优先使用 SIGIL_OPENAI_COMPATIBLE_API_KEY。
-# api_key = "sk-..."
-organization = "org_..."
-project = "proj_..."
 ```
 
-完整起点模板见 [openai-compatible.toml](../examples/config/openai-compatible.toml)。
+可复制文件见 [openai-compatible.toml](../examples/config/openai-compatible.toml)。
 
 ## 认证
 
-Sigil 按这个顺序解析 OpenAI-compatible 认证：
+`SIGIL_OPENAI_COMPATIBLE_API_KEY` 优先于 `[providers.openai_compat].api_key`。`organization` 与 `project` 是可选 account 字段。
 
-1. `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-2. `[providers.openai_compat].api_key`
+## 选项与可见限制
 
-`organization` 和 `project` 只在 endpoint 或账号要求时才需要。
+`SIGIL_OPENAI_COMPATIBLE_BASE_URL` 临时覆盖 `base_url`。Endpoint 与 model 必须支持 streamed Chat Completions 和 tool call。
 
-## 环境变量覆盖
-
-| 变量 | 覆盖 |
-| --- | --- |
-| `SIGIL_OPENAI_COMPATIBLE_BASE_URL` | `[providers.openai_compat].base_url` |
-
-这些覆盖适合 CI 和本地实验，不需要修改 `sigil.toml`。
-
-## 行为说明
-
-该 provider 会把 Sigil 的 provider-neutral messages、tool specs、streamed tool calls、usage 和可选 `system_fingerprint` 映射到 Chat Completions-compatible API。
-
-V1 不在通用 OpenAI-compatible route 上开启图片附件。文本/tool wire 形状兼容不能证明 endpoint 接受相同的 multimodal contract，因此带图请求会在 provider transport 前失败。请使用[图片附件](user-guide.md#图片附件)中明确支持的原生 provider。
-
-它不提供 DeepSeek-only prefix/FIM、reasoning replay、strict tools mode 或 beta endpoint 设置。如果需要这些能力，请使用 [DeepSeek provider](provider-deepseek.md)。
+即使某个服务提供自己的 multimodal extension，Sigil 也不会通过通用 compatible endpoint 接收图片附件。DeepSeek 专项 FIM 与 strict-tool 设置同样不适用。
 
 ## 验证
 
-运行：
-
-```bash
-sigil doctor
-```
-
-确认 `[agent].provider` 是 `openai_compat`，base URL 包含预期 `/v1` 路径，并且 key 来源是预期环境变量。
+运行 `sigil doctor`，确认 `openai_compat`、预期 `/v1` base URL、model 和凭据来源。
 
 ## 常见问题
 
-| 现象 | 检查 |
-| --- | --- |
-| 404 或 route 错误 | 确认 `base_url` 指向 Chat Completions-compatible `/v1` root。 |
-| 认证失败 | 确认已设置 `SIGIL_OPENAI_COMPATIBLE_API_KEY` 或 `[providers.openai_compat].api_key`。 |
-| Tool calls 不被接受 | 确认所选 endpoint/model 支持 streamed tool calls。 |
-| 计费账号或 project 不对 | 检查 `organization`、`project` 和 provider 控制台设置。 |
+- 404：让 `base_url` 指向 compatible `/v1` root。
+- 认证失败：检查环境变量或 config fallback。
+- Tool call 失败：确认 endpoint 与 model 支持 streamed tool call。
+- Account 错误：检查 `organization`、`project` 与 provider dashboard 设置。
+
+<!-- public-doc-cta: return-providers -->
+下一步：[返回 Provider 指南](providers.md)。

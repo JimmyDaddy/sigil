@@ -1,29 +1,48 @@
 # Sigil Logo Assets
 
-These logo files are source-controlled for repository documentation, release metadata, package listings, and social previews.
+The primary identity keeps the original broken hexagon and slab wordmark, while giving each symbol a stable role:
 
-| File | Size | Recommended use |
+- **Ink** (`#242932` / `#EEF1F3`) forms the container and core letterforms.
+- **Staff** (`#16BDB8` / `#5EFFF8`) forms the central staff and the second `i`.
+- **Terminal** (`#C85B4B` / `#FF8A78`) forms the `>_` prompt in the mark and the `g` counter.
+
+The flat vectors are the source of truth. Glow and shadow are presentation effects for large hero placements, not part of the logo geometry.
+
+## Canonical assets
+
+| File | Canvas | Recommended use |
 | --- | ---: | --- |
-| `sigil-full-soft.png` | 1094 x 545 | Soft logo treatment for light backgrounds and neutral website placement. |
-| `sigil-full-soft-2x.png` | 2188 x 1090 | 2x raster fallback for `sigil-full-soft.png`. |
-| `sigil-full-staff-glow.png` | 1094 x 545 | Staff-glow variant for dark-mode-friendly homepage and docs hero placement. |
-| `sigil-full-staff-glow-2x.png` | 2188 x 1090 | 2x raster fallback for `sigil-full-staff-glow.png`. |
-| `sigil-full-staff-glow.svg` | 1094 x 545 | Vector staff-glow full logo for responsive or small renders. |
-| `sigil-full-staff-glow-dark-mode.svg` | 1094 x 545 | Full logo with light wordmark/outline for dark website surfaces. |
-| `sigil-full-strong.png` | 1094 x 545 | High-contrast full-logo fallback for media or promotional surfaces. |
-| `sigil-full-strong-2x.png` | 2188 x 1090 | 2x raster fallback for `sigil-full-strong.png`. |
-| `sigil-mark-staff-glow.png` | 445 x 495 | Standalone mark for favicons, profile badges, and compact brand mark use. |
-| `sigil-mark-staff-glow-2x.png` | 890 x 990 | 2x raster fallback for `sigil-mark-staff-glow.png`. |
-| `sigil-mark-staff-glow-watermark.svg` | 445 x 495 | Homepage watermark source with a smoothed prompt glyph for oversized background rendering. |
-| `sigil-mark-staff-glow-watermark-4x.png` | 1780 x 1980 | High-resolution homepage watermark to avoid Retina upscaling artifacts. |
-| `sigil-mark-staff-glow.svg` | 445 x 495 | Vector standalone mark. |
-| `sigil-wordmark-header.svg` | 527 x 226 | Wordmark-only vector for header and docs logos on light surfaces. |
-| `sigil-wordmark-header-2x.png` | 1054 x 452 | 2x raster fallback for `sigil-wordmark-header.svg`. |
-| `preview-full-soft-black.png` | 1094 x 545 | Preview for soft full logo treatment (black text/wordmark). |
-| `preview-full-staff-glow-black.png` | 1094 x 545 | Preview for staff-glow full logo treatment (black background context). |
-| `preview-full-staff-glow-white.png` | 1094 x 545 | Preview for staff-glow full logo treatment (white background context). |
-| `preview-full-strong-black.png` | 1094 x 545 | Preview for strong full logo treatment (black context). |
-| `preview-glow-strengths-black.png` | 690 x 288 | Glow-strength comparison preview for logo tuning. |
-| `preview-mark-staff-glow-black.png` | 445 x 495 | Standalone mark preview (black context). |
+| `sigil-mark.svg` | 64 × 64 | Default standalone mark on light backgrounds. |
+| `sigil-mark-dark-mode.svg` | 64 × 64 | Standalone mark on dark backgrounds. |
+| `sigil-mark-micro.svg` | 64 × 64 | Simplified one-color mark at 24 px and below. |
+| `sigil-mark-micro-dark-mode.svg` | 64 × 64 | Simplified mark on dark backgrounds. |
+| `sigil-wordmark.svg` | 452 × 226 | W1 wordmark on light backgrounds. |
+| `sigil-wordmark-dark-mode.svg` | 452 × 226 | W1 wordmark on dark backgrounds. |
+| `sigil-lockup.svg` | 692 × 226 | Preferred horizontal logo lockup. |
+| `sigil-lockup-dark-mode.svg` | 692 × 226 | Horizontal lockup on dark backgrounds. |
+| `sigil-mark.png`, `sigil-mark-2x.png` | 512² / 1024² | Raster mark fallbacks. |
+| `sigil-wordmark.png`, `sigil-wordmark-2x.png` | 452 × 226 / 904 × 452 | Raster wordmark fallbacks. |
+| `sigil-lockup.png`, `sigil-lockup-2x.png` | 692 × 226 / 1384 × 452 | Raster lockup fallbacks. |
 
-Legacy logo variants from previous releases are preserved in `assets/logo-bak` during migration.
+## Compatibility assets
+
+Existing public URLs are retained so repository docs, Pages, release archives, and package listings do not break. The `staff-glow` name is historical; these files now wrap the same flat master geometry.
+
+| File | Canvas | Use |
+| --- | ---: | --- |
+| `sigil-full-staff-glow.svg` | 1094 × 545 | Light-background README and site hero compatibility wrapper. |
+| `sigil-full-staff-glow-dark-mode.svg` | 1094 × 545 | Dark-background site hero compatibility wrapper. |
+| `sigil-full-staff-glow.png`, `sigil-full-staff-glow-2x.png` | 1094 × 545 / 2188 × 1090 | Open Graph and raster compatibility. |
+| `sigil-mark-staff-glow.svg`, `sigil-mark-staff-glow-dark-mode.svg` | 445 × 495 | Standalone mark compatibility wrappers. |
+| `sigil-mark-staff-glow.png`, `sigil-mark-staff-glow-2x.png` | 445 × 495 / 890 × 990 | Raster mark compatibility. |
+| `sigil-mark-staff-glow-watermark.svg`, `sigil-mark-staff-glow-watermark-4x.png` | 445 × 495 / 1780 × 1980 | Homepage watermark. |
+| `sigil-wordmark-header.svg`, `sigil-wordmark-header-2x.png` | 527 × 226 / 1054 × 452 | Header compatibility wrapper and fallback. |
+
+`sigil-full-soft*`, `sigil-full-strong*`, and `preview-*` are legacy comparison assets. Keep them only for historical compatibility; do not use them on new surfaces.
+
+## Usage rules
+
+- Use the flat logo by default and add glow only around the cyan staff at large display sizes.
+- Keep the three color roles intact; do not recolor the terminal prompt to match the staff.
+- Use the micro mark at 24 px and below instead of shrinking the detailed prompt and branches.
+- Do not stretch the mark or wordmark; preserve each asset's viewBox aspect ratio.

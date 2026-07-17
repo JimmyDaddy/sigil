@@ -1,73 +1,34 @@
+<!-- public-doc-role: status; authority: maturity-and-limit-authority; sections: supported-today,limited-or-advanced,not-supported-yet; cta: open-changelog -->
+
 # Supported Today And Future Work
 
 [Docs home](README.md) · [Installation](installation.md) · [Changelog](changelog.md) · [简体中文](../zh-CN/status.md)
 
-This page separates what users can rely on today from what is experimental, limited, or future packaging work. The current alpha line is an early preview, not a stable API or plugin compatibility promise. Release versions and install commands are maintained in [Installation](installation.md) and the [Changelog](changelog.md).
-
-**Version boundary:** this page and the GitHub Pages site track `main`. The packaged alpha is `v0.0.1-alpha.4` and can lag behind the capabilities below; check [Unreleased](changelog.md#unreleased-main) before relying on a newer feature.
+Sigil is an early preview. Core TUI work is usable, but config, plugins, advanced sandbox behavior, and automation interfaces can still change. Release numbers and install commands live in [Installation](installation.md) and the [Changelog](changelog.md).
 
 ## Supported Today
 
-| Area | Status |
-| --- | --- |
-| TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
-| Distribution | npm alpha, Homebrew tap, Cargo git-tag, source, and release-archive paths are available; use [Installation](installation.md) for current commands and channel details. |
-| Quick Setup | First-run setup can create a usable local config. |
-| Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
-| Feedback support | `sigil doctor --output json` produces a versioned redacted report; `/feedback` previews its privacy boundary before an explicit local-only export. |
-| Automation output | `sigil run --output json` emits one versioned result, while `--output jsonl` emits ordered versioned events followed by one terminal result or error. |
-| Chat workflow | Users can work through the composer with visible tool activity. |
-| Image input | An idle Build composer accepts bounded PNG, JPEG, and WebP paths or image-clipboard input, shows removable metadata chips, and sends only to explicitly recognized image-capable OpenAI Responses, Anthropic, or Gemini model IDs. |
-| Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
-| Session recovery | Session and control records are append-only and restore visible state after restart for current V2 session logs. Older raw session logs are reported as unsupported and left unchanged. |
-| Checkpoint recovery | `Ctrl-R` previews an evidence-bound checkpoint and offers controlled file restore or a conversation fork that leaves files unchanged. |
-| Planning | `/plan` runs read-only planning prompts and can explicitly hand an accepted plan to durable `/task` execution; `/task <task>` creates durable multi-step task state directly, and `/task continue` resumes the latest task. |
-| Task verification | The Verification card exposes readiness, recommended checks, and inspectable snapshot and changeset evidence; `Alt-V` focuses it. |
-| Context controls | Context pressure stays visible. Manual, fully idle hard-threshold, and queued pre-turn portable apply require exact local admission. The narrow OpenAI Responses overflow path requires audited server counts and exact economics. Owned preparation and source/queue/rejection CAS prevent stale dispatch. |
-| DeepSeek provider | DeepSeek is the default Quick Setup path. |
-| OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
-| OpenAI Responses provider | Supported through `[providers.openai_responses]` for Responses streaming endpoints. The official pinned snapshot can perform one guarded, non-recursive overflow recovery after an exact output-free context rejection. |
-| Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. Its native-compaction beta driver records encrypted candidates only; it is not a user action and does not automatically change context. |
-| Gemini provider | Supported through `[providers.gemini]` for Gemini `streamGenerateContent` streaming. |
-| Web data tools | Stable `websearch` and capability-backed `webfetch` routes use separate network policy, durable egress disclosure, and external-source provenance. |
-| MCP servers | Local stdio and user-root Streamable HTTP servers are supported through `[[mcp_servers]]` with trust, approval, and secret-egress policy. |
-| Code intelligence | Optional, disabled by default, with LSP discovery and Rust fallback behavior. |
-| Terminal controls | Mouse capture, OSC52 copy, scroll sensitivity, diagnostics, and default-off privacy-bounded attention notifications are documented and configurable. |
+| Area | Current support |
+|---|---|
+| Providers | DeepSeek, OpenAI-compatible Chat Completions, OpenAI Responses, Anthropic, and Gemini; see [Providers](providers.md) |
+| Non-interactive interfaces | Headless `run` supports text, JSON, and JSONL; advanced integrations can use authenticated local-only `serve` |
+| Platforms | macOS and Linux are the main tested paths; Windows uses native PowerShell and reports its limits in Doctor |
 
 ## Limited Or Advanced
 
-| Area | Current expectation |
-| --- | --- |
-| Release archives | Available on tagged GitHub releases for manual installs; package-manager installs are preferred. |
-| Package-manager channels | Packaging names and availability may evolve during alpha; use [Installation](installation.md) as the current source of truth. |
-| OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
-| Provider-specific options | Each provider page explains its available setup and options; normal tool approvals, privacy, and session behavior stay consistent. |
-| Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |
-| MCP lazy startup | Lazy servers are configured but do not register fake tools until activated. |
-| External directories | Disabled by default and should stay narrow and approval-backed. |
-| Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
-| Local server | `sigil serve` starts an advanced local HTTP/SSE service with retained event replay and graceful shutdown. V1 is loopback-only, requires bearer auth for every route except health, and is not a remote or multi-user service. |
-| Execution sandbox | macOS, Linux, Docker, PTY, MCP stdio, and trusted plugin-hook paths have core coverage and receipts where supported, but coverage is not equivalent across all platforms and remote/container daemon scenarios. |
-| Context help | New requests can include a bounded, request-local set of relevant Rust, Python, JavaScript/TypeScript, or Go snippets. Warm relevant LSP data is preferred; bundled Tree-sitter fallback remains ignore-, secret-, size-, and budget-limited. This is not a persistent semantic graph or full-repository index. |
-| Model quality reports | Internal automated checks exist, but repeatable end-user model comparisons and release trends are not a supported product feature yet. |
+- Headless mode cannot ask for interactive approval; policy must decide in advance.
+- The local service listens only on the local machine and requires bearer authentication.
+- Code intelligence depends on language tools available in the launch environment.
+- External-directory access is off by default, and sandbox strength varies by platform and backend.
+- Deferred MCP servers must be activated before their tools are available.
+- Image input is limited to supported formats, sources, providers, and model capabilities.
+- Context compaction is offered only when Sigil can safely apply it for the selected model.
 
-## Future Work
+## Not Supported Yet
 
-These are not the current supported path unless a later release says otherwise:
+Self-update, a stable plugin API, a desktop application, uniform sandbox guarantees across platforms, and resuming an in-flight child process after restart are not promised today.
 
-- self-update;
-- desktop shell;
-- hosted documentation search;
-- richer generated release notes;
-- broader provider-specific setup assistants;
-- full semantic repo graph or vector retrieval by default;
-- transparent in-flight crash resume for running shell/agent processes;
-- parallel write-agent worktree isolation as a default workflow;
-- stable plugin API compatibility;
-- all-platform equivalent OS sandbox behavior;
-- built-in end-user model quality benchmarking;
-- release-to-release visual regression review for generated terminal screenshots.
+For exact commands and keys, use [Reference](reference.md). For configuration fields, use [Configuration Reference](configuration-reference.md). For problems, use [Troubleshooting](troubleshooting.md).
 
-## How To Read The Docs
-
-User docs describe current behavior unless a section explicitly says "future work", "limited", or "advanced". Treat the alpha line as usable for trials, not as a stable compatibility promise.
+<!-- public-doc-cta: open-changelog -->
+Next: [Read the Changelog](changelog.md).

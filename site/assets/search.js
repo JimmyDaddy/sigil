@@ -1,6 +1,10 @@
 (() => {
   const indexCache = new Map();
   const maxResults = 8;
+  const ranking = window.SigilSearchRanking;
+  if (!ranking) {
+    return;
+  }
   const messages = {
     en: {
       empty: "No matching docs.",
@@ -13,50 +17,6 @@
       error: "无法加载搜索索引。",
     },
   };
-
-  function normalize(value) {
-    return String(value || "").toLowerCase();
-  }
-
-  function tokenize(query) {
-    return normalize(query)
-      .split(/[\s,.;:!?()[\]{}"'`/\\]+/)
-      .map((token) => token.trim())
-      .filter(Boolean);
-  }
-
-  function scoreItem(item, tokens) {
-    const title = normalize(item.title);
-    const section = normalize(item.section);
-    const description = normalize(item.description);
-    const text = normalize(item.text);
-    let score = item.kind === "page" ? 2 : 0;
-
-    for (const token of tokens) {
-      let matched = false;
-      if (section.includes(token)) {
-        score += section.startsWith(token) ? 24 : 18;
-        matched = true;
-      }
-      if (title.includes(token)) {
-        score += title.startsWith(token) ? 18 : 12;
-        matched = true;
-      }
-      if (description.includes(token)) {
-        score += 7;
-        matched = true;
-      }
-      if (text.includes(token)) {
-        score += 2;
-        matched = true;
-      }
-      if (!matched) {
-        return 0;
-      }
-    }
-
-    return score;
-  }
 
   async function loadIndex(indexUrl) {
     if (!indexCache.has(indexUrl)) {
@@ -130,7 +90,7 @@
 
     input.addEventListener("input", async () => {
       const query = input.value;
-      const tokens = tokenize(query);
+      const tokens = ranking.tokenize(query);
       if (tokens.length === 0) {
         results.replaceChildren();
         return;
@@ -145,13 +105,7 @@
           return;
         }
 
-        const matches = loadedIndex
-          .filter((item) => item.locale === locale)
-          .map((item) => ({ item, score: scoreItem(item, tokens) }))
-          .filter((entry) => entry.score > 0)
-          .sort((left, right) => right.score - left.score || left.item.title.localeCompare(right.item.title))
-          .slice(0, maxResults)
-          .map((entry) => entry.item);
+        const matches = ranking.rank(loadedIndex, query, locale, maxResults);
 
         if (matches.length === 0) {
           renderStatus(results, locale, "empty");

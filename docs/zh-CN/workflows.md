@@ -1,179 +1,52 @@
+<!-- public-doc-role: workflows; authority: task-workflow-authority; sections: explore-an-unfamiliar-repository,make-a-small-change-safely,plan-a-larger-feature-or-refactor,debug-a-failing-command,review-local-changes,resume-previous-work,use-code-intelligence,connect-external-tools-with-mcp,what-to-review-yourself; cta: use-cookbook -->
+
 # 常见工作流
 
-[文档首页](README.md) · [English](../en/workflows.md)
+[文档首页](README.md) · [Cookbook](cookbook.md) · [English](../en/workflows.md)
 
-这些例子用于日常仓库开发。默认你已经在 TUI 中运行：
-
-```bash
-cd /path/to/workspace
-sigil
-```
+这些工作流说明任务中的检查点和用户决策。只包含可复制 prompt 的版本在 [Cookbook](cookbook.md)。
 
 ## 探索陌生仓库
 
-从只读问题开始：
-
-```text
-解释这个仓库的结构。指出主要入口、测试布局、配置文件和用户文档。
-```
-
-继续问一个聚焦问题：
-
-```text
-解释 Sigil 如何处理这个请求。指出用户可见阶段、可能需要查看的文件，以及它会在哪里显示错误或批准。
-```
-
-好的信号：
-
-- Sigil 会说明它读取了哪些具体文件。
-- Tool activity 保持只读。
-- 你可以要求它继续缩小到某个组件、目录或路径。
+要求 Sigil 保持只读，并指出入口、测试、配置与用户文档。有效结果会引用具体文件，并明确不确定之处。要求修改前，先把下一轮问题缩小到一个目录或行为。
 
 ## 安全地做小改动
 
-给出目标、范围和验证期望：
-
-```text
-更新 docs/zh-CN/quickstart.md，让首次运行路径对新用户更清晰。
-这次只改文档。
-编辑后检查链接，并运行可用的静态文档检查。
-```
-
-出现 approval 时，先检查 diff 再允许。运行结束后：
-
-```bash
-git diff
-```
-
-如果编辑范围太大，deny 并重新说明范围。
+说明目标、允许修改的文件、不能触碰的内容和验证方式。允许编辑前检查审批 diff。最后运行 `git diff` 和最小相关检查；如果方案超出范围，拒绝并重新缩小任务。
 
 ## 计划较大的功能或重构
 
-跨多个文件或需要持久分步骤的任务使用 `/task`：
+想先得到只读计划时使用 `/plan <prompt>`，只在步骤和边界都合适时接受 Plan ready card。已经确定要执行多步骤任务时使用 `/task <任务>`；最新任务无需新指导时使用 `/task continue`。
+
+指导语要具体，例如：
 
 ```text
-/task add a troubleshooting section for terminal copy failures and link it from the TUI guide
-```
-
-先 review 生成的 task plan，再让 execution 继续。你可以指导下一步：
-
-```text
-保持 docs-only，不要编辑 Rust code。同步更新英文和中文文档。
-```
-
-如果无需额外指导：
-
-```text
-/task continue
+只修改文档。英文和中文一起更新。不要修改 Rust 代码。
 ```
 
 ## 调试失败命令
 
-贴出失败命令和相关输出：
-
-```text
-cargo test 失败。断言显示 help text 缺少 Alt-D。
-找出 help text 来源，解释可能原因，并在编辑前给出最小修复方案。
-```
-
-更安全的做法是先要求 inspect，再决定是否编辑：
-
-```text
-先读取失败测试和实现。总结 root cause，等我确认后再改文件。
-```
+提供命令、相关输出和预期行为。先让 Sigil 阅读失败测试与实现、解释可能原因，并在编辑前等待。原因明确后，再要求最小修复并重跑同一项失败检查。
 
 ## Review 本地改动
 
-明确要求 review stance：
-
-```text
-Review 当前 diff，重点看用户可见回归、过期文档和缺失验证。按严重程度列出发现，并带文件引用。
-```
-
-再决定是否修复：
-
-```text
-只修复高严重程度的文档问题。不要触碰无关 Rust 改动。
-```
+要求按严重程度列出 finding，并附文件位置。明确要处理哪些 finding，同时把无关工作区改动排除在外。修复后重新检查 live diff，不要只依赖早先报告。
 
 ## 恢复历史工作
 
-使用：
-
-```text
-/resume
-```
-
-从列表中选择 session。恢复会重建可见对话和 durable task state。中断工具会显示为 interrupted；Sigil 不会静默重放它们。
-
-如果最新计划任务还没完成：
-
-```text
-/task continue
-```
-
-或直接在 composer 中输入下一步指导。
+打开 `/resume`、选择 session，并先阅读恢复的上下文。中断工具仍显示为已中断，不会自动重跑。可以在输入框提供新指导，或对未完成任务使用 `/task continue`。
 
 ## 使用 Code Intelligence
 
-在配置中启用：
-
-```toml
-[code_intelligence]
-enabled = true
-server_startup = "lazy"
-```
-
-在 TUI 中使用：
-
-```text
-Alt-D
-```
-
-对 git changed source files 运行 diagnostics。LSP server 可用时，code intelligence 还可以提供 symbols、definitions、references、code actions 和 rename previews。
-
-如果没有 LSP server，普通 chat 和文件工具仍可使用。见 [Sigil 配置指南](configuration.md) 和 [排障](troubleshooting.md)。
+启用后，code intelligence 可以辅助符号、定义、引用、诊断、code action 和 rename preview。按 `Alt-D` 检查已修改源码。如果没有可用 language server，普通 chat 和文件工具仍可工作；设置见[配置](configuration.md)，问题见[故障排查](troubleshooting.md)。
 
 ## 用 MCP 连接外部工具
 
-当 Sigil 需要工具化访问外部系统或专门的本地能力时，使用 MCP。
+先配置一个 server，使用保守 trust，运行 `/doctor`，并在允许调用或凭据前确认 server 能访问什么。设置与认证只在 [MCP 指南](mcp.md)说明。
 
-典型流程：
+## 需要你自己 Review 的内容
 
-1. 在 `[[mcp_servers]]` 配置 server。
-2. 设置保守的 trust policy。
-3. 先保持 `approval_default = "ask"`。
-4. 用 `/doctor` 检查 command 和 trust 配置。
-5. 只有在理解 server 能访问什么之后，再让 Sigil list 和 call MCP tools。
+始终检查最终 diff、变化的测试、命令输出、可能包含 secret 的配置文件，以及任何获准接收数据的外部服务。
 
-见 [Sigil MCP 接入指南](mcp.md)。
-
-## 更有效的 Prompt 模式
-
-好的 prompt 通常包含：
-
-- 明确目标。
-- 相关文件、模块或命令。
-- 不要触碰什么。
-- 如何验证结果。
-- 希望 Sigil 先提出方案，还是直接编辑。
-
-示例：
-
-```text
-改进 docs/zh-CN/configuration.md，让新用户更容易理解。
-保留 provider-specific advanced fields，但把常见路径放在完整 reference 前面。
-必要时同步英文 mirror。
-编辑后运行 docs link/path 检查。
-```
-
-## 需要你自己 review 的内容
-
-Sigil 可以 inspect、edit 和 run commands，但你仍需要检查：
-
-- `git diff`
-- 生成或修改的测试
-- 命令输出
-- approval diffs
-- 可能包含 secret 的配置文件
-- 允许 secret egress 或 write action 前的 MCP server
+<!-- public-doc-cta: use-cookbook -->
+下一步：[打开 Cookbook 获取可复制提示词](cookbook.md)。

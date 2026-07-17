@@ -1,76 +1,47 @@
+<!-- public-doc-role: provider-gemini; authority: provider-specific-setup; sections: minimal-setup,authentication,options-and-visible-limits,verify,common-problems; cta: return-providers -->
+
 # Gemini Provider
 
-[Docs home](README.md) · [Provider guide](providers.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [简体中文](../zh-CN/provider-gemini.md)
-
-Use the Gemini provider when you want Sigil to call Gemini models through Google's `streamGenerateContent` API.
+[Provider guide](providers.md) · [Configuration](configuration.md) · [简体中文](../zh-CN/provider-gemini.md)
 
 ## Minimal Setup
-
-For temporary local use:
 
 ```bash
 export SIGIL_GEMINI_API_KEY="..."
 sigil
 ```
 
-For reusable config:
-
 ```toml
 [agent]
 provider = "gemini"
 model = "gemini-2.5-pro"
-tool_timeout_secs = 30
-
-[model_request]
-request_timeout_secs = 120
-stream_idle_timeout_secs = 180
 
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-# Prefer SIGIL_GEMINI_API_KEY.
-# api_key = "..."
 ```
 
-A full starting template is available at [gemini.toml](../examples/config/gemini.toml).
+See [gemini.toml](../examples/config/gemini.toml) for a copyable file.
 
 ## Authentication
 
-Sigil resolves Gemini authentication in this order:
+`SIGIL_GEMINI_API_KEY` takes priority over `[providers.gemini].api_key` and avoids changing credentials used by other Google tools.
 
-1. `SIGIL_GEMINI_API_KEY`
-2. `[providers.gemini].api_key`
+## Options And Visible Limits
 
-Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without affecting other Google tooling in the same shell.
+`SIGIL_GEMINI_BASE_URL` temporarily overrides `base_url`. Keep `[agent].model` explicit because model availability can vary by account and region.
 
-## Environment Overrides
-
-| Variable | Overrides |
-| --- | --- |
-| `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
-
-## Behavior Notes
-
-Sigil handles Gemini's request format, function calling, responses, usage, and safety blocks for you. Gemini-specific options remain on this page, while the normal tool-approval, privacy, and session workflow stays the same.
-
-Image attachments are available only for explicitly recognized Gemini model IDs. Floating `latest` names, unknown IDs, and unrecognized aliases fail before provider transport. See [Image Attachments](user-guide.md#image-attachments) for input methods, local limits, cache behavior, and resume guidance.
-
-Gemini model names and endpoint availability can vary by account and region. Keep `[agent].model` explicit when using this provider in automation.
+Images work only with recognized Gemini model IDs. Floating `latest` names, unknown IDs, and aliases are rejected before sending.
 
 ## Verify
 
-Run:
-
-```bash
-sigil doctor
-```
-
-Check provider name, model, base URL and API key source.
+Run `sigil doctor` and confirm provider, model, base URL, and credential source.
 
 ## Common Problems
 
-| Symptom | Check |
-| --- | --- |
-| Authentication fails | Confirm `SIGIL_GEMINI_API_KEY` or `[providers.gemini].api_key` is visible to the `sigil` process. |
-| Model not found | Confirm the exact Gemini model name and endpoint version. |
-| Tool/function calls fail | Confirm the model and endpoint support function calling for your account. |
-| Requests time out | Check network access and consider `[model_request].stream_idle_timeout_secs`. |
+- Authentication: check `SIGIL_GEMINI_API_KEY` in the launching shell.
+- Model not found: confirm the model name, endpoint version, account, and region.
+- Function call fails: confirm model and endpoint support function calling.
+- Timeout: check network access and model-request timeouts.
+
+<!-- public-doc-cta: return-providers -->
+Next: [Return to Providers](providers.md).

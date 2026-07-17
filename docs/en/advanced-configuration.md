@@ -1,10 +1,14 @@
+<!-- public-doc-role: advanced-configuration; authority: advanced-settings-guide; sections: task-planning,verification,memory-skills-and-agents,compaction-and-code-intelligence,terminal-and-model-request-overrides,plugins-and-mcp; cta: open-configuration-reference -->
+
 # Advanced Configuration
 
-[Docs home](README.md) · [Configuration](configuration.md) · [Permissions and sandbox](permissions-and-sandbox.md) · [Appearance](appearance.md) · [Field reference](configuration-reference.md) · [简体中文](../zh-CN/advanced-configuration.md)
+[Docs home](README.md) · [Configuration](configuration.md) · [Permissions](permissions-and-sandbox.md) · [Field reference](configuration-reference.md) · [简体中文](../zh-CN/advanced-configuration.md)
 
-Use this page when the normal setup and `/config` choices are not enough. Keep the [Configuration guide](configuration.md) as the starting point, and make one focused change at a time.
+Use these settings only after the normal setup works. Change one area at a time and run `sigil doctor` when the result is unclear.
 
 ## Task Planning
+
+<!-- public-doc-topic: task -->
 
 ```toml
 [task]
@@ -17,20 +21,11 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-Normal composer input stays chat-first. Use `/task <goal>` for a durable multi-step task, `/task continue` to continue it, and `/plan <goal>` for a read-only planning pass before you explicitly create a task from the plan.
-
-`max_subagents` limits active child agents. `multi_agent_mode = "explicit_request_only"` is the conservative default: Sigil uses child agents only when you or the workspace instructions explicitly ask for delegation. Set `none` to disable ordinary delegation guidance, or `proactive` only when independent parallel work is appropriate. File-changing child work still follows the normal review and approval flow.
-
-You can give planner, executor, or child roles a different model or a narrower tool list. Use this only when you can explain why a role should be more limited than the main session. See the exact role fields in the [Configuration reference](configuration-reference.md#task).
+Ordinary input stays chat-first. Use `/plan` for a read-only plan and `/task` for multi-step execution. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
 
 ## Verification
 
 ```toml
-[verification.scope]
-profile = "auto"
-# extra_excludes = ["tmp/generated/**"]
-# generated_roots = ["generated"]
-
 [[verification.checks]]
 id = "cargo-test"
 command = "cargo"
@@ -38,26 +33,21 @@ args = ["test"]
 effect = "read_only"
 ```
 
-Configured checks are explicit checks you approve for your workspace. Repository hints can be suggested, but are not run simply because they exist. Use `read_only` for ordinary test, build, and lint commands; a check that changes relevant files must be followed by a non-writing check before the result is current.
+Add only checks you understand. Repository hints can be suggested but do not run merely because they exist. A check that changes relevant files must be followed by a non-writing check before the result is current.
 
 ## Memory, Skills, And Agents
 
-```toml
-[memory]
-enabled = true
+<!-- public-doc-topic: memory -->
 
-[skills]
-enabled = true
-user_skills = true
-user_agents = true
-compatibility_sources = []
-```
+`[memory].enabled = true` lets Sigil load workspace instruction files such as `SIGIL.md`, `AGENTS.md`, and `SIGIL.local.md`. Keep them short, current, and suitable for every session in the repository.
 
-When memory is enabled, Sigil can load workspace instruction files such as `SIGIL.md`, `AGENTS.md`, `CLAUDE.md`, and `SIGIL.local.md`. Keep repository instructions short, current, and appropriate for every session that opens the workspace.
+<!-- public-doc-topic: skills-agents -->
 
-Workspace resources live under `.sigil/`: reusable skills in `.sigil/skills`, slash commands in `.sigil/commands`, agent profiles in `.sigil/agents`, and plugin manifests in `.sigil/plugins`. Compatibility sources are opt-in. Review any imported skill, agent, or plugin before allowing it to act on a workspace.
+Reusable workspace skills, commands, agents, and plugins live under `.sigil/skills`, `.sigil/commands`, `.sigil/agents`, and `.sigil/plugins`. User resources and compatibility imports are controlled by `[skills]`. Review imported instructions before allowing them to act.
 
 ## Compaction And Code Intelligence
+
+<!-- public-doc-topic: compaction -->
 
 ```toml
 [compaction]
@@ -65,18 +55,24 @@ enabled = true
 soft_threshold_ratio = 0.5
 hard_threshold_ratio = 0.8
 tail_messages = 6
+```
 
+Compaction shortens older conversation context when the review says the target is ready. `/compact` is the manual path. If a model window is unknown, set `fallback_context_window_tokens`; failure leaves the active conversation unchanged.
+
+<!-- public-doc-topic: code-intelligence -->
+
+```toml
 [code_intelligence]
 enabled = false
 server_startup = "lazy"
 auto_discover = true
 ```
 
-Compaction manages long conversations. Manual, fully idle hard-threshold, and queued pre-turn apply remain gated by an exact local target proof; the narrow OpenAI Responses overflow route uses its own audited server-count proof. Unsupported profiles fail closed without changing the active boundary. Code intelligence is off by default. When enabled, it can use installed language servers and can provide code navigation, diagnostics, and reviewed edit suggestions. Enabling it does not bypass workspace trust, file approval, or diff review.
-
-Use `Alt-D` in the TUI to inspect diagnostics for changed source files. If a language server is missing, ordinary chat and file tools remain available.
+When enabled, Sigil can use installed language servers for navigation, diagnostics, and reviewed edits. `Alt-D` checks changed source files. Missing language-server support does not block ordinary chat or file tools.
 
 ## Terminal And Model Request Overrides
+
+<!-- public-doc-topic: terminal -->
 
 ```toml
 [terminal]
@@ -91,16 +87,21 @@ method = "auto"
 minimum_run_duration_ms = 10000
 ```
 
-Set `keyboard_enhancement = "off"` if a terminal or multiplexer mishandles enhanced keys. Set `mouse_capture = false` if mouse mode conflicts with your terminal. Set `osc52_clipboard = false` if your terminal blocks clipboard sequences. The [Terminal compatibility guide](terminal-compatibility.md) provides a manual checklist.
+Disable a feature when a terminal, remote layer, or multiplexer does not support it. Notifications are off by default and use fixed text without prompts, paths, tool details, provider, model, or session id. Use [Terminal compatibility](terminal-compatibility.md) to test the result.
 
-Attention notifications are disabled by default. When enabled, Sigil can signal a long run finishing, a required tool approval, a failed active run, or an MCP request waiting for input. `method` accepts `auto`, `osc9`, `osc777`, or `bell`; the long-run threshold accepts `1000` through `3600000` milliseconds. Notification text is fixed and never includes the prompt, reply, path, tool arguments, server name, error details, provider, or session id. The setting affects only the interactive TUI and does not add session events.
+<!-- public-doc-topic: model-request-env -->
 
-The environment variables `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`, `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`, and `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` temporarily override shared model-request timeouts. Provider credentials and endpoint options stay on the [Provider guide](providers.md) and its provider pages.
+`SIGIL_MODEL_REQUEST_TIMEOUT_SECS`, `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`, and `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` temporarily override shared model-request timeouts. Provider credentials and endpoint settings stay on provider pages.
 
 ## Plugins And MCP
 
-Plugins are discovered under `.sigil/plugins/<id>/plugin.toml` and reviewed from `/config`. Review a changed plugin again before allowing it to run. Plugin entries cannot request inherited environment credentials; configure credentialed local MCP servers in your user configuration instead.
+<!-- public-doc-topic: plugins -->
 
-Configure local MCP servers with `[[mcp_servers]]`. They start with a cleared environment. If a server needs a credential, grant only the required variable name with the root-only `inherit_env = ["ENV_NAME"]` setting. `/doctor` and `/config` show whether a grant is available without showing its value.
+Plugins are discovered at `.sigil/plugins/<id>/plugin.toml` and reviewed in `/config`. Review a changed plugin again before allowing it to run. Plugin entries cannot request inherited credential variables.
 
-See the [MCP guide](mcp.md) for server setup and trust decisions, and use the [Configuration reference](configuration-reference.md) for the complete advanced field list.
+<!-- public-doc-topic: mcp -->
+
+Configure MCP servers with `[[mcp_servers]]`. Local servers start with a cleared environment; grant only required variable names through root-user `inherit_env`. Remote authentication, trust, and compatibility belong in the [MCP guide](mcp.md). Exact fields are in [Configuration Reference](configuration-reference.md).
+
+<!-- public-doc-cta: open-configuration-reference -->
+Next: [Look up exact configuration fields](configuration-reference.md).

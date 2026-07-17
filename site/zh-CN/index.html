@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sigil - TUI-first Rust coding agent</title>
+    <title>Sigil - 在一个终端里完成仓库工作</title>
     <meta
       name="description"
-      content="Sigil 是一个 TUI-first Rust coding agent，提供有边界的仓库上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复。"
+      content="Sigil 是一个 TUI-first coding agent，用一个终端工作区检查、修改并验证真实仓库。"
     >
     <link rel="canonical" href="https://sigil.corerobin.com/zh-CN/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/">
@@ -16,21 +16,25 @@
     <meta name="theme-color" content="#1ecfc5">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
-    <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
+    <meta property="og:title" content="Sigil - 在一个终端里完成仓库工作">
     <meta
       property="og:description"
-      content="把有边界的代码上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复放进一个终端界面。"
+      content="在一个终端工作区里检查、修改并验证真实仓库。"
     >
     <meta property="og:url" content="https://sigil.corerobin.com/zh-CN/">
-    <meta property="og:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
-    <meta property="og:image:alt" content="Sigil 标志">
+    <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
+    <meta name="twitter:title" content="Sigil - 在一个终端里完成仓库工作">
     <meta
       name="twitter:description"
-      content="把有边界的代码上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复放进一个终端界面。"
+      content="在一个终端工作区里检查、修改并验证真实仓库。"
     >
-    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
+    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta name="twitter:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
     <script>
       (() => {
         try {
@@ -91,20 +95,19 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first coding agent</p>
           <h1>在一个终端里<br><span class="hero-accent">完成仓库工作。</span></h1>
           <p class="lede">
-            Sigil 把有边界的仓库上下文、图片输入、durable task、审批、diff、verification、attention signal 和 session 恢复放进面向 coding session 的终端产品里。
+            在终端里跟进任务、检查建议修改，并决定下一步。
           </p>
           <div class="alpha-status" aria-label="发布状态">
-            <strong>v0.0.1-alpha.4 preview</strong>
-            <span>核心 TUI 工作流今天已经可用。配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。</span>
-            <span>网站跟随 <code>main</code>，可能比已发布包更新。请先<a href="docs/changelog/#unreleased-main">查看 Unreleased</a>。</span>
+            <strong>早期预览</strong>
+            <span>网站跟随 <code>main</code>，已发布的软件包可能稍晚。采用 Sigil 前请先查看<a href="docs/status/">当前支持状态</a>。</span>
           </div>
           <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
             <a class="button secondary" href="docs/visual-tour/">视觉导览</a>
-            <a class="button secondary" href="docs/status/">支持状态</a>
+            <a class="button secondary" href="docs/">阅读文档</a>
           </div>
         </div>
         <div class="terminal-stage" data-terminal-stage>
@@ -117,98 +120,52 @@
               <span class="terminal-prompt" aria-hidden="true">&gt;</span>
               <code>/task 审核发布文档</code>
             </div>
-            <ol class="session-timeline" aria-label="任务执行阶段">
+            <ol class="session-timeline" aria-label="任务进展">
               <li class="session-phase session-phase-planner" data-phase="planner">
-                <span class="session-role">planner</span>
-                <span class="session-description">为发布审核写入可持久化步骤</span>
-                <span class="session-state session-state-complete">已完成</span>
+                <span class="session-role">请求</span>
+                <span class="session-description">审核发布文档</span>
+                <span class="session-state session-state-complete">已收到</span>
               </li>
               <li class="session-phase session-phase-worker" data-phase="worker">
-                <span class="session-role">worker</span>
-                <span class="session-description">完成只读文档评审</span>
-                <span class="session-state session-state-complete">已完成</span>
+                <span class="session-role">检查</span>
+                <span class="session-description">发现过时和重复说明</span>
+                <span class="session-state session-state-complete">完成</span>
               </li>
               <li class="session-phase session-phase-tool" data-phase="tool">
-                <span class="session-role">tool</span>
-                <span class="session-description">生成待审批的 edit_file 预览</span>
-                <span class="session-state session-state-ready">待审批</span>
+                <span class="session-role">修改</span>
+                <span class="session-description">准备聚焦的文档更新</span>
+                <span class="session-state session-state-ready">待检查</span>
               </li>
               <li class="session-phase session-phase-verify" data-phase="verify">
-                <span class="session-role">verify</span>
-                <span class="session-description">运行 Pages 检查和链接验证</span>
+                <span class="session-role">校验</span>
+                <span class="session-description">Pages 布局和链接正常</span>
                 <span class="session-state session-state-passed">已通过</span>
               </li>
               <li class="session-phase session-phase-status" data-phase="status">
-                <span class="session-role">status</span>
-                <span class="session-description">发布 alpha 版本</span>
-                <span class="session-state session-state-live">已上线</span>
+                <span class="session-role">结果</span>
+                <span class="session-description">文档可以发布</span>
+                <span class="session-state session-state-live">就绪</span>
               </li>
             </ol>
-            <div class="terminal-signals" aria-label="工作流保障">
-              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>会话可恢复</span>
-              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>审批受控</span>
-              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>验证已通过</span>
+            <div class="terminal-signals" aria-label="任务状态">
+              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>工作已保存</span>
+              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>修改已检查</span>
+              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>校验已通过</span>
             </div>
           </div>
         </div>
       </section>
 
-      <div class="capability-rail">
-        <div class="capability-track">
-          <div class="capability-set" role="list" aria-label="Sigil 能力">
-            <span role="listitem">持久会话</span>
-            <span role="listitem">审批预览</span>
-            <span role="listitem">子 Agent</span>
-            <span role="listitem">MCP 工具</span>
-            <span role="listitem">代码智能</span>
-            <span role="listitem">图片输入</span>
-            <span role="listitem">任务提醒</span>
-            <span role="listitem">验证</span>
-            <span role="listitem">恢复</span>
-          </div>
-          <div class="capability-set" aria-hidden="true">
-            <span>持久会话</span>
-            <span>审批预览</span>
-            <span>子 Agent</span>
-            <span>MCP 工具</span>
-            <span>代码智能</span>
-            <span>图片输入</span>
-            <span>任务提醒</span>
-            <span>验证</span>
-            <span>恢复</span>
-          </div>
-        </div>
-        <button
-          class="capability-motion-toggle"
-          type="button"
-          data-capability-motion-toggle
-          data-pause-label="暂停能力栏动画"
-          data-resume-label="继续能力栏动画"
-          aria-label="暂停能力栏动画"
-          title="暂停能力栏动画"
-        ><span aria-hidden="true">Ⅱ</span></button>
-      </div>
-
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">快速开始</p>
-          <h2>安装 preview release，并在工作区里启动。</h2>
+          <h2>安装一次，然后在仓库中启动。</h2>
         </div>
-        <div class="install-options" aria-label="安装方式">
+        <div class="install-options" aria-label="推荐安装方式">
           <article class="install-card install-card-primary">
             <span class="resource-kicker">推荐</span>
             <h3>npm alpha</h3>
             <pre><code>npm install -g @sigil-ai/sigil@alpha</code></pre>
-          </article>
-          <article class="install-card">
-            <span class="resource-kicker">macOS</span>
-            <h3>Homebrew tap</h3>
-            <pre><code>brew install JimmyDaddy/sigil/sigil-ai</code></pre>
-          </article>
-          <article class="install-card">
-            <span class="resource-kicker">源码</span>
-            <h3>Cargo git tag</h3>
-            <pre><code>cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --locked sigil</code></pre>
           </article>
         </div>
         <div class="steps">
@@ -221,7 +178,7 @@ sigil</code></pre>
           <div class="step">
             <span>2</span>
             <h3>配置</h3>
-            <p>找不到可用配置时，Sigil 会打开 Quick Setup。确认 workspace、选择 provider/model，并填写认证信息。v0.0.1-alpha.4 是 early preview。</p>
+            <p>缺少配置时，Sigil 会打开 Quick Setup。选择 provider 和 model，再填写认证信息。所有受支持的软件包路径见<a href="docs/installation/">安装指南</a>。</p>
           </div>
         </div>
       </section>
@@ -229,7 +186,7 @@ sigil</code></pre>
       <section class="section contrast" id="visual-preview">
         <div class="section-heading">
           <p class="eyebrow">视觉导览</p>
-          <h2>安装前先看清主要界面。</h2>
+          <h2>看清工作内容与决策点。</h2>
         </div>
         <div class="visual-grid terminal-deck">
           <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/">
@@ -240,21 +197,9 @@ sigil</code></pre>
             <img src="../assets/screenshots/approval-review.svg" alt="Sigil 审批检查截图" loading="lazy" decoding="async">
             <span>审批检查</span>
           </a>
-          <a class="visual-card terminal-window-config" href="docs/visual-tour/#配置面板">
-            <img src="../assets/screenshots/config-panel.svg" alt="Sigil 配置面板截图" loading="lazy" decoding="async">
-            <span>配置面板</span>
-          </a>
           <a class="visual-card terminal-window-verification" href="docs/visual-tour/#任务验证">
             <img src="../assets/screenshots/verification-card.svg" alt="Sigil 任务 Verification card 截图" loading="lazy" decoding="async">
             <span>任务验证</span>
-          </a>
-          <a class="visual-card terminal-window-checkpoint" href="docs/visual-tour/#checkpoint-恢复">
-            <img src="../assets/screenshots/checkpoint-restore.svg" alt="Sigil checkpoint 恢复检查截图" loading="lazy" decoding="async">
-            <span>Checkpoint 恢复</span>
-          </a>
-          <a class="visual-card terminal-window-compaction" href="docs/visual-tour/#上下文压缩预览">
-            <img src="../assets/screenshots/compaction-preview.svg" alt="Sigil 上下文压缩预览截图" loading="lazy" decoding="async">
-            <span>Compaction 检查</span>
           </a>
         </div>
       </section>
@@ -262,40 +207,24 @@ sigil</code></pre>
       <section class="section" id="workflow">
         <div class="section-heading">
           <p class="eyebrow">工作流</p>
-          <h2>为可审计的 coding session 设计。</h2>
+          <h2>真实工作中最重要的四件事。</h2>
         </div>
         <div class="feature-grid">
           <article>
-            <h3>Workspace TUI</h3>
-            <p>直接在 composer 输入任务，查看流式输出，并保持 session、usage、permissions、agents、LSP 和 controls 可见。</p>
+            <h3>统一工作界面</h3>
+            <p>在 TUI 中同时查看对话、工具活动、修改内容和下一步操作。</p>
           </article>
           <article>
-            <h3>Durable tasks and agents</h3>
-            <p>用 <code>/task</code> 处理多步骤任务，用 <code>/plan</code> 做只读规划，用 child agent 承接有边界的委派工作。</p>
+            <h3>风险操作先审查</h3>
+            <p>写文件、运行命令、访问网络或调用集成前，先检查审批信息和 diff。</p>
           </article>
           <article>
-            <h3>Approval and verification</h3>
-            <p>先 review 结构化 preview 与 receipt，再用 <code>Alt-V</code> 聚焦 Verification card，运行检查或查看完成证据。</p>
+            <h3>带上下文恢复</h3>
+            <p>回到已保存的 session；恢复中断工作时，不会静默重跑未完成的工具。</p>
           </article>
           <article>
-            <h3>有边界的 Web data</h3>
-            <p>通过 provider-hosted、configured MCP 或 bundled route 搜索，再只读取 session 已观察到的精确 URL，并执行 disclosure、SSRF 与 budget 控制。</p>
-          </article>
-          <article>
-            <h3>TUI-first 自动化</h3>
-            <p>日常工作保留在 TUI 中；脚本使用稳定 JSON 或 JSONL 输出，受信任的本机 client 通过带认证且仅允许 loopback 的服务接入。</p>
-          </article>
-          <article>
-            <h3>Session 与相关上下文</h3>
-            <p>保持 session lifecycle 显式可控；Rust、Python、JavaScript/TypeScript 和 Go 的有界上下文继续遵守 ignore、secret、大小与 budget 限制。</p>
-          </article>
-          <article>
-            <h3>支持图片的 Composer</h3>
-            <p>粘贴有边界的 PNG、JPEG 或 WebP，检查 metadata chip，并向明确支持图片的 OpenAI Responses、Anthropic 和 Gemini model 发送纯图片或图文 turn。</p>
-          </article>
-          <article>
-            <h3>不泄漏 Prompt 的提醒</h3>
-            <p>可选择为长任务完成、等待审批、执行失败或 MCP 等待输入启用终端 signal；固定通知文案不会包含 prompt、路径、工具详情或 session id。</p>
+            <h3>按需组合模型与工具</h3>
+            <p>选择受支持的 provider，接入 MCP，并按需启用仓库感知能力。</p>
           </article>
         </div>
       </section>
@@ -303,21 +232,9 @@ sigil</code></pre>
       <section class="section" id="safety">
         <div class="section-heading">
           <p class="eyebrow">安全模型</p>
-          <h2>高风险动作前保留可审计控制权。</h2>
+          <h2>在需要决策的地方保留控制权。</h2>
         </div>
-        <div class="split-list">
-          <ul>
-            <li>写入、执行、网络、MCP、LSP edit 和外部目录访问都经过 permission decision。</li>
-            <li>高风险动作完成前保留有边界的 preview、diff 和 verification evidence。</li>
-            <li>Provider 专项行为留在 provider crate，不污染通用 kernel。</li>
-          </ul>
-          <ul>
-            <li>Tool、task、agent、approval 和 execution lifecycle 都是 durable control records。</li>
-            <li>中断工具在恢复时变成 interrupted result，而不是隐藏重试。</li>
-            <li>MCP server、plugin、workspace agent 和外部数据都受显式 trust policy 约束。</li>
-            <li><code>/feedback</code> 会先预览隐私边界，再导出到本机，并支持检查 JSON 或打开 Bug 表单；不会自动上传任何内容。</li>
-          </ul>
-        </div>
+        <p class="lede">不同动作有不同限制。<a href="docs/safety/">安全指南</a>说明决策前要检查什么；<a href="docs/permissions-and-sandbox/">权限与沙箱</a>说明精确控制项与平台边界。</p>
       </section>
 
       <section class="section contrast" id="docs">
@@ -334,9 +251,9 @@ sigil</code></pre>
             <span>常见工作流</span>
             探索、编辑、调试、review 和恢复工作时可直接套用的提示词模式。
           </a>
-          <a href="docs/#config">
+          <a href="docs/#configuration">
             <span>配置</span>
-            Provider、permission、appearance、agents、skills、plugins、verification、terminal attention 和环境变量设置。
+            按 provider、权限、外观或高级设置进入对应指南。
           </a>
           <a href="docs/#troubleshooting">
             <span>排障</span>

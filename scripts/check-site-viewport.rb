@@ -11,7 +11,7 @@ require "uri"
 
 VIEWPORTS = [
   { width: 390, height: 844, label: "mobile" },
-  { width: 1024, height: 768, label: "tablet" },
+  { width: 768, height: 768, label: "tablet" },
   { width: 1440, height: 720, label: "desktop" }
 ].freeze
 
@@ -29,14 +29,14 @@ PAGES = [
   { path: "zh-CN/docs/index.html", kind: "docs-hub" },
   { path: "docs/quickstart/index.html", kind: "quickstart" },
   { path: "zh-CN/docs/quickstart/index.html", kind: "quickstart" },
-  { path: "docs/reference/index.html", kind: "generated-doc" },
-  { path: "zh-CN/docs/reference/index.html", kind: "generated-doc" },
-  { path: "docs/configuration-reference/index.html", kind: "generated-doc" },
-  { path: "zh-CN/docs/configuration-reference/index.html", kind: "generated-doc" },
-  { path: "docs/changelog/index.html", kind: "generated-doc" },
-  { path: "zh-CN/docs/changelog/index.html", kind: "generated-doc" },
-  { path: "docs/providers/index.html", kind: "generated-doc" },
-  { path: "zh-CN/docs/providers/index.html", kind: "generated-doc" }
+  { path: "docs/user-guide/index.html", kind: "generated-doc" },
+  { path: "zh-CN/docs/user-guide/index.html", kind: "generated-doc" },
+  { path: "docs/safety/index.html", kind: "generated-doc" },
+  { path: "zh-CN/docs/safety/index.html", kind: "generated-doc" },
+  { path: "docs/provider-deepseek/index.html", kind: "generated-doc" },
+  { path: "zh-CN/docs/provider-deepseek/index.html", kind: "generated-doc" },
+  { path: "docs/status/index.html", kind: "generated-doc" },
+  { path: "zh-CN/docs/status/index.html", kind: "generated-doc" }
 ].freeze
 
 def executable_on_path(name)
@@ -630,8 +630,8 @@ VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
         unless result_attribute(tag, "data-sigil-timeline-phases") == "5"
           failures << "#{page_label}: homepage session timeline must render five phases"
         end
-        unless result_attribute(tag, "data-sigil-deck-windows") == "6"
-          failures << "#{page_label}: homepage terminal deck must render six windows"
+        unless result_attribute(tag, "data-sigil-deck-windows") == "3"
+          failures << "#{page_label}: homepage terminal deck must render three focused windows"
         end
         if [1024, 1440].include?(viewport.fetch(:width)) &&
            result_attribute(tag, "data-sigil-deck-overlap") != "true"
@@ -649,8 +649,8 @@ VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
         unless result_attribute(tag, "data-sigil-docs-command-visible") == "true"
           failures << "#{page_label}: docs command palette is not visible"
         end
-        unless result_attribute(tag, "data-sigil-task-cards") == "3"
-          failures << "#{page_label}: docs task router must render three task cards"
+        unless result_attribute(tag, "data-sigil-task-cards") == "8"
+          failures << "#{page_label}: docs task router must render eight task cards"
         end
         if ["dark", "explicit-dark"].include?(variant.fetch(:label)) &&
            result_attribute(tag, "data-sigil-docs-command-input-background") != "rgba(0, 0, 0, 0)"

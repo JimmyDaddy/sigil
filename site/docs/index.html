@@ -4,10 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sigil documentation</title>
-    <meta
-      name="description"
-      content="Sigil documentation hub for installation, TUI workflow, configuration, verification, terminal compatibility, MCP, agents, and user support."
-    >
+    <meta name="description" content="Choose the Sigil guide for your next task: first run, daily TUI work, workflows, configuration, providers, safety, troubleshooting, or reference.">
     <link rel="canonical" href="https://sigil.corerobin.com/docs/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/docs/">
     <link rel="alternate" hreflang="zh-CN" href="https://sigil.corerobin.com/zh-CN/docs/">
@@ -17,20 +14,18 @@
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
     <meta property="og:title" content="Sigil documentation">
-    <meta
-      property="og:description"
-      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or support."
-    >
+    <meta property="og:description" content="Choose the Sigil guide for the task at hand.">
     <meta property="og:url" content="https://sigil.corerobin.com/docs/">
-    <meta property="og:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
-    <meta property="og:image:alt" content="Sigil logo">
+    <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Sigil documentation">
-    <meta
-      name="twitter:description"
-      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or support."
-    >
-    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/logo/sigil-full-staff-glow.png">
+    <meta name="twitter:description" content="Choose the Sigil guide for the task at hand.">
+    <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
+    <meta name="twitter:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
     <script>
       (() => {
         try {
@@ -43,6 +38,7 @@
     </script>
     <link rel="stylesheet" href="../assets/site.css">
     <script defer src="../assets/site.js"></script>
+    <script defer src="../assets/search-ranking.js"></script>
     <script defer src="../assets/search.js"></script>
   </head>
   <body>
@@ -70,28 +66,17 @@
     <main id="main-content">
       <section class="docs-hero">
         <div class="docs-brand-lockup">
-          <img
-            class="docs-logo docs-logo-on-light"
-            src="../assets/logo/sigil-full-staff-glow.svg"
-            alt="Sigil"
-          >
-          <img
-            class="docs-logo docs-logo-on-dark"
-            src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
-            alt=""
-            aria-hidden="true"
-          >
+          <img class="docs-logo docs-logo-on-light" src="../assets/logo/sigil-full-staff-glow.svg" alt="Sigil">
+          <img class="docs-logo docs-logo-on-dark" src="../assets/logo/sigil-full-staff-glow-dark-mode.svg" alt="" aria-hidden="true">
         </div>
         <div class="docs-hero-copy">
           <p class="eyebrow">Documentation</p>
-          <h1>Find the guide for the work.</h1>
-          <p class="lede">
-            Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing docs.
-          </p>
+          <h1>What do you want to do?</h1>
+          <p class="lede">Choose a task below or search for an exact command, setting, provider, or problem.</p>
           <aside class="docs-version-notice" aria-label="Development documentation">
             <strong>Development documentation</strong>
-            <span>These pages track main. The packaged alpha is v0.0.1-alpha.4; newer features may require a source install.</span>
-            <a href="changelog/">Review Unreleased</a>
+            <span>These pages follow <code>main</code>. Packaged releases can lag behind.</span>
+            <a href="installation/">Check installation support</a>
           </aside>
           <div class="docs-search-panel">
             <form class="site-search docs-command-palette" role="search" data-locale="en" data-index="../search.json">
@@ -108,106 +93,49 @@
 
       <section class="section docs-section" id="user-docs">
         <div class="section-heading">
-          <p class="eyebrow">User guides</p>
-          <h2>Start with a task path, then keep the reference nearby.</h2>
+          <p class="eyebrow">Choose by task</p>
+          <h2>Eight routes, each with one job.</h2>
         </div>
-        <h3 class="resource-group-heading">Start here</h3>
         <div class="resource-grid resource-grid-featured task-router">
-          <a class="resource-card task-card" id="install" href="installation/" data-step="01">
-            <span class="resource-kicker">Install</span>
-            <h3>Install and update</h3>
-            <p>Install with npm, Homebrew, Cargo git tags, source checkout, or release archives; update or uninstall an existing binary when needed.</p>
-          </a>
-          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="02">
+          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="01">
             <span class="resource-kicker">First run</span>
-            <h3>Complete your first task</h3>
-            <p>Launch Sigil in a workspace, complete Quick Setup, run doctor, and make the first safe edit.</p>
+            <h3>Try Sigil</h3>
+            <p>Install, complete Quick Setup, run a read-only task, and review a small change.</p>
           </a>
-          <a class="resource-card task-card" id="daily-work" href="user-guide/" data-step="03">
+          <a class="resource-card task-card" id="user-guide" href="user-guide/" data-step="02">
             <span class="resource-kicker">Daily work</span>
-            <h3>Work in the TUI</h3>
-            <p>Use the composer, plans, verification evidence, checkpoint recovery, context controls, sessions, and transcript controls in everyday repository work.</p>
+            <h3>Use the TUI</h3>
+            <p>Learn the working surface, common controls, approvals, sessions, and recovery.</p>
           </a>
-        </div>
-        <h3 class="resource-group-heading">Work with Sigil</h3>
-        <div class="resource-grid">
-          <a class="resource-card" id="workflows" href="workflows/">
-            <span class="resource-kicker">Examples</span>
-            <h3>Common workflows</h3>
-            <p>Practical prompts for exploring a repo, making changes, planning tasks, debugging failures, reviewing diffs, and resuming work.</p>
+          <a class="resource-card task-card" id="workflows" href="workflows/" data-step="03">
+            <span class="resource-kicker">Task patterns</span>
+            <h3>Run a workflow</h3>
+            <p>Explore, change, debug, review, plan, and resume repository work.</p>
           </a>
-          <a class="resource-card" id="cookbook" href="cookbook/">
-            <span class="resource-kicker">Prompts</span>
-            <h3>Cookbook</h3>
-            <p>Copyable prompt patterns for repository exploration, docs edits, reviews, debugging, planning, MCP, and terminal issues.</p>
+          <a class="resource-card task-card" id="configuration" href="configuration/" data-step="04">
+            <span class="resource-kicker">Settings</span>
+            <h3>Configure Sigil</h3>
+            <p>Find the right guide for permissions, appearance, advanced options, or exact fields.</p>
           </a>
-          <a class="resource-card" id="visual-tour" href="visual-tour/">
-            <span class="resource-kicker">Preview</span>
-            <h3>Visual tour</h3>
-            <p>See the main session, approval, configuration, verification, checkpoint recovery, and compaction preview surfaces before your first task.</p>
+          <a class="resource-card task-card" id="providers" href="providers/" data-step="05">
+            <span class="resource-kicker">Models and tools</span>
+            <h3>Choose a provider or integration</h3>
+            <p>Set up model providers, authentication, and MCP connections.</p>
           </a>
-          <a class="resource-card" id="safety" href="safety/">
-            <span class="resource-kicker">Control</span>
-            <h3>Safety and permissions</h3>
-            <p>What can run, what needs approval, how to review diffs, and how workspace/MCP trust boundaries work.</p>
+          <a class="resource-card task-card" id="safety" href="safety/" data-step="06">
+            <span class="resource-kicker">Decisions and data</span>
+            <h3>Understand safety and privacy</h3>
+            <p>Review the risk model, permission limits, sandbox expectations, and data handling.</p>
           </a>
-          <a class="resource-card" id="config" href="configuration/">
-            <span class="resource-kicker">Environment</span>
-            <h3>Configuration</h3>
-            <p>Config resolution, permissions, appearance, agents, skills, plugins, verification, code intelligence, terminal integration, and examples.</p>
+          <a class="resource-card task-card" id="troubleshooting" href="troubleshooting/" data-step="07">
+            <span class="resource-kicker">Fix a problem</span>
+            <h3>Troubleshoot</h3>
+            <p>Move from a symptom to a check, an action, and the right detailed guide.</p>
           </a>
-          <a class="resource-card" id="providers" href="providers/">
-            <span class="resource-kicker">Models</span>
-            <h3>Provider guide</h3>
-            <p>Choose and configure DeepSeek, OpenAI-compatible, OpenAI Responses, Anthropic, or Gemini providers with key priority and troubleshooting.</p>
-          </a>
-          <a class="resource-card" id="mcp" href="mcp/">
-            <span class="resource-kicker">Integrations</span>
-            <h3>MCP guide</h3>
-            <p>Configure local stdio or user-root Streamable HTTP MCP servers, understand trust levels, and keep external data and secrets under explicit policy.</p>
-          </a>
-        </div>
-        <h3 class="resource-group-heading">Reference and support</h3>
-        <div class="resource-grid resource-grid-compact">
-          <a class="resource-card" id="overview" href="overview/">
-            <span class="resource-kicker">Map</span>
-            <h3>Documentation map</h3>
-            <p>Find the shortest path from first use to daily workflows, configuration, troubleshooting, integrations, and reference material.</p>
-          </a>
-          <a class="resource-card" id="privacy" href="privacy/">
-            <span class="resource-kicker">Data</span>
-            <h3>Privacy</h3>
-            <p>Provider context, MCP egress, API keys, local session logs, doctor output, and sharing guidance.</p>
-          </a>
-          <a class="resource-card" id="troubleshooting" href="troubleshooting/">
-            <span class="resource-kicker">Fix</span>
-            <h3>Troubleshooting guide</h3>
-            <p>Diagnose setup, auth, workspace, approval, terminal, session, MCP, and code-intelligence issues.</p>
-          </a>
-          <a class="resource-card" id="reference" href="reference/">
-            <span class="resource-kicker">Lookup</span>
-            <h3>Reference</h3>
-            <p>Commands, keys, config resolution, important paths, environment variables, approvals, and recovery facts.</p>
-          </a>
-          <a class="resource-card" id="terminal" href="terminal-compatibility/">
-            <span class="resource-kicker">Runtime</span>
-            <h3>Terminal compatibility</h3>
-            <p>Checklist for rendering, mouse behavior, clipboard support, alternate screen behavior, and local smoke testing.</p>
-          </a>
-          <a class="resource-card" id="status" href="status/">
-            <span class="resource-kicker">Support</span>
-            <h3>Supported today</h3>
-            <p>What users can rely on now, what is limited or advanced, and what remains future packaging work.</p>
-          </a>
-          <a class="resource-card" id="changelog" href="changelog/">
-            <span class="resource-kicker">Release notes</span>
-            <h3>User changelog</h3>
-            <p>User-facing capability and documentation changes without implementation-only detail.</p>
-          </a>
-          <a class="resource-card" id="report-bug" href="https://github.com/JimmyDaddy/sigil/issues/new/choose">
-            <span class="resource-kicker">Feedback</span>
-            <h3>Report a bug</h3>
-            <p>Open the GitHub issue chooser to report a bug, request a feature, or flag a documentation problem.</p>
+          <a class="resource-card task-card" id="reference" href="reference/" data-step="08">
+            <span class="resource-kicker">Exact lookup</span>
+            <h3>Open the reference</h3>
+            <p>Look up commands, keys, paths, machine output, and recovery behavior.</p>
           </a>
         </div>
       </section>

@@ -3,8 +3,8 @@
 This directory contains the zero-dependency source assets for the static site
 published to GitHub Pages.
 
-The Pages workflow stages this directory, copies `assets/logo/*.{png,svg}` and
-docs examples into the published artifact, generates HTML pages from
+The Pages workflow stages this directory, copies the shared logo and social
+preview assets plus docs examples into the published artifact, generates HTML pages from
 `docs/en/*.md` and `docs/zh-CN/*.md`, checks the required files, and deploys it
 with GitHub's Pages actions.
 

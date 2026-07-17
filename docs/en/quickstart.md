@@ -1,137 +1,74 @@
+<!-- public-doc-role: quickstart; authority: first-success; sections: before-you-begin,1-install-sigil,2-start-in-the-workspace-you-want-to-edit,3-complete-quick-setup,4-run-the-first-checks,5-try-a-small-safe-task; cta: continue-by-task -->
+
 # Quickstart
 
-[Docs home](README.md) · [简体中文](../zh-CN/quickstart.md)
+[Docs home](README.md) · [Installation](installation.md) · [简体中文](../zh-CN/quickstart.md)
 
-This guide uses the recommended npm alpha path to get you into a useful Sigil session in a real repository. For every other install channel and all update or uninstall instructions, use [Installation](installation.md).
+This path installs Sigil, opens a real repository, and ends after one reviewed change. Other package, update, and uninstall paths belong in [Installation](installation.md).
 
 ## Before You Begin
 
-You need:
-
-- A modern terminal emulator.
-- Node.js and npm for the recommended install path.
-- A model provider credential.
-
-For the smoothest first run, start in a repository where you can inspect `git diff` before and after the session.
+You need a modern terminal, Node.js with npm, a model-provider credential, and a repository where you can inspect `git diff`.
 
 ## 1. Install Sigil
 
-Install the current alpha from the scoped npm package:
-
 ```bash
 npm install -g @sigil-ai/sigil@alpha
-```
-
-Homebrew, Cargo, source builds, release archives, updates, and uninstall commands are documented only in [Installation](installation.md), so those instructions stay current in one place.
-
-Confirm the binary is on `PATH`:
-
-```bash
 sigil --version
 ```
 
-If your shell cannot find `sigil`, check the installer output and confirm its binary directory is on `PATH`.
+If the command is missing, check the installer output and make sure npm's binary directory is on `PATH`.
 
 ## 2. Start In The Workspace You Want To Edit
-
-Open the project you want Sigil to operate on:
 
 ```bash
 cd /path/to/workspace
 sigil
 ```
 
-Sigil treats this launch directory as the active workspace when the config uses `workspace.root = "."`, which is the normal Quick Setup result.
+The launch directory becomes the normal active workspace when Quick Setup saves `workspace.root = "."`.
 
 ## 3. Complete Quick Setup
 
-If no usable config exists, Sigil opens Quick Setup. Confirm:
-
-1. Workspace: the repository or directory you want Sigil to inspect and modify.
-2. Provider/model: the backend model Sigil should use.
-3. Authentication: the API key or equivalent credential.
-
-For temporary local use, choose the provider first, then export the provider-specific variable listed in the [authentication map](providers.md#authentication-priority) before launching `sigil`. Each provider page includes its exact shell command; Sigil does not use one provider-neutral API key variable.
-
-If you save an API key through Quick Setup or `/config`, it is written as plaintext to the local config file. Do not commit a real `sigil.toml`.
+When configuration is missing, confirm the workspace, choose a provider and model, and add authentication. For temporary use, prefer the environment variable listed in the [provider guide](providers.md#authentication-priority). A key saved through Quick Setup or `/config` is plaintext in the local config file; never commit a real `sigil.toml`.
 
 ## 4. Run The First Checks
 
-Inside the TUI, run:
+Run:
 
 ```text
 /doctor
 ```
 
-This reports config loading, workspace, sessions, provider/auth, MCP, code intelligence, and terminal compatibility.
-
-Then ask a read-only repository question:
+Then ask a read-only question:
 
 ```text
-Explain this repository structure. Point out the important directories, test locations, configuration files, and user documentation.
+Explain this repository structure. Identify the main directories, tests, configuration files, and user documentation. Do not edit files.
 ```
 
-Read-only file and search tools usually run without approval. This is a good first test because it lets you watch how Sigil reads context before making changes.
+You should see concrete files and read-only activity without a change approval.
 
 ## 5. Try A Small Safe Task
 
-Use a narrow, reviewable prompt:
+Start with a proposal:
 
 ```text
-Review the README and docs index for unclear user-facing wording. Suggest improvements first; do not edit files yet.
+Review the README for unclear user-facing wording. Suggest improvements first; do not edit files yet.
 ```
 
-Then ask for a small edit:
+Then request one narrow edit:
 
 ```text
-Apply only the README wording changes you just proposed.
+Apply only the README wording changes you proposed.
 ```
 
-When Sigil requests a file-changing tool, review:
-
-- The tool summary.
-- The affected file list.
-- The diff preview.
-- The allow/deny action.
-
-After approval, inspect your repository normally:
+Before allowing the change, check the summary, affected files, and diff. Finish by reviewing the repository yourself:
 
 ```bash
 git diff
 ```
 
-## 6. Use Planning For Larger Work
+Run any project-specific formatter or test that the change needs. For multi-step work, continue with [Common workflows](workflows.md); for daily controls, open the [TUI user guide](user-guide.md).
 
-For work that needs multiple steps, start directly with:
-
-```text
-/task improve installation docs for macOS, Linux, and Windows users
-```
-
-Sigil writes a durable task plan. You can guide or correct the next step in the composer. To continue without extra guidance:
-
-```text
-/task continue
-```
-
-For a larger edit where you want a read-only planning pass first, run `/plan <prompt>` and accept the plan-ready card only when you want Sigil to create and run the durable task. Planned task state is stored in append-only control records and is restored when you reopen the session.
-
-## 7. End A Session Cleanly
-
-Before committing work produced with Sigil:
-
-```bash
-git diff
-sigil doctor
-```
-
-Run project-specific tests or formatters as appropriate. Sigil can run commands when allowed, but you should still review the final diff and test output.
-
-## Next
-
-- Learn daily controls in [Sigil TUI User Guide](user-guide.md).
-- Choose another install channel or manage an existing install in [Installation](installation.md).
-- Browse practical task patterns in [Common Workflows](workflows.md).
-- Choose a model backend and authentication method in [Sigil Provider Guide](providers.md).
-- Tune shared workspace, permission, and tool behavior in [Sigil Configuration Guide](configuration.md).
-- Fix common setup issues in [Troubleshooting](troubleshooting.md).
+<!-- public-doc-cta: continue-by-task -->
+Next: [Continue with the User Guide](user-guide.md).

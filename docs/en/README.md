@@ -1,43 +1,34 @@
+<!-- public-doc-role: overview; authority: task-router; sections: start-here,choose-by-task,maintainer-documentation; cta: choose-next-task -->
+
 # Sigil User Docs
 
-[简体中文](../zh-CN/README.md)
+[Website](https://sigil.corerobin.com/) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/README.md)
 
-Sigil is a TUI-first coding agent. This page is a compact map of the user documentation; it intentionally does not repeat release versions, install commands, or provider credentials. Follow the linked guide that owns each topic for current details.
-
-These docs track `main`, while the packaged alpha is `v0.0.1-alpha.4`. Check [Unreleased](changelog.md#unreleased-main) for features added after that release.
+Use the shortest route for the task in front of you:
 
 ## Start Here
 
-If you are new to Sigil, read these guides in order:
-
-1. [Quickstart](quickstart.md): use the recommended npm alpha path, launch the TUI, complete Quick Setup, and run a first useful session.
-2. [Installation](installation.md): choose an install channel or find the authoritative update, uninstall, and release-archive instructions.
-3. [Visual tour](visual-tour.md): see the main session, approval review, configuration, verification, checkpoint recovery, and compaction preview surfaces.
-4. [TUI user guide](user-guide.md): learn the screen layout, controls, image input, attention notifications, sessions, approvals, planning, verification, recovery, context controls, and code intelligence.
-5. [Safety and permissions](safety.md): understand what can run, what needs approval, and how to review risky actions.
-6. [Troubleshooting](troubleshooting.md): diagnose setup, authentication, terminal, MCP, code-intelligence, and recovery problems.
+1. [Installation](installation.md) — choose a package, update it, or remove it.
+2. [Quickstart](quickstart.md) — complete setup and review a first small change.
+3. [TUI user guide](user-guide.md) — learn the daily working surface.
 
 ## Choose By Task
 
-| I want to... | Read |
+| Goal | Read |
 | --- | --- |
-| Try Sigil for the first time | [Quickstart](quickstart.md) |
-| Install, update, or uninstall Sigil | [Installation](installation.md) |
-| See what the product looks like | [Visual tour](visual-tour.md) |
-| Learn the TUI and session workflow | [TUI user guide](user-guide.md) |
-| Follow practical coding-task patterns | [Common workflows](workflows.md) |
-| Reuse copyable prompt patterns | [Cookbook](cookbook.md) |
-| Configure shared workspace, permission, task, terminal, or tool behavior | [Configuration](configuration.md) |
-| Choose a provider or configure provider authentication | [Provider guide](providers.md) |
-| Understand approvals, workspace boundaries, and MCP trust | [Safety and permissions](safety.md) |
-| Understand privacy, provider context, session logs, and secrets | [Privacy and data handling](privacy.md) |
-| Add external tools through MCP | [MCP guide](mcp.md) |
-| Look up commands, keys, paths, and recovery facts | [Reference](reference.md) |
-| Validate attention notifications, image clipboard input, mouse capture, OSC52 copy, tmux, SSH, or WSL behavior | [Terminal compatibility](terminal-compatibility.md) |
-| Fix a problem or report a bug | [Troubleshooting](troubleshooting.md) |
-| Check current support commitments | [Supported today and future work](status.md) |
-| Read user-facing release notes | [User changelog](changelog.md) |
+| Explore, edit, debug, review, or resume work | [Common workflows](workflows.md) |
+| Change settings | [Configuration](configuration.md) |
+| Choose a model or external tool | [Providers](providers.md) and [MCP](mcp.md) |
+| Decide whether an action is safe | [Safety](safety.md), [permissions](permissions-and-sandbox.md), and [privacy](privacy.md) |
+| Fix a problem | [Troubleshooting](troubleshooting.md) |
+| Look up an exact command, key, path, or field | [Reference](reference.md) and [configuration reference](configuration-reference.md) |
+| Check maturity or recent changes | [Status](status.md) and [changelog](changelog.md) |
+
+Search on the [docs site](https://sigil.corerobin.com/docs/) when you know the term but not the page.
 
 ## Maintainer Documentation
 
-These pages describe the user-facing product. Architecture, implementation, and contribution constraints live in the repository under [`dev/docs`](https://github.com/JimmyDaddy/sigil/tree/main/dev/docs), [`dev/governance`](https://github.com/JimmyDaddy/sigil/tree/main/dev/governance), and [`AGENTS.md`](https://github.com/JimmyDaddy/sigil/blob/main/AGENTS.md).
+Architecture, release, and engineering material lives in [developer documentation](https://github.com/JimmyDaddy/sigil/tree/main/dev/docs). Contributors should also read [CONTRIBUTING.md](https://github.com/JimmyDaddy/sigil/blob/main/CONTRIBUTING.md).
+
+<!-- public-doc-cta: choose-next-task -->
+Next: [Start with Quickstart](quickstart.md).

@@ -1,23 +1,24 @@
+<!-- public-doc-role: appearance; authority: appearance-guide; sections: start-with-a-built-in-theme,override-a-few-semantic-colors,keep-the-tui-readable; cta: open-appearance-reference -->
+
 # Appearance
 
-[Docs home](README.md) · [Configuration](configuration.md) · [Permissions and sandbox](permissions-and-sandbox.md) · [Advanced configuration](advanced-configuration.md) · [Field reference](configuration-reference.md) · [简体中文](../zh-CN/appearance.md)
+[Docs home](README.md) · [Configuration](configuration.md) · [Field reference](configuration-reference.md) · [简体中文](../zh-CN/appearance.md)
 
-Sigil's appearance settings affect only the TUI. They do not change model requests, approvals, session history, or tool data.
+Appearance changes only the TUI display. It does not change model requests, approvals, saved conversation, or tool data.
 
 ## Start With A Built-in Theme
 
 ```toml
 [appearance]
+info_rail = true
 theme = "sigil_dark"
 syntax_theme = "auto"
 usage_cost_currency = "auto"
 ```
 
-Built-in `theme` values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. In the TUI, open `/config`, select Appearance, and use `Enter` on Theme to preview the available choices before saving with `Ctrl-S`.
+`info_rail` controls whether the right rail starts visible when width allows. `F2` changes visibility for the current run; `Shift-F2` switches a visible rail between compact and detail. In `/config` → **Appearance**, preview theme choices with `Enter` and save with `Ctrl-S`.
 
-`syntax_theme` controls code highlighting in markdown, tool previews, and approval summaries. `auto` follows the selected TUI theme. You can choose `catppuccin_mocha`, `catppuccin_latte`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `gruvbox_light`, `nord`, `one_half_dark`, `one_half_light`, or `monokai` explicitly.
-
-`usage_cost_currency` changes only the display format for usage estimates. `auto` follows a provider balance currency when available and otherwise uses USD; `usd` and `cny` force a display choice.
+`syntax_theme = "auto"` follows the TUI theme. `usage_cost_currency` affects display only. The complete accepted values are in [Configuration Reference](configuration-reference.md#appearance).
 
 ## Override A Few Semantic Colors
 
@@ -28,20 +29,11 @@ accent_primary = "#91B6AA"
 markdown_code_bg = "#1C2129"
 ```
 
-Color overrides accept only `#RRGGBB`. Choose semantic roles such as `accent_primary` or `text_muted`, rather than trying to style one component at a time. The TUI previews an Appearance draft immediately so you can compare the composer, tool cards, approvals, diffs, status indicators, and markdown before saving.
-
-The color editor in `/config` lets you select a group and token, type or paste a value, clear one token with `Backspace` or `Delete`, clear a group, or clear all overrides with `Ctrl-R`.
+Overrides use `#RRGGBB` semantic tokens. Start with a few roles rather than restyling every component. `/config` shows the override count and theme preview, but fine-grained tokens are read-only there; add, change, or remove them in `sigil.toml`.
 
 ## Keep The TUI Readable
 
-Run `sigil doctor` after changing colors. It reports invalid values and warns about weak text contrast, indistinct status colors, or unclear structural cues. A warning does not silently change your palette; it tells you which role is likely hard to read.
+Run `sigil doctor` after color changes. It warns about weak text contrast or indistinct status and diff colors without silently replacing your palette. Keep primary text readable, success/warning/error states distinct, selection visible, and added/removed lines separable from their backgrounds.
 
-Good starting rules:
-
-- Keep `text_primary` readable on the main surface, panels, input, and user messages.
-- Keep success, warning, error, and pending states visually distinct.
-- Make selected text readable on both selected rows and buttons.
-- Keep added and removed diff colors distinct from their backgrounds.
-- Override a small number of tokens before attempting a full custom palette.
-
-The complete token groups and field defaults are in the [Configuration reference](configuration-reference.md#appearance). For terminal-specific controls such as mouse capture and copy behavior, see [Advanced configuration](advanced-configuration.md#terminal-and-model-request-overrides).
+<!-- public-doc-cta: open-appearance-reference -->
+Next: [Look up exact appearance fields](configuration-reference.md).

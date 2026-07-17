@@ -106,13 +106,13 @@ end
   failures << "#{page}: expected three terminal status signals, found #{terminal_signals}" unless terminal_signals == 3
 
   capability_rails = tags(html, "div").count { |tag| class_token?(attributes(tag), "capability-rail") }
-  failures << "#{page}: expected one capability rail, found #{capability_rails}" unless capability_rails == 1
+  failures << "#{page}: capability rail must stay removed, found #{capability_rails}" unless capability_rails.zero?
 
   capability_motion_toggles = tags(html, "button").count do |tag|
     attributes(tag).key?("data-capability-motion-toggle")
   end
-  unless capability_motion_toggles == 1
-    failures << "#{page}: expected one capability motion toggle, found #{capability_motion_toggles}"
+  unless capability_motion_toggles.zero?
+    failures << "#{page}: capability motion toggle must stay removed, found #{capability_motion_toggles}"
   end
 
   timeline_phases = tags(html, "li").filter_map do |tag|
@@ -129,10 +129,7 @@ end
   %w[
     terminal-window-main
     terminal-window-approval
-    terminal-window-config
     terminal-window-verification
-    terminal-window-checkpoint
-    terminal-window-compaction
   ].each do |window_class|
     count = tags(html, "a").count { |tag| class_token?(attributes(tag), window_class) }
     failures << "#{page}: expected one #{window_class}, found #{count}" unless count == 1
@@ -157,13 +154,22 @@ end
     attrs = attributes(tag)
     [attrs["data-step"], attrs["href"]] if class_token?(attrs, "task-card")
   end
-  expected_tasks = [["01", "installation/"], ["02", "quickstart/"], ["03", "user-guide/"]]
+  expected_tasks = [
+    ["01", "quickstart/"],
+    ["02", "user-guide/"],
+    ["03", "workflows/"],
+    ["04", "configuration/"],
+    ["05", "providers/"],
+    ["06", "safety/"],
+    ["07", "troubleshooting/"],
+    ["08", "reference/"]
+  ]
   unless task_cards == expected_tasks
     failures << "#{page}: task router must be #{expected_tasks.inspect}, found #{task_cards.inspect}"
   end
 
   hrefs = tags(html, "a").filter_map { |tag| attributes(tag)["href"] }
-  %w[installation/ quickstart/ user-guide/ visual-tour/].each do |href|
+  expected_tasks.map(&:last).each do |href|
     count = hrefs.count(href)
     failures << "#{page}: task/resource target #{href.inspect} must appear once, found #{count}" unless count == 1
   end
@@ -184,7 +190,7 @@ if File.file?(site_css_path)
     failures << "assets/site.css: terminal shimmer must be finite"
   end
 
-  %w[hero-field terminal-stage terminal-signals capability-rail session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
+  %w[hero-field terminal-stage terminal-signals session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
     failures << "assets/site.css: missing .#{class_name} styles" unless site_css.include?(".#{class_name}")
   end
 else
@@ -273,17 +279,20 @@ if File.file?(not_found_path)
                  tags(not_found_html, "script").filter_map { |tag| attributes(tag)["src"] } +
                  tags(not_found_html, "img").filter_map { |tag| attributes(tag)["src"] }
   invalid_assets = local_assets.reject do |url|
-    url.start_with?("http://", "https://", "//", "data:") || url.start_with?("/sigil/assets/")
+    url.start_with?("http://", "https://", "//", "data:") || url.start_with?("/assets/")
   end
   invalid_assets.each do |url|
-    failures << "404.html: local resource #{url.inspect} must use the depth-safe /sigil/assets/ prefix"
+    failures << "404.html: local resource #{url.inspect} must use the custom-domain /assets/ prefix"
   end
 
   home_links = not_found_html.scan(/(<a\b[^>]*>)\s*Go home\s*<\/a>/im).flatten
   if home_links.empty?
     failures << "404.html: missing Go home link"
-  elsif home_links.none? { |tag| attributes(tag)["href"] == "/sigil/" }
-    failures << "404.html: Go home link must use href=\"/sigil/\""
+  elsif home_links.none? { |tag| attributes(tag)["href"] == "/" }
+    failures << "404.html: Go home link must use href=\"/\""
+  end
+  unless tags(not_found_html, "a").any? { |tag| attributes(tag)["href"] == "/docs/" }
+    failures << "404.html: missing depth-safe docs recovery link"
   end
 else
   failures << "404.html: built page is missing"

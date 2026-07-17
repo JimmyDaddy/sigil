@@ -1,3 +1,5 @@
+<!-- public-doc-role: cookbook; authority: copyable-prompts; sections: explore-a-repository,make-a-small-docs-change,make-a-small-code-change,review-a-diff,fix-a-failing-test,improve-documentation-structure,use-planning,work-with-mcp,investigate-terminal-issues,ask-for-proposal-first,guard-rails-to-add-to-prompts; cta: apply-prompt -->
+
 # Cookbook
 
 [文档首页](README.md) · [常见工作流](workflows.md) · [English](../en/cookbook.md)
@@ -100,3 +102,6 @@ Prefer existing patterns in this repository.
 Run only docs checks; this is a docs-only change.
 If a tool needs write access, show the diff before applying it.
 ```
+
+<!-- public-doc-cta: apply-prompt -->
+下一步：[选择对应的工作流](workflows.md)。

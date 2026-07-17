@@ -1,76 +1,47 @@
+<!-- public-doc-role: provider-gemini; authority: provider-specific-setup; sections: minimal-setup,authentication,options-and-visible-limits,verify,common-problems; cta: return-providers -->
+
 # Gemini Provider
 
-[文档首页](README.md) · [Provider 指南](providers.md) · [配置](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [English](../en/provider-gemini.md)
+[Provider 指南](providers.md) · [配置](configuration.md) · [English](../en/provider-gemini.md)
 
-当你希望 Sigil 通过 Google `streamGenerateContent` API 调用 Gemini 模型时，选择 Gemini provider。
-
-## 最小配置
-
-临时本地使用：
+## 最小设置
 
 ```bash
 export SIGIL_GEMINI_API_KEY="..."
 sigil
 ```
 
-可复用配置：
-
 ```toml
 [agent]
 provider = "gemini"
 model = "gemini-2.5-pro"
-tool_timeout_secs = 30
-
-[model_request]
-request_timeout_secs = 120
-stream_idle_timeout_secs = 180
 
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-# 优先使用 SIGIL_GEMINI_API_KEY。
-# api_key = "..."
 ```
 
-完整起点模板见 [gemini.toml](../examples/config/gemini.toml)。
+可复制文件见 [gemini.toml](../examples/config/gemini.toml)。
 
 ## 认证
 
-Sigil 按这个顺序解析 Gemini 认证：
+`SIGIL_GEMINI_API_KEY` 优先于 `[providers.gemini].api_key`，并且不会改变其他 Google 工具使用的凭据。
 
-1. `SIGIL_GEMINI_API_KEY`
-2. `[providers.gemini].api_key`
+## 选项与可见限制
 
-如果希望 Sigil 使用专属凭据，同时不影响同一个 shell 里的其他 Google 工具，优先使用 `SIGIL_GEMINI_API_KEY`。
+`SIGIL_GEMINI_BASE_URL` 临时覆盖 `base_url`。Model 可用性可能因 account 和 region 不同；请明确设置 `[agent].model`。
 
-## 环境变量覆盖
-
-| 变量 | 覆盖 |
-| --- | --- |
-| `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
-
-## 行为说明
-
-Sigil 会为你处理 Gemini 的请求格式、function calling、response、usage 与安全阻断。Gemini 专属选项留在本文；正常的 tool approval、隐私与 session 工作流保持一致。
-
-只有明确识别的 Gemini model id 才能使用图片附件。浮动 `latest` 名称、未知 id 和未识别 alias 会在 provider transport 前失败。输入方式、本地上限、cache 行为与 resume 建议见[图片附件](user-guide.md#图片附件)。
-
-Gemini model 名称和 endpoint 可用性可能随账号和区域变化。自动化使用时，请显式配置 `[agent].model`。
+图片只支持识别到的 Gemini model ID。Floating `latest` 名称、未知 ID 和 alias 会在发送前被拒绝。
 
 ## 验证
 
-运行：
-
-```bash
-sigil doctor
-```
-
-检查 provider 名称、model、base URL、timeout 和 API key 来源。
+运行 `sigil doctor`，确认 provider、model、base URL 与凭据来源。
 
 ## 常见问题
 
-| 现象 | 检查 |
-| --- | --- |
-| 认证失败 | 确认 `SIGIL_GEMINI_API_KEY` 或 `[providers.gemini].api_key` 对 `sigil` 进程可见。 |
-| 找不到 model | 确认 Gemini model 名称和 endpoint version。 |
-| Tool/function calls 失败 | 确认该 model 和 endpoint 对你的账号支持 function calling。 |
-| 请求超时 | 检查网络，并考虑 `[model_request].stream_idle_timeout_secs`。 |
+- 认证失败：检查启动 shell 中的 `SIGIL_GEMINI_API_KEY`。
+- Model not found：确认 model name、endpoint version、account 和 region。
+- Function call 失败：确认 model 与 endpoint 支持 function calling。
+- Timeout：检查网络和 model-request timeout。
+
+<!-- public-doc-cta: return-providers -->
+下一步：[返回 Provider 指南](providers.md)。

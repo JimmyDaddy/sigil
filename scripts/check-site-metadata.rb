@@ -65,7 +65,16 @@ end
 
 sitemap_path = File.join(site_root, "sitemap.xml")
 if File.file?(sitemap_path)
-  sitemap_entries = File.read(sitemap_path).scan(%r{<url>\s*<loc>([^<]+)</loc>\s*<lastmod>([^<]+)</lastmod>}m).to_h
+  sitemap_xml = File.read(sitemap_path)
+  sitemap_urls = sitemap_xml.scan(%r{<loc>([^<]+)</loc>}).flatten
+  sitemap_entries = sitemap_xml.scan(%r{<url>\s*<loc>([^<]+)</loc>\s*<lastmod>([^<]+)</lastmod>}m).to_h
+  duplicate_urls = sitemap_urls.tally.select { |_url, count| count > 1 }.keys
+  unexpected_urls = sitemap_urls.uniq - expected_sitemap_dates.keys
+  errors << "sitemap.xml: duplicate URLs #{duplicate_urls.join(', ')}" unless duplicate_urls.empty?
+  errors << "sitemap.xml: unexpected URLs #{unexpected_urls.join(', ')}" unless unexpected_urls.empty?
+  if sitemap_urls.length != expected_sitemap_dates.length
+    errors << "sitemap.xml: expected #{expected_sitemap_dates.length} URLs, found #{sitemap_urls.length}"
+  end
   expected_sitemap_dates.each do |url, expected_date|
     actual_date = sitemap_entries[url]
     if actual_date.nil?
@@ -79,6 +88,8 @@ if File.file?(sitemap_path)
       errors << "sitemap.xml: #{url} has invalid lastmod #{actual_date.inspect}: #{error.message}"
     end
   end
+  errors << "sitemap.xml: changefreq is ignored by Google and must not be emitted" if sitemap_xml.include?("<changefreq>")
+  errors << "sitemap.xml: priority is ignored by Google and must not be emitted" if sitemap_xml.include?("<priority>")
 else
   errors << "sitemap.xml: built sitemap is missing"
 end

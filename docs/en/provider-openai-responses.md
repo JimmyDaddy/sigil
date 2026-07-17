@@ -1,80 +1,47 @@
+<!-- public-doc-role: provider-openai-responses; authority: provider-specific-setup; sections: minimal-setup,authentication,options-and-visible-limits,verify,common-problems; cta: return-providers -->
+
 # OpenAI Responses Provider
 
-[Docs home](README.md) · [Provider guide](providers.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [简体中文](../zh-CN/provider-openai-responses.md)
-
-Use this provider when your selected model is served by the OpenAI Responses API at `/v1/responses`. It is separate from the [OpenAI-compatible provider](provider-openai-compatible.md), which speaks the Chat Completions protocol and is intended for compatible gateways.
+[Provider guide](providers.md) · [OpenAI-compatible](provider-openai-compatible.md) · [简体中文](../zh-CN/provider-openai-responses.md)
 
 ## Minimal Setup
-
-For temporary local use:
 
 ```bash
 export SIGIL_OPENAI_RESPONSES_API_KEY="sk-..."
 sigil
 ```
 
-For a reusable config:
-
 ```toml
 [agent]
 provider = "openai_responses"
 model = "gpt-4.1"
-tool_timeout_secs = 30
-
-[model_request]
-request_timeout_secs = 120
-stream_idle_timeout_secs = 180
 
 [providers.openai_responses]
 base_url = "https://api.openai.com/v1"
-# Prefer SIGIL_OPENAI_RESPONSES_API_KEY.
-# api_key = "sk-..."
-organization = "org_..."
-project = "proj_..."
 ```
 
-A full starting template is available at [openai-responses.toml](../examples/config/openai-responses.toml).
+See [openai-responses.toml](../examples/config/openai-responses.toml) for a copyable file.
 
 ## Authentication
 
-Sigil resolves Responses authentication in this order:
+`SIGIL_OPENAI_RESPONSES_API_KEY` takes priority over `[providers.openai_responses].api_key`. `organization` and `project` are optional account fields.
 
-1. `SIGIL_OPENAI_RESPONSES_API_KEY`
-2. `[providers.openai_responses].api_key`
+## Options And Visible Limits
 
-Optional `organization` and `project` fields are only needed for accounts that require them.
+`SIGIL_OPENAI_RESPONSES_BASE_URL` temporarily overrides `base_url`. This provider uses the Responses route, not Chat Completions. Background requests and provider-hosted tools are not enabled.
 
-## Environment Overrides
-
-| Variable | Overrides |
-| --- | --- |
-| `SIGIL_OPENAI_RESPONSES_BASE_URL` | `[providers.openai_responses].base_url` |
-
-## Behavior Notes
-
-The provider streams text, supported reasoning deltas, tool calls, and usage from the Responses event stream. It preserves each completed native output-item array as opaque provider state and reuses it unchanged for the matching assistant turn on later requests. This protects provider-specific items such as encrypted reasoning content without changing the Chat Completions provider contract.
-
-Normal requests use the full local session context and do not use remote response-handle continuation. Background requests and provider-hosted tools are not enabled on this provider. The native compact endpoint is not a user action.
-
-Image attachments are available only for model IDs that Sigil explicitly recognizes as image-capable, including supported dated snapshots. Unknown IDs and malformed or unrecognized aliases fail before provider transport; Sigil does not infer image support from the endpoint alone. See [Image Attachments](user-guide.md#image-attachments) for input methods, local limits, cache behavior, and resume guidance.
-
-Guarded overflow recovery is enabled only for the official `https://api.openai.com/v1` endpoint and exact `gpt-4.1-2025-04-14` snapshot after a provider-confirmed context-window rejection before output or side effects. Its request/session-owned preparation records separate non-generating measurements for the rejected request and compacted target, then requires exact before/after savings and target-fit proof before one frozen retry. Aliases, compatible endpoints, ordinary errors, count failures, stale frontiers, restored sessions, and recursive recovery remain excluded.
+Image attachments work only for model IDs Sigil recognizes as image-capable. Unknown names and aliases are rejected before sending. On the official endpoint and supported dated snapshot, one context-window rejection before output may trigger one compact-and-retry attempt; compatible endpoints, aliases, restored sessions, and repeated failures do not.
 
 ## Verify
 
-Run:
-
-```bash
-sigil doctor
-```
-
-Check that `[agent].provider` is `openai_responses`, the base URL includes the expected `/v1` path, and the key source is `SIGIL_OPENAI_RESPONSES_API_KEY` or your local config.
+Run `sigil doctor` and confirm `openai_responses`, the `/v1` base URL, model, and credential source.
 
 ## Common Problems
 
-| Symptom | Check |
-| --- | --- |
-| 404 or route errors | Confirm that the service exposes the Responses route under the configured `/v1` root, not only Chat Completions. |
-| Auth fails | Confirm `SIGIL_OPENAI_RESPONSES_API_KEY` or `[providers.openai_responses].api_key`. |
-| Stream stops before a reply is final | The provider requires the terminal `response.completed` event; inspect the endpoint or gateway's SSE compatibility. |
-| Tool calls are not accepted | Confirm the selected model supports Responses function tools. |
+- 404: confirm the service exposes `/v1/responses`, not only Chat Completions.
+- Authentication: check the environment variable or config fallback.
+- Stream ends early: confirm the endpoint emits a completed Responses event.
+- Tool or image input fails: confirm the selected model supports that input.
+
+<!-- public-doc-cta: return-providers -->
+Next: [Return to Providers](providers.md).

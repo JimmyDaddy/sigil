@@ -1,0 +1,1195 @@
+{
+  "schema_version": 1,
+  "purpose": "Machine-readable ownership and regression policy for RFC-0022 public documentation.",
+  "root_readmes": [
+    {
+      "path": "README.md",
+      "locale": "en",
+      "role": "repository-entry",
+      "cta_key": "recommended-install-and-docs"
+    },
+    {
+      "path": "README.zh-CN.md",
+      "locale": "zh-CN",
+      "role": "repository-entry",
+      "cta_key": "recommended-install-and-docs"
+    }
+  ],
+  "locale_roots": {
+    "en": "docs/en",
+    "zh-CN": "docs/zh-CN"
+  },
+  "pages": [
+    {
+      "slug": "overview",
+      "file": "README.md",
+      "role": "task-router",
+      "heading_keys": [
+        "start-here",
+        "choose-by-task",
+        "maintainer-documentation"
+      ],
+      "cta_key": "choose-next-task",
+      "heading_labels": {
+        "en": [
+          "Start Here",
+          "Choose By Task",
+          "Maintainer Documentation"
+        ],
+        "zh-CN": [
+          "从这里开始",
+          "按任务选择",
+          "维护者文档"
+        ]
+      },
+      "cta_target": "quickstart.md",
+      "cta_labels": {
+        "en": "Start with Quickstart",
+        "zh-CN": "从快速开始入门"
+      }
+    },
+    {
+      "slug": "quickstart",
+      "file": "quickstart.md",
+      "role": "first-success",
+      "heading_keys": [
+        "before-you-begin",
+        "1-install-sigil",
+        "2-start-in-the-workspace-you-want-to-edit",
+        "3-complete-quick-setup",
+        "4-run-the-first-checks",
+        "5-try-a-small-safe-task"
+      ],
+      "cta_key": "continue-by-task",
+      "heading_labels": {
+        "en": [
+          "Before You Begin",
+          "1. Install Sigil",
+          "2. Start In The Workspace You Want To Edit",
+          "3. Complete Quick Setup",
+          "4. Run The First Checks",
+          "5. Try A Small Safe Task"
+        ],
+        "zh-CN": [
+          "开始前",
+          "1. 安装 Sigil",
+          "2. 在要编辑的 Workspace 中启动",
+          "3. 完成 Quick Setup",
+          "4. 跑第一轮检查",
+          "5. 尝试一个小的安全任务"
+        ]
+      },
+      "cta_target": "user-guide.md",
+      "cta_labels": {
+        "en": "Continue with the User Guide",
+        "zh-CN": "继续阅读用户指南"
+      }
+    },
+    {
+      "slug": "installation",
+      "file": "installation.md",
+      "role": "install-update-uninstall-authority",
+      "heading_keys": [
+        "requirements",
+        "supported-install-channels",
+        "install-with-npm",
+        "install-with-homebrew",
+        "install-with-cargo",
+        "install-from-source",
+        "start",
+        "install-from-a-release-archive",
+        "update",
+        "uninstall"
+      ],
+      "cta_key": "start-quickstart",
+      "heading_labels": {
+        "en": [
+          "Requirements",
+          "Supported Install Channels",
+          "Install With npm",
+          "Install With Homebrew",
+          "Install With Cargo",
+          "Install From Source",
+          "Start",
+          "Install From A Release Archive",
+          "Update",
+          "Uninstall"
+        ],
+        "zh-CN": [
+          "前置条件",
+          "当前安装渠道",
+          "通过 npm 安装",
+          "通过 Homebrew 安装",
+          "通过 Cargo 安装",
+          "从源码安装",
+          "启动",
+          "从 Release Archive 安装",
+          "更新",
+          "卸载"
+        ]
+      },
+      "cta_target": "quickstart.md",
+      "cta_labels": {
+        "en": "Start with Quickstart",
+        "zh-CN": "从快速开始入门"
+      }
+    },
+    {
+      "slug": "visual-tour",
+      "file": "visual-tour.md",
+      "role": "visual-orientation",
+      "heading_keys": [
+        "main-tui-session",
+        "approval-review",
+        "configuration-panel",
+        "task-verification",
+        "checkpoint-restore",
+        "context-compaction-preview"
+      ],
+      "cta_key": "start-quickstart",
+      "heading_labels": {
+        "en": [
+          "Main TUI Session",
+          "Approval Review",
+          "Configuration Panel",
+          "Task Verification",
+          "Checkpoint Restore",
+          "Context Compaction Preview"
+        ],
+        "zh-CN": [
+          "主 TUI 会话",
+          "审批检查",
+          "配置面板",
+          "任务验证",
+          "Checkpoint 恢复",
+          "上下文压缩预览"
+        ]
+      },
+      "cta_target": "quickstart.md",
+      "cta_labels": {
+        "en": "Start with Quickstart",
+        "zh-CN": "从快速开始入门"
+      }
+    },
+    {
+      "slug": "workflows",
+      "file": "workflows.md",
+      "role": "task-workflow-authority",
+      "heading_keys": [
+        "explore-an-unfamiliar-repository",
+        "make-a-small-change-safely",
+        "plan-a-larger-feature-or-refactor",
+        "debug-a-failing-command",
+        "review-local-changes",
+        "resume-previous-work",
+        "use-code-intelligence",
+        "connect-external-tools-with-mcp",
+        "what-to-review-yourself"
+      ],
+      "cta_key": "use-cookbook",
+      "heading_labels": {
+        "en": [
+          "Explore An Unfamiliar Repository",
+          "Make A Small Change Safely",
+          "Plan A Larger Feature Or Refactor",
+          "Debug A Failing Command",
+          "Review Local Changes",
+          "Resume Previous Work",
+          "Use Code Intelligence",
+          "Connect External Tools With MCP",
+          "What To Review Yourself"
+        ],
+        "zh-CN": [
+          "探索陌生仓库",
+          "安全地做小改动",
+          "计划较大的功能或重构",
+          "调试失败命令",
+          "Review 本地改动",
+          "恢复历史工作",
+          "使用 Code Intelligence",
+          "用 MCP 连接外部工具",
+          "需要你自己 Review 的内容"
+        ]
+      },
+      "cta_target": "cookbook.md",
+      "cta_labels": {
+        "en": "Open the Cookbook for copyable prompts",
+        "zh-CN": "打开 Cookbook 获取可复制提示词"
+      }
+    },
+    {
+      "slug": "cookbook",
+      "file": "cookbook.md",
+      "role": "copyable-prompts",
+      "heading_keys": [
+        "explore-a-repository",
+        "make-a-small-docs-change",
+        "make-a-small-code-change",
+        "review-a-diff",
+        "fix-a-failing-test",
+        "improve-documentation-structure",
+        "use-planning",
+        "work-with-mcp",
+        "investigate-terminal-issues",
+        "ask-for-proposal-first",
+        "guard-rails-to-add-to-prompts"
+      ],
+      "cta_key": "apply-prompt",
+      "heading_labels": {
+        "en": [
+          "Explore A Repository",
+          "Make A Small Docs Change",
+          "Make A Small Code Change",
+          "Review A Diff",
+          "Fix A Failing Test",
+          "Improve Documentation Structure",
+          "Use Planning",
+          "Work With MCP",
+          "Investigate Terminal Issues",
+          "Ask For Proposal First",
+          "Guard Rails To Add To Prompts"
+        ],
+        "zh-CN": [
+          "探索仓库",
+          "做一个小文档改动",
+          "做一个小代码改动",
+          "Review Diff",
+          "修复失败测试",
+          "改进文档结构",
+          "使用 Planning",
+          "处理 MCP",
+          "排查终端问题",
+          "要求先出方案",
+          "可加到 Prompt 里的护栏"
+        ]
+      },
+      "cta_target": "workflows.md",
+      "cta_labels": {
+        "en": "Choose the matching workflow",
+        "zh-CN": "选择对应的工作流"
+      }
+    },
+    {
+      "slug": "user-guide",
+      "file": "user-guide.md",
+      "role": "tui-daily-use-authority",
+      "heading_keys": [
+        "start",
+        "headless-and-local-api-workflows",
+        "main-screen",
+        "common-controls",
+        "image-attachments",
+        "slash-commands",
+        "config-panel",
+        "web-search-and-fetch",
+        "planned-tasks",
+        "approvals-and-file-changes",
+        "sessions-and-recovery",
+        "long-context-and-compaction",
+        "code-intelligence"
+      ],
+      "cta_key": "open-reference",
+      "heading_labels": {
+        "en": [
+          "Start",
+          "Headless And Local API Workflows",
+          "Main Screen",
+          "Common Controls",
+          "Image Attachments",
+          "Slash Commands",
+          "Config Panel",
+          "Web Search And Fetch",
+          "Planned Tasks",
+          "Approvals and File Changes",
+          "Sessions and Recovery",
+          "Long Context and Compaction",
+          "Code Intelligence"
+        ],
+        "zh-CN": [
+          "启动",
+          "Headless 与本地 API 工作流",
+          "主界面",
+          "高频操作",
+          "图片附件",
+          "Slash Commands",
+          "配置面板",
+          "Web Search 与 Fetch",
+          "计划任务",
+          "审批和文件变更",
+          "Session 和恢复",
+          "长上下文和压缩",
+          "Code Intelligence"
+        ]
+      },
+      "cta_target": "reference.md",
+      "cta_labels": {
+        "en": "Look up exact controls in Reference",
+        "zh-CN": "在参考中查找精确操作"
+      }
+    },
+    {
+      "slug": "safety",
+      "file": "safety.md",
+      "role": "risk-model-authority",
+      "heading_keys": [
+        "risk-model",
+        "review-an-approval",
+        "hard-limits-to-remember"
+      ],
+      "cta_key": "configure-permissions",
+      "required_topics": [
+        "approval-risk-model"
+      ],
+      "heading_labels": {
+        "en": [
+          "Risk Model",
+          "Review An Approval",
+          "Hard Limits To Remember"
+        ],
+        "zh-CN": [
+          "风险模型",
+          "检查审批",
+          "必须记住的硬限制"
+        ]
+      },
+      "cta_target": "permissions-and-sandbox.md",
+      "cta_labels": {
+        "en": "Configure permissions and sandbox limits",
+        "zh-CN": "配置权限与沙箱限制"
+      }
+    },
+    {
+      "slug": "configuration",
+      "file": "configuration.md",
+      "role": "configuration-router",
+      "heading_keys": [
+        "choose-the-right-page",
+        "resolution-order",
+        "minimal-path",
+        "workspace",
+        "storage-and-session-paths",
+        "use-doctor-when-setup-looks-wrong"
+      ],
+      "cta_key": "open-configuration-reference",
+      "heading_labels": {
+        "en": [
+          "Choose The Right Page",
+          "Resolution Order",
+          "Minimal Path",
+          "Workspace",
+          "Storage And Session Paths",
+          "Use Doctor When Setup Looks Wrong"
+        ],
+        "zh-CN": [
+          "选择正确的页面",
+          "解析顺序",
+          "最小配置路径",
+          "Workspace",
+          "存储与 Session 路径",
+          "Setup 异常时使用 Doctor"
+        ]
+      },
+      "cta_target": "configuration-reference.md",
+      "cta_labels": {
+        "en": "Look up exact configuration fields",
+        "zh-CN": "查找精确配置字段"
+      }
+    },
+    {
+      "slug": "permissions-and-sandbox",
+      "file": "permissions-and-sandbox.md",
+      "role": "permission-network-sandbox-authority",
+      "heading_keys": [
+        "choose-a-permission-mode",
+        "review-before-an-action-runs",
+        "narrow-command-and-path-rules",
+        "network-and-web-tools",
+        "sandbox-expectations"
+      ],
+      "cta_key": "review-safety",
+      "required_topics": [
+        "network-control",
+        "external-directory",
+        "sandbox-limit"
+      ],
+      "heading_labels": {
+        "en": [
+          "Choose A Permission Mode",
+          "Review Before An Action Runs",
+          "Narrow Command And Path Rules",
+          "Network And Web Tools",
+          "Sandbox Expectations"
+        ],
+        "zh-CN": [
+          "选择 Permission Mode",
+          "动作运行前检查",
+          "收窄命令与路径规则",
+          "网络与 Web 工具",
+          "沙箱预期"
+        ]
+      },
+      "cta_target": "safety.md",
+      "cta_labels": {
+        "en": "Review the Safety decision checklist",
+        "zh-CN": "查看安全决策清单"
+      }
+    },
+    {
+      "slug": "appearance",
+      "file": "appearance.md",
+      "role": "appearance-guide",
+      "heading_keys": [
+        "start-with-a-built-in-theme",
+        "override-a-few-semantic-colors",
+        "keep-the-tui-readable"
+      ],
+      "cta_key": "open-appearance-reference",
+      "heading_labels": {
+        "en": [
+          "Start With A Built-in Theme",
+          "Override A Few Semantic Colors",
+          "Keep The TUI Readable"
+        ],
+        "zh-CN": [
+          "从内置主题开始",
+          "覆盖少量语义颜色",
+          "保持 TUI 可读"
+        ]
+      },
+      "cta_target": "configuration-reference.md",
+      "cta_labels": {
+        "en": "Look up exact appearance fields",
+        "zh-CN": "查找精确外观字段"
+      }
+    },
+    {
+      "slug": "advanced-configuration",
+      "file": "advanced-configuration.md",
+      "role": "advanced-settings-guide",
+      "heading_keys": [
+        "task-planning",
+        "verification",
+        "memory-skills-and-agents",
+        "compaction-and-code-intelligence",
+        "terminal-and-model-request-overrides",
+        "plugins-and-mcp"
+      ],
+      "cta_key": "open-configuration-reference",
+      "required_topics": [
+        "task",
+        "memory",
+        "skills-agents",
+        "compaction",
+        "code-intelligence",
+        "terminal",
+        "model-request-env",
+        "plugins",
+        "mcp"
+      ],
+      "heading_labels": {
+        "en": [
+          "Task Planning",
+          "Verification",
+          "Memory, Skills, And Agents",
+          "Compaction And Code Intelligence",
+          "Terminal And Model Request Overrides",
+          "Plugins And MCP"
+        ],
+        "zh-CN": [
+          "任务规划",
+          "验证",
+          "Memory、Skills 与 Agents",
+          "Compaction 与代码智能",
+          "终端与模型请求环境变量覆盖",
+          "Plugins 与 MCP"
+        ]
+      },
+      "cta_target": "configuration-reference.md",
+      "cta_labels": {
+        "en": "Look up exact configuration fields",
+        "zh-CN": "查找精确配置字段"
+      }
+    },
+    {
+      "slug": "configuration-reference",
+      "file": "configuration-reference.md",
+      "role": "configuration-field-authority",
+      "heading_keys": [
+        "workspace-storage-and-session",
+        "agent-and-providers",
+        "execution",
+        "verification",
+        "appearance",
+        "task",
+        "permission",
+        "web-memory-skills-and-compaction",
+        "code-intelligence-terminal-plugins-and-mcp"
+      ],
+      "cta_key": "return-configuration",
+      "heading_labels": {
+        "en": [
+          "Workspace, Storage, And Session",
+          "Agent And Providers",
+          "Execution",
+          "Verification",
+          "Appearance",
+          "Task",
+          "Permission",
+          "Web, Memory, Skills, And Compaction",
+          "Code Intelligence, Terminal, Plugins, And MCP"
+        ],
+        "zh-CN": [
+          "Workspace、Storage 与 Session",
+          "Agent 与 Providers",
+          "Execution",
+          "Verification",
+          "Appearance",
+          "Task",
+          "Permission",
+          "Web、Memory、Skills 与 Compaction",
+          "代码智能、Terminal、Plugins 与 MCP"
+        ]
+      },
+      "cta_target": "configuration.md",
+      "cta_labels": {
+        "en": "Return to Configuration",
+        "zh-CN": "返回配置指南"
+      }
+    },
+    {
+      "slug": "providers",
+      "file": "providers.md",
+      "role": "provider-selection-authority",
+      "heading_keys": [
+        "choose-a-provider",
+        "authentication-priority",
+        "copyable-starting-points",
+        "troubleshooting-path"
+      ],
+      "cta_key": "open-provider-guide",
+      "heading_labels": {
+        "en": [
+          "Choose A Provider",
+          "Authentication Priority",
+          "Copyable Starting Points",
+          "Troubleshooting Path"
+        ],
+        "zh-CN": [
+          "选择 Provider",
+          "认证优先级",
+          "可复制起点",
+          "排障路径"
+        ]
+      },
+      "cta_target": "provider-deepseek.md",
+      "cta_labels": {
+        "en": "Set up DeepSeek or choose another provider",
+        "zh-CN": "设置 DeepSeek 或选择其他 Provider"
+      }
+    },
+    {
+      "slug": "provider-deepseek",
+      "file": "provider-deepseek.md",
+      "role": "provider-specific-setup",
+      "heading_keys": [
+        "minimal-setup",
+        "authentication",
+        "options-and-visible-limits",
+        "verify",
+        "common-problems"
+      ],
+      "cta_key": "return-providers",
+      "heading_labels": {
+        "en": [
+          "Minimal Setup",
+          "Authentication",
+          "Options And Visible Limits",
+          "Verify",
+          "Common Problems"
+        ],
+        "zh-CN": [
+          "最小设置",
+          "认证",
+          "选项与可见限制",
+          "验证",
+          "常见问题"
+        ]
+      },
+      "cta_target": "providers.md",
+      "cta_labels": {
+        "en": "Return to Providers",
+        "zh-CN": "返回 Provider 指南"
+      }
+    },
+    {
+      "slug": "provider-openai-compatible",
+      "file": "provider-openai-compatible.md",
+      "role": "provider-specific-setup",
+      "heading_keys": [
+        "minimal-setup",
+        "authentication",
+        "options-and-visible-limits",
+        "verify",
+        "common-problems"
+      ],
+      "cta_key": "return-providers",
+      "heading_labels": {
+        "en": [
+          "Minimal Setup",
+          "Authentication",
+          "Options And Visible Limits",
+          "Verify",
+          "Common Problems"
+        ],
+        "zh-CN": [
+          "最小设置",
+          "认证",
+          "选项与可见限制",
+          "验证",
+          "常见问题"
+        ]
+      },
+      "cta_target": "providers.md",
+      "cta_labels": {
+        "en": "Return to Providers",
+        "zh-CN": "返回 Provider 指南"
+      }
+    },
+    {
+      "slug": "provider-openai-responses",
+      "file": "provider-openai-responses.md",
+      "role": "provider-specific-setup",
+      "heading_keys": [
+        "minimal-setup",
+        "authentication",
+        "options-and-visible-limits",
+        "verify",
+        "common-problems"
+      ],
+      "cta_key": "return-providers",
+      "heading_labels": {
+        "en": [
+          "Minimal Setup",
+          "Authentication",
+          "Options And Visible Limits",
+          "Verify",
+          "Common Problems"
+        ],
+        "zh-CN": [
+          "最小设置",
+          "认证",
+          "选项与可见限制",
+          "验证",
+          "常见问题"
+        ]
+      },
+      "cta_target": "providers.md",
+      "cta_labels": {
+        "en": "Return to Providers",
+        "zh-CN": "返回 Provider 指南"
+      }
+    },
+    {
+      "slug": "provider-anthropic",
+      "file": "provider-anthropic.md",
+      "role": "provider-specific-setup",
+      "heading_keys": [
+        "minimal-setup",
+        "authentication",
+        "options-and-visible-limits",
+        "verify",
+        "common-problems"
+      ],
+      "cta_key": "return-providers",
+      "heading_labels": {
+        "en": [
+          "Minimal Setup",
+          "Authentication",
+          "Options And Visible Limits",
+          "Verify",
+          "Common Problems"
+        ],
+        "zh-CN": [
+          "最小设置",
+          "认证",
+          "选项与可见限制",
+          "验证",
+          "常见问题"
+        ]
+      },
+      "cta_target": "providers.md",
+      "cta_labels": {
+        "en": "Return to Providers",
+        "zh-CN": "返回 Provider 指南"
+      }
+    },
+    {
+      "slug": "provider-gemini",
+      "file": "provider-gemini.md",
+      "role": "provider-specific-setup",
+      "heading_keys": [
+        "minimal-setup",
+        "authentication",
+        "options-and-visible-limits",
+        "verify",
+        "common-problems"
+      ],
+      "cta_key": "return-providers",
+      "heading_labels": {
+        "en": [
+          "Minimal Setup",
+          "Authentication",
+          "Options And Visible Limits",
+          "Verify",
+          "Common Problems"
+        ],
+        "zh-CN": [
+          "最小设置",
+          "认证",
+          "选项与可见限制",
+          "验证",
+          "常见问题"
+        ]
+      },
+      "cta_target": "providers.md",
+      "cta_labels": {
+        "en": "Return to Providers",
+        "zh-CN": "返回 Provider 指南"
+      }
+    },
+    {
+      "slug": "privacy",
+      "file": "privacy.md",
+      "role": "data-and-credential-authority",
+      "heading_keys": [
+        "what-can-leave-your-machine",
+        "what-stays-local",
+        "api-keys",
+        "session-logs",
+        "mcp-and-web-data",
+        "doctor-and-feedback-output",
+        "before-sharing-logs-or-reports"
+      ],
+      "cta_key": "review-safety",
+      "required_topics": [
+        "credentials-plaintext",
+        "session-log-local",
+        "data-egress"
+      ],
+      "heading_labels": {
+        "en": [
+          "What Can Leave Your Machine",
+          "What Stays Local",
+          "API Keys",
+          "Session Logs",
+          "MCP And Web Data",
+          "Doctor And Feedback Output",
+          "Before Sharing Logs Or Reports"
+        ],
+        "zh-CN": [
+          "什么可能离开本机",
+          "什么默认留在本机",
+          "API Keys",
+          "Session 日志",
+          "MCP 与 Web 数据",
+          "Doctor 与 Feedback 输出",
+          "分享日志或报告前"
+        ]
+      },
+      "cta_target": "safety.md",
+      "cta_labels": {
+        "en": "Review the Safety guide",
+        "zh-CN": "查看安全指南"
+      }
+    },
+    {
+      "slug": "troubleshooting",
+      "file": "troubleshooting.md",
+      "role": "symptom-to-action-authority",
+      "heading_keys": [
+        "decision-tree",
+        "quick-setup-opens-every-time",
+        "sigil-cannot-find-the-api-key",
+        "theme-colors-are-hard-to-read",
+        "the-wrong-workspace-is-being-used",
+        "a-file-tool-cannot-access-a-path",
+        "a-tool-needs-approval-in-headless-run",
+        "an-approval-was-denied-or-timed-out",
+        "mouse-or-clipboard-does-not-work",
+        "attention-notification-does-not-appear",
+        "session-restore-shows-interrupted-tools",
+        "context-usage-is-high",
+        "mcp-server-is-missing-failed-or-deferred",
+        "code-intelligence-is-not-ready",
+        "command-not-found-after-install",
+        "report-a-bug"
+      ],
+      "cta_key": "open-reference",
+      "heading_labels": {
+        "en": [
+          "Decision Tree",
+          "Quick Setup Opens Every Time",
+          "Sigil Cannot Find The API Key",
+          "Theme Colors Are Hard To Read",
+          "The Wrong Workspace Is Being Used",
+          "A File Tool Cannot Access A Path",
+          "A Tool Needs Approval In Headless `run`",
+          "An Approval Was Denied Or Timed Out",
+          "Mouse Or Clipboard Does Not Work",
+          "Attention Notification Does Not Appear",
+          "Session Restore Shows Interrupted Tools",
+          "Context Usage Is High",
+          "MCP Server Is Missing, Failed, Or Deferred",
+          "Code Intelligence Is Not Ready",
+          "Command Not Found After Install",
+          "Report A Bug"
+        ],
+        "zh-CN": [
+          "决策树",
+          "Quick Setup 每次都打开",
+          "Sigil 找不到 API Key",
+          "主题颜色难以阅读",
+          "Workspace 不对",
+          "文件工具不能访问某个路径",
+          "Headless `run` 里工具需要审批",
+          "审批被拒绝或超时",
+          "鼠标或剪贴板不可用",
+          "Attention Notification 没有出现",
+          "Session 恢复后显示 Interrupted Tools",
+          "Context Usage 很高",
+          "MCP Server 缺失、失败或 Deferred",
+          "Code Intelligence 未就绪",
+          "安装后 Command Not Found",
+          "报告问题"
+        ]
+      },
+      "cta_target": "reference.md",
+      "cta_labels": {
+        "en": "Look up exact commands and keys",
+        "zh-CN": "查找精确命令与键位"
+      }
+    },
+    {
+      "slug": "reference",
+      "file": "reference.md",
+      "role": "command-key-path-authority",
+      "heading_keys": [
+        "tui-keys",
+        "slash-commands",
+        "cli-commands",
+        "machine-output-and-local-server",
+        "config-resolution",
+        "important-paths",
+        "web-tool-inputs",
+        "approval-outcomes",
+        "session-recovery-facts"
+      ],
+      "cta_key": "return-user-guide",
+      "heading_labels": {
+        "en": [
+          "TUI Keys",
+          "Slash Commands",
+          "CLI Commands",
+          "Machine Output And Local Server",
+          "Config Resolution",
+          "Important Paths",
+          "Web Tool Inputs",
+          "Approval Outcomes",
+          "Session Recovery Facts"
+        ],
+        "zh-CN": [
+          "TUI 键位",
+          "Slash Commands",
+          "CLI Commands",
+          "Machine Output 与本地服务",
+          "Config 解析顺序",
+          "重要路径",
+          "Web Tool 输入",
+          "Approval Outcomes",
+          "Session Recovery Facts"
+        ]
+      },
+      "cta_target": "user-guide.md",
+      "cta_labels": {
+        "en": "Return to the User Guide",
+        "zh-CN": "返回用户指南"
+      }
+    },
+    {
+      "slug": "mcp",
+      "file": "mcp.md",
+      "role": "mcp-setup-and-use-authority",
+      "heading_keys": [
+        "minimal-config",
+        "streamable-http",
+        "process-environment-and-credentials",
+        "startup-and-refresh",
+        "compatibility-and-limits",
+        "trust-and-identity",
+        "roots-resources-prompts-and-input",
+        "troubleshooting"
+      ],
+      "cta_key": "open-troubleshooting",
+      "heading_labels": {
+        "en": [
+          "Minimal Config",
+          "Streamable HTTP",
+          "Process Environment And Credentials",
+          "Startup And Refresh",
+          "Compatibility And Limits",
+          "Trust And Identity",
+          "Roots, Resources, Prompts, And Input",
+          "Troubleshooting"
+        ],
+        "zh-CN": [
+          "最小配置",
+          "Streamable HTTP",
+          "进程环境与凭据",
+          "启动与刷新",
+          "兼容性与限制",
+          "Trust 与 Identity",
+          "Roots、Resources、Prompts 与输入",
+          "故障排查"
+        ]
+      },
+      "cta_target": "troubleshooting.md",
+      "cta_labels": {
+        "en": "Use the MCP troubleshooting path",
+        "zh-CN": "使用 MCP 排障路径"
+      }
+    },
+    {
+      "slug": "terminal-compatibility",
+      "file": "terminal-compatibility.md",
+      "role": "terminal-smoke-authority",
+      "heading_keys": [
+        "baseline",
+        "attention-notification-smoke",
+        "mouse-smoke",
+        "text-selection-and-copy",
+        "image-paste-smoke",
+        "tmux-screen-ssh-and-wsl",
+        "result-template"
+      ],
+      "cta_key": "open-troubleshooting",
+      "heading_labels": {
+        "en": [
+          "Baseline",
+          "Attention Notification Smoke",
+          "Mouse Smoke",
+          "Text Selection And Copy",
+          "Image Paste Smoke",
+          "tmux, screen, SSH, And WSL",
+          "Result Template"
+        ],
+        "zh-CN": [
+          "基线",
+          "Attention Notification Smoke",
+          "鼠标 Smoke",
+          "文本选择与复制",
+          "图片粘贴 Smoke",
+          "tmux、screen、SSH 与 WSL",
+          "结果模板"
+        ]
+      },
+      "cta_target": "troubleshooting.md",
+      "cta_labels": {
+        "en": "Continue with Troubleshooting",
+        "zh-CN": "继续排障"
+      }
+    },
+    {
+      "slug": "status",
+      "file": "status.md",
+      "role": "maturity-and-limit-authority",
+      "heading_keys": [
+        "supported-today",
+        "limited-or-advanced",
+        "not-supported-yet"
+      ],
+      "cta_key": "open-changelog",
+      "heading_labels": {
+        "en": [
+          "Supported Today",
+          "Limited Or Advanced",
+          "Not Supported Yet"
+        ],
+        "zh-CN": [
+          "当前支持",
+          "有限制或高级用法",
+          "暂不支持"
+        ]
+      },
+      "cta_target": "changelog.md",
+      "cta_labels": {
+        "en": "Read the Changelog",
+        "zh-CN": "阅读 Changelog"
+      }
+    },
+    {
+      "slug": "changelog",
+      "file": "changelog.md",
+      "role": "user-visible-release-history",
+      "heading_keys": [
+        "unreleased-main",
+        "v0-0-1-alpha-4-2026-07-16",
+        "v0-0-1-alpha-3-2026-07-15",
+        "v0-0-1-alpha-2-2026-07-15",
+        "v0-0-1-alpha-1-2026-07-08",
+        "v0-0-1-alpha-2026-07-07"
+      ],
+      "cta_key": "open-installation",
+      "heading_labels": {
+        "en": [
+          "Unreleased - main",
+          "v0.0.1-alpha.4 - 2026-07-16",
+          "v0.0.1-alpha.3 - 2026-07-15",
+          "v0.0.1-alpha.2 - 2026-07-15",
+          "v0.0.1-alpha.1 - 2026-07-08",
+          "v0.0.1-alpha - 2026-07-07"
+        ],
+        "zh-CN": [
+          "Unreleased - main",
+          "v0.0.1-alpha.4 - 2026-07-16",
+          "v0.0.1-alpha.3 - 2026-07-15",
+          "v0.0.1-alpha.2 - 2026-07-15",
+          "v0.0.1-alpha.1 - 2026-07-08",
+          "v0.0.1-alpha - 2026-07-07"
+        ]
+      },
+      "cta_target": "installation.md",
+      "cta_labels": {
+        "en": "Review installation and update paths",
+        "zh-CN": "查看安装与更新方式"
+      }
+    }
+  ],
+  "hub_task_targets": [
+    "quickstart",
+    "user-guide",
+    "workflows",
+    "configuration",
+    "providers",
+    "safety",
+    "troubleshooting",
+    "reference"
+  ],
+  "entry_html": [
+    "site/index.html",
+    "site/docs/index.html",
+    "site/zh-CN/index.html",
+    "site/zh-CN/docs/index.html",
+    "site/404.html"
+  ],
+  "config_examples": [
+    "docs/examples/config/README.md",
+    "docs/examples/config/anthropic.toml",
+    "docs/examples/config/code-intelligence-rust.toml",
+    "docs/examples/config/deepseek-basic.toml",
+    "docs/examples/config/gemini.toml",
+    "docs/examples/config/mcp-safe-defaults.toml",
+    "docs/examples/config/openai-compatible.toml",
+    "docs/examples/config/openai-responses.toml"
+  ],
+  "topic_authorities": {
+    "installation-release": "installation",
+    "first-success": "quickstart",
+    "daily-tui": "user-guide",
+    "commands-keys-paths": "reference",
+    "configuration-fields": "configuration-reference",
+    "permission-network-sandbox": "permissions-and-sandbox",
+    "risk-model": "safety",
+    "data-and-credentials": "privacy",
+    "provider-selection": "providers",
+    "mcp": "mcp",
+    "symptom-to-action": "troubleshooting",
+    "maturity-and-limits": "status",
+    "release-history": "changelog"
+  },
+  "search_first_result": {
+    "en": {
+      "install": "installation",
+      "provider": "providers",
+      "approval": "safety",
+      "sandbox": "permissions-and-sandbox",
+      "MCP": "mcp",
+      "session restore": "user-guide"
+    },
+    "zh-CN": {
+      "安装": "installation",
+      "provider": "providers",
+      "审批": "safety",
+      "沙箱": "permissions-and-sandbox",
+      "MCP": "mcp",
+      "会话恢复": "user-guide"
+    }
+  },
+  "allowlist": [
+    {
+      "path": "README.md",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "The repository entry keeps one recommended first-install command."
+    },
+    {
+      "path": "README.zh-CN.md",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "The localized repository entry mirrors the one recommended command."
+    },
+    {
+      "path": "docs/en/quickstart.md",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "Quickstart needs one executable path to first success."
+    },
+    {
+      "path": "docs/zh-CN/quickstart.md",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "Localized Quickstart mirrors the one executable first-success path."
+    },
+    {
+      "path": "site/index.html",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "The homepage keeps one recommended first-install command."
+    },
+    {
+      "path": "site/zh-CN/index.html",
+      "rule": "installation-authority",
+      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "reason": "The localized homepage mirrors the one recommended command."
+    },
+    {
+      "path": "docs/examples/config/deepseek-basic.toml",
+      "rule": "provider-auth-authority",
+      "line_pattern": "SIGIL_API_KEY",
+      "reason": "A provider-specific config example may name its matching environment credential."
+    },
+    {
+      "path": "docs/examples/config/openai-compatible.toml",
+      "rule": "provider-auth-authority",
+      "line_pattern": "SIGIL_OPENAI_COMPATIBLE_API_KEY",
+      "reason": "A provider-specific config example may name its matching environment credential."
+    },
+    {
+      "path": "docs/examples/config/openai-responses.toml",
+      "rule": "provider-auth-authority",
+      "line_pattern": "SIGIL_OPENAI_RESPONSES_API_KEY",
+      "reason": "A provider-specific config example may name its matching environment credential."
+    },
+    {
+      "path": "docs/examples/config/anthropic.toml",
+      "rule": "provider-auth-authority",
+      "line_pattern": "SIGIL_ANTHROPIC_API_KEY",
+      "reason": "A provider-specific config example may name its matching environment credential."
+    },
+    {
+      "path": "docs/examples/config/gemini.toml",
+      "rule": "provider-auth-authority",
+      "line_pattern": "SIGIL_GEMINI_API_KEY",
+      "reason": "A provider-specific config example may name its matching environment credential."
+    }
+  ]
+}
