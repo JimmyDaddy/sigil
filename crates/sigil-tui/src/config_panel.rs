@@ -95,6 +95,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) appearance_theme: ThemeId,
     pub(crate) appearance_syntax_theme: SyntaxThemeId,
     pub(crate) appearance_usage_cost_currency: UsageCostCurrency,
+    pub(crate) appearance_info_rail: bool,
     pub(crate) appearance_color_group_index: usize,
     pub(crate) appearance_color_token_index: usize,
     pub(crate) mcp_servers: Vec<McpServerDraft>,

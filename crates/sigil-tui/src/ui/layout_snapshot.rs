@@ -196,7 +196,12 @@ impl LayoutSnapshot {
             return snapshot;
         }
 
-        let shell = shell_layout(screen, app.footer_strip_height(), app.composer_height());
+        let shell = shell_layout(
+            screen,
+            app.footer_strip_height(),
+            app.composer_height(),
+            app.info_rail_visible(),
+        );
         let (egress_disclosure, live_content) = egress_disclosure_layout(shell.live_panel, app);
         let mut snapshot = Self {
             screen,
@@ -1210,8 +1215,17 @@ fn approval_action_badge_width(label: &str, selected: bool) -> u16 {
     }
 }
 
-pub(super) fn shell_layout(screen: Rect, footer_height: u16, composer_height: u16) -> ShellLayout {
-    let sidebar_width = sidebar_width_for_terminal(screen.width as usize) as u16;
+pub(super) fn shell_layout(
+    screen: Rect,
+    footer_height: u16,
+    composer_height: u16,
+    info_rail_visible: bool,
+) -> ShellLayout {
+    let sidebar_width = if info_rail_visible {
+        sidebar_width_for_terminal(screen.width as usize) as u16
+    } else {
+        0
+    };
     let shell = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(sidebar_width)])

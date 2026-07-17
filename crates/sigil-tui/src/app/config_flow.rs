@@ -1,4 +1,5 @@
 use crate::appearance_diagnostics::appearance_doctor_checks;
+use crate::commands::{UiCommand, command_for_key_event};
 use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
     CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
@@ -259,8 +260,18 @@ impl AppState {
             self.should_quit = true;
             return Ok(None);
         }
+        let info_rail_command = match command_for_key_event(key) {
+            Some(
+                command @ (UiCommand::ToggleInfoRailVisibility | UiCommand::ToggleInfoRailDetail),
+            ) => Some(command),
+            _ => None,
+        };
+        if info_rail_command == Some(UiCommand::ToggleInfoRailDetail) {
+            self.handle_ui_command(UiCommand::ToggleInfoRailDetail);
+            return Ok(None);
+        }
         if self.has_modal() {
-            if key.code == KeyCode::F(2)
+            if (key.code == KeyCode::F(2) && key.modifiers.is_empty())
                 || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 let outcome = self.submit_modal();
@@ -279,6 +290,10 @@ impl AppState {
             let outcome = self.handle_modal_key_event(key);
             return self.apply_config_modal_outcome(outcome);
         }
+        if info_rail_command == Some(UiCommand::ToggleInfoRailVisibility) {
+            self.handle_ui_command(UiCommand::ToggleInfoRailVisibility);
+            return Ok(None);
+        }
 
         let keep_close_guard = matches!(key.code, KeyCode::Esc)
             || (key.code == KeyCode::Enter
@@ -293,9 +308,6 @@ impl AppState {
         match key.code {
             KeyCode::Esc => {
                 return self.attempt_close_config();
-            }
-            KeyCode::F(2) => {
-                return self.save_config_draft();
             }
             KeyCode::F(3) => {
                 return self.save_config_draft_and_close();
@@ -768,6 +780,13 @@ impl AppState {
                         ConfigField::TerminalNotificationMethod => {
                             config_state.draft.terminal_notification_method =
                                 config_state.draft.terminal_notification_method.next();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::AppearanceInfoRail => {
+                            config_state.draft.appearance_info_rail =
+                                !config_state.draft.appearance_info_rail;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
@@ -1757,6 +1776,9 @@ impl AppState {
     }
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
+        let info_rail_default_changed = self.config_snapshot.as_ref().is_none_or(|snapshot| {
+            snapshot.appearance.info_rail != root_config.appearance.info_rail
+        });
         let appearance_changed = self
             .config_snapshot
             .as_ref()
@@ -1769,6 +1791,9 @@ impl AppState {
         self.sigil_paths = sigil_paths;
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
+        if info_rail_default_changed {
+            self.info_rail_visible = root_config.appearance.info_rail;
+        }
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
         self.runtime.permission_mode = root_config.permission.mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();

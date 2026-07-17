@@ -7,11 +7,12 @@ use sigil_kernel::{
     AgentConfig, AgentMailboxMessageEntry, AgentMailboxStatus, AgentRole, AgentRouteId,
     AgentThreadId, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, ContextBodyRef,
     ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
-    ControlEntry, EventHandler, JobIntentEntry, MemoryConfig, PackedContext, PermissionConfig,
-    RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef, StepLeaseEntry,
-    StepLeaseStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory,
-    ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ControlEntry, EventHandler, JobIntentEntry, MemoryConfig, ModelMessage, PackedContext,
+    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef,
+    StepLeaseEntry, StepLeaseStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall,
+    ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
+    WorkspaceConfig,
 };
 
 use super::*;
@@ -170,7 +171,7 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .info_rail
             .controls
             .iter()
-            .any(|line| line == "Ctrl-C: quit")
+            .any(|line| line.starts_with("Ctrl-C: quit"))
     );
 }
 
@@ -182,6 +183,30 @@ fn footer_hints_show_shift_enter_when_keyboard_enhancement_is_enabled() {
 
     assert!(view_model.footer.hints.contains("Shift-Enter newline"));
     assert!(!view_model.footer.hints.contains("Ctrl-J newline"));
+}
+
+#[test]
+fn footer_hints_explain_copy_selection_and_latest_response() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::AssistantMessage(
+        ModelMessage::assistant(Some("latest response".to_owned()), Vec::new()),
+    ))))?;
+
+    let latest = UiViewModel::from_app(&app);
+    assert!(latest.footer.hints.contains("Ctrl-L copy reply"));
+
+    assert!(!app.begin_timeline_text_selection_at(0, 0));
+    assert!(app.update_timeline_text_selection_at(0, 1));
+    let selected = UiViewModel::from_app(&app);
+    assert!(selected.footer.hints.contains("Ctrl-C copy selection"));
+    assert!(
+        selected
+            .info_rail
+            .controls
+            .iter()
+            .any(|line| line == "Ctrl-C: copy selection")
+    );
+    Ok(())
 }
 
 #[test]
@@ -205,7 +230,7 @@ fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
             .any(|line| line == "F2: info rail")
     );
 
-    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
     let detail = UiViewModel::from_app(&app);
 
     assert!(app.info_rail_detail_enabled());
@@ -225,6 +250,43 @@ fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
     );
     assert!(detail.info_rail.usage_lines.len() > compact.info_rail.usage_lines.len());
     assert_eq!(app.last_notice(), Some("info rail: detail"));
+    Ok(())
+}
+
+#[test]
+fn info_rail_visibility_uses_config_default_and_f2_runtime_override() -> anyhow::Result<()> {
+    let mut config = test_config();
+    config.appearance.info_rail = false;
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+
+    assert!(!app.info_rail_visible());
+
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    assert!(app.info_rail_visible());
+    assert_eq!(app.last_notice(), Some("info rail: shown"));
+    let wide_layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 120, 24), &app);
+    assert!(wide_layout.info_rail.width > 0);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    assert!(!app.info_rail_visible());
+    assert_eq!(app.last_notice(), Some("info rail: hidden"));
+
+    app.set_terminal_size(80, 24);
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    assert!(app.info_rail_visible());
+    assert_eq!(
+        app.last_notice(),
+        Some("info rail: enabled; hidden at current width")
+    );
+    let narrow_layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 80, 24), &app);
+    assert_eq!(narrow_layout.info_rail.width, 0);
+
+    app.set_terminal_size(140, 24);
+    let expanded_layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 140, 24), &app);
+    assert!(expanded_layout.info_rail.width > 0);
     Ok(())
 }
 
@@ -1153,7 +1215,7 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
             .all(|hint| hint != "Alt-J: next activity")
     );
 
-    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
     let detail_view_model = UiViewModel::from_app(&app);
     assert!(
         detail_view_model
@@ -1280,7 +1342,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Enter add follow-up · Esc interrupt · Ctrl-T details"
+        "agent: main · Enter add follow-up · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Thinking);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");

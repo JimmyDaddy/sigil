@@ -746,6 +746,68 @@ fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
 }
 
 #[test]
+fn mouse_drag_into_info_rail_keeps_copy_scoped_to_transcript() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(
+        TimelineRole::Assistant,
+        "transcript text stays separate from the info rail",
+    );
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (start_column, start_row) =
+        live_text_point_at_text_offset(&app, &layout, "transcript text", 0);
+    let (end_column, end_row) =
+        live_text_point_at_text_offset(&app, &layout, "transcript text", 15);
+
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, start_column, start_row),
+        &layout,
+    )?;
+    let _ = app.handle_mouse_event(mouse(MouseInputKind::Drag, end_column, end_row), &layout)?;
+    let transcript_only = app
+        .selected_timeline_text()
+        .expect("expected transcript selection before crossing into info rail");
+
+    let (info_column, info_row) = point_in(layout.info_rail);
+    let _ = app.handle_mouse_event(mouse(MouseInputKind::Drag, info_column, info_row), &layout)?;
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftUp, info_column, info_row),
+        &layout,
+    )?;
+
+    assert_eq!(
+        app.selected_timeline_text().as_deref(),
+        Some(transcript_only.as_str())
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CopyToClipboard { text }) if text == transcript_only
+    ));
+    Ok(())
+}
+
+#[test]
+fn ctrl_l_copies_latest_assistant_response_without_selection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(TimelineRole::User, "summarize this");
+    app.push_timeline(TimelineRole::Assistant, "latest response");
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::CopyToClipboard { text }) if text == "latest response"
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("copy pending 1 line(s), 15 char(s)")
+    );
+    Ok(())
+}
+
+#[test]
 fn mouse_drag_selects_timeline_text_by_columns() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);

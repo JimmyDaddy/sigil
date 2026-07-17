@@ -54,7 +54,7 @@ pub(super) fn render_config_nav_lines(config_state: Option<&ConfigState>) -> Vec
         lines.push("Permissions: Enter cycle mode".to_owned());
         lines.push("Permissions: task checks run from task status".to_owned());
     } else if state.selected_section == ConfigSection::Appearance {
-        lines.push("Appearance: Enter cycle".to_owned());
+        lines.push("Appearance: Enter toggle/cycle".to_owned());
         lines.push("Appearance: color overrides in sigil.toml".to_owned());
     } else if state.selected_section == ConfigSection::Terminal {
         lines.push("Terminal: compatibility lives in sigil.toml".to_owned());

@@ -313,6 +313,7 @@ pub struct AppState {
     pub active_pane: PaneFocus,
     pub timeline_scroll_back: usize,
     pub activity_scroll_back: usize,
+    info_rail_visible: bool,
     info_rail_detail: bool,
     review: ReviewState,
     config_snapshot: Option<RootConfig>,
@@ -621,6 +622,7 @@ impl AppState {
             active_pane: PaneFocus::Composer,
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
+            info_rail_visible: root_config.appearance.info_rail,
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
@@ -722,6 +724,7 @@ impl AppState {
             active_pane: PaneFocus::Composer,
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
+            info_rail_visible: true,
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: None,
@@ -960,6 +963,10 @@ impl AppState {
             return self.handle_config_key_event(key);
         }
 
+        if command_for_key_event(key) == Some(UiCommand::CopyTranscript) {
+            return Ok(self.request_copy_selection_or_latest_response());
+        }
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.checkpoint_mutation_pending() {
                 self.last_notice = Some(
@@ -969,15 +976,7 @@ impl AppState {
                 return Ok(None);
             }
             if let Some(text) = self.selected_timeline_text() {
-                self.last_notice = Some(format!(
-                    "copy pending {}",
-                    timeline_flow::clipboard_copy_status(&text)
-                ));
-                self.push_event(
-                    "selection:copy",
-                    format!("pending {}", timeline_flow::clipboard_copy_status(&text)),
-                );
-                return Ok(Some(AppAction::CopyToClipboard { text }));
+                return Ok(Some(self.request_clipboard_copy(text)));
             }
             self.modal_state = None;
             if self.runtime.is_busy {

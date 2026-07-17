@@ -651,6 +651,7 @@ model = "deepseek-v4-flash"
         config.appearance.usage_cost_currency,
         UsageCostCurrency::Auto
     );
+    assert!(config.appearance.info_rail);
     assert!(config.appearance.colors.is_empty());
     assert_eq!(config.task.default_mode, TaskMode::Chat);
 }
@@ -693,6 +694,7 @@ model = "deepseek-v4-flash"
 theme = "solarized_dark"
 syntax_theme = "solarized_dark"
 usage_cost_currency = "cny"
+info_rail = false
 
 [appearance.colors]
 surface_base = "#002b36"
@@ -707,6 +709,7 @@ accent_primary = "#b58900"
         config.appearance.usage_cost_currency,
         UsageCostCurrency::Cny
     );
+    assert!(!config.appearance.info_rail);
     assert_eq!(config.appearance.colors.len(), 2);
     assert_eq!(
         config.appearance.colors.get("surface_base"),
@@ -894,6 +897,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
             theme: ThemeId::Nord,
             syntax_theme: SyntaxThemeId::Nord,
             usage_cost_currency: UsageCostCurrency::Usd,
+            info_rail: false,
             colors: crate::ThemeColorOverrides::new(colors),
         },
         task: Default::default(),
@@ -908,6 +912,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
     assert!(rendered.contains("theme = \"nord\""));
     assert!(rendered.contains("syntax_theme = \"nord\""));
     assert!(rendered.contains("usage_cost_currency = \"usd\""));
+    assert!(rendered.contains("info_rail = false"));
     assert!(rendered.contains("[appearance.colors]"));
     assert!(rendered.contains("surface_base = \"#07080a\""));
     assert!(rendered.contains("text_primary = \"#ecf0f6\""));

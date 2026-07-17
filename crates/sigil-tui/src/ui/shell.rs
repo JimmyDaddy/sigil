@@ -55,6 +55,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         frame.area(),
         app.footer_strip_height(),
         app.composer_height(),
+        app.info_rail_visible(),
     );
 
     let view_model = UiViewModel::from_app(app);

@@ -1,7 +1,7 @@
 use sigil_kernel::{RootConfig, TerminalKeyboardEnhancement};
 use sigil_runtime::support::SupportBuildInfo;
 
-use super::{AppState, ComposerMode};
+use super::{AppState, ComposerMode, formatting::sidebar_width_for_terminal};
 
 impl AppState {
     pub(crate) fn set_support_build_info(&mut self, build_info: SupportBuildInfo) {
@@ -110,6 +110,26 @@ impl AppState {
 
     pub(crate) fn info_rail_detail_enabled(&self) -> bool {
         self.info_rail_detail
+    }
+
+    pub(crate) fn info_rail_visible(&self) -> bool {
+        self.info_rail_visible
+    }
+
+    pub(crate) fn toggle_info_rail_visibility(&mut self) {
+        self.info_rail_visible = !self.info_rail_visible;
+        let (mode, notice) = if !self.info_rail_visible {
+            ("hidden", "info rail: hidden")
+        } else if sidebar_width_for_terminal(self.terminal_width.into()) == 0 {
+            (
+                "enabled_width_limited",
+                "info rail: enabled; hidden at current width",
+            )
+        } else {
+            ("shown", "info rail: shown")
+        };
+        self.last_notice = Some(notice.to_owned());
+        self.push_event("info_rail", mode);
     }
 
     pub(crate) fn toggle_info_rail_detail(&mut self) {

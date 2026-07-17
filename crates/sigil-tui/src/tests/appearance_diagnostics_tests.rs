@@ -23,6 +23,7 @@ fn appearance_doctor_checks_reports_invalid_override_as_appearance_colors() {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
         usage_cost_currency: Default::default(),
+        info_rail: true,
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -49,6 +50,7 @@ fn appearance_doctor_checks_reports_low_contrast_override() {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
         usage_cost_currency: Default::default(),
+        info_rail: true,
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -74,6 +76,7 @@ fn appearance_doctor_checks_groups_semantic_and_structural_warnings() {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
         usage_cost_currency: Default::default(),
+        info_rail: true,
         colors: ThemeColorOverrides::new(colors),
     };
 

@@ -574,7 +574,7 @@ fn config_empty_mcp_reports_no_selection_and_preserves_explicit_footer_navigatio
     assert_eq!(app.config_selected_field_label(), Some("close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Appearance"));
-    assert_eq!(app.config_selected_field_label(), Some("Theme"));
+    assert_eq!(app.config_selected_field_label(), Some("Info rail"));
     Ok(())
 }
 
@@ -1598,7 +1598,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 }
 
 #[test]
-fn config_appearance_step_shows_theme_and_scope() {
+fn config_appearance_step_shows_info_rail_theme_and_scope() {
     let mut config = test_config();
     config.appearance.theme = sigil_kernel::ThemeId::GruvboxDark;
     let mut colors = std::collections::BTreeMap::new();
@@ -1615,10 +1615,13 @@ fn config_appearance_step_shows_theme_and_scope() {
     let nav = app.config_nav_lines().join("\n");
 
     assert!(detail.contains("Appearance 9/13 · TUI theme"));
-    assert!(nav.contains("Appearance: Enter cycle"));
+    assert!(nav.contains("Appearance: Enter toggle/cycle"));
     assert!(nav.contains("Appearance: color overrides in sigil.toml"));
+    assert!(detail.contains("[layout]"));
+    assert!(detail.contains("> Info rail: yes  [Enter toggle]"));
+    assert!(detail.contains("F2 toggles visibility for the current run"));
     assert!(detail.contains("[theme]"));
-    assert!(detail.contains("Theme: gruvbox_dark  [Enter cycle]"));
+    assert!(detail.contains("Theme: gruvbox_dark"));
     assert!(detail.contains("- Name: Gruvbox Dark"));
     assert!(detail.contains("Syntax theme: auto"));
     assert!(detail.contains("- Syntax source: auto -> Gruvbox Dark"));
@@ -1885,6 +1888,12 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Appearance);
+    assert!(
+        app.config_state
+            .as_mut()
+            .expect("config state should still exist")
+            .focus_field(ConfigField::AppearanceTheme)
+    );
     let initial_control_entries = app.session_browser.current_entries.len();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -1936,6 +1945,96 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
     );
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("theme = \"solarized_dark\""));
+    Ok(())
+}
+
+#[test]
+fn config_appearance_info_rail_toggle_saves_and_applies_default() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    assert!(app.info_rail_visible());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert_eq!(state.selected_field, Some(ConfigField::AppearanceInfoRail));
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("updated info_rail"));
+    assert!(app.info_rail_visible());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("info rail save should return config saved action");
+    };
+
+    assert!(!root_config.appearance.info_rail);
+    assert!(!app.info_rail_visible());
+    let rendered = std::fs::read_to_string(&config_path)?;
+    assert!(rendered.contains("info_rail = false"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    assert!(app.info_rail_visible());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert!(state.focus_field(ConfigField::AppearanceTheme));
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("unrelated appearance save should return config saved action");
+    };
+    assert!(!root_config.appearance.info_rail);
+    assert!(app.info_rail_visible());
+    Ok(())
+}
+
+#[test]
+fn config_info_rail_shortcuts_do_not_save_dirty_draft() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert!(state.focus_field(ConfigField::AppearanceTheme));
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(app.config_is_dirty());
+    assert!(app.info_rail_visible());
+    assert!(!config_path.exists());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(!app.info_rail_visible());
+    assert!(app.config_is_dirty());
+    assert!(!config_path.exists());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+    assert!(action.is_none());
+    assert!(app.info_rail_detail_enabled());
+    assert!(app.config_is_dirty());
+    assert!(!config_path.exists());
     Ok(())
 }
 
@@ -3688,7 +3787,7 @@ fn config_close_requires_second_escape_when_dirty() -> Result<()> {
 }
 
 #[test]
-fn config_f2_saves_and_keeps_config_open() -> Result<()> {
+fn config_ctrl_s_saves_and_keeps_config_open() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     test_config().save(&config_path)?;
@@ -3700,10 +3799,10 @@ fn config_f2_saves_and_keeps_config_open() -> Result<()> {
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.draft.provider_api_key = "saved-from-f2".to_owned();
+    state.draft.provider_api_key = "saved-from-ctrl-s".to_owned();
     state.dirty = true;
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     let Some(AppAction::ConfigSaved { root_config }) = action else {
         panic!("expected config save action");
@@ -3716,7 +3815,7 @@ fn config_f2_saves_and_keeps_config_open() -> Result<()> {
             .get("deepseek")
             .and_then(|value| value.get("api_key"))
             .and_then(|value| value.as_str()),
-        Some("saved-from-f2")
+        Some("saved-from-ctrl-s")
     );
 
     let saved = RootConfig::load(&config_path)?;
@@ -3726,7 +3825,7 @@ fn config_f2_saves_and_keeps_config_open() -> Result<()> {
             .get("deepseek")
             .and_then(|value| value.get("api_key"))
             .and_then(|value| value.as_str()),
-        Some("saved-from-f2")
+        Some("saved-from-ctrl-s")
     );
     Ok(())
 }

@@ -764,9 +764,9 @@ impl TerminalKeyboardEnhancement {
 
 /// TUI appearance preferences shared by interactive entrypoints.
 ///
-/// Theme choices are user-interface preferences only. They must not affect session history,
+/// Appearance choices are user-interface preferences only. They must not affect session history,
 /// provider-visible request material, tool approval audit entries, or cache-stable state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct AppearanceConfig {
     #[serde(default)]
@@ -775,8 +775,22 @@ pub struct AppearanceConfig {
     pub syntax_theme: SyntaxThemeId,
     #[serde(default)]
     pub usage_cost_currency: UsageCostCurrency,
+    #[serde(default = "default_appearance_info_rail")]
+    pub info_rail: bool,
     #[serde(default, skip_serializing_if = "ThemeColorOverrides::is_empty")]
     pub colors: ThemeColorOverrides,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            theme: ThemeId::default(),
+            syntax_theme: SyntaxThemeId::default(),
+            usage_cost_currency: UsageCostCurrency::default(),
+            info_rail: default_appearance_info_rail(),
+            colors: ThemeColorOverrides::default(),
+        }
+    }
 }
 
 /// Stable identifiers for built-in TUI themes.
@@ -2393,6 +2407,10 @@ fn default_terminal_scroll_sensitivity() -> u16 {
 
 fn default_terminal_notification_minimum_run_duration_ms() -> u64 {
     DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS
+}
+
+fn default_appearance_info_rail() -> bool {
+    true
 }
 
 fn default_lsp_trust_required() -> bool {

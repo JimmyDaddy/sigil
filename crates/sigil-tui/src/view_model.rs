@@ -262,6 +262,11 @@ fn detail_info_rail_usage_lines(app: &AppState) -> Vec<String> {
 
 fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
     let mut controls = global_control_hints(app.runtime.is_busy && app.approval.pending.is_none());
+    if app.selected_timeline_text().is_some() {
+        controls.retain(|hint| !hint.starts_with("Ctrl-C:"));
+        controls.insert(0, "Ctrl-C: copy selection".to_owned());
+        controls.insert(1, "Ctrl-L: copy selection or latest response".to_owned());
+    }
     if app.has_tool_cards() {
         controls.retain(|hint| !hint.starts_with("Ctrl-T: thinking"));
         controls.extend(tool_card_control_hints());
@@ -270,7 +275,9 @@ fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
         return controls;
     }
 
-    let preferred: &[&str] = if app.has_tool_cards() {
+    let preferred: &[&str] = if app.selected_timeline_text().is_some() {
+        &["Ctrl-C:", "Ctrl-L:", "F2:"]
+    } else if app.has_tool_cards() {
         &["F2:", "Ctrl-T:", "Ctrl-G:"]
     } else {
         &["F1:", "F2:", "Ctrl-C:", "Esc:", "/ or `:"]
@@ -885,6 +892,9 @@ fn footer_run_label(app: &AppState) -> String {
 fn footer_hints(app: &AppState) -> String {
     let agent = format!("agent: {}", app.active_agent_label());
     let queue = app.composer_queue_summary();
+    if app.selected_timeline_text().is_some() {
+        return format!("{agent} · Ctrl-C copy selection · Esc clear selection");
+    }
     if app.pending_plan_approval().is_some() {
         return format!("{agent} · Enter create and run task · Esc discard");
     }
@@ -920,7 +930,7 @@ fn footer_hints(app: &AppState) -> String {
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
         return format!(
-            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Esc interrupt · Ctrl-T details"
+            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
         );
     }
     if app.runtime.is_busy {
@@ -928,7 +938,9 @@ fn footer_hints(app: &AppState) -> String {
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!("{agent} · {queue}Enter add follow-up · Esc interrupt · Ctrl-T details");
+        return format!(
+            "{agent} · {queue}Enter add follow-up · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
+        );
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -952,7 +964,7 @@ fn footer_hints(app: &AppState) -> String {
     } else {
         "Ctrl-J newline"
     };
-    format!("{agent} · Enter send · {newline_hint} · Alt-A agent · / commands")
+    format!("{agent} · Enter send · {newline_hint} · Ctrl-L copy reply · Alt-A agent · / commands")
 }
 
 fn composer_agent_panel_child_selected(app: &AppState) -> bool {

@@ -3,11 +3,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     SubmitPrompt,
+    CopyTranscript,
     EnterPlanMode,
     SubmitTask,
     CancelOrQuit,
     ToggleWriteMode,
     ToggleThinking,
+    ToggleInfoRailVisibility,
     ToggleInfoRailDetail,
     OpenKeyboardHelp,
     OpenConfig,
@@ -68,6 +70,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
+        command: UiCommand::CopyTranscript,
+        keys: &[KeyBinding { label: "Ctrl-L" }],
+        slash: None,
+        label: "Copy selection or latest response",
+        help: "Copy selected transcript text, or the latest assistant response when nothing is selected.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
         command: UiCommand::CancelOrQuit,
         keys: &[KeyBinding { label: "Ctrl-C" }],
         slash: Some("/quit"),
@@ -92,10 +102,18 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
-        command: UiCommand::ToggleInfoRailDetail,
+        command: UiCommand::ToggleInfoRailVisibility,
         keys: &[KeyBinding { label: "F2" }],
         slash: None,
         label: "Info rail",
+        help: "Show or hide the right info rail for the current run.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::ToggleInfoRailDetail,
+        keys: &[KeyBinding { label: "Shift-F2" }],
+        slash: None,
+        label: "Info rail detail",
         help: "Toggle the right rail between compact and detailed information.",
         surface: CommandSurface::Global,
     },
@@ -250,7 +268,13 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
 pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
     match key.code {
         KeyCode::F(1) => Some(UiCommand::OpenKeyboardHelp),
-        KeyCode::F(2) => Some(UiCommand::ToggleInfoRailDetail),
+        KeyCode::F(2) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(UiCommand::ToggleInfoRailDetail)
+        }
+        KeyCode::F(2) => Some(UiCommand::ToggleInfoRailVisibility),
+        KeyCode::Char('l') | KeyCode::Char('L') if key.modifiers == KeyModifiers::CONTROL => {
+            Some(UiCommand::CopyTranscript)
+        }
         KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::FocusLatestToolCard)
         }
@@ -295,11 +319,13 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::OpenKeyboardHelp).expect("keyboard help metadata exists"),
         "/ or 、: command palette".to_owned(),
         control_hint(UiCommand::ToggleWriteMode).expect("write mode metadata exists"),
+        control_hint(UiCommand::ToggleInfoRailVisibility)
+            .expect("info rail visibility metadata exists"),
         control_hint(UiCommand::ToggleInfoRailDetail).expect("info rail metadata exists"),
         if is_busy {
             "Esc: interrupt".to_owned()
         } else {
-            "Ctrl-C: quit".to_owned()
+            "Ctrl-C: quit · Ctrl-L: copy reply".to_owned()
         },
         control_hint(UiCommand::ToggleThinking).expect("thinking metadata exists"),
         control_hint(UiCommand::CycleAgentView).expect("agent metadata exists"),
@@ -333,7 +359,12 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     lines.extend(command_help_lines([
         UiCommand::OpenKeyboardHelp,
         UiCommand::SubmitPrompt,
-        UiCommand::CancelOrQuit,
+    ]));
+    lines.push(
+        "Ctrl-C: Copy selection; otherwise cancel or quit. Ctrl-L: Copy selection or latest reply."
+            .to_owned(),
+    );
+    lines.extend(command_help_lines([
         UiCommand::StartNewSession,
         UiCommand::PreviewV2Compaction,
     ]));
@@ -387,9 +418,9 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         String::new(),
         "Config".to_owned(),
     ]);
+    lines.extend(command_help_lines([UiCommand::ToggleWriteMode]));
+    lines.push("F2: Show/hide info rail. Shift-F2: Toggle compact/detail.".to_owned());
     lines.extend(command_help_lines([
-        UiCommand::ToggleWriteMode,
-        UiCommand::ToggleInfoRailDetail,
         UiCommand::OpenConfig,
         UiCommand::OpenDoctor,
     ]));

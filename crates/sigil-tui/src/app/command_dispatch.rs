@@ -90,6 +90,10 @@ impl AppState {
             self.toggle_info_rail_detail();
             return true;
         }
+        if command == UiCommand::ToggleInfoRailVisibility {
+            self.toggle_info_rail_visibility();
+            return true;
+        }
         if command == UiCommand::FocusVerificationCard {
             return self.focus_verification_card();
         }
@@ -124,11 +128,13 @@ impl AppState {
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::CancelFocusedTerminalTask => false,
             UiCommand::SubmitPrompt
+            | UiCommand::CopyTranscript
             | UiCommand::EnterPlanMode
             | UiCommand::SubmitTask
             | UiCommand::CancelOrQuit
             | UiCommand::ToggleWriteMode
             | UiCommand::ToggleThinking
+            | UiCommand::ToggleInfoRailVisibility
             | UiCommand::ToggleInfoRailDetail
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig

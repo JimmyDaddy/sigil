@@ -175,6 +175,8 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
         .collect::<String>();
     assert!(rendered.contains("Session"));
     assert!(rendered.contains("Review"));
+    assert!(rendered.contains("F2"));
+    assert!(rendered.contains("Shift-F2"));
     assert!(rendered.contains("Navigation"));
     Ok(())
 }
@@ -297,6 +299,20 @@ fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> 
     assert!(rendered.contains("session"));
     assert!(rendered.contains("LSP"));
     Ok(())
+}
+
+#[test]
+fn render_main_screen_honors_hidden_info_rail_setting_on_wide_terminals() {
+    let mut config = test_config();
+    config.appearance.info_rail = false;
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    let layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 140, 24), &app);
+
+    assert_eq!(layout.info_rail.width, 0);
+    assert_eq!(layout.live_panel.width, 140);
+    assert!(layout.info_rail_agent_rows.is_empty());
 }
 
 #[test]
@@ -565,6 +581,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
     select_config_section_for_test(&mut app, ConfigSection::Appearance);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend)?;

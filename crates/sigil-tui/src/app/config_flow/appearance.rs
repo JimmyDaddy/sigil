@@ -1,6 +1,15 @@
 use super::*;
 
 pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+    lines.push("[layout]".to_owned());
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::AppearanceInfoRail,
+    ));
+    lines.push(render_config_hint_row(
+        "F2 toggles visibility for the current run; narrow terminals still collapse the rail",
+    ));
+    lines.push(String::new());
     lines.push("[theme]".to_owned());
     lines.push(render_config_value_row(
         config_state,
@@ -64,6 +73,7 @@ pub(super) fn draft_appearance_config(config_state: &ConfigState) -> AppearanceC
     appearance.theme = config_state.draft.appearance_theme;
     appearance.syntax_theme = config_state.draft.appearance_syntax_theme;
     appearance.usage_cost_currency = config_state.draft.appearance_usage_cost_currency;
+    appearance.info_rail = config_state.draft.appearance_info_rail;
     appearance
 }
 

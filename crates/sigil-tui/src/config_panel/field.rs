@@ -47,6 +47,7 @@ pub(crate) enum ConfigField {
     TerminalNotificationsEnabled,
     TerminalNotificationMethod,
     TerminalNotificationMinimumRunDurationMs,
+    AppearanceInfoRail,
     AppearanceTheme,
     AppearanceSyntaxTheme,
     AppearanceUsageCostCurrency,
@@ -102,7 +103,8 @@ impl ConfigField {
         Self::TerminalNotificationMethod,
         Self::TerminalNotificationMinimumRunDurationMs,
     ];
-    const APPEARANCE_FIELDS: [Self; 3] = [
+    const APPEARANCE_FIELDS: [Self; 4] = [
+        Self::AppearanceInfoRail,
         Self::AppearanceTheme,
         Self::AppearanceSyntaxTheme,
         Self::AppearanceUsageCostCurrency,
@@ -164,6 +166,7 @@ impl ConfigField {
             Self::TerminalNotificationsEnabled => "notifications_enabled",
             Self::TerminalNotificationMethod => "notification_method",
             Self::TerminalNotificationMinimumRunDurationMs => "minimum_run_duration_ms",
+            Self::AppearanceInfoRail => "info_rail",
             Self::AppearanceTheme => "theme",
             Self::AppearanceSyntaxTheme => "syntax_theme",
             Self::AppearanceUsageCostCurrency => "usage_cost_currency",
@@ -210,6 +213,7 @@ impl ConfigField {
             Self::TerminalNotificationsEnabled => "Attention notifications",
             Self::TerminalNotificationMethod => "Notification method",
             Self::TerminalNotificationMinimumRunDurationMs => "Long-run threshold",
+            Self::AppearanceInfoRail => "Info rail",
             Self::AppearanceTheme => "Theme",
             Self::AppearanceSyntaxTheme => "Syntax theme",
             Self::AppearanceUsageCostCurrency => "Cost currency",
@@ -312,6 +316,9 @@ impl ConfigField {
             Self::TerminalNotificationMinimumRunDurationMs => {
                 "Completed runs notify only after this duration. Input-required and failure signals do not use this threshold."
             }
+            Self::AppearanceInfoRail => {
+                "Shows the right info rail by default when terminal width allows it. F2 can hide or show it for the current run."
+            }
             Self::AppearanceTheme => {
                 "Color palette for the TUI. Draft themes preview immediately; saving persists the choice and does not affect session history."
             }
@@ -391,7 +398,8 @@ impl ConfigField {
             | Self::CodeIntelReportMissing
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard
-            | Self::TerminalNotificationsEnabled => "Enter toggle",
+            | Self::TerminalNotificationsEnabled
+            | Self::AppearanceInfoRail => "Enter toggle",
             Self::TerminalScrollSensitivity | Self::TerminalNotificationMinimumRunDurationMs => {
                 "Enter input"
             }

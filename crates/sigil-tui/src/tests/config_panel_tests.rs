@@ -506,6 +506,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Appearance),
         &[
+            ConfigField::AppearanceInfoRail,
             ConfigField::AppearanceTheme,
             ConfigField::AppearanceSyntaxTheme,
             ConfigField::AppearanceUsageCostCurrency,
@@ -740,10 +741,20 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
     config.appearance.syntax_theme = sigil_kernel::SyntaxThemeId::SolarizedDark;
     config.appearance.usage_cost_currency = sigil_kernel::UsageCostCurrency::Usd;
+    config.appearance.info_rail = true;
     let mut state = ConfigState::from_root_config(&config);
 
     state.set_section(ConfigSection::Appearance);
-    assert_eq!(state.selected_field, Some(ConfigField::AppearanceTheme));
+    assert_eq!(state.selected_field, Some(ConfigField::AppearanceInfoRail));
+    assert_eq!(state.display_value(ConfigField::AppearanceInfoRail), "yes");
+    assert_eq!(
+        state.field_text_value(ConfigField::AppearanceInfoRail),
+        None
+    );
+    assert_eq!(
+        ConfigField::AppearanceInfoRail.action_label(),
+        "Enter toggle"
+    );
     assert_eq!(
         state.display_value(ConfigField::AppearanceTheme),
         "solarized_light"
@@ -791,6 +802,7 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     state.draft.appearance_theme = sigil_kernel::ThemeId::Nord;
     state.draft.cycle_appearance_syntax_theme();
     state.draft.cycle_appearance_usage_cost_currency();
+    state.draft.appearance_info_rail = false;
     let saved = state.draft.to_root_config()?;
 
     assert_eq!(saved.appearance.theme, sigil_kernel::ThemeId::Nord);
@@ -802,6 +814,7 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
         saved.appearance.usage_cost_currency,
         sigil_kernel::UsageCostCurrency::Cny
     );
+    assert!(!saved.appearance.info_rail);
     Ok(())
 }
 

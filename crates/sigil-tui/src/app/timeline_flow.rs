@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    AgentView, AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
-    TimelineEntry, TimelineRole, TimelineTextSelection,
+    AgentView, AppAction, AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase,
+    ThinkingBlockMode, TimelineEntry, TimelineRole, TimelineTextSelection,
     agent_flow::agent_thread_sidebar_detail,
     formatting::{
         line_has_visible_content, sidebar_width_for_terminal, truncate_session_view_text,
@@ -853,6 +853,46 @@ impl AppState {
                 .join("\n"),
         )
         .filter(|text| !text.is_empty())
+    }
+
+    pub(crate) fn request_clipboard_copy(&mut self, text: String) -> AppAction {
+        let status = clipboard_copy_status(&text);
+        self.last_notice = Some(format!("copy pending {status}"));
+        self.push_event("selection:copy", format!("pending {status}"));
+        AppAction::CopyToClipboard { text }
+    }
+
+    pub(crate) fn request_copy_selection_or_latest_response(&mut self) -> Option<AppAction> {
+        let text = self
+            .selected_timeline_text()
+            .or_else(|| self.latest_assistant_response_text());
+        let Some(text) = text else {
+            self.last_notice = Some("nothing to copy".to_owned());
+            return None;
+        };
+        Some(self.request_clipboard_copy(text))
+    }
+
+    fn latest_assistant_response_text(&self) -> Option<String> {
+        if matches!(self.agent_panel.active_view, AgentView::Child { .. }) {
+            return self
+                .agent_panel
+                .active_child_transcript
+                .as_ref()?
+                .timeline_entries
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.role == TimelineRole::Assistant && !entry.text.trim().is_empty()
+                })
+                .map(|entry| entry.text.clone());
+        }
+
+        self.timeline
+            .iter()
+            .rev()
+            .find(|entry| entry.role == TimelineRole::Assistant && !entry.text.trim().is_empty())
+            .map(|entry| entry.text.clone())
     }
 
     pub(crate) fn begin_timeline_text_selection_at(

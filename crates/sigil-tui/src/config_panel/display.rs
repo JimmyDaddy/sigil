@@ -68,6 +68,7 @@ impl ConfigState {
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::TerminalNotificationsEnabled
             | ConfigField::TerminalNotificationMethod
+            | ConfigField::AppearanceInfoRail
             | ConfigField::AppearanceTheme
             | ConfigField::AppearanceSyntaxTheme
             | ConfigField::AppearanceUsageCostCurrency
@@ -135,6 +136,7 @@ impl ConfigState {
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::TerminalNotificationsEnabled
             | ConfigField::TerminalNotificationMethod
+            | ConfigField::AppearanceInfoRail
             | ConfigField::AppearanceTheme
             | ConfigField::AppearanceSyntaxTheme => None,
             ConfigField::AppearanceUsageCostCurrency => None,
@@ -232,6 +234,9 @@ impl ConfigState {
             }
             ConfigField::TerminalNotificationMethod => {
                 return self.draft.terminal_notification_method.as_str().to_owned();
+            }
+            ConfigField::AppearanceInfoRail => {
+                return bool_label(self.draft.appearance_info_rail).to_owned();
             }
             ConfigField::AppearanceTheme => {
                 return self.draft.appearance_theme.as_str().to_owned();
@@ -346,6 +351,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::TerminalOsc52Clipboard
         | ConfigField::TerminalNotificationsEnabled
         | ConfigField::TerminalNotificationMethod
+        | ConfigField::AppearanceInfoRail
         | ConfigField::AppearanceTheme
         | ConfigField::AppearanceSyntaxTheme
         | ConfigField::McpName => false,

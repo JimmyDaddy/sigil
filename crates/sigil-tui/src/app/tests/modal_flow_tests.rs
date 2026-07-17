@@ -782,7 +782,8 @@ fn config_color_override_modal_stays_config_file_only() -> Result<()> {
         .expect("config state should still exist");
     assert!(matches!(
         state.selected_field,
-        Some(ConfigField::AppearanceTheme)
+        Some(ConfigField::AppearanceInfoRail)
+            | Some(ConfigField::AppearanceTheme)
             | Some(ConfigField::AppearanceSyntaxTheme)
             | Some(ConfigField::AppearanceUsageCostCurrency)
     ));

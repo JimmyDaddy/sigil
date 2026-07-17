@@ -73,6 +73,7 @@ impl ConfigDraft {
             appearance_theme: root_config.appearance.theme,
             appearance_syntax_theme: root_config.appearance.syntax_theme,
             appearance_usage_cost_currency: root_config.appearance.usage_cost_currency,
+            appearance_info_rail: root_config.appearance.info_rail,
             appearance_color_group_index: first_appearance_color_group_index(root_config),
             appearance_color_token_index: first_appearance_color_token_index(root_config),
             mcp_servers: root_config
@@ -203,6 +204,7 @@ impl ConfigDraft {
         root_config.appearance.theme = self.appearance_theme;
         root_config.appearance.syntax_theme = self.appearance_syntax_theme;
         root_config.appearance.usage_cost_currency = self.appearance_usage_cost_currency;
+        root_config.appearance.info_rail = self.appearance_info_rail;
         root_config.appearance.colors = self.base_root_config.appearance.colors.clone();
         root_config.mcp_servers = self
             .mcp_servers
