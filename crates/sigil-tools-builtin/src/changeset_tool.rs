@@ -203,15 +203,15 @@ impl ChangeSetArtifactStore {
             .artifact_label_root
             .join(change_set_id.as_str())
             .to_string_lossy()
-            .into_owned();
+            .replace('\\', "/");
         let relative_preview = PathBuf::from(&relative_dir)
             .join(CHANGESET_PREVIEW_DIFF_FILE)
             .to_string_lossy()
-            .into_owned();
+            .replace('\\', "/");
         let relative_reverse = PathBuf::from(&relative_dir)
             .join(CHANGESET_REVERSE_DIFF_FILE)
             .to_string_lossy()
-            .into_owned();
+            .replace('\\', "/");
         let absolute_dir = self.artifact_root.join(change_set_id.as_str());
         Ok(ChangeSetArtifactPaths {
             absolute_preview: absolute_dir.join(CHANGESET_PREVIEW_DIFF_FILE),

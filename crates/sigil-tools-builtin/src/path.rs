@@ -168,12 +168,24 @@ pub(crate) fn resolve_existing_prefix(absolute_path: &Path) -> Result<PathBuf> {
             Ok(_) => {
                 let mut resolved = fs::canonicalize(&candidate)
                     .with_context(|| format!("failed to resolve {}", candidate.display()))?;
+                if !missing_suffix.is_empty()
+                    && !fs::metadata(&resolved)
+                        .with_context(|| format!("failed to inspect {}", resolved.display()))?
+                        .is_dir()
+                {
+                    bail!(
+                        "existing path prefix is not a directory: {}",
+                        candidate.display()
+                    );
+                }
                 for component in missing_suffix.iter().rev() {
                     resolved.push(component);
                 }
                 return lexically_normalize_path(&resolved);
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
                 let Some(file_name) = candidate.file_name().map(ToOwned::to_owned) else {
                     return lexically_normalize_path(absolute_path);
                 };

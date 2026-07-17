@@ -5,13 +5,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use serde_json::json;
+#[cfg(unix)]
+use sigil_kernel::ExecutionOutputStream;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt, ExecutionOutputStream,
-    ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
+    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt, ExecutionReceipt,
+    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionStreamCapture,
     ExecutionTerminationCause, ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder,
     PathTrustZone, PermissionRisk, RunCancellationOwner, TerminalExecutionBackendCapabilities,
@@ -2690,13 +2694,25 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
         registry.permission_access(&ctx, &cargo_check_call)?,
         ToolAccess::Execute
     );
+    #[cfg(unix)]
     assert_eq!(
         registry.permission_operation(&ctx, &cargo_check_call)?,
         ToolOperation::ExecuteWorkspaceCheckCommand
     );
+    #[cfg(windows)]
+    assert_eq!(
+        registry.permission_operation(&ctx, &cargo_check_call)?,
+        ToolOperation::ExecuteUnknownCommand
+    );
     let cargo_check_subjects = registry.permission_subjects(&ctx, &cargo_check_call)?;
+    #[cfg(unix)]
     assert!(cargo_check_subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Command && subject.normalized == "family:cargo_check"
+    }));
+    #[cfg(windows)]
+    assert!(cargo_check_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command
+            && subject.normalized == "cd . && cargo check 2>&1 | tail -20"
     }));
 
     let read_call = tool_call("terminal_read", json!({ "task_id": "terminal-perm" }));
@@ -2790,20 +2806,24 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
         )?,
         ToolOperation::ApplyChangeSet
     );
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call("bash", json!({ "command": "rm -rf .sigil" }))
-        )?,
-        ToolOperation::ExecuteDestructiveCommand
-    );
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call("terminal_start", json!({ "command": "git clean -fdx" }))
-        )?,
-        ToolOperation::ExecuteDestructiveCommand
-    );
+    let bash_operation = registry.permission_operation(
+        &ctx,
+        &tool_call("bash", json!({ "command": "rm -rf .sigil" })),
+    )?;
+    let terminal_operation = registry.permission_operation(
+        &ctx,
+        &tool_call("terminal_start", json!({ "command": "git clean -fdx" })),
+    )?;
+    #[cfg(unix)]
+    {
+        assert_eq!(bash_operation, ToolOperation::ExecuteDestructiveCommand);
+        assert_eq!(terminal_operation, ToolOperation::ExecuteDestructiveCommand);
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(bash_operation, ToolOperation::ExecuteUnknownCommand);
+        assert_eq!(terminal_operation, ToolOperation::ExecuteUnknownCommand);
+    }
     Ok(())
 }
 
@@ -3764,14 +3784,13 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
     };
     let ctx = ToolContext::new(workspace, 5);
 
+    #[cfg(windows)]
+    let command = "$scratch = $env:SIGIL_SCRATCH_DIR; if (!(Test-Path -LiteralPath $scratch -PathType Container)) { exit 1 }; Set-Content -NoNewline -LiteralPath (Join-Path $scratch 'probe') -Value 'bash-ok'; [Console]::Out.Write('ok')";
+    #[cfg(not(windows))]
+    let command = "test -d \"$SIGIL_SCRATCH_DIR\" && printf bash-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf ok";
+
     let result = tool
-        .execute(
-            ctx,
-            "bash".to_owned(),
-            json!({
-                "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf bash-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf ok"
-            }),
-        )
+        .execute(ctx, "bash".to_owned(), json!({ "command": command }))
         .await?;
 
     assert!(matches!(result.status, ToolResultStatus::Ok));
@@ -4036,12 +4055,13 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
+    #[cfg(windows)]
+    let command = "Write-Error 'bad output' -ErrorAction Continue; exit 7";
+    #[cfg(not(windows))]
+    let command = "printf 'bad output' >&2; exit 7";
+
     let result = bash_tool(temp.path())
-        .execute(
-            ctx,
-            "bash".to_owned(),
-            json!({ "command": "printf 'bad output' >&2; exit 7" }),
-        )
+        .execute(ctx, "bash".to_owned(), json!({ "command": command }))
         .await?;
 
     assert!(result.is_error());
@@ -4050,6 +4070,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -4094,6 +4115,7 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_permission_subjects_include_external_paths_and_redirections() -> Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -4129,6 +4151,7 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -4169,6 +4192,7 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_approval() -> Result<()>
 {
@@ -4259,6 +4283,7 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_shell_analysis_treats_missing_relative_paths_as_workspace_subjects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -4282,6 +4307,7 @@ async fn bash_shell_analysis_treats_missing_relative_paths_as_workspace_subjects
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_permission_subjects_resolve_cd_relative_paths_against_external_cwd() -> Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -4666,6 +4692,7 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn bash_file_test_echo_loop_is_readonly_but_scripts_still_execute() -> Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -5593,6 +5620,11 @@ fn builtin_text_limit_and_path_helpers_cover_multibyte_edges() -> Result<()> {
         resolved,
         workspace.path().canonicalize()?.join("missing/child.txt")
     );
+    let blocking_file = workspace.path().join("blocking-file");
+    fs::write(&blocking_file, "not a directory")?;
+    let blocked = super::resolve_existing_prefix(&blocking_file.join("child.txt"))
+        .expect_err("a regular-file ancestor must reject a missing descendant");
+    assert!(blocked.to_string().contains("is not a directory"));
 
     let missing_root = workspace.path().join("does-not-exist");
     assert!(
@@ -6188,7 +6220,7 @@ fn windows_descendant_command(pid_file: &Path) -> String {
 
 #[cfg(windows)]
 async fn read_windows_pid(path: &Path) -> Result<u32> {
-    for _ in 0..200 {
+    for _ in 0..800 {
         if let Ok(contents) = tokio::fs::read_to_string(path).await
             && let Ok(process_id) = contents.trim().parse()
         {

@@ -1,13 +1,16 @@
 use std::{
-    collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
+    sync::Arc,
     time::Duration,
 };
 
 #[cfg(unix)]
+use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
+#[cfg(unix)]
+use std::sync::{Mutex as StdMutex, atomic::AtomicBool};
 
 use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
@@ -18,20 +21,21 @@ use sigil_kernel::{
     TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus,
 };
+#[cfg(unix)]
+use tokio::process::Command;
 use tokio::{
     fs::OpenOptions,
     io::AsyncWriteExt,
-    process::Command,
     sync::{Mutex, mpsc},
     time::{sleep, timeout},
 };
 
-use super::{
-    TerminalBackendKind, TerminalExecutionConfig, TerminalProcessManager, TerminalPtySize,
-    TerminalStartRequest,
-};
+#[cfg(unix)]
+use super::TerminalExecutionConfig;
+use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
 use serial_test::serial;
 
+#[cfg(unix)]
 fn sandbox_execution_config(
     backend: ExecutionBackendKind,
     profile: ExecutionSandboxProfile,
@@ -607,17 +611,21 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
 #[tokio::test]
 async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_cwd() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
     let subdir = temp.path().join("subdir");
     std::fs::create_dir(&subdir)?;
     let manager = TerminalProcessManager::new(temp.path())?;
 
+    #[cfg(windows)]
+    let command = "(Get-Location).Path";
+    #[cfg(not(windows))]
+    let command = "pwd";
+
     let entry = manager
         .start(TerminalStartRequest {
             task_id: None,
-            command: "pwd".to_owned(),
+            command: command.to_owned(),
             cwd: Some(subdir.clone()),
-            shell: Some(shell),
+            shell: None,
             env: Default::default(),
         })
         .await?;
@@ -630,7 +638,11 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
     let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
-    assert!(read.content.contains(&subdir.display().to_string()));
+    assert!(
+        read.content
+            .to_ascii_lowercase()
+            .contains(&subdir.display().to_string().to_ascii_lowercase())
+    );
     Ok(())
 }
 
@@ -1129,7 +1141,7 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
     assert!(TerminalPtySize::new(0, 10).is_err());
     assert!(TerminalPtySize::new(10, 0).is_err());
     let absolute_error = manager
-        .stored_artifact_path(Path::new("/tmp/outside"))
+        .stored_artifact_path(temp.path())
         .expect_err("absolute artifact path should be rejected");
     assert!(absolute_error.to_string().contains("must be relative"));
 
@@ -1319,6 +1331,7 @@ async fn terminal_pty_reader_panic_is_reported_live_after_the_panic() -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
@@ -1538,6 +1551,7 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     Ok(())
 }
 
+#[cfg(unix)]
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
@@ -1682,12 +1696,15 @@ impl Read for PanicReader {
     }
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct FailingKiller;
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct SuccessfulKiller;
 
+#[cfg(unix)]
 impl portable_pty::ChildKiller for SuccessfulKiller {
     fn kill(&mut self) -> std::io::Result<()> {
         Ok(())
@@ -1698,6 +1715,7 @@ impl portable_pty::ChildKiller for SuccessfulKiller {
     }
 }
 
+#[cfg(unix)]
 impl portable_pty::ChildKiller for FailingKiller {
     fn kill(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other("kill failed"))
