@@ -196,6 +196,20 @@ Run:
 
 In the TUI, a failing eager MCP server should not block ordinary chat or planned tasks with built-in tools.
 
+For OAuth, use the typed state shown in `/config` → **MCP Servers** → **Authentication**:
+
+| State or error | What to do |
+| --- | --- |
+| `authentication required` | Choose **Sign in** explicitly; eager startup never opens a browser. |
+| metadata unavailable / destination rejected | Check HTTPS, the resource URL, Network disclosure, proxy/domain policy, and the authorization server metadata. |
+| callback invalid | Restart sign-in and use only the newest browser tab. For manual return, paste the complete callback URL with its original state. |
+| credential store unavailable/rejected | Unlock or enable the native Keychain, Credential Manager, or Secret Service. Sigil has no plaintext credential fallback. |
+| refresh rejected | Sign in again. Sigil disables an invalid refresh credential instead of looping. |
+| remote revoke failed | The local credential remains. Retry remote sign-out or explicitly clear it after reviewing the warning. |
+| budget exhausted | Increase the bounded Web budget or finish other Web work, then retry the explicit action. |
+
+OAuth redirects and automatic request retries are disabled. If a request receives `401` after sending, Sigil does not replay it. See [MCP OAuth authentication](mcp.md#oauth-authentication) for the callback and credential contract.
+
 ## Code Intelligence Is Not Ready
 
 Check:

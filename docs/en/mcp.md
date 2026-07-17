@@ -57,9 +57,25 @@ egress_logging = true
 allow_secrets = false
 ```
 
-Every protocol message receives a fresh durable transport authorization and disclosure before DNS or socket activity. Direct connections validate and pin the complete resolved address set; environment-proxy routes identify the proxy destination as `proxy_remote`. Redirects and OAuth challenges are not followed in V1.
+Every protocol message receives a fresh durable transport authorization and disclosure before DNS or socket activity. Direct connections validate and pin the complete resolved address set; environment-proxy routes identify the proxy destination as `proxy_remote`. Redirects are not followed. An OAuth challenge becomes an actionable `authentication required` state and never causes an automatic browser launch or request replay.
 
 `roots` exposes only the canonical workspace root as a `file:` URI. `elicitation` accepts only bounded forms through the existing TUI form/audit flow; URL elicitation, sampling, and tasks remain unsupported. Headless CLI activation fails closed when an interactive form has no handler. `/doctor` and `/config` display only safe origins, header/environment names, capabilities, and fingerprint state—never resolved credentials.
+
+### OAuth Authentication
+
+OAuth is mutually exclusive with a static `Authorization` header or `bearer_token_env_var`:
+
+```toml
+[mcp_servers.oauth]
+# client_id = "sigil-public-client" # optional when dynamic registration is supported
+scopes = ["mcp:tools"]
+```
+
+OAuth requires HTTPS and an explicit **Sign in** action. Eager or headless startup reports `authentication required` without opening a browser. In `/config`, select the server and open **Authentication**. The modal can sign in, open or copy the authorization URL, accept a complete callback URL for headless/manual return, cancel, refresh, sign out, or explicitly clear a retained local credential. The automatic callback listens only on the IPv4 loopback interface at a random port.
+
+Discovery, dynamic registration, token exchange, refresh, and revocation may use different HTTPS destinations. Every physical request repeats the normal network policy, disclosure, destination guard, and shared budget checks. Redirects and automatic retries remain disabled. A `401` after a request is sent marks authentication stale but does not replay that request.
+
+Tokens and registration secrets are stored only in the native system credential store. Sigil does not write them to TOML, session history, logs, or support bundles, and it does not fall back to a plaintext file. Sign-out first attempts remote revocation; if that cannot be proven, the local credential remains. You may retry or choose **clear local only**, which makes no remote-revocation claim.
 
 ## Process Environment and Credentials
 
@@ -110,6 +126,7 @@ Model-triggered server activation is classified as local `Execute` plus `Network
 The TUI shows lifecycle states:
 
 - `deferred`
+- `authentication required`
 - `activating`
 - `refreshing`
 - `stale <capability>`
@@ -120,7 +137,7 @@ The TUI shows lifecycle states:
 
 Sigil uses the newline-delimited JSON stdio transport defined by MCP `2025-06-18`. MCP servers that use LSP-style `Content-Length` headers are not compatible and must be updated to the current transport. Sigil does not guess or switch formats on a live connection.
 
-Startup has one absolute budget covering `initialize`, `initialized`, and the first `tools/list`. Each tool, resource, or prompt call uses the active tool timeout. A zero timeout uses the finite 30-second project default, and larger configured values are clamped to a 24-hour hard maximum. A timeout or invalid/oversized frame permanently closes that client generation, attempts to terminate its process group/tree, and reaps the direct child; incomplete cleanup is reported rather than presented as successful. On Windows, Sigil keeps the stdio connection open while it runs bounded `taskkill /T /F`, so a cooperative stdin-EOF exit cannot race ahead of tree cleanup; if the leader was already gone before teardown began, tree cleanup is reported as unconfirmed. Limit failures use structured resource-limit details, including the applicable limit and observed lower bound.
+Startup has one absolute budget covering `initialize`, `initialized`, and the first `tools/list`. Each tool, resource, or prompt call uses the active tool timeout. A zero timeout uses the finite 30-second project default, and larger configured values are clamped to a 24-hour hard maximum. A timeout or invalid/oversized frame permanently closes that client generation, attempts to terminate its process group/tree, and reaps the direct child; incomplete cleanup is reported rather than presented as successful. On Windows, the stdio child is assigned to a native kill-on-close Job Object immediately after spawn; assignment, termination, wait, or drain failure is reported instead of being presented as clean shutdown. Limit failures use structured resource-limit details, including the applicable limit and observed lower bound.
 
 Each NDJSON frame is limited to 4 MiB; one operation may consume at most 256 inbound messages and 8 MiB of framed input, while MCP stderr has an 8 MiB hard limit. Tool, resource, and prompt content is redacted before JSON escaping and bounded to 32 KiB or 2,000 lines before it reaches the model-input limit. Truncation is reported without adding text that could reintroduce a configured secret.
 
@@ -261,6 +278,14 @@ Check:
 - Whether pinned identity matches the observed pin when `pin_version = true`.
 
 In the TUI, this should not stop ordinary tasks. The failing server appears as `failed` in MCP status, and built-in tools remain available.
+
+### OAuth sign-in fails
+
+- `authentication required`: open **Authentication** and choose **Sign in** explicitly.
+- Callback rejected: restart sign-in and use only the newest browser tab, or paste the complete callback URL.
+- Credential store unavailable: unlock or enable the native Keychain, Credential Manager, or Secret Service. There is no plaintext fallback.
+- Destination rejected or budget exhausted: review the Network disclosure and Web policy before retrying the explicit action.
+- Remote revoke failed: retry sign-out or explicitly clear the retained local credential after reviewing the warning.
 
 ### Secret egress is blocked
 

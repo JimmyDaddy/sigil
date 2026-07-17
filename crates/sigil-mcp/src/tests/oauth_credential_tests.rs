@@ -284,6 +284,24 @@ async fn invalid_refresh_transport_and_revoke_are_one_attempt_and_typed() {
     ));
     assert_eq!(transport.requests().len(), 1);
 
+    for (failure, expected) in [
+        (
+            super::super::oauth::McpOAuthTransportError::DestinationRejected,
+            McpOAuthCredentialError::DestinationRejected,
+        ),
+        (
+            super::super::oauth::McpOAuthTransportError::BudgetExhausted,
+            McpOAuthCredentialError::BudgetExhausted,
+        ),
+    ] {
+        let refresh = QueueExecutor::with_responses(vec![Err(failure)]);
+        assert!(matches!(
+            refresh_oauth_credential(refresh.as_ref(), &original).await,
+            Err(error) if error == expected
+        ));
+        assert_eq!(refresh.requests().len(), 1);
+    }
+
     let revoke = QueueExecutor::with_responses(vec![Ok(McpOAuthHttpResponse::new(
         503,
         None,
@@ -294,6 +312,24 @@ async fn invalid_refresh_transport_and_revoke_are_one_attempt_and_typed() {
         Err(McpOAuthCredentialError::RevocationRejected)
     ));
     assert_eq!(revoke.requests().len(), 1);
+
+    for (failure, expected) in [
+        (
+            super::super::oauth::McpOAuthTransportError::DestinationRejected,
+            McpOAuthCredentialError::DestinationRejected,
+        ),
+        (
+            super::super::oauth::McpOAuthTransportError::BudgetExhausted,
+            McpOAuthCredentialError::BudgetExhausted,
+        ),
+    ] {
+        let revoke = QueueExecutor::with_responses(vec![Err(failure)]);
+        assert!(matches!(
+            revoke_oauth_credential(revoke.as_ref(), &original).await,
+            Err(error) if error == expected
+        ));
+        assert_eq!(revoke.requests().len(), 1);
+    }
 
     let no_endpoint = record(1_000, Some(1_001), false);
     let unused = QueueExecutor::with_responses(Vec::new());
@@ -344,4 +380,55 @@ async fn confidential_client_refresh_uses_form_encoded_basic_and_honors_secret_e
         .decode(header.strip_prefix("Basic ").expect("Basic scheme"))
         .expect("base64");
     assert_eq!(decoded, b"sigil%3Aclient:sec%3Aret+value");
+}
+
+#[tokio::test]
+#[ignore = "requires an unlocked native system credential store"]
+async fn native_system_keyring_round_trip_is_exact_and_cleanup_safe() {
+    let unique = Uuid::new_v4();
+    let scope = McpOAuthCredentialScope::new(
+        format!("sigil-keyring-conformance-{unique}"),
+        "https://mcp.example/public/mcp",
+        "https://auth.example/tenant",
+        "sigil-keyring-conformance",
+        vec!["files:read".to_owned()],
+    )
+    .expect("native keyring scope");
+    let lookup = McpOAuthCredentialLookup::new(
+        scope.server_name().to_owned(),
+        scope.resource().to_owned(),
+        Some(scope.client_id().to_owned()),
+        scope.scopes().to_vec(),
+    )
+    .expect("native keyring lookup");
+    let mut record = record(1_000, Some(2_000), true);
+    record.scope = scope.clone();
+    let store = SystemMcpOAuthCredentialStore;
+
+    let result = async {
+        store.store(&record).await?;
+        store.store_locator(&lookup, &scope).await?;
+        let loaded = store
+            .load_located(&lookup)
+            .await?
+            .ok_or(McpOAuthCredentialError::StoreRejected)?;
+        if loaded.scope() != &scope || loaded.status(1_000) != McpOAuthCredentialStatus::Present {
+            return Err(McpOAuthCredentialError::StoreRejected);
+        }
+        Ok::<(), McpOAuthCredentialError>(())
+    }
+    .await;
+
+    let locator_cleanup = store.delete_locator(&lookup).await;
+    let record_cleanup = store.delete(&scope).await;
+    result.expect("native keyring round trip");
+    assert!(locator_cleanup.expect("delete native locator"));
+    assert!(record_cleanup.expect("delete native record"));
+    assert!(
+        store
+            .load(&scope)
+            .await
+            .expect("verify native cleanup")
+            .is_none()
+    );
 }

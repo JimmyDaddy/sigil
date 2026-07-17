@@ -41,6 +41,7 @@ pub enum McpOAuthAuthErrorCode {
     CredentialStoreRejected,
     RefreshRejected,
     RevocationRejected,
+    BudgetExhausted,
     Transport,
 }
 
@@ -148,6 +149,10 @@ impl McpOAuthFlowError {
                 | McpOAuthProtocolError::CallbackFailed => McpOAuthAuthErrorCode::CallbackInvalid,
                 McpOAuthProtocolError::ClientRegistrationRejected
                 | McpOAuthProtocolError::TokenRejected => McpOAuthAuthErrorCode::TokenRejected,
+                McpOAuthProtocolError::DestinationRejected => {
+                    McpOAuthAuthErrorCode::DestinationRejected
+                }
+                McpOAuthProtocolError::BudgetExhausted => McpOAuthAuthErrorCode::BudgetExhausted,
                 McpOAuthProtocolError::Transport => McpOAuthAuthErrorCode::Transport,
             },
             Self::Credential(error) => match error {
@@ -165,6 +170,10 @@ impl McpOAuthFlowError {
                 McpOAuthCredentialError::RevocationRejected => {
                     McpOAuthAuthErrorCode::RevocationRejected
                 }
+                McpOAuthCredentialError::DestinationRejected => {
+                    McpOAuthAuthErrorCode::DestinationRejected
+                }
+                McpOAuthCredentialError::BudgetExhausted => McpOAuthAuthErrorCode::BudgetExhausted,
                 McpOAuthCredentialError::Transport => McpOAuthAuthErrorCode::Transport,
                 McpOAuthCredentialError::InvalidScope | McpOAuthCredentialError::InvalidRecord => {
                     McpOAuthAuthErrorCode::ConfigurationInvalid

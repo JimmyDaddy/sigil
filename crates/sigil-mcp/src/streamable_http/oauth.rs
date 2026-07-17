@@ -69,6 +69,10 @@ pub enum McpOAuthProtocolError {
     CallbackFailed,
     #[error("remote MCP OAuth token exchange was rejected")]
     TokenRejected,
+    #[error("remote MCP OAuth destination authorization was rejected")]
+    DestinationRejected,
+    #[error("remote MCP OAuth network budget was exhausted")]
+    BudgetExhausted,
     #[error("remote MCP OAuth transport failed")]
     Transport,
 }
@@ -751,7 +755,7 @@ pub async fn prepare_oauth_client(
             SecretString::new(body),
         ))
         .await
-        .map_err(|_| McpOAuthProtocolError::Transport)?;
+        .map_err(map_http_transport_error)?;
     if response.status != 201
         || !is_json_content_type(response.content_type.as_deref())
         || response.body.expose_secret().len() > MAX_METADATA_BODY_BYTES
@@ -1204,7 +1208,7 @@ pub async fn exchange_oauth_authorization_code(
     let response = executor
         .execute(request)
         .await
-        .map_err(|_| McpOAuthProtocolError::Transport)?;
+        .map_err(map_http_transport_error)?;
     parse_bearer_token_response(response, &authorization.scopes, &authorization.scopes)
 }
 
@@ -1332,7 +1336,7 @@ async fn fetch_first_json<T: for<'de> Deserialize<'de>>(
         let response = executor
             .execute(McpOAuthHttpRequest::get(&candidate, purpose))
             .await
-            .map_err(|_| McpOAuthProtocolError::Transport)?;
+            .map_err(map_http_transport_error)?;
         if response.status == 404 {
             continue;
         }
@@ -1393,6 +1397,14 @@ fn inserted_well_known(url: &Url, suffix: &str) -> Result<Url, McpOAuthProtocolE
         return Err(McpOAuthProtocolError::InvalidMetadata);
     }
     Ok(result)
+}
+
+fn map_http_transport_error(error: McpOAuthTransportError) -> McpOAuthProtocolError {
+    match error {
+        McpOAuthTransportError::DestinationRejected => McpOAuthProtocolError::DestinationRejected,
+        McpOAuthTransportError::BudgetExhausted => McpOAuthProtocolError::BudgetExhausted,
+        McpOAuthTransportError::Transport => McpOAuthProtocolError::Transport,
+    }
 }
 
 fn validate_https_url(value: &str, allow_query: bool) -> Result<Url, ()> {

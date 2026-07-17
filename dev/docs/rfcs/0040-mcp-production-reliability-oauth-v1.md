@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0-R40.4 complete; R40.5 next
+状态：active / R40.0-R40.5 local implementation complete; hosted platform conformance pending next CI
 
 创建日期：2026-07-17
 
@@ -284,6 +284,7 @@ deadline 的证据才调整公开 timeout。
 cargo test -p sigil-mcp
 cargo test -p sigil-runtime remote_mcp
 cargo test -p sigil-tui mcp
+./scripts/tui-mcp-oauth-pty-acceptance.py
 cargo clippy -p sigil-mcp -p sigil-runtime -p sigil-tui --all-targets -- -D warnings
 cargo fmt --all --check
 ./scripts/check-docs.sh
@@ -297,6 +298,29 @@ Windows Job Object 与 platform keyring claims 必须由真实 hosted runner 执
 CI，但真实第三方 OAuth account 不进入必跑 gate。
 
 ## 13. Progress
+
+R40.0-R40.4 已按独立 commit 完成。R40.5 的本地实现与验证已完成：OAuth transport error class
+不再被协议层抹平；`/config` 中 Authentication modal 在 config route 之前独占按键；signed-in 投影不会
+覆盖已经由真实 activation 证明的 ready tool count；production loopback callback、manual/cancel、restart
+credential recovery 与 native macOS Keychain round trip 均有可执行证据。
+
+编译后的 production `sigil` 还通过了可复现的真实 PTY OAuth smoke：临时 HTTPS tunnel 后的本机
+resource/authorization fixture 完成 protected-resource 与 authorization-server discovery、manual callback、
+PKCE token exchange、native keyring 持久化、Bearer MCP initialize/initialized/tools-list、remote revoke 与
+explicit local clear。该 smoke 同时发现并修复了 config/OAuth surface 提前返回、无法渲染 durable network
+disclosure receipt 的死锁；配置表面现在先真实渲染 disclosure card，成功 frame 后才确认 egress。
+
+终审还发现 harness 会把含 `state`/PKCE challenge 的 OSC52 authorization payload 写入 raw PTY log，且
+token 已持久化后的异常路径缺少本机凭据回滚。最终实现会在落盘前移除 OSC52 payload，并在失败时停止
+原实例、启动新的 production TUI，通过显式 **clear local only** 删除同一 native-store credential。正常链路
+和 post-token 注入失败链路均已执行；两者的持久日志都不含 OAuth transient canary，失败链路也证明凭据
+已清除且没有虚构 remote revoke 成功。
+
+EN/ZH MCP、权限与沙箱、配置字段参考、排障和 changelog 已同步；Pages 继续由这些 source docs 生成，
+没有提交生成页。完整 workspace test、strict Clippy、docs/site、deny、audit、rustfmt 和 diff gate 通过。
+CI 新增 Linux Secret Service、macOS Keychain 与 Windows Credential Manager matrix；由于本批次未获授权
+推送，不能把尚未触发的 hosted jobs 记为已通过。真实第三方 OAuth account 不进入必跑 gate；协议完成
+由 production loopback/runtime conformance 与真实 TUI binary 完整 OAuth 链路共同证明。
 
 - R40.0 complete. 已完成 MCP 2025-11-25、OAuth RFC、当前 Sigil runtime 与 Codex/Gemini/OpenCode
   实现 inventory。独立预审未发现 P0；发现的 remote lazy/refresh 错误路由、动态 credential snapshot

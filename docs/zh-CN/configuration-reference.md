@@ -132,5 +132,12 @@ Role 包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
 | `[terminal.notifications].method` | `"auto"` | `auto`、`osc9`、`osc777` 或 `bell`。 |
 | `[terminal.notifications].minimum_run_duration_ms` | `10000` | 长任务完成阈值，范围为 `1000` 到 `3600000`。 |
 | `[[mcp_servers]].inherit_env` | `[]` | 传递给本地 MCP server 的仅根配置凭据名列表。 |
+| `[[mcp_servers]].transport` | `"stdio"` | `stdio` 或 `streamable_http`。 |
+| `[[mcp_servers]].url` | HTTP 时必填 | 远端 server 的 HTTPS endpoint。 |
+| `[[mcp_servers]].http_headers` / `.env_http_headers` | `{}` | 静态公开 header，或 header 到环境变量名的绑定。Secret 值应保留在环境变量中。 |
+| `[[mcp_servers]].bearer_token_env_var` | 未设置 | 包含一个静态 bearer token 的环境变量；与 OAuth 互斥。 |
+| `[[mcp_servers]].client_capabilities` | `[]` | 可选的 `roots` 与 `elicitation` remote server capability。 |
+| `[mcp_servers.oauth].client_id` | 未设置 | 可选 public client id；server 支持动态注册时可省略。 |
+| `[mcp_servers.oauth].scopes` | `[]` | 可选 scope。OAuth 要求 HTTPS，且不能与静态 bearer 或 Authorization 凭据同时使用。 |
 
 设置示例见[高级配置](advanced-configuration.md)和[MCP 指南](mcp.md)。

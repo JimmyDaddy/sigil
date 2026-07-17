@@ -27,6 +27,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+sigil-mcp = { path = "../sigil-mcp" }
 tempfile.workspace = true
 
 [lints]

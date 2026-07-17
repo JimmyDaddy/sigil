@@ -52,31 +52,35 @@ impl AppState {
             sigil_runtime::McpOAuthAuthPhase::AuthenticationRequired
             | sigil_runtime::McpOAuthAuthPhase::Cancelled
             | sigil_runtime::McpOAuthAuthPhase::RevokedLocallyRetained => {
-                super::McpServerRuntimeStatus::AuthenticationRequired
+                Some(super::McpServerRuntimeStatus::AuthenticationRequired)
             }
             sigil_runtime::McpOAuthAuthPhase::Discovering
             | sigil_runtime::McpOAuthAuthPhase::AwaitingCallback
             | sigil_runtime::McpOAuthAuthPhase::ExchangingCode => {
-                super::McpServerRuntimeStatus::Activating
+                Some(super::McpServerRuntimeStatus::Activating)
             }
-            sigil_runtime::McpOAuthAuthPhase::SignedIn
-            | sigil_runtime::McpOAuthAuthPhase::Refreshing
+            sigil_runtime::McpOAuthAuthPhase::SignedIn => None,
+            sigil_runtime::McpOAuthAuthPhase::Refreshing
             | sigil_runtime::McpOAuthAuthPhase::Revoking => {
-                super::McpServerRuntimeStatus::Refreshing
+                Some(super::McpServerRuntimeStatus::Refreshing)
             }
-            sigil_runtime::McpOAuthAuthPhase::Failed => super::McpServerRuntimeStatus::Failed {
-                message: status
-                    .error
-                    .map(|error| format!("OAuth {error:?}"))
-                    .unwrap_or_else(|| "OAuth failed".to_owned()),
-            },
+            sigil_runtime::McpOAuthAuthPhase::Failed => {
+                Some(super::McpServerRuntimeStatus::Failed {
+                    message: status
+                        .error
+                        .map(|error| format!("OAuth {error:?}"))
+                        .unwrap_or_else(|| "OAuth failed".to_owned()),
+                })
+            }
             sigil_runtime::McpOAuthAuthPhase::NotConfigured => {
-                super::McpServerRuntimeStatus::Deferred
+                Some(super::McpServerRuntimeStatus::Deferred)
             }
         };
-        self.runtime
-            .mcp_server_statuses
-            .insert(server_name.clone(), runtime_status);
+        if let Some(runtime_status) = runtime_status {
+            self.runtime
+                .mcp_server_statuses
+                .insert(server_name.clone(), runtime_status);
+        }
         self.push_event("mcp:oauth", format!("server={server_name} phase={phase:?}"));
     }
 
@@ -108,9 +112,7 @@ impl AppState {
                     buffer.pop();
                     return None;
                 }
-                KeyCode::Char(character)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
+                KeyCode::Char(character) if plain_character_modifiers(key.modifiers) => {
                     if buffer.len() < 8 * 1024 && !character.is_control() {
                         buffer.push(character);
                     }
@@ -164,7 +166,8 @@ impl AppState {
                 _ => None,
             },
             KeyCode::Char('o' | 'O')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
+                if plain_character_modifiers(key.modifiers)
+                    && phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
             {
                 modal
                     .status
@@ -173,7 +176,8 @@ impl AppState {
                     .map(|url| AppAction::OpenSecretExternalUrl { url })
             }
             KeyCode::Char('c' | 'C')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
+                if plain_character_modifiers(key.modifiers)
+                    && phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
             {
                 modal
                     .status
@@ -182,14 +186,16 @@ impl AppState {
                     .map(|text| AppAction::CopySecretToClipboard { text })
             }
             KeyCode::Char('m' | 'M')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
+                if plain_character_modifiers(key.modifiers)
+                    && phase == Some(sigil_runtime::McpOAuthAuthPhase::AwaitingCallback) =>
             {
                 modal.manual_callback = Some(String::new());
                 self.last_notice = Some("paste the complete callback URL, then Enter".to_owned());
                 None
             }
             KeyCode::Char('r' | 'R')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::SignedIn) =>
+                if plain_character_modifiers(key.modifiers)
+                    && phase == Some(sigil_runtime::McpOAuthAuthPhase::SignedIn) =>
             {
                 Some(AppAction::McpOAuth {
                     server_name: modal.server_name.clone(),
@@ -197,7 +203,8 @@ impl AppState {
                 })
             }
             KeyCode::Char('s' | 'S')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::SignedIn) =>
+                if plain_character_modifiers(key.modifiers)
+                    && phase == Some(sigil_runtime::McpOAuthAuthPhase::SignedIn) =>
             {
                 Some(AppAction::McpOAuth {
                     server_name: modal.server_name.clone(),
@@ -205,7 +212,15 @@ impl AppState {
                 })
             }
             KeyCode::Char('l' | 'L')
-                if phase == Some(sigil_runtime::McpOAuthAuthPhase::RevokedLocallyRetained) =>
+                if plain_character_modifiers(key.modifiers)
+                    && matches!(
+                        phase,
+                        Some(
+                            sigil_runtime::McpOAuthAuthPhase::SignedIn
+                                | sigil_runtime::McpOAuthAuthPhase::Failed
+                                | sigil_runtime::McpOAuthAuthPhase::RevokedLocallyRetained
+                        )
+                    ) =>
             {
                 Some(AppAction::McpOAuth {
                     server_name: modal.server_name.clone(),
@@ -215,6 +230,10 @@ impl AppState {
             _ => None,
         }
     }
+}
+
+fn plain_character_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
 }
 
 pub(super) fn modal_lines(state: &McpOAuthModalState) -> Vec<String> {
@@ -252,13 +271,15 @@ pub(super) fn modal_lines(state: &McpOAuthModalState) -> Vec<String> {
     } else {
         lines.push(match status.phase {
             sigil_runtime::McpOAuthAuthPhase::AuthenticationRequired
-            | sigil_runtime::McpOAuthAuthPhase::Failed
             | sigil_runtime::McpOAuthAuthPhase::Cancelled => "Enter sign in · Esc close".to_owned(),
+            sigil_runtime::McpOAuthAuthPhase::Failed => {
+                "Enter retry sign in · L clear local only · Esc close".to_owned()
+            }
             sigil_runtime::McpOAuthAuthPhase::AwaitingCallback => {
                 "O open browser · C copy URL · M manual callback · Esc cancel".to_owned()
             }
             sigil_runtime::McpOAuthAuthPhase::SignedIn => {
-                "R/Enter refresh · S sign out (remote revoke first) · Esc close".to_owned()
+                "R/Enter refresh · S revoke remotely · L clear local only · Esc close".to_owned()
             }
             sigil_runtime::McpOAuthAuthPhase::RevokedLocallyRetained => {
                 "L/Enter clear local credential · Esc keep local credential".to_owned()

@@ -39,6 +39,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     }
     if app.is_config_mode() {
         render_config(frame, app);
+        let (egress_disclosure, _) = egress_disclosure_layout(frame.area(), app);
+        if let Some(area) = egress_disclosure {
+            let _ = render_active_egress_disclosure_card(frame, area, app, &theme);
+        }
         return;
     }
 

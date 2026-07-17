@@ -132,5 +132,12 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[terminal.notifications].method` | `"auto"` | `auto`, `osc9`, `osc777`, or `bell`. |
 | `[terminal.notifications].minimum_run_duration_ms` | `10000` | Long-run completion threshold, from `1000` through `3600000`. |
 | `[[mcp_servers]].inherit_env` | `[]` | Root-only list of credential names to pass to a local MCP server. |
+| `[[mcp_servers]].transport` | `"stdio"` | `stdio` or `streamable_http`. |
+| `[[mcp_servers]].url` | required for HTTP | HTTPS endpoint for a remote server. |
+| `[[mcp_servers]].http_headers` / `.env_http_headers` | `{}` | Static public headers or header-to-environment-name bindings. Secret values should stay in environment variables. |
+| `[[mcp_servers]].bearer_token_env_var` | unset | Environment variable containing one static bearer token. Mutually exclusive with OAuth. |
+| `[[mcp_servers]].client_capabilities` | `[]` | Optional `roots` and `elicitation` capabilities advertised to a remote server. |
+| `[mcp_servers.oauth].client_id` | unset | Optional public client id; omit when the server supports dynamic registration. |
+| `[mcp_servers.oauth].scopes` | `[]` | Optional requested scopes. OAuth requires HTTPS and cannot be combined with a static bearer or Authorization credential. |
 
 See [Advanced configuration](advanced-configuration.md) and the [MCP guide](mcp.md) for setup examples.

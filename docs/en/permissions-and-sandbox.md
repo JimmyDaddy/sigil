@@ -63,6 +63,8 @@ With `network_mode = "allow"`, read-only web searches and fetches can proceed wi
 
 `deny` disables web access. The bundled search route sends your normalized query to its stated search service; read the [Privacy guide](privacy.md) and [MCP guide](mcp.md) before enabling third-party tools or credentials.
 
+Remote MCP and MCP OAuth follow this independent network boundary too. `auto-edit` does not silently authorize OAuth discovery, token exchange, refresh, or revocation. One sign-in can contact the MCP resource and a separate authorization server, so Sigil may show more than one destination disclosure. Session grants remain bound to the admitted network effect; they never expose token values or bypass destination checks.
+
 ## Sandbox Expectations
 
 Permission decides whether Sigil may attempt an action. A sandbox is the operating-system boundary that may constrain a command after it is allowed. They are complementary, not interchangeable.

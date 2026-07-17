@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::MutationArtifactRetentionPreview;
+use ratatui::{Terminal, backend::TestBackend};
 
 fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     let mut config = test_config();
@@ -620,8 +621,68 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn config_mcp_oauth_activation_opens_exclusive_authentication_modal() -> Result<()> {
+#[derive(Debug)]
+struct OAuthPromptExecutor {
+    responses: std::sync::Mutex<std::collections::VecDeque<sigil_mcp::McpOAuthHttpResponse>>,
+}
+
+#[async_trait::async_trait]
+impl sigil_mcp::McpOAuthHttpExecutor for OAuthPromptExecutor {
+    async fn execute(
+        &self,
+        _request: sigil_mcp::McpOAuthHttpRequest,
+    ) -> std::result::Result<sigil_mcp::McpOAuthHttpResponse, sigil_mcp::McpOAuthTransportError>
+    {
+        self.responses
+            .lock()
+            .expect("OAuth response lock")
+            .pop_front()
+            .ok_or(sigil_mcp::McpOAuthTransportError::Transport)
+    }
+}
+
+async fn oauth_prompt(server: &McpServerConfig) -> sigil_runtime::McpOAuthAuthStatus {
+    let response = |value: serde_json::Value| {
+        sigil_mcp::McpOAuthHttpResponse::new(
+            200,
+            Some("application/json".to_owned()),
+            SecretString::new(value.to_string()),
+        )
+    };
+    let executor = std::sync::Arc::new(OAuthPromptExecutor {
+        responses: std::sync::Mutex::new(
+            vec![
+                response(serde_json::json!({
+                    "resource": "https://mcp.example/public/mcp",
+                    "authorization_servers": ["https://auth.example/tenant"],
+                    "scopes_supported": ["files:read", "files:write"]
+                })),
+                response(serde_json::json!({
+                    "issuer": "https://auth.example/tenant",
+                    "authorization_endpoint": "https://auth.example/authorize",
+                    "token_endpoint": "https://auth.example/token",
+                    "revocation_endpoint": "https://auth.example/revoke",
+                    "response_types_supported": ["code"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                    "code_challenge_methods_supported": ["S256"],
+                    "token_endpoint_auth_methods_supported": ["none"]
+                })),
+            ]
+            .into(),
+        ),
+    });
+    sigil_runtime::McpOAuthRuntimeService::new(
+        std::sync::Arc::new(sigil_runtime::McpOAuthCredentialManager::system()),
+        executor,
+    )
+    .begin(server)
+    .await
+    .expect("prepare OAuth prompt")
+    .prompt()
+}
+
+#[tokio::test]
+async fn config_mcp_oauth_modal_owns_every_advertised_action_key() -> Result<()> {
     let mut config = test_config();
     config.mcp_servers.push(McpServerConfig {
         name: "remote-oauth".to_owned(),
@@ -674,7 +735,184 @@ fn config_mcp_oauth_activation_opens_exclusive_authentication_modal() -> Result<
         url: SecretString::new("https://auth.example/authorize?code=secret-canary"),
     };
     assert!(!format!("{secret_action:?}").contains("secret-canary"));
+
+    let prompt = oauth_prompt(&config.mcp_servers[0]).await;
+    app.apply_mcp_oauth_status(prompt.clone(), None);
+    assert!(app.modal_lines().join("\n").contains("O open browser"));
+    for key in [
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+    ] {
+        assert!(app.handle_key_event(key)?.is_none());
+    }
+    let open = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        open,
+        Some(AppAction::OpenSecretExternalUrl { .. })
+    ));
+    assert!(!format!("{open:?}").contains("auth.example"));
+    let copy = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        copy,
+        Some(AppAction::CopySecretToClipboard { .. })
+    ));
+    assert!(!format!("{copy:?}").contains("auth.example"));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?
+            .is_none()
+    );
+    let callback = "http://127.0.0.1:43210/callback?code=modal-canary&state=state-canary";
+    for character in callback.chars() {
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?
+                .is_none()
+        );
+    }
+    let manual = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        manual,
+        Some(AppAction::McpOAuth {
+            action: McpOAuthUserAction::ManualCallback(_),
+            ..
+        })
+    ));
+    assert!(!format!("{manual:?}").contains("modal-canary"));
+
+    app.apply_mcp_oauth_status(prompt.clone(), None);
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?,
+        Some(AppAction::McpOAuth {
+            action: McpOAuthUserAction::Cancel,
+            ..
+        })
+    ));
+
+    app.runtime.mcp_server_statuses.insert(
+        "remote-oauth".to_owned(),
+        crate::app::McpServerRuntimeStatus::Ready {
+            tool_count: Some(2),
+            process_coverage: None,
+        },
+    );
+    app.apply_mcp_oauth_status(
+        prompt
+            .clone()
+            .with_phase(sigil_runtime::McpOAuthAuthPhase::SignedIn),
+        None,
+    );
+    assert_eq!(
+        app.mcp_server_runtime_status_label("remote-oauth")
+            .as_deref(),
+        Some("ready 2 tools")
+    );
+    for key in [
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+    ] {
+        assert!(app.handle_key_event(key)?.is_none());
+    }
+    for (key, expected) in [
+        (KeyCode::Char('r'), McpOAuthUserAction::Refresh),
+        (KeyCode::Enter, McpOAuthUserAction::Refresh),
+        (KeyCode::Char('s'), McpOAuthUserAction::Revoke),
+        (KeyCode::Char('l'), McpOAuthUserAction::ClearLocal),
+    ] {
+        let action = app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?;
+        assert!(matches!(
+            action,
+            Some(AppAction::McpOAuth { action, .. }) if std::mem::discriminant(&action) == std::mem::discriminant(&expected)
+        ));
+    }
+
+    app.apply_mcp_oauth_status(
+        prompt
+            .clone()
+            .failed(&sigil_runtime::McpOAuthFlowError::Cancelled),
+        None,
+    );
+    assert!(app.modal_lines().join("\n").contains("L clear local only"));
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))?,
+        Some(AppAction::McpOAuth {
+            action: McpOAuthUserAction::ClearLocal,
+            ..
+        })
+    ));
+
+    app.apply_mcp_oauth_status(
+        prompt
+            .clone()
+            .with_phase(sigil_runtime::McpOAuthAuthPhase::RevokedLocallyRetained),
+        Some(sigil_runtime::McpOAuthRevocationOutcome::Revoked),
+    );
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT))?
+            .is_none()
+    );
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))?,
+        Some(AppAction::McpOAuth {
+            action: McpOAuthUserAction::ClearLocal,
+            ..
+        })
+    ));
+    app.apply_mcp_oauth_status(
+        prompt.with_phase(sigil_runtime::McpOAuthAuthPhase::AuthenticationRequired),
+        None,
+    );
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?,
+        Some(AppAction::McpOAuth {
+            action: McpOAuthUserAction::SignIn,
+            ..
+        })
+    ));
     Ok(())
+}
+
+#[test]
+fn config_oauth_surface_renders_disclosure_before_acknowledging_it() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    let disclosure = sigil_kernel::PreEgressDisclosure::new(
+        sigil_kernel::EgressDisclosureKind::Transport,
+        None,
+        "config-oauth",
+        "tui",
+        "MCP OAuth discovery",
+        "route-fingerprint",
+        "profile-fingerprint",
+        "https://mcp.example/",
+        "https://mcp.example/",
+        sigil_kernel::EgressNetworkRoute::Direct,
+        vec![sigil_kernel::EgressDataCategory::ConnectionMetadata],
+    )
+    .expect("valid disclosure");
+    let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
+        disclosure,
+        receipt_tx,
+    })
+    .expect("disclosure request");
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("test terminal");
+    terminal
+        .draw(|frame| crate::ui::render(frame, &app))
+        .expect("config frame should render");
+
+    assert!(matches!(
+        receipt_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(app.acknowledge_active_egress_disclosure_frame());
+    let receipt = futures::executor::block_on(receipt_rx)
+        .expect("receipt")
+        .expect("successful config-frame receipt");
+    assert_eq!(receipt.sink_fingerprint(), "tui-active-card-frame-v1");
 }
 
 #[test]

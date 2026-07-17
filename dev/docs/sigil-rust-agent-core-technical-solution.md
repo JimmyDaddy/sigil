@@ -267,7 +267,7 @@ sigil/
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-process`：只承载跨 crate 复用的进程树 lifecycle ownership、整树终止和离线 capability probe。Windows 通过 kill-on-close Job Object 统一服务内置工具与 stdio MCP；Unix 的 process-group 建立与信号策略仍由调用 crate 维护。它不承载 shell 选择、sandbox、terminal I/O、MCP framing、receipt 或 TUI 状态。
 - `sigil-code-intel`：隔离 LSP client 生命周期、多语言 Tree-sitter request-local fallback、RepoMapLite source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。首批 request-local adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用编译期固定 grammar、ignore-aware bounded walker/read、deterministic caps 和 same-language unique-reference heuristic；它不建立 persistent repo graph，也不把 heuristic edge 宣传为 resolved call graph。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态结果以 bounded Context V1/tool result 进入 provider-visible request，不修改 stable base system prompt。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
-- `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
+- `sigil-mcp`：隔离 stdio 与 Streamable HTTP MCP client、OAuth 2.1 凭据生命周期和工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry、run options、Context source provider contract / hard-cap enforcement 和 request resolver，避免 TUI / CLI 各自硬编码装配链。tool surface 保留与 registry 同一个 `CodeIntelligenceService` inner；每次请求先在 35ms 内只读 query-relevant warm LSP cache，有命中时使用 explicit path + LSP rows 并跳过 RepoMap，miss/disabled/timeout 才使用 request-local multilingual RepoMap。它把这些结果转换为带 score breakdown 的 bounded Context V1 items，并把 trusted plugin hook output / caller-supplied MCP resource text 通过同一个 source-provider contract 转成 `ExtensionProvided` / `McpResource` rows；缺失或不可信输入只产生 excluded provenance，不阻塞普通 request。normal、plan、headless、queue 和 compaction preparation 共享该 resolver；已经冻结的 provider request 不在 dispatch 时重算。kernel 只看到 provider-neutral `ContextItem` 和 packer，不知道 runtime 存在。
 - `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 各写一套判断。
@@ -1027,7 +1027,7 @@ E21.17 已把 Streamable HTTP 协议核心接入用户根 flat tagged MCP config
 - `progress`：长时工具和远程 server 可以发正式进度，而不是靠文本日志刷屏
 - `elicitation`：server 能在 `tools/call` 等处理中合法地向用户要补充输入
 
-当前 stdio MCP 实现已经支持 `initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`，并在等待响应时处理 server 发来的反向请求：
+当前 MCP 实现同时支持 stdio 与用户根配置声明的 Streamable HTTP transport。两者都覆盖 `initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`；stdio transport 还会在等待响应时处理 server 发来的反向请求：
 
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面
@@ -1037,7 +1037,7 @@ E21.17 已把 Streamable HTTP 协议核心接入用户根 flat tagged MCP config
 
 stdio transport 按声明的 MCP `2025-06-18` 使用 newline-delimited JSON，不再接受未声明的 LSP `Content-Length` framing。每个 inbound envelope 必须是单个 JSON object，batch array 直接拒绝；server request/notification 的 `id` 仅接受 string/integer、`params` 仅接受 object，success response 的 `result` 必须是 object。单个 inbound/outbound frame 硬限制为 4 MiB，单次 operation 最多处理 256 个 inbound message、累计 8 MiB；outbound frame 在完整 bounded encode 成功前不会写入 pipe。CRLF compatibility 只允许硬上限后的唯一候选 `\r`，任何其他 cap+1 byte 都立即返回 `frame_too_large`，不能继续占用 deadline。`initialize`、`initialized` 与首次 `tools/list` 共用一个 startup absolute deadline，tool/resource/prompt 则从等待串行 connection lock 前开始消费 `ToolContext.timeout_secs`，覆盖 write、flush、frame read 与 inbound handler；零值使用有限的 30 秒安全默认，不表示无限等待，非零值最高限制为 24 小时，极端 `u64` 输入不能造成 deadline overflow/panic。frame/message/cumulative/stderr limit 统一投影为带 limit 与 observed lower bound 的结构化 `resource_limit`。
 
-timeout、framing/EOF、unexpected response id、message budget 或 MCP stderr 8 MiB hard limit 会由同一个 first-winner `Ready -> Closing -> Closed` owner 原子发布 reason/typed cause，关闭 stdin、尝试终止 process group/tree，并回收直接 child；loser 不能覆盖首因，清理不完整时必须明确报告。Windows healthy teardown 在 bounded `taskkill /T /F` 完成前持有 stdio，避免 EOF 促使 leader 先退出；若 leader 在 teardown 前已消失则保持 tree cleanup unconfirmed 的真实证据。旧 `Arc<McpClient>` 随后在写任何 bytes 前 fail-fast；恢复必须通过既有 activation/refresh 流程重新执行 process binding、environment binding、pin 和 lifecycle scan，创建新的 process generation，不能在旧 stream 上自动重放请求。tool lifecycle owner 使用 provider-neutral 的 exact raw server scope + unique generation id，refresh 不依赖 sanitize/truncate/hash 后的 provider name；显式 activation/refresh 对 optional server 同样 strict，replacement 失败时恢复旧 generation，旧 generation shutdown 失败时只按 replacement exact owner 回滚新 generation。多 server registration 失败会回滚本次已注册 generation，duplicate exact server name 在 launch 前 fail-fast，generation shutdown 会尝试所有 distinct owner 后再聚合错误。stderr 只保留 64 KiB head/tail 与 total/truncation evidence，hard-limit/reader-failure 以 typed cause 投影，raw full stderr 不进入错误或持久状态。
+timeout、framing/EOF、unexpected response id、message budget 或 MCP stderr 8 MiB hard limit 会由同一个 first-winner `Ready -> Closing -> Closed` owner 原子发布 reason/typed cause，关闭 stdin、尝试终止 process group/tree，并回收直接 child；loser 不能覆盖首因，清理不完整时必须明确报告。Windows healthy teardown 由 kill-on-close Job Object 持有并终止完整 stdio MCP process tree；若 leader 在 teardown 前已消失则保持 tree cleanup unconfirmed 的真实证据。旧 `Arc<McpClient>` 随后在写任何 bytes 前 fail-fast；恢复必须通过既有 activation/refresh 流程重新执行 process binding、environment binding、pin 和 lifecycle scan，创建新的 process generation，不能在旧 stream 上自动重放请求。tool lifecycle owner 使用 provider-neutral 的 exact raw server scope + unique generation id，refresh 不依赖 sanitize/truncate/hash 后的 provider name；显式 activation/refresh 对 optional server 同样 strict，replacement 失败时恢复旧 generation，旧 generation shutdown 失败时只按 replacement exact owner 回滚新 generation。多 server registration 失败会回滚本次已注册 generation，duplicate exact server name 在 launch 前 fail-fast，generation shutdown 会尝试所有 distinct owner 后再聚合错误。stderr 只保留 64 KiB head/tail 与 total/truncation evidence，hard-limit/reader-failure 以 typed cause 投影，raw full stderr 不进入错误或持久状态。
 
 ### 11.4 信任与数据出境模型
 
@@ -1321,7 +1321,7 @@ pub struct ProviderCapabilities {
 - `tokio`：async runtime
 - `futures` / `tokio-stream`：stream 组合
 - `serde`、`serde_json`、`toml`：配置和协议序列化
-- `reqwest`：provider HTTP client / runtime provider status client；MCP 当前走 stdio client
+- `reqwest`：provider HTTP client、runtime provider status client，以及 Streamable HTTP MCP/OAuth client
 - `async-trait`：第一阶段先解决 object-safe async trait 问题
 - `thiserror` + `anyhow`：错误分层
 - `tracing` + `tracing-subscriber`：结构化日志
@@ -1473,7 +1473,7 @@ pub struct ProviderCapabilities {
 3. kernel 是 event-driven、agent-runtime-centered
 4. provider crate 保持 provider-specific 协议细节内聚，kernel 只承载中立契约
 5. DeepSeek、OpenAI-compatible、Anthropic、Gemini 共用 runtime 装配与 capability view
-6. MCP `stdio` 进入 runtime/TUI 生命周期，server lifecycle 和 trust policy 保持可配置
+6. MCP `stdio` 与 Streamable HTTP/OAuth 进入 runtime/TUI 生命周期，server lifecycle、凭据和 trust policy 保持可配置
 7. planner / executor / subagent 在 base loop 之上以可审计的 task state 继续演进
 
 ## 18. 立即下一步

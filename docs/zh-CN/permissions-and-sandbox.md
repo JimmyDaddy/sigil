@@ -63,6 +63,8 @@ search_route = "auto"  # auto | provider_hosted | mcp | bundled | disabled
 
 `deny` 会关闭 Web 访问。bundled search route 会把归一化后的查询发送给其声明的搜索服务；开启第三方工具或凭据前，请阅读[隐私指南](privacy.md)和[MCP 指南](mcp.md)。
 
+远端 MCP 与 MCP OAuth 也遵守这条独立网络边界。`auto-edit` 不会静默授权 OAuth discovery、token exchange、refresh 或 revoke。一次登录可能同时访问 MCP resource 与另一个 authorization server，因此 Sigil 可能展示多个目标 disclosure。Session grant 仍绑定已获准的 network effect；它不会暴露 token 值，也不会绕过目标检查。
+
 ## 沙箱的实际含义
 
 权限决定 Sigil 是否可以尝试一项动作。沙箱是操作系统层面的边界，用于在动作获准后限制命令。两者互补，不能互相替代。

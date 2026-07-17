@@ -9,6 +9,8 @@ This page lists user-facing release notes. For support boundaries and early-prev
 ### Changed
 
 - Windows shell and terminal tools now use native PowerShell by default, disclose the resolved dialect in Doctor and tool cards, keep non-POSIX approval analysis conservative, and use Job Object process-tree ownership for cancellation and timeout. Local execution remains explicitly unconfined.
+- Remote Streamable HTTP MCP servers now support explicit TUI-first OAuth sign-in with PKCE, loopback or manual callback, native credential storage, bounded refresh/revocation, and typed authentication failures. Every OAuth destination still passes the normal network disclosure and destination checks; headless startup never opens a browser.
+- Remote MCP activation and refresh now replace tool generations transactionally, while Windows stdio MCP process trees use native Job Object ownership for bounded cleanup.
 
 ## v0.0.1-alpha.4 - 2026-07-16
 

@@ -953,6 +953,9 @@ impl AppState {
         if self.is_setup_mode() {
             return self.handle_setup_key_event(key);
         }
+        if self.mcp_oauth_modal_open() {
+            return Ok(self.handle_mcp_oauth_modal_key_event(key));
+        }
         if self.is_config_mode() {
             return self.handle_config_key_event(key);
         }
@@ -987,9 +990,6 @@ impl AppState {
         }
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
-        }
-        if self.mcp_oauth_modal_open() {
-            return Ok(self.handle_mcp_oauth_modal_key_event(key));
         }
         if self.feedback_modal_open() {
             return Ok(self.handle_feedback_modal_key_event(key));

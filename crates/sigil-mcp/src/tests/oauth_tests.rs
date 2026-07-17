@@ -33,6 +33,13 @@ impl QueueExecutor {
     fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().expect("requests lock").clone()
     }
+
+    fn with_results(responses: Vec<Result<McpOAuthHttpResponse, McpOAuthTransportError>>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 #[async_trait]
@@ -617,4 +624,37 @@ fn bounded_inputs_and_debug_surfaces_reject_or_redact_sensitive_values() {
     assert!(!debug.contains("secret-header-canary"));
     assert!(!debug.contains("secret-code-canary"));
     assert!(!debug.contains("https://auth.example/token"));
+}
+
+#[tokio::test]
+async fn protocol_preserves_destination_budget_and_transport_failure_classes() {
+    let challenge = McpOAuthChallenge::parse(
+        "Bearer",
+        SecretString::new("https://resource.example/public/mcp"),
+    )
+    .expect("challenge")
+    .expect("Bearer challenge");
+    for (transport, expected) in [
+        (
+            McpOAuthTransportError::DestinationRejected,
+            McpOAuthProtocolError::DestinationRejected,
+        ),
+        (
+            McpOAuthTransportError::BudgetExhausted,
+            McpOAuthProtocolError::BudgetExhausted,
+        ),
+        (
+            McpOAuthTransportError::Transport,
+            McpOAuthProtocolError::Transport,
+        ),
+    ] {
+        let executor = QueueExecutor::with_results(vec![Err(transport)]);
+        assert_eq!(
+            discover_oauth_authorization_server(&executor, &challenge)
+                .await
+                .expect_err("transport class must remain typed"),
+            expected
+        );
+        assert_eq!(executor.requests().len(), 1);
+    }
 }

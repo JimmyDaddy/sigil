@@ -193,6 +193,51 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-http --all-targets
 
+  oauth-keyring-conformance:
+    name: OAuth keyring conformance (${{ matrix.name }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux Secret Service
+            os: ubuntu-latest
+          - name: macOS Keychain
+            os: macos-latest
+          - name: Windows Credential Manager
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Secret Service fixture
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes dbus-x11 gnome-keyring
+
+      - name: Test Linux Secret Service round trip
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dbus-run-session -- bash -eu -o pipefail -c '
+            eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+            cargo test --locked -p sigil-mcp native_system_keyring_round_trip_is_exact_and_cleanup_safe -- --ignored
+          '
+
+      - name: Test native credential-store round trip
+        if: runner.os != 'Linux'
+        run: cargo test --locked -p sigil-mcp native_system_keyring_round_trip_is_exact_and_cleanup_safe -- --ignored
+
   test:
     needs: check
     runs-on: ubuntu-latest

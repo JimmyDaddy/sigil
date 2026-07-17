@@ -13,7 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::oauth::{
     McpOAuthClientRegistration, McpOAuthDiscovery, McpOAuthHttpExecutor, McpOAuthHttpPurpose,
     McpOAuthHttpRequest, McpOAuthHttpResponse, McpOAuthProtocolError, McpOAuthTokenResponse,
-    basic_client_authorization, parse_bearer_token_response,
+    McpOAuthTransportError, basic_client_authorization, parse_bearer_token_response,
 };
 
 const CREDENTIAL_RECORD_VERSION: u8 = 1;
@@ -50,6 +50,10 @@ pub enum McpOAuthCredentialError {
     RefreshRejected,
     #[error("remote MCP OAuth revocation was rejected")]
     RevocationRejected,
+    #[error("remote MCP OAuth destination authorization was rejected")]
+    DestinationRejected,
+    #[error("remote MCP OAuth network budget was exhausted")]
+    BudgetExhausted,
     #[error("remote MCP OAuth transport failed")]
     Transport,
 }
@@ -780,12 +784,16 @@ pub async fn refresh_oauth_credential(
     let response = executor
         .execute(request)
         .await
-        .map_err(|_| McpOAuthCredentialError::Transport)?;
+        .map_err(map_transport_error)?;
     if is_invalid_grant(&response) {
         return Err(McpOAuthCredentialError::InvalidRefresh);
     }
     parse_bearer_token_response(response, &record.scope.scopes, &record.scope.scopes).map_err(
         |error| match error {
+            McpOAuthProtocolError::DestinationRejected => {
+                McpOAuthCredentialError::DestinationRejected
+            }
+            McpOAuthProtocolError::BudgetExhausted => McpOAuthCredentialError::BudgetExhausted,
             McpOAuthProtocolError::Transport => McpOAuthCredentialError::Transport,
             _ => McpOAuthCredentialError::RefreshRejected,
         },
@@ -832,11 +840,19 @@ pub async fn revoke_oauth_credential(
     let response = executor
         .execute(request)
         .await
-        .map_err(|_| McpOAuthCredentialError::Transport)?;
+        .map_err(map_transport_error)?;
     if response.status != 200 {
         return Err(McpOAuthCredentialError::RevocationRejected);
     }
     Ok(McpOAuthRevocationOutcome::Revoked)
+}
+
+fn map_transport_error(error: McpOAuthTransportError) -> McpOAuthCredentialError {
+    match error {
+        McpOAuthTransportError::DestinationRejected => McpOAuthCredentialError::DestinationRejected,
+        McpOAuthTransportError::BudgetExhausted => McpOAuthCredentialError::BudgetExhausted,
+        McpOAuthTransportError::Transport => McpOAuthCredentialError::Transport,
+    }
 }
 
 fn build_revocation_request(

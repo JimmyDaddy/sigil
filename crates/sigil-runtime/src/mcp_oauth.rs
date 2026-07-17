@@ -8,8 +8,9 @@ use sigil_mcp::{
     McpOAuthCredentialError, McpOAuthCredentialLocatorStore, McpOAuthCredentialLookup,
     McpOAuthCredentialRecord, McpOAuthCredentialScope, McpOAuthCredentialSnapshot,
     McpOAuthCredentialStatus, McpOAuthCredentialStore, McpOAuthHttpExecutor,
-    McpOAuthRevocationOutcome, McpStreamableHttpBearerProvider, McpStreamableHttpError,
-    SystemMcpOAuthCredentialStore, refresh_oauth_credential, revoke_oauth_credential,
+    McpOAuthRevocationOutcome, McpStreamableHttpBearerProvider, McpStreamableHttpDestinationError,
+    McpStreamableHttpError, SystemMcpOAuthCredentialStore, refresh_oauth_credential,
+    revoke_oauth_credential,
 };
 use tokio::sync::Mutex;
 
@@ -99,6 +100,12 @@ fn map_credential_error(error: McpOAuthCredentialError) -> McpStreamableHttpErro
     match error {
         McpOAuthCredentialError::AuthenticationRequired
         | McpOAuthCredentialError::InvalidRefresh => McpStreamableHttpError::AuthenticationRequired,
+        McpOAuthCredentialError::DestinationRejected => {
+            McpStreamableHttpError::DestinationAuthorization(
+                McpStreamableHttpDestinationError::DestinationRejected,
+            )
+        }
+        McpOAuthCredentialError::BudgetExhausted => McpStreamableHttpError::BudgetExhausted,
         McpOAuthCredentialError::Transport => McpStreamableHttpError::Transport,
         McpOAuthCredentialError::InvalidScope
         | McpOAuthCredentialError::InvalidRecord

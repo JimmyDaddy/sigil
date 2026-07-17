@@ -196,6 +196,20 @@ sigil tokenizer install deepseek-v4-flash
 
 在 TUI 中，失败的 eager MCP server 不应该阻塞普通 chat 或使用内置工具的 planned task。
 
+OAuth 请根据 `/config` → **MCP Servers** → **Authentication** 中的 typed state 处理：
+
+| 状态或错误 | 处理方式 |
+| --- | --- |
+| `authentication required` | 明确选择**登录**；eager 启动不会自动打开浏览器。 |
+| metadata unavailable / destination rejected | 检查 HTTPS、resource URL、Network disclosure、proxy/domain policy 与 authorization server metadata。 |
+| callback invalid | 重新开始登录，只使用最新浏览器 tab。手动返回时粘贴包含原始 state 的完整 callback URL。 |
+| credential store unavailable/rejected | 解锁或启用平台原生 Keychain、Credential Manager 或 Secret Service。Sigil 没有明文凭据 fallback。 |
+| refresh rejected | 重新登录。Sigil 会停用无效 refresh credential，不会循环重试。 |
+| 远端 revoke 失败 | 本机凭据会保留。重试远端退出，或检查提示后明确清除。 |
+| budget exhausted | 增加有边界的 Web budget，或等待其他 Web 工作结束，再重试显式动作。 |
+
+OAuth redirect 与自动请求 retry 均关闭。请求发送后收到 `401` 时，Sigil 不会重放该请求。完整 callback 与凭据契约见 [MCP OAuth 认证](mcp.md#oauth-认证)。
+
 ## Code Intelligence 未就绪
 
 检查：

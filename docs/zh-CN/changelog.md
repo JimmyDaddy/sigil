@@ -9,6 +9,8 @@
 ### 调整
 
 - Windows shell 与 terminal 工具现在默认使用 native PowerShell，在 Doctor 和 tool card 中显示解析后的 dialect，对非 POSIX 命令保持保守批准分析，并通过 Job Object 持有取消与超时的进程树；本地执行仍明确标记为 unconfined。
+- 远端 Streamable HTTP MCP server 现在支持显式、TUI-first 的 OAuth 登录，包括 PKCE、loopback 或手动 callback、原生凭据存储、有边界的 refresh/revoke 与 typed authentication failure。每个 OAuth 目标仍经过常规 network disclosure 与 destination check；headless 启动不会打开浏览器。
+- 远端 MCP activation/refresh 现在以 transaction 方式替换 tool generation；Windows stdio MCP process tree 使用原生 Job Object ownership 进行有边界清理。
 
 ## v0.0.1-alpha.4 - 2026-07-16
 
