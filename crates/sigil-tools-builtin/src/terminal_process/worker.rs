@@ -155,6 +155,10 @@ pub(super) fn spawn_pty_runtime(
     let master = Arc::new(StdMutex::new(master));
     let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_PTY_INPUT_QUEUE_BOUND);
     spawn_pty_input_thread(writer, input_rx);
+    #[cfg(windows)]
+    let terminal_response_tx = Some(input_tx.clone());
+    #[cfg(not(windows))]
+    let terminal_response_tx = None;
 
     let command_spec = plan
         .pty_command
@@ -192,6 +196,7 @@ pub(super) fn spawn_pty_runtime(
         plan.artifacts.absolute_stdout.clone(),
         plan.artifacts.absolute_output.clone(),
         artifact_limits,
+        terminal_response_tx,
         Arc::clone(&capture_ledger),
         capture_failure_tx,
     );

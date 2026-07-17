@@ -1187,6 +1187,7 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
         temp.path().join("pty-stream.log"),
         temp.path().join("pty-output.log"),
         super::TerminalArtifactLimits::default(),
+        None,
         Arc::new(super::TerminalCaptureLedger::default()),
         capture_failure_tx,
     )
@@ -1312,6 +1313,7 @@ async fn terminal_pty_reader_panic_is_reported_live_after_the_panic() -> Result<
         temp.path().join("pty-panic-stdout.log"),
         temp.path().join("pty-panic-output.log"),
         super::TerminalArtifactLimits::default(),
+        None,
         Arc::new(super::TerminalCaptureLedger::default()),
         capture_failure_tx,
     );
@@ -1325,6 +1327,28 @@ async fn terminal_pty_reader_panic_is_reported_live_after_the_panic() -> Result<
             .unwrap_or_default()
             .contains("pty output reader panicked")
     );
+    Ok(())
+}
+
+#[test]
+fn terminal_query_responder_handles_split_and_private_cursor_queries() -> Result<()> {
+    let (input_tx, input_rx) = std::sync::mpsc::sync_channel(2);
+    let mut responder = super::io::TerminalQueryResponder::new(Some(input_tx));
+
+    responder.observe(b"before\x1b[")?;
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    responder.observe(b"6nafter")?;
+    assert_eq!(input_rx.try_recv()?, b"\x1b[1;1R");
+    responder.observe(b"ordinary output")?;
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    responder.observe(b"\x1b[?6n")?;
+    assert_eq!(input_rx.try_recv()?, b"\x1b[1;1R");
     Ok(())
 }
 

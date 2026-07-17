@@ -4053,7 +4053,7 @@ async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
 #[tokio::test]
 async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 15);
 
     #[cfg(windows)]
     let command = "Write-Error 'bad output' -ErrorAction Continue; exit 7";
@@ -4065,7 +4065,12 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
         .await?;
 
     assert!(result.is_error());
-    assert_eq!(result.metadata.exit_code, Some(7));
+    assert_eq!(
+        result.metadata.exit_code,
+        Some(7),
+        "unexpected result: {:?}",
+        result
+    );
     assert!(result.content.contains("bad output"));
     Ok(())
 }

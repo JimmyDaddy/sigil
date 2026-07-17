@@ -204,11 +204,69 @@ impl CombinedOutputWriter {
     }
 }
 
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+const PRIVATE_CURSOR_POSITION_QUERY: &[u8] = b"\x1b[?6n";
+const CURSOR_POSITION_RESPONSE: &[u8] = b"\x1b[1;1R";
+const TERMINAL_QUERY_TAIL_BYTES: usize = PRIVATE_CURSOR_POSITION_QUERY.len() - 1;
+
+#[derive(Default)]
+pub(super) struct TerminalQueryResponder {
+    input_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
+    tail: Vec<u8>,
+}
+
+impl TerminalQueryResponder {
+    pub(super) fn new(input_tx: Option<std_mpsc::SyncSender<Vec<u8>>>) -> Self {
+        Self {
+            input_tx,
+            tail: Vec::new(),
+        }
+    }
+
+    pub(super) fn observe(&mut self, bytes: &[u8]) -> Result<()> {
+        let Some(input_tx) = self.input_tx.as_ref() else {
+            return Ok(());
+        };
+        let previous_tail_len = self.tail.len();
+        self.tail.extend_from_slice(bytes);
+        let response_count = [CURSOR_POSITION_QUERY, PRIVATE_CURSOR_POSITION_QUERY]
+            .into_iter()
+            .map(|query| count_new_terminal_queries(&self.tail, previous_tail_len, query))
+            .sum::<usize>();
+        for _ in 0..response_count {
+            input_tx
+                .try_send(CURSOR_POSITION_RESPONSE.to_vec())
+                .map_err(|error| match error {
+                    std_mpsc::TrySendError::Full(_) => {
+                        anyhow!("terminal PTY input queue is full while responding to cursor query")
+                    }
+                    std_mpsc::TrySendError::Disconnected(_) => anyhow!(
+                        "terminal PTY input channel closed while responding to cursor query"
+                    ),
+                })?;
+        }
+        if self.tail.len() > TERMINAL_QUERY_TAIL_BYTES {
+            self.tail
+                .drain(..self.tail.len().saturating_sub(TERMINAL_QUERY_TAIL_BYTES));
+        }
+        Ok(())
+    }
+}
+
+fn count_new_terminal_queries(bytes: &[u8], previous_len: usize, query: &[u8]) -> usize {
+    bytes
+        .windows(query.len())
+        .enumerate()
+        .filter(|(index, window)| *window == query && index + query.len() > previous_len)
+        .count()
+}
+
 pub(super) fn spawn_pty_read_thread(
     reader: Box<dyn Read + Send>,
     stream_path: PathBuf,
     output_path: PathBuf,
     limits: TerminalArtifactLimits,
+    terminal_response_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
     capture_ledger: Arc<TerminalCaptureLedger>,
     capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
 ) -> ThreadJoinHandle<Result<CaptureOutcome>> {
@@ -221,6 +279,7 @@ pub(super) fn spawn_pty_read_thread(
                 stream_path,
                 output_path,
                 limits,
+                terminal_response_tx,
                 capture_ledger,
                 capture_failure_tx,
             )
@@ -269,10 +328,12 @@ pub(super) fn capture_pty_reader(
     stream_path: PathBuf,
     output_path: PathBuf,
     limits: TerminalArtifactLimits,
+    terminal_response_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
     capture_ledger: Arc<TerminalCaptureLedger>,
     capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
 ) -> Result<CaptureOutcome> {
     let stream = TerminalOutputStream::Stdout;
+    let mut terminal_query_responder = TerminalQueryResponder::new(terminal_response_tx);
     let mut stream_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -319,6 +380,14 @@ pub(super) fn capture_pty_reader(
                 );
             }
         };
+        if let Err(error) = terminal_query_responder.observe(&buffer[..read]) {
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::io(stream, "respond to terminal query", error)
+                    .with_counts(observed_bytes, written_bytes),
+            );
+        }
         observed_bytes = observed_bytes.saturating_add(read as u64);
         capture_ledger.record_observed(stream, read as u64);
         let remaining_stream = limits.stream_bytes.saturating_sub(written_bytes);
