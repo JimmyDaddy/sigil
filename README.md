@@ -1,56 +1,66 @@
-# Sigil
-
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/sigil-full-staff-glow-dark-mode.svg">
-    <img src="assets/logo/sigil-full-staff-glow.svg" alt="Sigil logo" width="560">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/sigil-lockup-dark-mode.svg">
+    <img src="assets/logo/sigil-lockup.svg" alt="Sigil" width="520">
   </picture>
 </p>
 
-English | [简体中文](README.zh-CN.md)
+<p align="center"><strong>Reviewable edits. Resumable sessions. One terminal.</strong></p>
+<p align="center">A TUI-first coding agent for real repository work.</p>
 
-[![CI](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml)
-[![Pages](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml)
+<p align="center">
+  <a href="https://github.com/JimmyDaddy/sigil/releases"><img src="https://img.shields.io/github/v/release/JimmyDaddy/sigil?include_prereleases&amp;sort=semver&amp;style=flat-square&amp;color=C85B4B" alt="Release"></a>
+  <a href="https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JimmyDaddy/sigil/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="Build status"></a>
+  <a href="https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml"><img src="https://img.shields.io/github/actions/workflow/status/JimmyDaddy/sigil/pages.yml?branch=main&amp;style=flat-square&amp;label=docs" alt="Documentation status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/JimmyDaddy/sigil?style=flat-square&amp;color=242932" alt="MIT License"></a>
+</p>
 
-Sigil is a TUI-first coding agent for real repository work. It keeps conversation, edits, approvals, diffs, diagnostics, and recovery in one terminal workspace, with a small CLI surface for automation.
+<p align="center">
+  <a href="https://sigil.corerobin.com/">Website</a> ·
+  <a href="https://sigil.corerobin.com/docs/">Documentation</a> ·
+  <a href="docs/en/quickstart.md">Quickstart</a> ·
+  <a href="https://sigil.corerobin.com/docs/visual-tour/">Visual tour</a>
+</p>
 
-[Website](https://sigil.corerobin.com/) · [Documentation](https://sigil.corerobin.com/docs/) · [Visual tour](https://sigil.corerobin.com/docs/visual-tour/) · [Project status](https://sigil.corerobin.com/docs/status/)
+<p align="center">English · <a href="README.zh-CN.md">简体中文</a></p>
 
-Sigil is an early preview. The website and user docs follow `main`; packaged releases can lag behind. Check [Installation](docs/en/installation.md) for supported install and update paths, and [Changelog](docs/en/changelog.md) before relying on a newly documented feature.
+<p align="center">
+  <a href="https://sigil.corerobin.com/docs/visual-tour/">
+    <img src="site/assets/screenshots/tui-session.svg" alt="Sigil TUI showing a repository task, tool activity, and session context" width="900">
+  </a>
+</p>
 
-## Start
+> [!NOTE]
+> Sigil is an early preview. The website and user docs follow `main`; packaged releases can lag behind. Check [Installation](docs/en/installation.md) and the [Changelog](docs/en/changelog.md) before relying on a newly documented feature.
 
-Install the preview package:
+## Why Sigil
+
+| Work in context | Stay in control |
+| --- | --- |
+| **TUI-first workspace**<br>Follow the conversation, tool activity, changes, and next action without leaving the terminal. | **Review before risk**<br>Inspect approvals and diffs before writes, commands, network access, or external integrations proceed. |
+| **Resumable sessions**<br>Return to saved work and recover interrupted tasks without silently rerunning an unfinished tool. | **Models and tools, your way**<br>Choose among supported providers, add MCP integrations, and enable repository-aware assistance when you need it. |
+
+## Start in under a minute
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha
-```
-
-Then open the repository you want to work in:
-
-```bash
 cd /path/to/your/project
 sigil
 ```
 
-Quick Setup appears when configuration is missing. Choose a provider and model, add authentication, and run `sigil doctor` if anything looks incomplete. The [Quickstart](docs/en/quickstart.md) walks through a first read-only task and a small reviewed change.
+Quick Setup opens when configuration is missing. Choose a provider and model, add authentication, and run `sigil doctor` if anything looks incomplete. The [Quickstart](docs/en/quickstart.md) takes you from a first read-only task to a small reviewed change.
 
-## Why Sigil
+## Go deeper
 
-- **TUI-first work:** follow the conversation, tool activity, changes, and next action without leaving the terminal.
-- **Review before risk:** inspect approvals and diffs before writes, commands, network access, or external integrations proceed.
-- **Work that can resume:** return to saved sessions and recover interrupted work without silently rerunning an unfinished tool.
-- **Flexible models and tools:** choose among supported providers, add MCP integrations, and enable repository-aware assistance when you need it.
-
-## Documentation
-
-- [TUI user guide](docs/en/user-guide.md) — daily controls, approvals, sessions, and recovery.
-- [Configuration](docs/en/configuration.md) — common setup paths and links to exact fields.
-- [Providers](docs/en/providers.md) and [MCP](docs/en/mcp.md) — models, authentication, and integrations.
-- [Safety](docs/en/safety.md), [permissions](docs/en/permissions-and-sandbox.md), and [privacy](docs/en/privacy.md) — decisions, limits, and data handling.
-- [Troubleshooting](docs/en/troubleshooting.md) — symptoms, checks, and recovery actions.
-- [Reference](docs/en/reference.md) — exact commands, keys, paths, and exit behavior.
+| Guide | What it covers |
+| --- | --- |
+| [TUI user guide](docs/en/user-guide.md) | Daily controls, approvals, sessions, and recovery. |
+| [Configuration](docs/en/configuration.md) | Common setup paths and exact fields. |
+| [Providers](docs/en/providers.md) and [MCP](docs/en/mcp.md) | Models, authentication, and integrations. |
+| [Safety](docs/en/safety.md), [permissions](docs/en/permissions-and-sandbox.md), and [privacy](docs/en/privacy.md) | Decisions, limits, and data handling. |
+| [Troubleshooting](docs/en/troubleshooting.md) | Symptoms, checks, and recovery actions. |
+| [Reference](docs/en/reference.md) | Commands, keys, paths, and exit behavior. |
 
 ## Project
 
-Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [developer documentation index](dev/docs/index.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Sigil is distributed under the [MIT License](LICENSE).
+[Project status](https://sigil.corerobin.com/docs/status/) · [Contributing](CONTRIBUTING.md) · [Developer docs](dev/docs/index.md) · [Security](SECURITY.md) · [MIT License](LICENSE)
