@@ -1,4 +1,7 @@
-use std::fs;
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -106,6 +109,70 @@ fn deleting_projection_and_rebuilding_produces_equivalent_rows() -> Result<()> {
     }
 
     assert_eq!(before, after);
+    Ok(())
+}
+
+#[test]
+fn explicit_recovery_quarantines_projection_and_rebuilds_under_exclusive_lease() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    finalized_session(
+        &lifecycle.session_dir.join("session.jsonl"),
+        "Recover catalog",
+        "deepseek",
+        "chat",
+    )?;
+    projection.rebuild()?;
+    let mut before = projection.list_workspace_entries()?;
+
+    let report = projection.quarantine_and_rebuild()?;
+    let mut after = projection.list_workspace_entries()?;
+    for row in before.iter_mut().chain(after.iter_mut()) {
+        row.indexed_at_unix_ms = 0;
+    }
+
+    assert_eq!(before, after);
+    assert_eq!(report.generation, 1);
+    assert_eq!(report.rebuilt_source_count, 1);
+    assert!(report.quarantined_file_count >= 1);
+    let quarantine_name = report
+        .quarantine_directory_name
+        .expect("existing projection should have a quarantine directory");
+    let quarantine = projection
+        .database_path()
+        .parent()
+        .expect("database parent")
+        .join(quarantine_name);
+    assert!(quarantine.is_dir());
+    assert!(
+        quarantine
+            .join(
+                projection
+                    .database_path()
+                    .file_name()
+                    .expect("database filename")
+            )
+            .is_file()
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_recovery_fails_closed_while_a_catalog_connection_is_active() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    projection.rebuild()?;
+    let connection = projection.open_connection()?;
+
+    let error = projection
+        .quarantine_and_rebuild()
+        .expect_err("active usage lease must block recovery");
+
+    assert!(matches!(error, SessionCatalogProjectionError::RecoveryBusy));
+    assert!(projection.database_path().is_file());
+    drop(connection);
+    projection.quarantine_and_rebuild()?;
     Ok(())
 }
 
@@ -266,6 +333,86 @@ fn incremental_reconcile_reuses_unchanged_rows_and_tracks_pin_append_delete() ->
     let removed = projection.reconcile()?;
     assert_eq!(removed.removed_source_count, 1);
     assert_eq!(projection.list_workspace_entries()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn truncated_reconcile_preserves_unscanned_rows_until_a_complete_scan() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    for name in ["first", "second", "third"] {
+        finalized_session(
+            &lifecycle.session_dir.join(format!("{name}.jsonl")),
+            name,
+            "deepseek",
+            "chat",
+        )?;
+    }
+    projection.rebuild()?;
+    let limited_lifecycle = lifecycle.clone().with_limits(LocalSessionLifecycleLimits {
+        max_catalog_entries: 1,
+        ..LocalSessionLifecycleLimits::default()
+    });
+    let limited_projection = SessionCatalogProjectionService::new(
+        limited_lifecycle,
+        projection.database_path().to_path_buf(),
+    );
+    fs::remove_file(lifecycle.session_dir.join("third.jsonl"))?;
+
+    let partial = limited_projection.reconcile()?;
+
+    assert_eq!(partial.scanned_source_count, 1);
+    assert_eq!(partial.truncated_source_count, 1);
+    assert_eq!(partial.removed_source_count, 0);
+    assert_eq!(limited_projection.list_workspace_entries()?.len(), 3);
+
+    let complete = projection.reconcile()?;
+    assert_eq!(complete.truncated_source_count, 0);
+    assert_eq!(complete.removed_source_count, 1);
+    assert_eq!(projection.list_workspace_entries()?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn sqlite_writer_contention_returns_within_the_bounded_busy_timeout() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    projection.rebuild()?;
+    let writer = Connection::open(projection.database_path())?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    let started = Instant::now();
+
+    let error = projection
+        .reconcile()
+        .expect_err("concurrent writer must not wait indefinitely");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::Sqlite { .. }
+    ));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    writer.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn source_metadata_drift_is_rejected_before_projection_publish() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions)?;
+    let path = sessions.join("session.jsonl");
+    finalized_session(&path, "Drift", "deepseek", "chat")?;
+    let mut candidates = direct_jsonl_candidates(&fs::canonicalize(&sessions)?)?;
+    let candidate = candidates.pop().expect("session candidate");
+    fs::write(&path, "changed after scan")?;
+
+    let error = ensure_source_stable(&candidate).expect_err("source drift must fail closed");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::Source { .. }
+    ));
     Ok(())
 }
 
@@ -523,5 +670,36 @@ fn projection_rejects_symlink_database_path() -> Result<()> {
         SessionCatalogProjectionError::UnsafePath { .. }
     ));
     assert_eq!(fs::read_to_string(target)?, "outside");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn projection_rejects_broken_symlink_recovery_lease_without_creating_target() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(
+        projection
+            .database_path()
+            .parent()
+            .expect("database parent"),
+    )?;
+    let outside = temp.path().join("outside-recovery-lock");
+    symlink(
+        &outside,
+        sqlite_sidecar_path(projection.database_path(), ".recovery-lock"),
+    )?;
+
+    let error = projection
+        .rebuild()
+        .expect_err("symlink recovery lease must fail closed");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::UnsafePath { .. }
+    ));
+    assert!(!outside.exists());
     Ok(())
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File, OpenOptions},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -125,6 +126,10 @@ pub enum SessionCatalogProjectionError {
     },
     #[error("session catalog reconcile conflicted with another writer after bounded retries")]
     ReconcileConflict,
+    #[error("session catalog recovery lease is busy")]
+    RecoveryBusy,
+    #[error("session catalog recovery failed: {message}")]
+    Recovery { message: String },
 }
 
 /// Safe, compact historical session row. Message and tool bodies are never materialized here.
@@ -201,11 +206,50 @@ pub struct SessionCatalogProjectionReconcileReport {
     pub reconciled_at_unix_ms: u64,
 }
 
+/// Result of explicitly quarantining a projection and rebuilding it from durable sources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCatalogProjectionRecoveryReport {
+    pub workspace_id: String,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_directory_name: Option<String>,
+    pub quarantined_file_count: usize,
+    pub rebuilt_source_count: usize,
+    pub degraded_source_count: usize,
+    pub identity_conflict_count: usize,
+    pub truncated_source_count: usize,
+    pub recovered_at_unix_ms: u64,
+}
+
 /// Workspace-bound owner of the rebuildable global SQLite session catalog.
 #[derive(Debug, Clone)]
 pub struct SessionCatalogProjectionService {
     lifecycle: LocalSessionLifecycleService,
     database_path: PathBuf,
+}
+
+struct SessionCatalogConnection {
+    connection: Connection,
+    _usage_lease: Option<File>,
+}
+
+impl Deref for SessionCatalogConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for SessionCatalogConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
+struct SessionCatalogRecoveryLease {
+    _file: File,
 }
 
 impl SessionCatalogProjectionService {
@@ -275,20 +319,71 @@ impl SessionCatalogProjectionService {
         list_workspace_entries(&connection, &self.lifecycle.workspace_id)
     }
 
-    fn open_connection(&self) -> Result<Connection, SessionCatalogProjectionError> {
+    /// Quarantines the current SQLite files under an exclusive process lease and rebuilds from
+    /// durable JSONL/lifecycle sources before releasing that lease.
+    ///
+    /// This is an explicit owner recovery action. Automatic queries never move or delete a
+    /// projection. The quarantine directory remains beside the database for inspection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionCatalogProjectionError::RecoveryBusy`] while another Sigil process holds
+    /// a catalog connection, or a typed filesystem/rebuild error without deleting the durable
+    /// session sources.
+    pub fn quarantine_and_rebuild(
+        &self,
+    ) -> Result<SessionCatalogProjectionRecoveryReport, SessionCatalogProjectionError> {
         prepare_database_parent(&self.database_path)?;
-        if self.database_path.exists() {
-            let metadata = fs::symlink_metadata(&self.database_path).map_err(|error| {
-                SessionCatalogProjectionError::UnsafePath {
-                    message: format!("failed to inspect database file: {error}"),
-                }
-            })?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(SessionCatalogProjectionError::UnsafePath {
-                    message: "database must be a regular file and not a symlink".to_owned(),
-                });
+        let recovery_lease = self.acquire_exclusive_recovery_lease()?;
+        let quarantine = quarantine_sqlite_files(&self.database_path)?;
+        let rebuilt = self.reconcile_internal_with_recovery(true, Some(&recovery_lease));
+        match rebuilt {
+            Ok(rebuilt) => Ok(SessionCatalogProjectionRecoveryReport {
+                workspace_id: rebuilt.workspace_id,
+                generation: rebuilt.generation,
+                quarantine_directory_name: quarantine
+                    .as_ref()
+                    .and_then(|quarantine| quarantine.path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned()),
+                quarantined_file_count: quarantine
+                    .as_ref()
+                    .map_or(0, |quarantine| quarantine.file_count),
+                rebuilt_source_count: rebuilt.scanned_source_count,
+                degraded_source_count: rebuilt.degraded_source_count,
+                identity_conflict_count: rebuilt.identity_conflict_count,
+                truncated_source_count: rebuilt.truncated_source_count,
+                recovered_at_unix_ms: rebuilt.reconciled_at_unix_ms,
+            }),
+            Err(error) => {
+                quarantine_failed_rebuild(&self.database_path, quarantine.as_ref());
+                Err(error)
             }
         }
+    }
+
+    fn open_connection(&self) -> Result<SessionCatalogConnection, SessionCatalogProjectionError> {
+        prepare_database_parent(&self.database_path)?;
+        let usage_lease = self.acquire_shared_usage_lease()?;
+        let connection = self.open_database_connection()?;
+        Ok(SessionCatalogConnection {
+            connection,
+            _usage_lease: Some(usage_lease),
+        })
+    }
+
+    fn open_connection_under_recovery(
+        &self,
+        _recovery_lease: &SessionCatalogRecoveryLease,
+    ) -> Result<SessionCatalogConnection, SessionCatalogProjectionError> {
+        let connection = self.open_database_connection()?;
+        Ok(SessionCatalogConnection {
+            connection,
+            _usage_lease: None,
+        })
+    }
+
+    fn open_database_connection(&self) -> Result<Connection, SessionCatalogProjectionError> {
+        validate_optional_regular_projection_file(&self.database_path, "database")?;
         let mut connection = Connection::open_with_flags(
             &self.database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -307,12 +402,47 @@ impl SessionCatalogProjectionService {
         Ok(connection)
     }
 
+    fn acquire_shared_usage_lease(&self) -> Result<File, SessionCatalogProjectionError> {
+        let lease = open_recovery_lease_file(&self.database_path)?;
+        lease.try_lock_shared().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => SessionCatalogProjectionError::RecoveryBusy,
+            std::fs::TryLockError::Error(error) => SessionCatalogProjectionError::Recovery {
+                message: format!("failed to acquire shared usage lease: {error}"),
+            },
+        })?;
+        Ok(lease)
+    }
+
+    fn acquire_exclusive_recovery_lease(
+        &self,
+    ) -> Result<SessionCatalogRecoveryLease, SessionCatalogProjectionError> {
+        let lease = open_recovery_lease_file(&self.database_path)?;
+        lease.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => SessionCatalogProjectionError::RecoveryBusy,
+            std::fs::TryLockError::Error(error) => SessionCatalogProjectionError::Recovery {
+                message: format!("failed to acquire exclusive recovery lease: {error}"),
+            },
+        })?;
+        Ok(SessionCatalogRecoveryLease { _file: lease })
+    }
+
     fn reconcile_internal(
         &self,
         force_rebuild: bool,
     ) -> Result<SessionCatalogProjectionReconcileReport, SessionCatalogProjectionError> {
+        self.reconcile_internal_with_recovery(force_rebuild, None)
+    }
+
+    fn reconcile_internal_with_recovery(
+        &self,
+        force_rebuild: bool,
+        recovery_lease: Option<&SessionCatalogRecoveryLease>,
+    ) -> Result<SessionCatalogProjectionReconcileReport, SessionCatalogProjectionError> {
         for retry_count in 0..=MAX_RECONCILE_RETRIES {
-            let mut connection = self.open_connection()?;
+            let mut connection = match recovery_lease {
+                Some(recovery_lease) => self.open_connection_under_recovery(recovery_lease)?,
+                None => self.open_connection()?,
+            };
             let base_metadata = workspace_metadata(&connection, &self.lifecycle.workspace_id)?;
             let base_generation = base_metadata
                 .as_ref()
@@ -397,7 +527,7 @@ impl SessionCatalogProjectionService {
                 workspace_id: self.lifecycle.workspace_id.clone(),
                 generation,
                 generation_changed,
-                scanned_source_count: scan.entries.len(),
+                scanned_source_count: scan.scanned_source_count,
                 reused_source_count: scan.reused_source_count,
                 updated_source_count,
                 removed_source_count,
@@ -417,7 +547,12 @@ impl SessionCatalogProjectionService {
         force_rebuild: bool,
         indexed_at_unix_ms: u64,
     ) -> Result<SessionCatalogScan, SessionCatalogProjectionError> {
-        if !self.lifecycle.session_dir.exists() {
+        if !self
+            .lifecycle
+            .session_dir
+            .try_exists()
+            .map_err(source_error)?
+        {
             return Ok(SessionCatalogScan::default());
         }
         let metadata = fs::symlink_metadata(&self.lifecycle.session_dir).map_err(source_error)?;
@@ -472,8 +607,22 @@ impl SessionCatalogProjectionService {
             }
             entries.push(self.project_candidate(candidate, state, &pins, indexed_at_unix_ms)?);
         }
+        let scanned_source_count = entries.len();
+        if truncated_source_count > 0 && !force_rebuild {
+            let scanned_refs = entries
+                .iter()
+                .map(|entry| entry.session_ref.clone())
+                .collect::<BTreeSet<_>>();
+            entries.extend(
+                existing
+                    .values()
+                    .filter(|entry| !scanned_refs.contains(&entry.session_ref))
+                    .cloned(),
+            );
+        }
         Ok(SessionCatalogScan {
             entries,
+            scanned_source_count,
             reused_source_count,
             truncated_source_count,
         })
@@ -544,6 +693,7 @@ impl SessionCatalogProjectionService {
 #[derive(Debug, Default)]
 struct SessionCatalogScan {
     entries: Vec<SessionCatalogProjectionEntry>,
+    scanned_source_count: usize,
     reused_source_count: usize,
     truncated_source_count: usize,
 }
@@ -611,35 +761,237 @@ fn workspace_metadata(
         .map_err(SessionCatalogProjectionError::from)
 }
 
+#[derive(Debug)]
+struct SessionCatalogQuarantine {
+    path: PathBuf,
+    file_count: usize,
+}
+
+fn open_recovery_lease_file(database_path: &Path) -> Result<File, SessionCatalogProjectionError> {
+    let lease_path = sqlite_sidecar_path(database_path, ".recovery-lock");
+    validate_optional_regular_projection_file(&lease_path, "recovery lease")?;
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lease_path)
+        .map_err(|error| SessionCatalogProjectionError::Recovery {
+            message: format!("failed to open recovery lease: {error}"),
+        })?;
+    validate_regular_projection_file(&lease_path, "recovery lease")?;
+    tighten_open_file_permissions(&lease)?;
+    Ok(lease)
+}
+
+fn quarantine_sqlite_files(
+    database_path: &Path,
+) -> Result<Option<SessionCatalogQuarantine>, SessionCatalogProjectionError> {
+    let mut sources = Vec::new();
+    for path in sqlite_projection_files(database_path) {
+        if validate_optional_regular_projection_file(&path, "SQLite projection file")? {
+            sources.push(path);
+        }
+    }
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let quarantine_path = create_quarantine_directory(database_path)?;
+    let mut moved = Vec::with_capacity(sources.len());
+    for source in sources {
+        let file_name =
+            source
+                .file_name()
+                .ok_or_else(|| SessionCatalogProjectionError::Recovery {
+                    message: "SQLite projection file has no filename".to_owned(),
+                })?;
+        let destination = quarantine_path.join(file_name);
+        if let Err(error) = fs::rename(&source, &destination) {
+            for (original, quarantined) in moved.iter().rev() {
+                let _ = fs::rename(quarantined, original);
+            }
+            let _ = fs::remove_dir(&quarantine_path);
+            return Err(SessionCatalogProjectionError::Recovery {
+                message: format!("failed to quarantine SQLite projection file: {error}"),
+            });
+        }
+        moved.push((source, destination));
+    }
+    Ok(Some(SessionCatalogQuarantine {
+        path: quarantine_path,
+        file_count: moved.len(),
+    }))
+}
+
+fn quarantine_failed_rebuild(
+    database_path: &Path,
+    existing_quarantine: Option<&SessionCatalogQuarantine>,
+) {
+    let quarantine_path = existing_quarantine
+        .map(|quarantine| Ok(quarantine.path.clone()))
+        .unwrap_or_else(|| create_quarantine_directory(database_path));
+    let Ok(quarantine_path) = quarantine_path else {
+        return;
+    };
+    for source in sqlite_projection_files(database_path) {
+        if !matches!(
+            validate_optional_regular_projection_file(&source, "failed rebuild"),
+            Ok(true)
+        ) {
+            continue;
+        }
+        let Some(file_name) = source.file_name() else {
+            continue;
+        };
+        let mut failed_name = "failed-rebuild-".to_owned();
+        failed_name.push_str(&file_name.to_string_lossy());
+        let _ = fs::rename(source, quarantine_path.join(failed_name));
+    }
+}
+
+fn create_quarantine_directory(
+    database_path: &Path,
+) -> Result<PathBuf, SessionCatalogProjectionError> {
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| SessionCatalogProjectionError::Recovery {
+            message: "database has no parent directory".to_owned(),
+        })?;
+    let database_name = database_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "session-catalog".into());
+    for attempt in 0..100_u8 {
+        let path = parent.join(format!(
+            ".{database_name}-quarantine-{}-{}-{attempt}",
+            current_unix_ms(),
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                tighten_directory_permissions(&path)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(SessionCatalogProjectionError::Recovery {
+                    message: format!("failed to create quarantine directory: {error}"),
+                });
+            }
+        }
+    }
+    Err(SessionCatalogProjectionError::Recovery {
+        message: "failed to allocate a unique quarantine directory".to_owned(),
+    })
+}
+
+fn sqlite_projection_files(database_path: &Path) -> [PathBuf; 3] {
+    [
+        database_path.to_path_buf(),
+        sqlite_sidecar_path(database_path, "-wal"),
+        sqlite_sidecar_path(database_path, "-shm"),
+    ]
+}
+
+fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn validate_regular_projection_file(
+    path: &Path,
+    label: &'static str,
+) -> Result<(), SessionCatalogProjectionError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| SessionCatalogProjectionError::Recovery {
+            message: format!("failed to inspect {label}: {error}"),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(SessionCatalogProjectionError::UnsafePath {
+            message: format!("{label} must be a regular file and not a symlink"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_regular_projection_file(
+    path: &Path,
+    label: &'static str,
+) -> Result<bool, SessionCatalogProjectionError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            validate_regular_projection_file(path, label)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(SessionCatalogProjectionError::UnsafePath {
+            message: format!("failed to inspect {label}: {error}"),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn tighten_open_file_permissions(file: &File) -> Result<(), SessionCatalogProjectionError> {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| SessionCatalogProjectionError::Recovery {
+            message: format!("failed to restrict recovery lease permissions: {error}"),
+        })
+}
+
+#[cfg(not(unix))]
+fn tighten_open_file_permissions(_file: &File) -> Result<(), SessionCatalogProjectionError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tighten_directory_permissions(path: &Path) -> Result<(), SessionCatalogProjectionError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        SessionCatalogProjectionError::Recovery {
+            message: format!("failed to restrict quarantine directory permissions: {error}"),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn tighten_directory_permissions(_path: &Path) -> Result<(), SessionCatalogProjectionError> {
+    Ok(())
+}
+
 fn prepare_database_parent(path: &Path) -> Result<(), SessionCatalogProjectionError> {
     let parent = path
         .parent()
         .ok_or_else(|| SessionCatalogProjectionError::UnsafePath {
             message: "database has no parent directory".to_owned(),
         })?;
-    if parent.exists() {
-        let metadata = fs::symlink_metadata(parent).map_err(|error| {
-            SessionCatalogProjectionError::UnsafePath {
-                message: format!("failed to inspect database parent: {error}"),
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(SessionCatalogProjectionError::UnsafePath {
+                    message: "database parent must be a real directory".to_owned(),
+                });
             }
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(SessionCatalogProjectionError::UnsafePath {
-                message: "database parent must be a real directory".to_owned(),
-            });
         }
-    } else {
-        fs::create_dir_all(parent).map_err(|error| SessionCatalogProjectionError::UnsafePath {
-            message: format!("failed to create database parent: {error}"),
-        })?;
-        let metadata = fs::symlink_metadata(parent).map_err(|error| {
-            SessionCatalogProjectionError::UnsafePath {
-                message: format!("failed to inspect created database parent: {error}"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(parent).map_err(|error| {
+                SessionCatalogProjectionError::UnsafePath {
+                    message: format!("failed to create database parent: {error}"),
+                }
+            })?;
+            let metadata = fs::symlink_metadata(parent).map_err(|error| {
+                SessionCatalogProjectionError::UnsafePath {
+                    message: format!("failed to inspect created database parent: {error}"),
+                }
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(SessionCatalogProjectionError::UnsafePath {
+                    message: "created database parent must be a real directory".to_owned(),
+                });
             }
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        }
+        Err(error) => {
             return Err(SessionCatalogProjectionError::UnsafePath {
-                message: "created database parent must be a real directory".to_owned(),
+                message: format!("failed to inspect database parent: {error}"),
             });
         }
     }

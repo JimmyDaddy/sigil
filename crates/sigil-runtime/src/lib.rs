@@ -212,9 +212,10 @@ pub use session_lifecycle::{
     SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SESSION_EXPORT_SCHEMA_VERSION,
     SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
     SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
-    SessionCatalogProjectionReconcileReport, SessionCatalogProjectionService, SessionDeleteOutput,
-    SessionDeletePreview, SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1,
-    SessionExportV1, SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
+    SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,
+    SessionCatalogProjectionService, SessionDeleteOutput, SessionDeletePreview,
+    SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1, SessionExportV1,
+    SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
     SessionRetentionPreview, SessionRetentionReason,
 };
 pub use skills::{

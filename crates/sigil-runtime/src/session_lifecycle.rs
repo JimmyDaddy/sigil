@@ -32,7 +32,7 @@ pub use projection::{
     SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogProjectionEntry,
     SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
     SessionCatalogProjectionRebuildReport, SessionCatalogProjectionReconcileReport,
-    SessionCatalogProjectionService,
+    SessionCatalogProjectionRecoveryReport, SessionCatalogProjectionService,
 };
 
 use journal::LocalSessionLifecycleJournal;

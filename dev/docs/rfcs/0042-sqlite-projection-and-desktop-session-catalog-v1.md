@@ -1,6 +1,6 @@
 # RFC-0042 SQLite Projection and Desktop Session Catalog V1
 
-状态：accepted / R42.0-R42.3 implemented；R42.4-R42.5 pending
+状态：accepted / R42.0-R42.4 implemented；R42.5 pending
 
 创建日期：2026-07-19
 
@@ -284,3 +284,19 @@ session registry。缺口是跨进程重启的历史 catalog、稳定分页/sear
   incompatible/corrupt/busy/reconcile失败映射为503，客户端可以确定何时重启分页。
 - OpenAPI补齐分页、search/provider/pin/state参数、catalog DTO与400/401/409/503响应；HTTP集成测试覆盖auth、
   unavailable、真实durable JSONL查询、严格parser、stale cursor及绝对路径不泄漏。
+
+## 19. R42.4 result
+
+- 所有Sigil catalog connection在打开SQLite前先持有独立recovery lock file的OS shared lease；显式
+  `quarantine_and_rebuild()`必须取得exclusive non-blocking lease。另一个Sigil进程/连接仍在使用catalog时
+  稳定返回`RecoveryBusy`，不会rename活动数据库或形成old/new split。
+- owner recovery在exclusive lease存续期间验证并移动database/`-wal`/`-shm`到同parent、0700的唯一
+  quarantine目录，再创建空V1并从当前workspace JSONL/lifecycle truth完整rebuild；旧文件不删除，失败的新
+  database也尽力隔离。report只返回quarantine basename和bounded counts，不输出source/root绝对路径。
+- database、parent、recovery lease和SQLite sidecar的existing-path检查改为`symlink_metadata`/typed error，
+  broken symlink不会先被follow并在外部创建target；lock/database文件保持0600。
+- 修正partial scan语义：entry limit触发truncation时，普通incremental reconcile保留未扫描的既有row并发布
+  `truncated_source_count`，不把不可证明的absence当成delete；后续complete scan才执行stale-row removal。
+  显式full rebuild仍从bounded truth重建，不复用可能损坏的旧row。
+- 测试覆盖quarantine后等价重建、active connection阻止recovery、broken lock symlink、partial/complete stale
+  cleanup、source metadata drift和SQLite concurrent writer在2秒busy timeout内返回。
