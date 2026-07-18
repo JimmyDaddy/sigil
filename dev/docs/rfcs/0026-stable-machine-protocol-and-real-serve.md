@@ -258,3 +258,10 @@ P26.1-P26.5 已全部完成，并按独立 commit 边界交付：
 - EN/ZH status、reference、user guide、safety 与 RFC-0012/RFC-0016 boundary 已同步。
 
 最终 Full-Audit 通过 workspace fmt/check/test/Clippy、docs mirror/link/command metadata、Pages site、dependency advisories/bans/licenses/sources 与 diff gate；未发现剩余 P0/P1/P2 finding。V1 边界仍明确排除 remote bind、multi-user tenancy、daemon auto-start 与 session export/delete/retention。
+
+2026-07-19 follow-up：
+
+- [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md) 在不修改P26 command/event契约的前提下，
+  为同一loopback bearer listener增加独立`GET /session-catalog`历史read model与OpenAPI描述。
+- `/sessions`仍是process-local live adapter handles；`/session-catalog`只返回从JSONL/lifecycle truth可重建的
+  compact metadata。SQLite unavailable不会阻止server run、approval、SSE或session append。

@@ -8,7 +8,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been added after `v0.0.1-alpha.5` yet.
+### Added
+
+- Added an authenticated, restart-durable historical session catalog to `sigil serve` for future desktop clients, with bounded pagination, title search, provider/pin/state filters, and explicit stale-cursor recovery. Session logs remain the source of truth, and catalog failures do not stop runs or recording.
 
 ## v0.0.1-alpha.5 - 2026-07-18
 

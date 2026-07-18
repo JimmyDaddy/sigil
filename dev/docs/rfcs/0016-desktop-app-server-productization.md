@@ -1,6 +1,6 @@
 # RFC-0016 Desktop and App Server Productization
 
-状态：accepted / E16.1-E16.6 implemented / production closure completed by RFC-0026
+状态：accepted / E16.1-E16.7 implemented / production closure completed by RFC-0026 and RFC-0042
 
 创建日期：2026-06-29
 
@@ -140,6 +140,10 @@ It does not own:
 - Desktop/client adapter uses the same kernel/runtime paths as TUI.
 - SQLite escalation remains gated by measured query pressure.
 
+E16.7 已由 [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md) 完成：desktop/local
+server现在具备独立的、鉴权的historical session catalog，支持跨重启的bounded keyset pagination、provider/
+pin/state filter与title search。它与process-local `/sessions`、run registry和SSE live state保持分离。
+
 ## 7. Validation
 
 Recommended checks:
@@ -153,7 +157,8 @@ cargo test -p sigil-tui runner
 ## 8. Open Questions
 
 - Whether OpenAPI should cover all commands in MVP or only session/run/approval commands.
-- E16.7 何时由真实 desktop/server query pressure 触发 SQLite/materialized projection escalation。
+- Whether a future desktop shell should launch one `sigil serve` per workspace or reuse a supervised multi-workspace
+  local process; RFC-0042 deliberately does not decide launcher topology.
 
 ## 8.1 Production Closure Track
 
@@ -161,7 +166,9 @@ cargo test -p sigil-tui runner
 已在不引入 SQLite 的前提下完成 production closure：linearizable durable command identity、
 foreground lease、production driver、durable replay、approval/cancel、disclosure、replay+live
 SSE、loopback bearer listener、真实 `sigil serve`、process E2E 与 graceful drain 均已落地。
-SQLite/materialized projection 仍只在真实 query pressure 出现后重新评估。
+后续 [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md) 已基于真实historical list query
+contract完成E16.7：SQLite只承担可重建历史read model，不扩大app-server control plane，也不改变RFC-0026的
+production run closure。
 
 ## 9. References
 

@@ -82,7 +82,9 @@ export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
 sigil serve
 ```
 
-服务会打印选中的回环地址。`GET /health` 无需认证；OpenAPI、披露记录、会话、运行、事件、取消和审批路由都要求 `Authorization: Bearer <token>`。这不是远端或多用户服务，不使用 Cookie 认证或通配符 CORS，并会在按下 `Ctrl-C` 时关闭。
+服务会打印选中的回环地址。`GET /health` 无需认证；OpenAPI、披露记录、会话、运行、事件、取消、审批和历史目录路由都要求 `Authorization: Bearer <token>`。这不是远端或多用户服务，不使用 Cookie 认证或通配符 CORS，并会在按下 `Ctrl-C` 时关闭。
+
+`GET /sessions` 只列出当前服务进程拥有的实时句柄。需要查询跨重启保留的工作区历史时，使用 `GET /session-catalog?limit=50&q=...&provider=...&pinned=true&state=ready`。历史目录只返回 OpenAPI 白名单中经过安全投影的精简元数据和不透明的 `next_cursor`；存储哈希、记录校验和、当前运行、审批和进度都不属于该响应。如果翻页期间历史发生变化，服务会返回 `409 stale_cursor`，客户端应从第一页重新查询。历史目录只是可从会话日志重建的索引，因此目录故障不会阻止运行或会话记录。
 
 ## 配置解析顺序
 

@@ -1,6 +1,6 @@
 # RFC-0008 Thread Projection and Agent Graph Observability
 
-状态：draft / E08.1-E08.4, E08.6 and E08.7 implemented / E08.5 gated
+状态：accepted / E08.1-E08.7 implemented
 
 创建日期：2026-06-28
 
@@ -128,7 +128,10 @@ cargo test -p sigil-tui session
 - E08.6 已新增 runtime agent graph product-view adapter over durable session logs，并迁移 TUI agent summary consumer；active turn、approval 和 transient progress 仍保持 live runtime state 边界，projection lag 不作为交互真相来源。
 - E08.7 已新增 projection query contract 和 pressure metrics：`ProjectionQueryContract` 描述 query family、scope、surface、pagination/filter/search/sort/freshness 需求；`ProjectionPressureSample` / `ProjectionPressureThresholds` / `evaluate_projection_pressure` 输出 keep file-backed、measure more 或 escalate materialized view 的建议。
 
-本阶段没有引入 SQLite，也没有让 active approval/tool execution 依赖 projection。
+E08.5 后续由 [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md) 在具体的 desktop
+historical session query pressure 下打开：runtime 提供可删除、可重建的 SQLite session catalog，production
+`sigil serve` 提供独立的鉴权分页查询；JSONL/lifecycle journal 仍是 truth，active approval/tool execution/run
+progress 仍不依赖 SQLite。
 
 2026-06-29 审计补充：
 
@@ -140,8 +143,17 @@ cargo test -p sigil-tui session
 - E08.5 不应直接以“为桌面端预留”为理由打开。先通过 E08.7 收集 projection query contract 和 pressure metrics；只有 scan count、latency、repeated log scan、多 surface demand 或 query shape 证明 file-backed replay 不够时，才进入 materialized-view design。
 - `requires_fresh_live_state` 的查询不通过 SQLite 解决；active turn/tool/approval/terminal progress 仍属于 live runtime state boundary。
 
+2026-07-19 E08.5 完成补充：
+
+- 首个 materialized family 固定为 current-workspace historical `SessionList`，触发证据是最多4096个/512 MiB
+  JSONL的重复scan、desktop/server多surface、跨重启分页/filter/search/sort，而不是抽象“未来可能需要”。
+- global SQLite只存compact safe metadata和source integrity/fingerprint，不存raw message/tool body/absolute path；
+  generation/filter-bound keyset cursor在变化时明确stale，不把旧页静默当成最新事实。
+- shared usage lease、exclusive quarantine/rebuild、schema/app id与bounded busy/reconcile让projection failure只降级
+  历史查询，不反向破坏session append、resume、approval、delete/pin授权或run执行。
+
 ## 11. Open Questions
 
-- Whether file-backed projection remains enough for TUI-only workflows.
-- Which projection family should be the first SQLite candidate.
+- Whether later TUI historical views should adopt the SQLite catalog or keep their current bounded adapter.
+- Which additional measured query family, if any, justifies a second materialized view.
 - Whether dispatch trace should be shown in `/doctor`, session detail, or a dedicated inspect panel.

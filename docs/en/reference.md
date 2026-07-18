@@ -82,7 +82,9 @@ export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
 sigil serve
 ```
 
-The service prints its selected loopback address. `GET /health` is unauthenticated; OpenAPI, disclosure, session, run, event, cancellation, and approval routes require `Authorization: Bearer <token>`. It is not a remote or multi-user service, does not use cookie auth or wildcard CORS, and shuts down on `Ctrl-C`.
+The service prints its selected loopback address. `GET /health` is unauthenticated; OpenAPI, disclosure, session, run, event, cancellation, approval, and historical catalog routes require `Authorization: Bearer <token>`. It is not a remote or multi-user service, does not use cookie auth or wildcard CORS, and shuts down on `Ctrl-C`.
+
+`GET /sessions` lists live handles owned by the current server process. For restart-durable workspace history, use `GET /session-catalog?limit=50&q=...&provider=...&pinned=true&state=ready`. The catalog returns an OpenAPI-defined allowlist of compact, safely projected metadata with an opaque `next_cursor`; storage hashes, record checksums, active runs, approvals, and progress are not part of this response. If history changes between pages, a `409 stale_cursor` response means the client must restart from the first page. The catalog is a rebuildable index over session logs, so a catalog failure does not stop runs or session recording.
 
 ## Config Resolution
 
