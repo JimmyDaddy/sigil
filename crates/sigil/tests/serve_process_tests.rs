@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Child, ChildStdin, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -112,8 +112,27 @@ struct ServeProcess {
     stderr_path: PathBuf,
 }
 
+struct DesktopServeProcess {
+    child: Child,
+    owner_stdin: Option<ChildStdin>,
+    address: SocketAddr,
+    server_info: serde_json::Value,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
+
 impl Drop for ServeProcess {
     fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+impl Drop for DesktopServeProcess {
+    fn drop(&mut self) {
+        self.owner_stdin.take();
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -161,6 +180,60 @@ fn spawn_serve(workspace: &Path, config_path: &Path, token: &str) -> ServeProces
     }
 }
 
+fn spawn_desktop_serve(workspace: &Path, config_path: &Path, token: &str) -> DesktopServeProcess {
+    let stdout_path = workspace.join("desktop-serve.stdout");
+    let stderr_path = workspace.join("desktop-serve.stderr");
+    let stdout = File::create(&stdout_path).expect("desktop serve stdout should create");
+    let stderr = File::create(&stderr_path).expect("desktop serve stderr should create");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .current_dir(workspace)
+        .env("SIGIL_HTTP_TOKEN", token)
+        .args([
+            "--config",
+            config_path.to_str().expect("UTF-8 config path"),
+            "serve",
+            "--startup-output",
+            "json",
+            "--shutdown-on-stdin-close",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("desktop sigil serve should spawn");
+    let owner_stdin = child
+        .stdin
+        .take()
+        .expect("desktop owner pipe should be available");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let server_info = loop {
+        let output = fs::read_to_string(&stdout_path).unwrap_or_default();
+        if let Some(line) = output.lines().find(|line| !line.trim().is_empty()) {
+            break serde_json::from_str::<serde_json::Value>(line)
+                .expect("desktop startup line should be JSON");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "desktop sigil serve did not report startup JSON; stdout={output}; stderr={}",
+            fs::read_to_string(&stderr_path).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let address = server_info["bind_addr"]
+        .as_str()
+        .expect("desktop startup should include bind_addr")
+        .parse()
+        .expect("desktop bind_addr should be a socket address");
+    DesktopServeProcess {
+        child,
+        owner_stdin: Some(owner_stdin),
+        address,
+        server_info,
+        stdout_path,
+        stderr_path,
+    }
+}
+
 fn http_request(
     address: SocketAddr,
     method: &str,
@@ -168,12 +241,26 @@ fn http_request(
     token: Option<&str>,
     body: Option<&str>,
 ) -> (u16, String) {
+    http_request_with_last_event_id(address, method, path, token, body, None)
+}
+
+fn http_request_with_last_event_id(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+    last_event_id: Option<&str>,
+) -> (u16, String) {
     let body = body.unwrap_or_default();
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let replay_cursor = last_event_id
+        .map(|cursor| format!("Last-Event-ID: {cursor}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}{replay_cursor}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let mut stream = TcpStream::connect(address).expect("serve endpoint should accept a client");
@@ -235,6 +322,82 @@ fn wait_for_child_output(mut child: Child, timeout: Duration) -> Output {
         stdout,
         stderr,
     }
+}
+
+fn close_desktop_owner_and_wait(mut process: DesktopServeProcess) -> Output {
+    process.owner_stdin.take();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (status, timed_out) = loop {
+        match process
+            .child
+            .try_wait()
+            .expect("desktop serve child status should be readable")
+        {
+            Some(status) => break (status, false),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            None => {
+                process
+                    .child
+                    .kill()
+                    .expect("timed-out desktop serve should be killed");
+                break (
+                    process
+                        .child
+                        .wait()
+                        .expect("timed-out desktop serve should be reaped"),
+                    true,
+                );
+            }
+        }
+    };
+    let stdout = fs::read(&process.stdout_path).expect("desktop serve stdout should read");
+    let stderr = fs::read(&process.stderr_path).expect("desktop serve stderr should read");
+    assert!(
+        !timed_out,
+        "desktop sigil serve did not drain after owner pipe closure; stderr={}",
+        String::from_utf8_lossy(&stderr)
+    );
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+#[test]
+fn desktop_owner_channel_json_bootstrap_and_pipe_close_are_secret_free() {
+    let workspace = test_workspace("desktop-owner");
+    let config_path = workspace.join("sigil.toml");
+    let token = "desktop-process-secret-token";
+    write_config(&config_path, "http://127.0.0.1:1");
+
+    let server = spawn_desktop_serve(&workspace, &config_path, token);
+
+    assert_eq!(server.server_info["schema_version"], 1);
+    assert_eq!(server.server_info["protocol_version"], 1);
+    assert_eq!(server.server_info["authentication"], "bearer");
+    assert_eq!(server.server_info["shutdown_on_stdin_close"], true);
+    assert_eq!(
+        server.server_info["capabilities"]["durable_session_reopen"],
+        true
+    );
+    let startup = fs::read_to_string(&server.stdout_path).expect("startup output should read");
+    assert_eq!(startup.lines().count(), 1);
+    assert!(!startup.contains(token));
+    assert!(!startup.contains(workspace.to_string_lossy().as_ref()));
+    let (status, metadata) = http_request(server.address, "GET", "/server-info", Some(token), None);
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata)
+            .expect("server metadata should be JSON"),
+        server.server_info
+    );
+
+    let output = close_desktop_owner_and_wait(server);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
 #[cfg(unix)]
@@ -315,6 +478,10 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
         .as_str()
         .expect("session id should exist")
         .to_owned();
+    let durable_session_id = session["durable_session_scope_id"]
+        .as_str()
+        .expect("durable session id should exist")
+        .to_owned();
     assert!(session_id.starts_with("http-session-e1-"));
 
     let run_command = serde_json::json!({
@@ -354,6 +521,24 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     assert!(events_body.contains("event: run_event"));
     assert!(events_body.contains("\"type\":\"run_finished\""));
     assert!(events_body.contains("serve process answer"));
+    let last_event_id = events_body
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .next_back()
+        .expect("terminal durable SSE should include a replay cursor");
+    let (reconnect_status, reconnect_body) = http_request_with_last_event_id(
+        server.address,
+        "GET",
+        &format!("/runs/{run_id}/events"),
+        Some(token),
+        None,
+        Some(last_event_id),
+    );
+    assert_eq!(reconnect_status, 200);
+    assert!(
+        !reconnect_body.contains("event: run_event"),
+        "cursor at the terminal event should replay an empty suffix"
+    );
     provider.join().expect("provider fixture should join");
 
     let (snapshot_status, snapshot_body) = http_request(
@@ -375,23 +560,91 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     assert!(startup.contains("status: listening; press Ctrl-C for graceful shutdown"));
     assert!(!startup.contains(token));
 
+    let (restart_base_url, restart_provider) = spawn_provider_fixture("reopened process answer");
+    write_config(&config_path, &restart_base_url);
     let restarted = spawn_serve(&workspace, &config_path, token);
-    let (restarted_status, restarted_body) = http_request(
+    let (catalog_status, catalog_body) = http_request(
+        restarted.address,
+        "GET",
+        "/session-catalog",
+        Some(token),
+        None,
+    );
+    assert_eq!(catalog_status, 200, "catalog response: {catalog_body}");
+    let catalog: serde_json::Value =
+        serde_json::from_str(&catalog_body).expect("catalog body should be JSON");
+    let historical = catalog["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["session_id"].as_str() == Some(durable_session_id.as_str()))
+        })
+        .expect("completed durable session should enter the historical catalog");
+    let open_body = serde_json::json!({
+        "session_ref": historical["session_ref"],
+        "session_id": durable_session_id,
+        "label": "Reopened history"
+    })
+    .to_string();
+    let (open_status, open_response) = http_request(
         restarted.address,
         "POST",
-        "/sessions",
+        "/sessions/open",
         Some(token),
-        Some("{}"),
+        Some(&open_body),
     );
-    assert_eq!(restarted_status, 201);
-    let restarted_session: serde_json::Value =
-        serde_json::from_str(&restarted_body).expect("restarted session should be JSON");
+    assert_eq!(open_status, 200, "open response: {open_response}");
+    let reopened: serde_json::Value =
+        serde_json::from_str(&open_response).expect("open response should be JSON");
+    let reopened_session_id = reopened["id"]
+        .as_str()
+        .expect("reopened adapter id should exist")
+        .to_owned();
     assert!(
-        restarted_session["id"]
+        reopened["id"]
             .as_str()
-            .expect("restarted session id should exist")
+            .expect("reopened session id should exist")
             .starts_with("http-session-e2-")
     );
+    assert_ne!(reopened_session_id, session_id);
+    assert_eq!(reopened["durable_session_scope_id"], durable_session_id);
+    let resumed_command = serde_json::json!({
+        "protocol_version": 1,
+        "command_id": "start-process-reopened",
+        "client_id": "process-e2e",
+        "session_id": reopened_session_id,
+        "payload": {
+            "prompt": "Continue the durable session with the fixture answer",
+            "approval_mode": "deny"
+        }
+    })
+    .to_string();
+    let (resumed_status, resumed_body) = http_request(
+        restarted.address,
+        "POST",
+        &format!("/sessions/{reopened_session_id}/runs"),
+        Some(token),
+        Some(&resumed_command),
+    );
+    assert_eq!(resumed_status, 201, "resumed response: {resumed_body}");
+    let resumed: serde_json::Value =
+        serde_json::from_str(&resumed_body).expect("resumed receipt should be JSON");
+    let resumed_run_id = resumed["run"]["id"]
+        .as_str()
+        .expect("resumed run id should exist");
+    let (events_status, events_body) = http_request(
+        restarted.address,
+        "GET",
+        &format!("/runs/{resumed_run_id}/events"),
+        Some(token),
+        None,
+    );
+    assert_eq!(events_status, 200);
+    assert!(events_body.contains("reopened process answer"));
+    restart_provider
+        .join()
+        .expect("restart provider fixture should join");
     assert_eq!(stop_serve(restarted).status.code(), Some(0));
 
     fs::remove_dir_all(workspace).expect("test workspace should remove");
