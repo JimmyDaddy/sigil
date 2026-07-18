@@ -122,7 +122,19 @@ async fn restricted_launch_probe_does_not_inherit_unlisted_handle() {
         .expect("restricted launch probe should run");
     drop(sentinel_file);
 
-    assert_eq!(receipt.exit_code, Some(0));
+    assert!(
+        receipt.exit_code.is_some(),
+        "handle canary child should reach a native terminal status"
+    );
+    assert_ne!(
+        receipt.exit_code,
+        Some(9),
+        "exit 9 means the unlisted parent handle remained usable in the child"
+    );
+    assert_eq!(
+        receipt.output.termination,
+        sigil_kernel::ExecutionTerminationCause::Exited
+    );
     assert!(
         std::fs::read(sentinel.path())
             .expect("sentinel should remain readable")
