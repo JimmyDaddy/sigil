@@ -462,7 +462,7 @@ async fn app_container_dacl_grant_cannot_write_medium_integrity_workspace() {
     );
     assert!(
         !super::WindowsFilesystemGrant::sid_has_security_control_rights(
-            &workspace.join("created.txt"),
+            &existing,
             second_grant.restricting_sid(),
         )
         .expect("AppContainer security-control rights should resolve")
