@@ -23,8 +23,8 @@ use windows_sys::Win32::{
             TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
         },
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetFileSecurityW,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-        SetFileSecurityW,
+        GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
     },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_DELETE_CHILD,
@@ -454,18 +454,44 @@ fn restore_from_snapshot(root: &Path, paths: &GrantPaths) -> Result<()> {
         .with_context(|| format!("failed to read {}", paths.snapshot.display()))?;
     let descriptor = SecurityDescriptorBuffer::from_bytes(&bytes)?;
     let wide = nul_terminated(root.as_os_str(), "grant root")?;
-    // SAFETY: wide is NUL-terminated and descriptor is an aligned self-relative security
-    // descriptor captured from GetFileSecurityW. Only its DACL is restored.
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut dacl: *mut ACL = null_mut();
+    // SAFETY: descriptor is an aligned, self-relative security descriptor captured from
+    // GetFileSecurityW, and all output pointers are valid for the call.
     if unsafe {
-        SetFileSecurityW(
-            wide.as_ptr(),
-            DACL_SECURITY_INFORMATION,
+        GetSecurityDescriptorDacl(
             descriptor.as_ptr(),
+            &raw mut dacl_present,
+            &raw mut dacl,
+            &raw mut dacl_defaulted,
         )
     } == 0
     {
         return Err(io::Error::last_os_error())
-            .context("SetFileSecurityW failed to restore Windows grant root DACL");
+            .context("GetSecurityDescriptorDacl failed for Windows grant snapshot");
+    }
+    if dacl_present == 0 || dacl.is_null() {
+        bail!("Windows grant root with an absent or null original DACL is unsupported");
+    }
+
+    // SAFETY: wide is NUL-terminated and dacl points into the live snapshot descriptor.
+    // SetNamedSecurityInfoW is used intentionally because it propagates the restored inheritable
+    // DACL to existing descendants, unlike SetFileSecurityW's root-only replacement.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status.cast_signed()))
+            .context("SetNamedSecurityInfoW failed to restore Windows grant root DACL");
     }
     Ok(())
 }

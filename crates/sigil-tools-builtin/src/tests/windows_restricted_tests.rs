@@ -250,7 +250,7 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn write_restricted_sid_grants_one_root_and_restores_its_dacl() {
+async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let granted_root = temp.path().join("workspace");
     let denied_root = temp.path().join("sibling");
