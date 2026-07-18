@@ -24,7 +24,7 @@ use windows_sys::Win32::{
         },
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetFileSecurityW,
         GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetFileSecurityW,
     },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_DELETE_CHILD,
@@ -492,6 +492,22 @@ fn restore_from_snapshot(root: &Path, paths: &GrantPaths) -> Result<()> {
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status.cast_signed()))
             .context("SetNamedSecurityInfoW failed to restore Windows grant root DACL");
+    }
+
+    // SetNamedSecurityInfoW can normalize the root descriptor while propagating inheritance.
+    // Reapply the exact captured DACL to the root after descendant cleanup so both properties hold:
+    // descendants lose the run SID and the root returns byte-for-byte to its original descriptor.
+    // SAFETY: wide and the aligned self-relative snapshot remain live for the call.
+    if unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            descriptor.as_ptr(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error())
+            .context("SetFileSecurityW failed to finalize exact Windows grant root restoration");
     }
     Ok(())
 }

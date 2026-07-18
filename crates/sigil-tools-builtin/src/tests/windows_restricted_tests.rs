@@ -284,7 +284,7 @@ async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
     let restore_result = grant.restore();
     let (outcome, restricting_sid_count) =
         run_result.expect("filesystem containment fixture should return a receipt");
-    restore_result.expect("workspace DACL should restore exactly after child cleanup");
+    restore_result.expect("workspace and descendant DACLs should restore after child cleanup");
 
     assert_eq!(restricting_sid_count, 3);
     assert_eq!(outcome.exit_code, Some(0));
