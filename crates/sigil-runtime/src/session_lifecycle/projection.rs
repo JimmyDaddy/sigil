@@ -22,9 +22,17 @@ use super::{
     SessionCandidate, direct_jsonl_candidates, hash_file_bounded, modified_at_unix_ms,
 };
 
+mod query;
+
+pub use query::{
+    DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE, SessionCatalogProjectionPage,
+    SessionCatalogProjectionQuery,
+};
+
 pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 1;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RECONCILE_RETRIES: usize = 2;
 
 const CREATE_SCHEMA_SQL: &str = r#"
 CREATE TABLE session_catalog_workspace_v1 (
@@ -32,7 +40,8 @@ CREATE TABLE session_catalog_workspace_v1 (
     generation INTEGER NOT NULL CHECK (generation >= 0),
     reconciled_at_unix_ms INTEGER NOT NULL CHECK (reconciled_at_unix_ms >= 0),
     degraded_source_count INTEGER NOT NULL CHECK (degraded_source_count >= 0),
-    identity_conflict_count INTEGER NOT NULL CHECK (identity_conflict_count >= 0)
+    identity_conflict_count INTEGER NOT NULL CHECK (identity_conflict_count >= 0),
+    truncated_source_count INTEGER NOT NULL CHECK (truncated_source_count >= 0)
 ) STRICT;
 
 CREATE TABLE session_catalog_entry_v1 (
@@ -50,6 +59,7 @@ CREATE TABLE session_catalog_entry_v1 (
     provider_name TEXT,
     model_name TEXT,
     title TEXT,
+    title_search TEXT,
     user_message_count INTEGER NOT NULL CHECK (user_message_count >= 0),
     assistant_message_count INTEGER NOT NULL CHECK (assistant_message_count >= 0),
     tool_result_count INTEGER NOT NULL CHECK (tool_result_count >= 0),
@@ -102,6 +112,19 @@ pub enum SessionCatalogProjectionError {
     IntegerRange { field: &'static str },
     #[error("session catalog projection encoding failed: {message}")]
     Encoding { message: String },
+    #[error("session catalog query is invalid: {message}")]
+    InvalidQuery { message: String },
+    #[error("session catalog cursor is invalid: {message}")]
+    InvalidCursor { message: String },
+    #[error(
+        "session catalog cursor is stale: cursor generation {cursor_generation}, current generation {current_generation}"
+    )]
+    StaleCursor {
+        cursor_generation: u64,
+        current_generation: u64,
+    },
+    #[error("session catalog reconcile conflicted with another writer after bounded retries")]
+    ReconcileConflict,
 }
 
 /// Safe, compact historical session row. Message and tool bodies are never materialized here.
@@ -160,6 +183,24 @@ pub struct SessionCatalogProjectionRebuildReport {
     pub reconciled_at_unix_ms: u64,
 }
 
+/// Diagnostics for one metadata-aware incremental workspace reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCatalogProjectionReconcileReport {
+    pub workspace_id: String,
+    pub generation: u64,
+    pub generation_changed: bool,
+    pub scanned_source_count: usize,
+    pub reused_source_count: usize,
+    pub updated_source_count: usize,
+    pub removed_source_count: usize,
+    pub degraded_source_count: usize,
+    pub identity_conflict_count: usize,
+    pub truncated_source_count: usize,
+    pub retry_count: usize,
+    pub reconciled_at_unix_ms: u64,
+}
+
 /// Workspace-bound owner of the rebuildable global SQLite session catalog.
 #[derive(Debug, Clone)]
 pub struct SessionCatalogProjectionService {
@@ -192,39 +233,34 @@ impl SessionCatalogProjectionService {
     pub fn rebuild(
         &self,
     ) -> Result<SessionCatalogProjectionRebuildReport, SessionCatalogProjectionError> {
-        let mut connection = self.open_connection()?;
-        let reconciled_at_unix_ms = current_unix_ms();
-        let (entries, truncated_source_count) = self.rebuild_entries(reconciled_at_unix_ms)?;
-        let degraded_source_count = entries
-            .iter()
-            .filter(|entry| entry.source_state != LocalSessionCatalogState::Ready)
-            .count();
-        let identity_conflict_count = identity_conflict_count(&entries);
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let generation = next_workspace_generation(&transaction, &self.lifecycle.workspace_id)?;
-        replace_workspace_entries(
-            &transaction,
-            &self.lifecycle.workspace_id,
-            generation,
-            reconciled_at_unix_ms,
-            degraded_source_count,
-            identity_conflict_count,
-            &entries,
-        )?;
-        transaction.commit()?;
+        let report = self.reconcile_internal(true)?;
         Ok(SessionCatalogProjectionRebuildReport {
-            workspace_id: self.lifecycle.workspace_id.clone(),
-            generation,
-            scanned_source_count: entries.len(),
-            indexed_source_count: entries
-                .iter()
-                .filter(|entry| entry.source_state == LocalSessionCatalogState::Ready)
-                .count(),
-            degraded_source_count,
-            identity_conflict_count,
-            truncated_source_count,
-            reconciled_at_unix_ms,
+            workspace_id: report.workspace_id,
+            generation: report.generation,
+            scanned_source_count: report.scanned_source_count,
+            indexed_source_count: report
+                .scanned_source_count
+                .saturating_sub(report.degraded_source_count),
+            degraded_source_count: report.degraded_source_count,
+            identity_conflict_count: report.identity_conflict_count,
+            truncated_source_count: report.truncated_source_count,
+            reconciled_at_unix_ms: report.reconciled_at_unix_ms,
         })
+    }
+
+    /// Reconciles changed direct session sources while reusing metadata-stable rows.
+    ///
+    /// A generation compare-and-swap prevents an older concurrent scan from replacing a newer
+    /// commit. The bounded retry count prevents writer contention from becoming an unbounded wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for unsafe inputs, source drift, SQLite failures, or repeated
+    /// generation conflicts.
+    pub fn reconcile(
+        &self,
+    ) -> Result<SessionCatalogProjectionReconcileReport, SessionCatalogProjectionError> {
+        self.reconcile_internal(false)
     }
 
     /// Reads this workspace's current rows in deterministic catalog order.
@@ -236,19 +272,7 @@ impl SessionCatalogProjectionService {
         &self,
     ) -> Result<Vec<SessionCatalogProjectionEntry>, SessionCatalogProjectionError> {
         let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
-            "SELECT workspace_id, session_ref, session_id, source_state, source_bytes, \
-             source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
-             last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
-             title, user_message_count, assistant_message_count, tool_result_count, \
-             control_entry_count, latest_usage_json, latest_task_json, latest_readiness_json, \
-             pinned, indexed_at_unix_ms \
-             FROM session_catalog_entry_v1 WHERE workspace_id = ?1 \
-             ORDER BY source_modified_at_unix_ms DESC, session_id DESC, session_ref DESC",
-        )?;
-        let rows = statement.query_map(params![self.lifecycle.workspace_id], decode_entry_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(SessionCatalogProjectionError::from)
+        list_workspace_entries(&connection, &self.lifecycle.workspace_id)
     }
 
     fn open_connection(&self) -> Result<Connection, SessionCatalogProjectionError> {
@@ -283,12 +307,118 @@ impl SessionCatalogProjectionService {
         Ok(connection)
     }
 
-    fn rebuild_entries(
+    fn reconcile_internal(
         &self,
+        force_rebuild: bool,
+    ) -> Result<SessionCatalogProjectionReconcileReport, SessionCatalogProjectionError> {
+        for retry_count in 0..=MAX_RECONCILE_RETRIES {
+            let mut connection = self.open_connection()?;
+            let base_metadata = workspace_metadata(&connection, &self.lifecycle.workspace_id)?;
+            let base_generation = base_metadata
+                .as_ref()
+                .map_or(0, |metadata| metadata.generation);
+            let existing = list_workspace_entries(&connection, &self.lifecycle.workspace_id)?
+                .into_iter()
+                .map(|entry| (entry.session_ref.clone(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let reconciled_at_unix_ms = current_unix_ms();
+            let scan = self.scan_entries(&existing, force_rebuild, reconciled_at_unix_ms)?;
+            let degraded_source_count = scan
+                .entries
+                .iter()
+                .filter(|entry| entry.source_state != LocalSessionCatalogState::Ready)
+                .count();
+            let identity_conflict_count = identity_conflict_count(&scan.entries);
+            let next_by_ref = scan
+                .entries
+                .iter()
+                .map(|entry| (entry.session_ref.clone(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let updated_source_count = next_by_ref
+                .iter()
+                .filter(|(session_ref, entry)| existing.get(*session_ref) != Some(*entry))
+                .count();
+            let removed_source_count = existing
+                .keys()
+                .filter(|session_ref| !next_by_ref.contains_key(*session_ref))
+                .count();
+            let metadata_changed = base_metadata.as_ref().is_none_or(|metadata| {
+                metadata.degraded_source_count != degraded_source_count
+                    || metadata.identity_conflict_count != identity_conflict_count
+                    || metadata.truncated_source_count != scan.truncated_source_count
+            });
+            let generation_changed = force_rebuild
+                || updated_source_count > 0
+                || removed_source_count > 0
+                || metadata_changed;
+            let generation = if generation_changed {
+                base_generation.checked_add(1).ok_or(
+                    SessionCatalogProjectionError::IntegerRange {
+                        field: "generation",
+                    },
+                )?
+            } else {
+                base_generation
+            };
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !workspace_generation_matches(
+                &transaction,
+                &self.lifecycle.workspace_id,
+                base_metadata.as_ref().map(|metadata| metadata.generation),
+            )? {
+                transaction.rollback()?;
+                continue;
+            }
+            if generation_changed {
+                replace_workspace_entries(
+                    &transaction,
+                    &self.lifecycle.workspace_id,
+                    generation,
+                    reconciled_at_unix_ms,
+                    degraded_source_count,
+                    identity_conflict_count,
+                    scan.truncated_source_count,
+                    &scan.entries,
+                )?;
+            } else {
+                upsert_workspace_metadata(
+                    &transaction,
+                    &self.lifecycle.workspace_id,
+                    generation,
+                    reconciled_at_unix_ms,
+                    degraded_source_count,
+                    identity_conflict_count,
+                    scan.truncated_source_count,
+                )?;
+            }
+            transaction.commit()?;
+            return Ok(SessionCatalogProjectionReconcileReport {
+                workspace_id: self.lifecycle.workspace_id.clone(),
+                generation,
+                generation_changed,
+                scanned_source_count: scan.entries.len(),
+                reused_source_count: scan.reused_source_count,
+                updated_source_count,
+                removed_source_count,
+                degraded_source_count,
+                identity_conflict_count,
+                truncated_source_count: scan.truncated_source_count,
+                retry_count,
+                reconciled_at_unix_ms,
+            });
+        }
+        Err(SessionCatalogProjectionError::ReconcileConflict)
+    }
+
+    fn scan_entries(
+        &self,
+        existing: &BTreeMap<String, SessionCatalogProjectionEntry>,
+        force_rebuild: bool,
         indexed_at_unix_ms: u64,
-    ) -> Result<(Vec<SessionCatalogProjectionEntry>, usize), SessionCatalogProjectionError> {
+    ) -> Result<SessionCatalogScan, SessionCatalogProjectionError> {
         if !self.lifecycle.session_dir.exists() {
-            return Ok((Vec::new(), 0));
+            return Ok(SessionCatalogScan::default());
         }
         let metadata = fs::symlink_metadata(&self.lifecycle.session_dir).map_err(source_error)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -317,11 +447,36 @@ impl SessionCatalogProjectionService {
             .map_err(source_error)?;
         let mut validated_bytes = 0_u64;
         let mut entries = Vec::with_capacity(candidates.len());
+        let mut reused_source_count = 0;
         for candidate in candidates {
             let state = candidate_state(&candidate, &self.lifecycle.limits, &mut validated_bytes);
+            let session_ref = candidate
+                .session_ref
+                .as_path()
+                .to_string_lossy()
+                .into_owned();
+            if !force_rebuild
+                && let Some(previous) = existing.get(&session_ref)
+                && source_fingerprint_matches(previous, &candidate, state)
+            {
+                let mut reused = previous.clone();
+                reused.pinned = reused.session_id.as_deref().is_some_and(|session_id| {
+                    pins.get(&candidate.session_ref)
+                        .is_some_and(|(pinned_session_id, pinned)| {
+                            pinned_session_id == session_id && *pinned
+                        })
+                });
+                entries.push(reused);
+                reused_source_count += 1;
+                continue;
+            }
             entries.push(self.project_candidate(candidate, state, &pins, indexed_at_unix_ms)?);
         }
-        Ok((entries, truncated_source_count))
+        Ok(SessionCatalogScan {
+            entries,
+            reused_source_count,
+            truncated_source_count,
+        })
     }
 
     fn project_candidate(
@@ -384,6 +539,76 @@ impl SessionCatalogProjectionService {
         apply_session_projection(&mut entry, projection, records.last());
         Ok(entry)
     }
+}
+
+#[derive(Debug, Default)]
+struct SessionCatalogScan {
+    entries: Vec<SessionCatalogProjectionEntry>,
+    reused_source_count: usize,
+    truncated_source_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionCatalogWorkspaceMetadata {
+    generation: u64,
+    reconciled_at_unix_ms: u64,
+    degraded_source_count: usize,
+    identity_conflict_count: usize,
+    truncated_source_count: usize,
+}
+
+fn source_fingerprint_matches(
+    previous: &SessionCatalogProjectionEntry,
+    candidate: &SessionCandidate,
+    state: LocalSessionCatalogState,
+) -> bool {
+    previous.source_state == state
+        && previous.source_bytes == candidate.bytes
+        && previous.source_modified_at_unix_ms == candidate.modified_at_unix_ms
+}
+
+fn list_workspace_entries(
+    connection: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<SessionCatalogProjectionEntry>, SessionCatalogProjectionError> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, session_ref, session_id, source_state, source_bytes, \
+         source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
+         last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
+         title, user_message_count, assistant_message_count, tool_result_count, \
+         control_entry_count, latest_usage_json, latest_task_json, latest_readiness_json, \
+         pinned, indexed_at_unix_ms \
+         FROM session_catalog_entry_v1 WHERE workspace_id = ?1 \
+         ORDER BY source_modified_at_unix_ms DESC, COALESCE(session_id, '') DESC, \
+         session_ref DESC",
+    )?;
+    let rows = statement.query_map(params![workspace_id], decode_entry_row)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(SessionCatalogProjectionError::from)
+}
+
+fn workspace_metadata(
+    connection: &Connection,
+    workspace_id: &str,
+) -> Result<Option<SessionCatalogWorkspaceMetadata>, SessionCatalogProjectionError> {
+    connection
+        .query_row(
+            "SELECT generation, reconciled_at_unix_ms, degraded_source_count, \
+             identity_conflict_count, truncated_source_count \
+             FROM session_catalog_workspace_v1 WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| {
+                Ok(SessionCatalogWorkspaceMetadata {
+                    generation: decode_u64(row.get(0)?, 0)?,
+                    reconciled_at_unix_ms: decode_u64(row.get(1)?, 1)?,
+                    degraded_source_count: decode_usize(row.get(2)?, 2)?,
+                    identity_conflict_count: decode_usize(row.get(3)?, 3)?,
+                    truncated_source_count: decode_usize(row.get(4)?, 4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(SessionCatalogProjectionError::from)
 }
 
 fn prepare_database_parent(path: &Path) -> Result<(), SessionCatalogProjectionError> {
@@ -563,10 +788,11 @@ fn identity_conflict_count(entries: &[SessionCatalogProjectionEntry]) -> usize {
     conflicts.len()
 }
 
-fn next_workspace_generation(
+fn workspace_generation_matches(
     transaction: &Transaction<'_>,
     workspace_id: &str,
-) -> Result<u64, SessionCatalogProjectionError> {
+    expected: Option<u64>,
+) -> Result<bool, SessionCatalogProjectionError> {
     let current: Option<i64> = transaction
         .query_row(
             "SELECT generation FROM session_catalog_workspace_v1 WHERE workspace_id = ?1",
@@ -574,15 +800,14 @@ fn next_workspace_generation(
             |row| row.get(0),
         )
         .optional()?;
-    let current = current.unwrap_or(0);
-    let next = current
-        .checked_add(1)
-        .ok_or(SessionCatalogProjectionError::IntegerRange {
-            field: "generation",
-        })?;
-    u64::try_from(next).map_err(|_| SessionCatalogProjectionError::IntegerRange {
-        field: "generation",
-    })
+    let current = current
+        .map(|value| {
+            u64::try_from(value).map_err(|_| SessionCatalogProjectionError::IntegerRange {
+                field: "generation",
+            })
+        })
+        .transpose()?;
+    Ok(current == expected)
 }
 
 fn replace_workspace_entries(
@@ -592,25 +817,17 @@ fn replace_workspace_entries(
     reconciled_at_unix_ms: u64,
     degraded_source_count: usize,
     identity_conflict_count: usize,
+    truncated_source_count: usize,
     entries: &[SessionCatalogProjectionEntry],
 ) -> Result<(), SessionCatalogProjectionError> {
-    transaction.execute(
-        "INSERT INTO session_catalog_workspace_v1(\
-             workspace_id, generation, reconciled_at_unix_ms, degraded_source_count, \
-             identity_conflict_count\
-         ) VALUES (?1, ?2, ?3, ?4, ?5) \
-         ON CONFLICT(workspace_id) DO UPDATE SET \
-             generation = excluded.generation, \
-             reconciled_at_unix_ms = excluded.reconciled_at_unix_ms, \
-             degraded_source_count = excluded.degraded_source_count, \
-             identity_conflict_count = excluded.identity_conflict_count",
-        params![
-            workspace_id,
-            to_i64(generation, "generation")?,
-            to_i64(reconciled_at_unix_ms, "reconciled_at_unix_ms")?,
-            usize_to_i64(degraded_source_count, "degraded_source_count")?,
-            usize_to_i64(identity_conflict_count, "identity_conflict_count")?,
-        ],
+    upsert_workspace_metadata(
+        transaction,
+        workspace_id,
+        generation,
+        reconciled_at_unix_ms,
+        degraded_source_count,
+        identity_conflict_count,
+        truncated_source_count,
     )?;
     transaction.execute(
         "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1",
@@ -619,6 +836,38 @@ fn replace_workspace_entries(
     for entry in entries {
         insert_entry(transaction, entry)?;
     }
+    Ok(())
+}
+
+fn upsert_workspace_metadata(
+    transaction: &Transaction<'_>,
+    workspace_id: &str,
+    generation: u64,
+    reconciled_at_unix_ms: u64,
+    degraded_source_count: usize,
+    identity_conflict_count: usize,
+    truncated_source_count: usize,
+) -> Result<(), SessionCatalogProjectionError> {
+    transaction.execute(
+        "INSERT INTO session_catalog_workspace_v1(\
+             workspace_id, generation, reconciled_at_unix_ms, degraded_source_count, \
+             identity_conflict_count, truncated_source_count\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(workspace_id) DO UPDATE SET \
+             generation = excluded.generation, \
+             reconciled_at_unix_ms = excluded.reconciled_at_unix_ms, \
+             degraded_source_count = excluded.degraded_source_count, \
+             identity_conflict_count = excluded.identity_conflict_count, \
+             truncated_source_count = excluded.truncated_source_count",
+        params![
+            workspace_id,
+            to_i64(generation, "generation")?,
+            to_i64(reconciled_at_unix_ms, "reconciled_at_unix_ms")?,
+            usize_to_i64(degraded_source_count, "degraded_source_count")?,
+            usize_to_i64(identity_conflict_count, "identity_conflict_count")?,
+            usize_to_i64(truncated_source_count, "truncated_source_count")?,
+        ],
+    )?;
     Ok(())
 }
 
@@ -631,12 +880,12 @@ fn insert_entry(
              workspace_id, session_ref, session_id, source_state, source_bytes, \
              source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
              last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
-             title, user_message_count, assistant_message_count, tool_result_count, \
+             title, title_search, user_message_count, assistant_message_count, tool_result_count, \
              control_entry_count, latest_usage_json, latest_task_json, latest_readiness_json, \
              pinned, indexed_at_unix_ms\
          ) VALUES (\
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-             ?18, ?19, ?20, ?21, ?22, ?23\
+             ?18, ?19, ?20, ?21, ?22, ?23, ?24\
          )",
         params![
             entry.workspace_id,
@@ -656,6 +905,7 @@ fn insert_entry(
             entry.provider_name,
             entry.model_name,
             entry.title,
+            entry.title.as_deref().map(str::to_lowercase),
             to_i64(entry.user_message_count, "user_message_count")?,
             to_i64(entry.assistant_message_count, "assistant_message_count")?,
             to_i64(entry.tool_result_count, "tool_result_count")?,
@@ -762,6 +1012,16 @@ fn decode_optional<T: for<'de> Deserialize<'de>>(
 
 fn decode_u64(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn decode_usize(value: i64, column: usize) -> Result<usize, rusqlite::Error> {
+    usize::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Integer,

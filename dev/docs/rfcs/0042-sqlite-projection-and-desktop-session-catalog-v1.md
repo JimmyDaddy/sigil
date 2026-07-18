@@ -1,6 +1,6 @@
 # RFC-0042 SQLite Projection and Desktop Session Catalog V1
 
-状态：accepted / R42.0-R42.1 implemented；R42.2-R42.5 pending
+状态：accepted / R42.0-R42.2 implemented；R42.3-R42.5 pending
 
 创建日期：2026-07-19
 
@@ -256,3 +256,18 @@ session registry。缺口是跨进程重启的历史 catalog、稳定分页/sear
   rebuild结果；其他 workspace row保持不变。unknown schema/application id/source state均fail closed。
 - 测试覆盖删除数据库后等价重建、pin投影、跨workspace隔离、legacy/invalid隐私、schema mismatch、未知
   state和symlink database拒绝。R42.1尚未接入 production `serve`，普通TUI/CLI不会创建数据库。
+
+## 17. R42.2 result
+
+- `reconcile()`先读取 workspace generation与既有source fingerprint，只为state/bytes/mtime变化的direct child
+  replay JSONL；metadata-stable row直接复用，但仍从append-only lifecycle journal刷新exact session pin。
+- scan完成后使用`BEGIN IMMEDIATE`重新比较generation；旧scan遇到其他writer的新commit会rollback并最多重试
+  两次，不能覆盖更新结果。append/change/delete/pin、degraded/truncated/conflict metadata与generation在同一
+  transaction发布；无material变化时只刷新reconciled time，generation保持稳定。
+- runtime新增独立`SessionCatalogPageCursorV1`：base64url payload绑定workspace/filter hash、query schema、
+  catalog generation和末行keyset。filter变化返回invalid cursor，generation变化返回stale cursor，不回退
+  第一页。
+- query默认50、最大100，按modified/session id/session ref稳定降序；支持exact provider/pin/state过滤与
+  bounded Unicode-lowercase title literal search，`%`、`_`和escape char不获得wildcard语义。
+- 测试覆盖unchanged reuse、append/delete/pin增量更新、generation CAS、三页无重无漏、filter-bound cursor、
+  stale cursor、literal search、provider/pin/state filter和malformed/unbounded query拒绝。

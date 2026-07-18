@@ -28,8 +28,10 @@ pub use journal::{
     LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
 };
 pub use projection::{
+    DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE,
     SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogProjectionEntry,
-    SessionCatalogProjectionError, SessionCatalogProjectionRebuildReport,
+    SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
+    SessionCatalogProjectionRebuildReport, SessionCatalogProjectionReconcileReport,
     SessionCatalogProjectionService,
 };
 

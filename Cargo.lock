@@ -3178,6 +3178,7 @@ version = "0.0.1-alpha.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "fs2",
  "futures",
  "ignore",

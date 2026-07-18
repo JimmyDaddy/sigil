@@ -229,6 +229,254 @@ fn projection_rejects_unknown_persisted_source_state() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn incremental_reconcile_reuses_unchanged_rows_and_tracks_pin_append_delete() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let first = lifecycle.session_dir.join("first.jsonl");
+    let second = lifecycle.session_dir.join("second.jsonl");
+    finalized_session(&first, "First", "deepseek", "chat")?;
+    finalized_session(&second, "Second", "anthropic", "claude")?;
+    let initial = projection.rebuild()?;
+
+    let unchanged = projection.reconcile()?;
+
+    assert_eq!(unchanged.generation, initial.generation);
+    assert!(!unchanged.generation_changed);
+    assert_eq!(unchanged.reused_source_count, 2);
+    assert_eq!(unchanged.updated_source_count, 0);
+    lifecycle.set_session_pin(&first, true, 200)?;
+    let pinned = projection.reconcile()?;
+    assert!(pinned.generation_changed);
+    assert_eq!(pinned.generation, initial.generation + 1);
+    assert_eq!(pinned.reused_source_count, 2);
+    assert_eq!(pinned.updated_source_count, 1);
+    JsonlSessionStore::new(&first)?.append(&SessionLogEntry::User(ModelMessage::user("Later")))?;
+    let appended = projection.reconcile()?;
+    assert_eq!(appended.reused_source_count, 1);
+    assert_eq!(appended.updated_source_count, 1);
+    let first_row = projection
+        .list_workspace_entries()?
+        .into_iter()
+        .find(|entry| entry.session_ref == "first.jsonl")
+        .expect("first row");
+    assert_eq!(first_row.user_message_count, 2);
+    fs::remove_file(second)?;
+    let removed = projection.reconcile()?;
+    assert_eq!(removed.removed_source_count, 1);
+    assert_eq!(projection.list_workspace_entries()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn catalog_query_paginates_without_duplicates_and_binds_cursor_to_filters() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    for index in 0..5 {
+        finalized_session(
+            &lifecycle.session_dir.join(format!("session-{index}.jsonl")),
+            &format!("Prompt {index}"),
+            if index % 2 == 0 {
+                "deepseek"
+            } else {
+                "anthropic"
+            },
+            "model",
+        )?;
+    }
+    projection.rebuild()?;
+    let full = projection.query(SessionCatalogProjectionQuery {
+        limit: 100,
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    let first = projection.query(SessionCatalogProjectionQuery {
+        limit: 2,
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    let second = projection.query(SessionCatalogProjectionQuery {
+        limit: 2,
+        cursor: first.next_cursor.clone(),
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    let third = projection.query(SessionCatalogProjectionQuery {
+        limit: 2,
+        cursor: second.next_cursor.clone(),
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    let paged = first
+        .entries
+        .iter()
+        .chain(&second.entries)
+        .chain(&third.entries)
+        .map(|entry| entry.session_ref.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(paged.len(), 5);
+    assert_eq!(
+        paged,
+        full.entries
+            .iter()
+            .map(|entry| entry.session_ref.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(third.next_cursor.is_none());
+    let error = projection
+        .query(SessionCatalogProjectionQuery {
+            limit: 2,
+            cursor: first.next_cursor,
+            provider_name: Some("deepseek".to_owned()),
+            ..SessionCatalogProjectionQuery::default()
+        })
+        .expect_err("cursor must be bound to filters");
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::InvalidCursor { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn catalog_query_filters_literal_search_provider_pin_and_state() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let literal = lifecycle.session_dir.join("literal.jsonl");
+    finalized_session(&literal, "Find 100%_Literal", "deepseek", "deepseek-v4")?;
+    finalized_session(
+        &lifecycle.session_dir.join("other.jsonl"),
+        "Other title",
+        "anthropic",
+        "claude",
+    )?;
+    fs::write(lifecycle.session_dir.join("invalid.jsonl"), "invalid\n")?;
+    lifecycle.set_session_pin(&literal, true, 300)?;
+    projection.rebuild()?;
+
+    let matched = projection.query(SessionCatalogProjectionQuery {
+        search: Some("%_literal".to_owned()),
+        provider_name: Some("deepseek".to_owned()),
+        pinned: Some(true),
+        source_state: Some(LocalSessionCatalogState::Ready),
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    let invalid = projection.query(SessionCatalogProjectionQuery {
+        source_state: Some(LocalSessionCatalogState::Invalid),
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+
+    assert_eq!(matched.entries.len(), 1);
+    assert_eq!(matched.entries[0].session_ref, "literal.jsonl");
+    assert_eq!(invalid.entries.len(), 1);
+    assert_eq!(invalid.entries[0].session_ref, "invalid.jsonl");
+    Ok(())
+}
+
+#[test]
+fn catalog_query_rejects_stale_generation_cursor() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    for index in 0..3 {
+        finalized_session(
+            &lifecycle.session_dir.join(format!("session-{index}.jsonl")),
+            &format!("Prompt {index}"),
+            "deepseek",
+            "chat",
+        )?;
+    }
+    projection.rebuild()?;
+    let first = projection.query(SessionCatalogProjectionQuery {
+        limit: 1,
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+    finalized_session(
+        &lifecycle.session_dir.join("new.jsonl"),
+        "New session",
+        "deepseek",
+        "chat",
+    )?;
+    projection.reconcile()?;
+
+    let error = projection
+        .query(SessionCatalogProjectionQuery {
+            limit: 1,
+            cursor: first.next_cursor,
+            ..SessionCatalogProjectionQuery::default()
+        })
+        .expect_err("changed generation must invalidate cursor");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::StaleCursor { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn catalog_query_rejects_unbounded_blank_and_malformed_inputs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+
+    for query in [
+        SessionCatalogProjectionQuery {
+            limit: 0,
+            ..SessionCatalogProjectionQuery::default()
+        },
+        SessionCatalogProjectionQuery {
+            limit: MAX_SESSION_CATALOG_PAGE_SIZE + 1,
+            ..SessionCatalogProjectionQuery::default()
+        },
+        SessionCatalogProjectionQuery {
+            search: Some("   ".to_owned()),
+            ..SessionCatalogProjectionQuery::default()
+        },
+    ] {
+        assert!(matches!(
+            projection
+                .query(query)
+                .expect_err("invalid query must fail closed"),
+            SessionCatalogProjectionError::InvalidQuery { .. }
+        ));
+    }
+    assert!(matches!(
+        projection
+            .query(SessionCatalogProjectionQuery {
+                cursor: Some("not-base64!".to_owned()),
+                ..SessionCatalogProjectionQuery::default()
+            })
+            .expect_err("malformed cursor must fail closed"),
+        SessionCatalogProjectionError::InvalidCursor { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn generation_compare_and_swap_rejects_an_older_scan() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    finalized_session(
+        &lifecycle.session_dir.join("session.jsonl"),
+        "Generation",
+        "deepseek",
+        "chat",
+    )?;
+    let initial = projection.rebuild()?;
+    let mut stale_connection = projection.open_connection()?;
+    projection.rebuild()?;
+    let transaction = stale_connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    assert!(!workspace_generation_matches(
+        &transaction,
+        "workspace-1",
+        Some(initial.generation),
+    )?);
+    transaction.rollback()?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn projection_rejects_symlink_database_path() -> Result<()> {
