@@ -297,11 +297,16 @@ async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
             .expect("new workspace file should remain readable"),
         "created"
     );
+    assert!(
+        !super::WindowsFilesystemGrant::sid_has_mutating_rights(&existing, &restricting_sid)
+            .expect("existing file effective rights should resolve"),
+        "existing child retained the run-specific SID's mutating rights after restore"
+    );
     assert_eq!(
         super::WindowsFilesystemGrant::descriptor_hash(&existing)
             .expect("restored existing file descriptor should be captured"),
         existing_descriptor_before,
-        "existing child descriptor retained inherited grant residue"
+        "existing child descriptor changed even after the run-specific SID lost mutating rights"
     );
     assert!(
         !super::WindowsFilesystemGrant::sid_has_mutating_rights(
