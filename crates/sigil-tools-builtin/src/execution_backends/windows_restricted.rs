@@ -15,7 +15,9 @@ use super::{
 /// selectable public backend until filesystem containment is proven by R41.2.
 #[derive(Debug)]
 pub(crate) struct WindowsRestrictedProbeReceipt {
-    pub(crate) token_restricted: bool,
+    pub(crate) privileges_constrained: bool,
+    pub(crate) source_enabled_non_traverse_privilege_count: u32,
+    pub(crate) restricted_enabled_non_traverse_privilege_count: u32,
     pub(crate) environment_policy: ProcessEnvironmentPolicy,
     pub(crate) resources: ExecutionResourceReceipt,
     pub(crate) exit_code: Option<i32>,
@@ -53,7 +55,7 @@ pub(crate) async fn windows_restricted_launch_probe(
     request: &ExecutionRequest,
 ) -> Result<WindowsRestrictedProbeReceipt> {
     let child = NativeWindowsRestrictedChild::spawn(request)?;
-    let token_restricted = child.token_restricted();
+    let privilege_evidence = child.privilege_evidence();
     let deadline = execution_deadline(request)?;
     let outcome = supervise_execution_child(
         SupervisedExecutionChild::WindowsRestricted(child),
@@ -66,7 +68,11 @@ pub(crate) async fn windows_restricted_launch_probe(
     )
     .await?;
     Ok(WindowsRestrictedProbeReceipt {
-        token_restricted,
+        privileges_constrained: privilege_evidence.privileges_constrained(),
+        source_enabled_non_traverse_privilege_count: privilege_evidence
+            .source_enabled_non_traverse_privilege_count,
+        restricted_enabled_non_traverse_privilege_count: privilege_evidence
+            .restricted_enabled_non_traverse_privilege_count,
         environment_policy: request.environment_policy,
         resources: outcome.resources,
         exit_code: outcome.exit_code,
@@ -105,8 +111,10 @@ mod native {
         },
         Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
         Security::{
-            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, IsTokenRestricted, SECURITY_ATTRIBUTES,
-            TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation,
+            LookupPrivilegeValueW, SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED,
+            SECURITY_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_PRIVILEGES,
+            TOKEN_QUERY, TokenPrivileges,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -127,6 +135,18 @@ mod native {
 
     const TERMINATED_BY_SUPERVISOR_EXIT_CODE: u32 = 1;
 
+    #[derive(Clone, Copy)]
+    pub(crate) struct RestrictedTokenPrivilegeEvidence {
+        pub(crate) source_enabled_non_traverse_privilege_count: u32,
+        pub(crate) restricted_enabled_non_traverse_privilege_count: u32,
+    }
+
+    impl RestrictedTokenPrivilegeEvidence {
+        pub(crate) fn privileges_constrained(self) -> bool {
+            self.restricted_enabled_non_traverse_privilege_count == 0
+        }
+    }
+
     pub(crate) struct NativeWindowsRestrictedChild {
         process: Arc<OwnedHandle>,
         thread: Option<OwnedHandle>,
@@ -135,7 +155,7 @@ mod native {
         stderr: Option<TokioFile>,
         wait_task: Option<JoinHandle<io::Result<ExitStatus>>>,
         status: Option<ExitStatus>,
-        token_restricted: bool,
+        privilege_evidence: RestrictedTokenPrivilegeEvidence,
     }
 
     impl NativeWindowsRestrictedChild {
@@ -156,9 +176,15 @@ mod native {
 
             let process_token = open_current_process_token()?;
             let restricted_token = create_restricted_token(raw_handle(&process_token))?;
-            let token_restricted = is_token_restricted(raw_handle(&restricted_token))?;
-            if !token_restricted {
-                bail!("CreateRestrictedToken returned a token that is not restricted");
+            let privilege_evidence = restricted_token_privilege_evidence(
+                raw_handle(&process_token),
+                raw_handle(&restricted_token),
+            )?;
+            if !privilege_evidence.privileges_constrained() {
+                bail!(
+                    "restricted token retains {} enabled non-traverse privilege(s)",
+                    privilege_evidence.restricted_enabled_non_traverse_privilege_count
+                );
             }
 
             let stdin = open_inheritable_nul()?;
@@ -231,7 +257,7 @@ mod native {
                 stderr: Some(stderr.read.into_tokio_file()),
                 wait_task: None,
                 status: None,
-                token_restricted,
+                privilege_evidence,
             })
         }
 
@@ -239,8 +265,8 @@ mod native {
             self.process_id
         }
 
-        pub(crate) fn token_restricted(&self) -> bool {
-            self.token_restricted
+        pub(crate) fn privilege_evidence(&self) -> RestrictedTokenPrivilegeEvidence {
+            self.privilege_evidence
         }
 
         pub(crate) fn take_stdout(&mut self) -> Option<super::super::SupervisedExecutionPipe> {
@@ -499,12 +525,106 @@ mod native {
         Ok(unsafe { OwnedHandle::from_raw_handle(restricted) })
     }
 
-    fn is_token_restricted(token: HANDLE) -> Result<bool> {
-        if token.is_null() || token == INVALID_HANDLE_VALUE {
-            bail!("cannot inspect an invalid restricted token handle");
+    fn restricted_token_privilege_evidence(
+        source: HANDLE,
+        restricted: HANDLE,
+    ) -> Result<RestrictedTokenPrivilegeEvidence> {
+        let traverse_privilege = lookup_traverse_privilege()?;
+        let source_enabled_non_traverse_privilege_count =
+            enabled_non_traverse_privilege_count(source, traverse_privilege)?;
+        let restricted_enabled_non_traverse_privilege_count =
+            enabled_non_traverse_privilege_count(restricted, traverse_privilege)?;
+        Ok(RestrictedTokenPrivilegeEvidence {
+            source_enabled_non_traverse_privilege_count,
+            restricted_enabled_non_traverse_privilege_count,
+        })
+    }
+
+    fn lookup_traverse_privilege() -> Result<windows_sys::Win32::Foundation::LUID> {
+        let mut luid = windows_sys::Win32::Foundation::LUID::default();
+        // SAFETY: SE_CHANGE_NOTIFY_NAME is a static NUL-terminated string and luid is a valid
+        // out pointer. A null system name selects the local system.
+        if unsafe { LookupPrivilegeValueW(null(), SE_CHANGE_NOTIFY_NAME, &raw mut luid) } == 0 {
+            return Err(io::Error::last_os_error())
+                .context("failed to resolve SeChangeNotifyPrivilege");
         }
-        // SAFETY: token is a live token handle owned by the caller.
-        Ok(unsafe { IsTokenRestricted(token) } != 0)
+        Ok(luid)
+    }
+
+    fn enabled_non_traverse_privilege_count(
+        token: HANDLE,
+        traverse_privilege: windows_sys::Win32::Foundation::LUID,
+    ) -> Result<u32> {
+        if token.is_null() || token == INVALID_HANDLE_VALUE {
+            bail!("cannot inspect an invalid token handle");
+        }
+
+        let mut bytes = 0_u32;
+        // SAFETY: This is the documented sizing call. token is live and bytes is a valid out
+        // pointer; no output buffer is supplied.
+        let _ =
+            unsafe { GetTokenInformation(token, TokenPrivileges, null_mut(), 0, &raw mut bytes) };
+        let token_privileges_header_bytes = u32::try_from(size_of::<TOKEN_PRIVILEGES>())
+            .context("TOKEN_PRIVILEGES size exceeds u32")?;
+        if bytes < token_privileges_header_bytes {
+            bail!("TokenPrivileges sizing returned an invalid buffer length");
+        }
+
+        let words = usize::try_from(bytes)
+            .context("TokenPrivileges buffer length exceeds usize")?
+            .div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let storage_bytes = u32::try_from(storage.len() * size_of::<usize>())
+            .context("TokenPrivileges storage length exceeds u32")?;
+        let mut returned_bytes = 0_u32;
+        // SAFETY: storage is suitably aligned and sized for TOKEN_PRIVILEGES, token remains live,
+        // and returned_bytes is a valid out pointer.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenPrivileges,
+                storage.as_mut_ptr().cast::<c_void>(),
+                storage_bytes,
+                &raw mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error()).context("GetTokenInformation failed");
+        }
+
+        let token_privileges = storage.as_ptr().cast::<TOKEN_PRIVILEGES>();
+        // SAFETY: GetTokenInformation initialized the TOKEN_PRIVILEGES header in storage.
+        let count = unsafe { (*token_privileges).PrivilegeCount as usize };
+        // SAFETY: token_privileges points at a complete TOKEN_PRIVILEGES header in storage.
+        let privileges_ptr = unsafe {
+            std::ptr::addr_of!((*token_privileges).Privileges)
+                .cast::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>()
+        };
+        let privilege_offset = privileges_ptr as usize - token_privileges as usize;
+        let required_bytes = privilege_offset
+            .checked_add(
+                count
+                    .checked_mul(size_of::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>())
+                    .context("TokenPrivileges entry count overflowed")?,
+            )
+            .context("TokenPrivileges buffer size overflowed")?;
+        let returned_bytes = usize::try_from(returned_bytes)
+            .context("TokenPrivileges returned length exceeds usize")?;
+        let available_bytes = returned_bytes.min(storage.len() * size_of::<usize>());
+        if required_bytes > available_bytes {
+            bail!("TokenPrivileges returned a truncated privilege array");
+        }
+        // SAFETY: Privileges is the first element of the variable-length trailing array.
+        let privileges = unsafe { std::slice::from_raw_parts(privileges_ptr, count) };
+        let enabled_non_traverse = privileges
+            .iter()
+            .filter(|privilege| privilege.Attributes & SE_PRIVILEGE_ENABLED != 0)
+            .filter(|privilege| {
+                privilege.Luid.LowPart != traverse_privilege.LowPart
+                    || privilege.Luid.HighPart != traverse_privilege.HighPart
+            })
+            .count();
+        u32::try_from(enabled_non_traverse).context("enabled privilege count exceeds u32")
     }
 
     fn open_inheritable_nul() -> Result<OwnedHandle> {

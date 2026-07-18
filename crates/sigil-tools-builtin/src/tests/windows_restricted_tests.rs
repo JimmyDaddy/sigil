@@ -58,7 +58,12 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
         .await
         .expect("restricted launch probe should run");
 
-    assert!(receipt.token_restricted);
+    assert!(receipt.privileges_constrained);
+    assert_eq!(receipt.restricted_enabled_non_traverse_privilege_count, 0);
+    assert!(
+        receipt.source_enabled_non_traverse_privilege_count
+            >= receipt.restricted_enabled_non_traverse_privilege_count
+    );
     assert_eq!(receipt.exit_code, Some(7));
     assert!(String::from_utf8_lossy(&receipt.stdout).contains("probe-out"));
     assert!(String::from_utf8_lossy(&receipt.stderr).contains("probe-err"));
