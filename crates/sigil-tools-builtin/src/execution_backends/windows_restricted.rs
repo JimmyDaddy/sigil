@@ -18,6 +18,7 @@ pub(crate) struct WindowsRestrictedProbeReceipt {
     pub(crate) privileges_constrained: bool,
     pub(crate) source_enabled_non_traverse_privilege_count: u32,
     pub(crate) restricted_enabled_non_traverse_privilege_count: u32,
+    pub(crate) restricting_sid_count: u32,
     pub(crate) environment_policy: ProcessEnvironmentPolicy,
     pub(crate) resources: ExecutionResourceReceipt,
     pub(crate) exit_code: Option<i32>,
@@ -73,6 +74,7 @@ pub(crate) async fn windows_restricted_launch_probe(
             .source_enabled_non_traverse_privilege_count,
         restricted_enabled_non_traverse_privilege_count: privilege_evidence
             .restricted_enabled_non_traverse_privilege_count,
+        restricting_sid_count: privilege_evidence.restricting_sid_count,
         environment_policy: request.environment_policy,
         resources: outcome.resources,
         exit_code: outcome.exit_code,
@@ -106,15 +108,16 @@ mod native {
     use tokio::{fs::File as TokioFile, task::JoinHandle};
     use windows_sys::Win32::{
         Foundation::{
-            HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED,
-            WAIT_OBJECT_0, WAIT_TIMEOUT,
+            HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
+            WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
         Security::{
-            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation,
-            LookupPrivilegeValueW, SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED,
-            SECURITY_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_PRIVILEGES,
-            TOKEN_QUERY, TokenPrivileges,
+            Authorization::ConvertStringSidToSidW, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE,
+            GetTokenInformation, LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME,
+            SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY,
+            TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrivileges,
+            TokenRestrictedSids, WRITE_RESTRICTED,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -139,6 +142,53 @@ mod native {
     pub(crate) struct RestrictedTokenPrivilegeEvidence {
         pub(crate) source_enabled_non_traverse_privilege_count: u32,
         pub(crate) restricted_enabled_non_traverse_privilege_count: u32,
+        pub(crate) restricting_sid_count: u32,
+    }
+
+    pub(crate) struct WindowsRestrictingSid {
+        sid: PSID,
+    }
+
+    impl WindowsRestrictingSid {
+        pub(crate) fn new_unique() -> Result<Self> {
+            let bytes = *uuid::Uuid::new_v4().as_bytes();
+            let components = bytes
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("UUID chunk is 4 bytes")))
+                .collect::<Vec<_>>();
+            Self::from_string(&format!(
+                "S-1-5-21-{}-{}-{}-{}",
+                components[0], components[1], components[2], components[3]
+            ))
+        }
+
+        fn from_string(value: &str) -> Result<Self> {
+            let wide = nul_terminated(OsStr::new(value), "restricting SID")?;
+            let mut sid: PSID = null_mut();
+            // SAFETY: wide is NUL-terminated and sid is a valid output pointer. The returned SID
+            // is released with LocalFree in Drop.
+            if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut sid) } == 0 {
+                return Err(io::Error::last_os_error())
+                    .context("failed to parse Windows restricting SID");
+            }
+            if sid.is_null() {
+                bail!("ConvertStringSidToSidW returned a null restricting SID");
+            }
+            Ok(Self { sid })
+        }
+
+        pub(crate) fn as_ptr(&self) -> PSID {
+            self.sid
+        }
+    }
+
+    impl Drop for WindowsRestrictingSid {
+        fn drop(&mut self) {
+            if !self.sid.is_null() {
+                // SAFETY: ConvertStringSidToSidW allocated this SID with LocalAlloc.
+                let _ = unsafe { LocalFree(self.sid) };
+            }
+        }
     }
 
     impl RestrictedTokenPrivilegeEvidence {
@@ -160,6 +210,20 @@ mod native {
 
     impl NativeWindowsRestrictedChild {
         pub(super) fn spawn(request: &ExecutionRequest) -> Result<Self> {
+            Self::spawn_with_optional_restricting_sid(request, None)
+        }
+
+        pub(crate) fn spawn_with_restricting_sid(
+            request: &ExecutionRequest,
+            restricting_sid: &WindowsRestrictingSid,
+        ) -> Result<Self> {
+            Self::spawn_with_optional_restricting_sid(request, Some(restricting_sid))
+        }
+
+        fn spawn_with_optional_restricting_sid(
+            request: &ExecutionRequest,
+            restricting_sid: Option<&WindowsRestrictingSid>,
+        ) -> Result<Self> {
             let program = canonical_file(Path::new(&request.program), "program")?;
             let cwd = fs::canonicalize(&request.cwd).with_context(|| {
                 format!(
@@ -175,7 +239,8 @@ mod native {
             }
 
             let process_token = open_current_process_token()?;
-            let restricted_token = create_restricted_token(raw_handle(&process_token))?;
+            let restricted_token =
+                create_restricted_token(raw_handle(&process_token), restricting_sid)?;
             let privilege_evidence = restricted_token_privilege_evidence(
                 raw_handle(&process_token),
                 raw_handle(&restricted_token),
@@ -501,20 +566,37 @@ mod native {
         Ok(unsafe { OwnedHandle::from_raw_handle(token) })
     }
 
-    fn create_restricted_token(existing: HANDLE) -> Result<OwnedHandle> {
+    fn create_restricted_token(
+        existing: HANDLE,
+        restricting_sid: Option<&WindowsRestrictingSid>,
+    ) -> Result<OwnedHandle> {
         let mut restricted: HANDLE = null_mut();
-        // SAFETY: existing is a live token, restricted is a valid out pointer, and zero counts
-        // permit null SID/privilege arrays.
+        let mut restricting_entry = restricting_sid.map(|sid| SID_AND_ATTRIBUTES {
+            Sid: sid.as_ptr(),
+            Attributes: 0,
+        });
+        let restricting_count = u32::from(restricting_entry.is_some());
+        let restricting_entries = restricting_entry.as_mut().map_or(null(), |entry| {
+            (entry as *mut SID_AND_ATTRIBUTES).cast_const()
+        });
+        let flags = DISABLE_MAX_PRIVILEGE
+            | if restricting_sid.is_some() {
+                WRITE_RESTRICTED
+            } else {
+                0
+            };
+        // SAFETY: existing is a live token, restricted is a valid out pointer, and the optional
+        // restricting SID entry remains live for the duration of the call.
         if unsafe {
             CreateRestrictedToken(
                 existing,
-                DISABLE_MAX_PRIVILEGE,
+                flags,
                 0,
                 null(),
                 0,
                 null(),
-                0,
-                null(),
+                restricting_count,
+                restricting_entries,
                 &raw mut restricted,
             )
         } == 0
@@ -534,10 +616,51 @@ mod native {
             enabled_non_traverse_privilege_count(source, traverse_privilege)?;
         let restricted_enabled_non_traverse_privilege_count =
             enabled_non_traverse_privilege_count(restricted, traverse_privilege)?;
+        let restricting_sid_count = restricted_sid_count(restricted)?;
         Ok(RestrictedTokenPrivilegeEvidence {
             source_enabled_non_traverse_privilege_count,
             restricted_enabled_non_traverse_privilege_count,
+            restricting_sid_count,
         })
+    }
+
+    fn restricted_sid_count(token: HANDLE) -> Result<u32> {
+        let mut bytes = 0_u32;
+        // SAFETY: This is the documented sizing call and bytes is a valid output pointer.
+        let _ = unsafe {
+            GetTokenInformation(token, TokenRestrictedSids, null_mut(), 0, &raw mut bytes)
+        };
+        if bytes < u32::try_from(size_of::<u32>()).expect("u32 size fits u32") {
+            bail!("TokenRestrictedSids sizing returned an invalid buffer length");
+        }
+
+        let words = usize::try_from(bytes)
+            .context("TokenRestrictedSids buffer length exceeds usize")?
+            .div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let storage_bytes = u32::try_from(storage.len() * size_of::<usize>())
+            .context("TokenRestrictedSids storage length exceeds u32")?;
+        let mut returned_bytes = 0_u32;
+        // SAFETY: storage is aligned and sufficiently sized for TOKEN_GROUPS, token is live, and
+        // returned_bytes is a valid output pointer.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenRestrictedSids,
+                storage.as_mut_ptr().cast::<c_void>(),
+                storage_bytes,
+                &raw mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error())
+                .context("GetTokenInformation(TokenRestrictedSids) failed");
+        }
+        if returned_bytes < u32::try_from(size_of::<u32>()).expect("u32 size fits u32") {
+            bail!("TokenRestrictedSids returned a truncated header");
+        }
+        // SAFETY: GetTokenInformation initialized at least the GroupCount header field.
+        Ok(unsafe { (*storage.as_ptr().cast::<TOKEN_GROUPS>()).GroupCount })
     }
 
     fn lookup_traverse_privilege() -> Result<windows_sys::Win32::Foundation::LUID> {
@@ -827,7 +950,7 @@ mod native {
 }
 
 #[cfg(windows)]
-pub(super) use native::NativeWindowsRestrictedChild;
+pub(super) use native::{NativeWindowsRestrictedChild, WindowsRestrictingSid};
 
 #[cfg(test)]
 #[path = "../tests/windows_restricted_tests.rs"]

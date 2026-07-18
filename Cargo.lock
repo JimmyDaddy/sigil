@@ -3177,6 +3177,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "url",
+ "uuid",
  "walkdir",
  "windows-sys 0.61.2",
 ]

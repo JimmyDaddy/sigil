@@ -113,6 +113,28 @@ async fn supervise_native_probe(
 }
 
 #[cfg(windows)]
+async fn supervise_restricting_sid_probe(
+    request: &ExecutionRequest,
+    restricting_sid: &super::WindowsRestrictingSid,
+) -> anyhow::Result<(super::super::SupervisedExecutionOutcome, u32)> {
+    let child =
+        super::NativeWindowsRestrictedChild::spawn_with_restricting_sid(request, restricting_sid)?;
+    let restricting_sid_count = child.privilege_evidence().restricting_sid_count;
+    let deadline = super::super::execution_deadline(request)?;
+    let outcome = super::super::supervise_execution_child(
+        super::super::SupervisedExecutionChild::WindowsRestricted(child),
+        request,
+        super::super::OutputCollectionLimits::execution(),
+        super::super::PreflightReaderFault::None,
+        None,
+        deadline,
+        None,
+    )
+    .await?;
+    Ok((outcome, restricting_sid_count))
+}
+
+#[cfg(windows)]
 async fn wait_for_file(path: &std::path::Path) -> anyhow::Result<()> {
     for _ in 0..800 {
         if path.is_file() {
@@ -173,6 +195,7 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
 
     assert!(receipt.privileges_constrained);
     assert_eq!(receipt.restricted_enabled_non_traverse_privilege_count, 0);
+    assert_eq!(receipt.restricting_sid_count, 0);
     assert!(
         receipt.source_enabled_non_traverse_privilege_count
             >= receipt.restricted_enabled_non_traverse_privilege_count
@@ -181,6 +204,40 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
     assert!(String::from_utf8_lossy(&receipt.stdout).contains("probe-out"));
     assert!(String::from_utf8_lossy(&receipt.stderr).contains("probe-err"));
     assert!(!receipt.timed_out);
+}
+
+#[cfg(windows)]
+#[serial]
+#[tokio::test]
+async fn write_restricted_sid_denies_ungranted_same_user_path() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let host_can_write = temp.path().join("host-can-write.txt");
+    fs::write(&host_can_write, b"host")
+        .expect("the unrestricted test process should be able to write the fixture root");
+    let denied_target = temp.path().join("restricted-write-must-fail.txt");
+    let mut request = fixture_request("deny-write");
+    request.env.insert(
+        "SIGIL_RESTRICTED_DENIED_PATH".to_owned(),
+        denied_target.to_string_lossy().into_owned(),
+    );
+    let restricting_sid =
+        super::WindowsRestrictingSid::new_unique().expect("unique restricting SID should resolve");
+
+    let (outcome, restricting_sid_count) =
+        supervise_restricting_sid_probe(&request, &restricting_sid)
+            .await
+            .expect("write-restricted probe should return a receipt");
+
+    assert_eq!(restricting_sid_count, 1);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        outcome.output.termination,
+        ExecutionTerminationCause::Exited
+    );
+    assert!(
+        !denied_target.exists(),
+        "ungranted same-user path became writable under the restricting SID"
+    );
 }
 
 #[cfg(windows)]
@@ -498,6 +555,14 @@ fn restricted_process_fixture() {
                 .expect("fixture output should be written");
             stdout.flush().expect("fixture output should flush");
             std::thread::sleep(Duration::from_secs(30));
+        }
+        "deny-write" => {
+            let denied_path = std::env::var_os("SIGIL_RESTRICTED_DENIED_PATH")
+                .map(PathBuf::from)
+                .expect("denied write path should be provided");
+            let error = fs::write(denied_path, b"escaped")
+                .expect_err("write-restricted token unexpectedly wrote an ungranted path");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
         "descendant-parent" => {
             let mut descendant =
