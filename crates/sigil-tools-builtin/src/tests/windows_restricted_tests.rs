@@ -228,7 +228,10 @@ async fn write_restricted_sid_denies_ungranted_same_user_path() {
             .await
             .expect("write-restricted probe should return a receipt");
 
-    assert_eq!(restricting_sid_count, 1);
+    assert_eq!(
+        restricting_sid_count, 3,
+        "token should carry the unique capability, logon, and Everyone runtime SIDs"
+    );
     assert_eq!(outcome.exit_code, Some(0));
     assert_eq!(
         outcome.output.termination,
