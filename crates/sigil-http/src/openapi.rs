@@ -35,6 +35,23 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/server-info": {
+                "get": {
+                    "summary": "Read immutable local server bootstrap metadata",
+                    "responses": {
+                        "200": {
+                            "description": "Secret-free workspace/listener/protocol capabilities",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ServerInfo" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "Read this authenticated local API description",
@@ -104,6 +121,35 @@ pub fn http_openapi_document() -> Value {
                         },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/open": {
+                "post": {
+                    "summary": "Reopen a durable workspace session as a local handle",
+                    "description": "Revalidates the relative session reference and expected durable identity against current lifecycle and JSONL truth. SQLite catalog rows are candidates, not authorization.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/SessionOpenRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "New or existing idempotent local session snapshot",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionSnapshot" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
             },
@@ -367,10 +413,48 @@ pub fn http_openapi_document() -> Value {
                     "required": ["status"],
                     "properties": { "status": { "type": "string", "const": "ok" } }
                 },
+                "ServerInfo": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "protocol_version", "server_version", "workspace_id", "bind_addr", "authentication", "shutdown_on_stdin_close", "capabilities"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "protocol_version": { "type": "integer", "const": HTTP_PROTOCOL_VERSION },
+                        "server_version": { "type": "string" },
+                        "workspace_id": { "type": "string" },
+                        "bind_addr": { "type": "string" },
+                        "authentication": { "type": "string", "enum": ["bearer"] },
+                        "shutdown_on_stdin_close": { "type": "boolean" },
+                        "capabilities": { "$ref": "#/components/schemas/ServerCapabilities" }
+                    }
+                },
+                "ServerCapabilities": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_catalog", "durable_session_reopen", "durable_event_replay", "live_events", "approval", "cancellation"],
+                    "properties": {
+                        "session_catalog": { "type": "boolean" },
+                        "durable_session_reopen": { "type": "boolean" },
+                        "durable_event_replay": { "type": "boolean" },
+                        "live_events": { "type": "boolean" },
+                        "approval": { "type": "boolean" },
+                        "cancellation": { "type": "boolean" }
+                    }
+                },
                 "SessionCreateRequest": {
                     "type": "object",
                     "properties": {
                         "label": { "type": "string" }
+                    }
+                },
+                "SessionOpenRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "session_id"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 512, "pattern": "^[^/\\\\]+\\.jsonl$" },
+                        "session_id": { "type": "string", "maxLength": 512 },
+                        "label": { "type": ["string", "null"], "maxLength": 160 }
                     }
                 },
                 "SessionSnapshot": {

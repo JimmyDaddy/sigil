@@ -9,7 +9,7 @@ use sigil_kernel::{
 use super::*;
 use crate::{
     HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpRunApprovalMode,
-    HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest,
+    HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest, HttpSessionOpenRequest,
 };
 
 fn call() -> ToolCall {
@@ -170,6 +170,99 @@ async fn production_driver_rejects_an_in_memory_only_event_bus() {
             tokio::runtime::Handle::current(),
         )
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_truth() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("test config should write");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+    let session_path = sessions.join("session-history.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&session_path)
+        .expect("durable session store should open");
+    let mut session = sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session
+        .append_user_message(sigil_kernel::ModelMessage::user("history"))
+        .expect("durable message should append");
+    let durable_session_id = session.session_scope_id().to_owned();
+    drop(session);
+
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 8)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 8)
+            .expect("disclosure journal should initialize"),
+    );
+    let lifecycle = sigil_runtime::LocalSessionLifecycleService::new(
+        "workspace-1",
+        &sessions,
+        temp.path().join("exports"),
+    );
+    let options = HttpProductionRunDriverOptions::new(&config_path, temp.path())
+        .with_session_lifecycle(lifecycle);
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            options,
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands.json"), 8)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let request = HttpSessionOpenRequest {
+        session_ref: "session-history.jsonl".to_owned(),
+        session_id: durable_session_id.clone(),
+        label: Some("History".to_owned()),
+    };
+
+    let opened = registry
+        .open_session(request.clone())
+        .expect("current durable source should reopen");
+
+    assert_eq!(opened.durable_session_scope_id, durable_session_id);
+    assert_eq!(
+        std::path::Path::new(&opened.session_log_path),
+        session_path
+            .canonicalize()
+            .expect("session path should resolve")
+    );
+    assert_eq!(
+        registry
+            .open_session(request)
+            .expect("duplicate reopen should be idempotent")
+            .id,
+        opened.id
+    );
+    assert_eq!(
+        registry.open_session(HttpSessionOpenRequest {
+            session_ref: "session-history.jsonl".to_owned(),
+            session_id: "stale-id".to_owned(),
+            label: None,
+        }),
+        Err(crate::HttpRegistryError::DurableSessionIdentityChanged)
     );
 }
 

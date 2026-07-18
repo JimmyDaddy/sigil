@@ -27,9 +27,10 @@ use tokio::{
 
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, RunOutput, ServeOptions,
-    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
-    drain_provider_stream, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
-    render_run_event, render_serve_startup_plan, render_version,
+    ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan, StdoutEventHandler,
+    build_serve_startup_plan, build_session_catalog_service, drain_provider_stream,
+    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
+    render_serve_startup_json, render_serve_startup_plan, render_version,
     run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
@@ -623,6 +624,8 @@ fn cli_parses_serve_command_with_secure_defaults() -> Result<()> {
             port: 0,
             ref token_env,
             no_token: false,
+            startup_output: ServeStartupOutput::Text,
+            shutdown_on_stdin_close: false,
         }) if host == IpAddr::V4(Ipv4Addr::LOCALHOST)
             && token_env == DEFAULT_HTTP_TOKEN_ENV
     ));
@@ -641,6 +644,9 @@ fn cli_parses_serve_command_overrides() -> Result<()> {
         "--token-env",
         "CUSTOM_SIGIL_HTTP_TOKEN",
         "--no-token",
+        "--startup-output",
+        "json",
+        "--shutdown-on-stdin-close",
     ])?;
 
     assert!(matches!(
@@ -650,6 +656,8 @@ fn cli_parses_serve_command_overrides() -> Result<()> {
             port: 8765,
             ref token_env,
             no_token: true,
+            startup_output: ServeStartupOutput::Json,
+            shutdown_on_stdin_close: true,
         }) if host == IpAddr::V4(Ipv4Addr::UNSPECIFIED)
             && token_env == "CUSTOM_SIGIL_HTTP_TOKEN"
     ));
@@ -781,6 +789,36 @@ fn serve_startup_plan_renders_listener_status_without_token_value() -> Result<()
     assert!(rendered.contains("auth: bearer token from SIGIL_HTTP_TOKEN"));
     assert!(rendered.contains("status: listening; press Ctrl-C for graceful shutdown"));
     assert!(!rendered.contains("secret-token"));
+    Ok(())
+}
+
+#[test]
+fn serve_startup_json_is_one_line_secret_free_server_metadata() -> Result<()> {
+    let info = sigil_http::HttpServerInfo::new(
+        "workspace-1",
+        SocketAddr::from(([127, 0, 0, 1], 43123)),
+        true,
+    );
+
+    let rendered = render_serve_startup_json(&info)?;
+    let decoded: sigil_http::HttpServerInfo = serde_json::from_str(rendered.trim_end())?;
+
+    assert_eq!(rendered.lines().count(), 1);
+    assert_eq!(decoded, info);
+    assert_eq!(decoded.bind_addr, "127.0.0.1:43123");
+    assert!(decoded.capabilities.durable_session_reopen);
+    assert!(!rendered.contains(DEFAULT_HTTP_TOKEN_ENV));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("session_log_path"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn serve_owner_channel_reports_eof_and_reaps_its_reader() -> Result<()> {
+    let mut watcher = ServeOwnerChannelWatcher::spawn(std::io::Cursor::new(b"owner".to_vec()))?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), watcher.wait()).await?;
+    watcher.reap_if_finished()?;
     Ok(())
 }
 
@@ -1257,6 +1295,8 @@ fn default_serve_options() -> ServeOptions {
         port: 0,
         token_env: DEFAULT_HTTP_TOKEN_ENV.to_owned(),
         no_token: false,
+        startup_output: ServeStartupOutput::Text,
+        shutdown_on_stdin_close: false,
     }
 }
 

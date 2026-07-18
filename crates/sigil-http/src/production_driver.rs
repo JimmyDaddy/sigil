@@ -9,15 +9,17 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalHandler, NetworkEffect, PublicRunEvent, PublicRunEventKind, ToolAccess, ToolApproval,
-    ToolApprovalUserDecision, ToolCall, ToolSpec,
+    ApprovalHandler, NetworkEffect, PublicRunEvent, PublicRunEventKind, SessionRef, ToolAccess,
+    ToolApproval, ToolApprovalUserDecision, ToolCall, ToolSpec,
 };
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, PreparedApplicationRun, bind_application_session,
-    prepare_application_run, record_application_preparation_cancellation,
+    bind_existing_application_session, prepare_application_run,
+    record_application_preparation_cancellation,
 };
+use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
@@ -25,7 +27,7 @@ use crate::{
     HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
     HttpPendingApproval, HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval,
     HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionRunRegistry,
+    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -42,6 +44,8 @@ pub struct HttpProductionRunDriverOptions {
     pub approval_timeout: Duration,
     /// Maximum time allowed for cooperative cancellation quiescence.
     pub cancellation_timeout: Duration,
+    /// Workspace-bound lifecycle truth used to authorize historical session reopen.
+    pub session_lifecycle: Option<LocalSessionLifecycleService>,
 }
 
 impl HttpProductionRunDriverOptions {
@@ -53,7 +57,18 @@ impl HttpProductionRunDriverOptions {
             launch_cwd: launch_cwd.into(),
             approval_timeout: DEFAULT_HTTP_APPROVAL_TIMEOUT,
             cancellation_timeout: DEFAULT_HTTP_CANCELLATION_TIMEOUT,
+            session_lifecycle: None,
         }
+    }
+
+    /// Attaches workspace-bound lifecycle truth for durable session reopen.
+    #[must_use]
+    pub fn with_session_lifecycle(
+        mut self,
+        session_lifecycle: LocalSessionLifecycleService,
+    ) -> Self {
+        self.session_lifecycle = Some(session_lifecycle);
+        self
     }
 }
 
@@ -202,6 +217,45 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         "failed to bind durable session for {session_id}: {error}"
                     ))
                 })?;
+        Ok(HttpSessionBinding {
+            session_scope_id: binding.session_scope_id,
+            session_log_path: binding.session_log_path.display().to_string(),
+        })
+    }
+
+    fn bind_existing_session(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+    ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
+        let lifecycle = self
+            .options
+            .session_lifecycle
+            .as_ref()
+            .ok_or(HttpSessionOpenBindingError::Unavailable)?;
+        let candidate = lifecycle
+            .resolve_session_for_reopen(session_ref, expected_session_id)
+            .map_err(|error| match error {
+                LocalSessionReopenError::NotFound => HttpSessionOpenBindingError::NotFound,
+                LocalSessionReopenError::NotReady { .. } => HttpSessionOpenBindingError::NotReady,
+                LocalSessionReopenError::IdentityChanged => {
+                    HttpSessionOpenBindingError::IdentityChanged
+                }
+                LocalSessionReopenError::CatalogUnavailable { .. } => {
+                    HttpSessionOpenBindingError::Unavailable
+                }
+            })?;
+        let binding = bind_existing_application_session(
+            &self.options.config_path,
+            &candidate.session_log_path,
+        )
+        .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
+        if binding.session_scope_id != candidate.session_id
+            || binding.session_scope_id != expected_session_id
+            || binding.session_log_path != candidate.session_log_path
+        {
+            return Err(HttpSessionOpenBindingError::IdentityChanged);
+        }
         Ok(HttpSessionBinding {
             session_scope_id: binding.session_scope_id,
             session_log_path: binding.session_log_path.display().to_string(),

@@ -1,9 +1,10 @@
 use std::{
     env,
     future::Future,
-    io::Write,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    thread::JoinHandle,
 };
 
 pub mod egress_disclosure;
@@ -16,7 +17,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
-use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
+use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpServerInfo};
 #[cfg(not(test))]
 use sigil_http::{
     HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
@@ -115,6 +116,10 @@ enum Commands {
         token_env: String,
         #[arg(long = "no-token", action = clap::ArgAction::SetTrue)]
         no_token: bool,
+        #[arg(long = "startup-output", value_enum, default_value = "text")]
+        startup_output: ServeStartupOutput,
+        #[arg(long = "shutdown-on-stdin-close", action = clap::ArgAction::SetTrue)]
+        shutdown_on_stdin_close: bool,
     },
     /// Hidden developer adapter for explicit provider-backed acceptance campaigns.
     #[command(name = "model-eval", hide = true)]
@@ -166,6 +171,13 @@ enum RunOutput {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum DoctorOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum ServeStartupOutput {
     #[default]
     Text,
     Json,
@@ -273,6 +285,8 @@ async fn run_main() -> Result<u8> {
             port,
             token_env,
             no_token,
+            startup_output,
+            shutdown_on_stdin_close,
         } => {
             let token = if no_token {
                 None
@@ -287,6 +301,8 @@ async fn run_main() -> Result<u8> {
                     port,
                     token_env,
                     no_token,
+                    startup_output,
+                    shutdown_on_stdin_close,
                 },
                 token.as_deref(),
             )
@@ -557,6 +573,8 @@ struct ServeOptions {
     port: u16,
     token_env: String,
     no_token: bool,
+    startup_output: ServeStartupOutput,
+    shutdown_on_stdin_close: bool,
 }
 
 impl ServeOptions {
@@ -579,6 +597,48 @@ struct ServeStartupPlan {
     token_env: Option<String>,
 }
 
+struct ServeOwnerChannelWatcher {
+    closed: tokio::sync::oneshot::Receiver<()>,
+    thread: JoinHandle<()>,
+}
+
+impl ServeOwnerChannelWatcher {
+    fn spawn<R>(mut reader: R) -> std::io::Result<Self>
+    where
+        R: Read + Send + 'static,
+    {
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("sigil-serve-owner-channel".to_owned())
+            .spawn(move || {
+                let mut buffer = [0_u8; 256];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => {
+                            let _ = closed_tx.send(());
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            })?;
+        Ok(Self { closed, thread })
+    }
+
+    async fn wait(&mut self) {
+        let _ = (&mut self.closed).await;
+    }
+
+    fn reap_if_finished(self) -> Result<()> {
+        if self.thread.is_finished() {
+            self.thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("serve owner channel watcher panicked"))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(not(test))]
 async fn serve_command(
     config_path: &Path,
@@ -587,7 +647,7 @@ async fn serve_command(
     token: Option<&str>,
 ) -> Result<()> {
     let config = options.http_config();
-    let mut plan = build_serve_startup_plan(options, token)?;
+    let mut plan = build_serve_startup_plan(options.clone(), token)?;
     let root_config = RootConfig::load(config_path)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
@@ -609,14 +669,19 @@ async fn serve_command(
         256,
         protocol_journal,
     ));
+    let lifecycle = build_session_lifecycle_service(&paths);
     let driver = std::sync::Arc::new(HttpProductionRunDriver::new(
-        HttpProductionRunDriverOptions::new(config_path, launch_cwd),
+        HttpProductionRunDriverOptions::new(config_path, launch_cwd)
+            .with_session_lifecycle(lifecycle.clone()),
         std::sync::Arc::clone(&disclosure_journal),
         std::sync::Arc::clone(&event_bus),
         tokio::runtime::Handle::current(),
     )?);
     let registry = driver.build_registry(command_store)?;
-    let session_catalog = std::sync::Arc::new(build_session_catalog_service(&paths));
+    let session_catalog = std::sync::Arc::new(SessionCatalogProjectionService::new(
+        lifecycle,
+        &paths.session_catalog_db,
+    ));
     let warm_catalog = std::sync::Arc::clone(&session_catalog);
     let catalog_ready = tokio::task::spawn_blocking(move || warm_catalog.reconcile())
         .await
@@ -633,26 +698,57 @@ async fn serve_command(
         event_bus,
         disclosure_journal,
         session_catalog,
+        paths.workspace_id.clone(),
+        options.shutdown_on_stdin_close,
     )
     .await?;
     plan.bind_addr = server.local_addr()?;
-    print!("{}", render_serve_startup_plan(&plan));
+    let mut owner_channel = options
+        .shutdown_on_stdin_close
+        .then(|| ServeOwnerChannelWatcher::spawn(std::io::stdin()))
+        .transpose()?;
+    match options.startup_output {
+        ServeStartupOutput::Text => print!("{}", render_serve_startup_plan(&plan)),
+        ServeStartupOutput::Json => {
+            let info = server
+                .server_info()
+                .ok_or_else(|| anyhow::anyhow!("production HTTP server metadata is unavailable"))?;
+            print!("{}", render_serve_startup_json(info)?);
+        }
+    }
     io::stdout().flush()?;
     server
         .serve_until_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            if let Some(owner_channel) = owner_channel.as_mut() {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    () = owner_channel.wait() => {}
+                }
+            } else {
+                let _ = tokio::signal::ctrl_c().await;
+            }
         })
         .await?;
+    if let Some(owner_channel) = owner_channel {
+        owner_channel.reap_if_finished()?;
+    }
     Ok(())
 }
 
-fn build_session_catalog_service(paths: &SigilPaths) -> SessionCatalogProjectionService {
-    let lifecycle = LocalSessionLifecycleService::new(
+fn build_session_lifecycle_service(paths: &SigilPaths) -> LocalSessionLifecycleService {
+    LocalSessionLifecycleService::new(
         paths.workspace_id.clone(),
         &paths.session_log_dir,
         &paths.session_exports_root,
-    );
-    SessionCatalogProjectionService::new(lifecycle, &paths.session_catalog_db)
+    )
+}
+
+#[cfg(test)]
+fn build_session_catalog_service(paths: &SigilPaths) -> SessionCatalogProjectionService {
+    SessionCatalogProjectionService::new(
+        build_session_lifecycle_service(paths),
+        &paths.session_catalog_db,
+    )
 }
 
 fn build_serve_startup_plan(
@@ -684,6 +780,10 @@ fn render_serve_startup_plan(plan: &ServeStartupPlan) -> String {
         "Sigil HTTP/SSE adapter\nbind: {}\nauth: {}\nstatus: listening; press Ctrl-C for graceful shutdown\n",
         plan.bind_addr, auth
     )
+}
+
+fn render_serve_startup_json(info: &HttpServerInfo) -> Result<String> {
+    Ok(format!("{}\n", serde_json::to_string(info)?))
 }
 
 async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> Result<()> {

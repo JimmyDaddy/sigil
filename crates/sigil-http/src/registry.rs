@@ -11,7 +11,7 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sigil_kernel::safe_persistence_text;
+use sigil_kernel::{SessionRef, safe_persistence_text};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -20,18 +20,24 @@ use crate::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpStoredCommandClaim, HttpStoredCommandCompletion,
         HttpStoredCommandIdentity, HttpStoredCommandKey,
     },
-    driver::{HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart},
+    driver::{
+        HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
+        HttpSessionOpenBindingError,
+    },
     dto::{
         HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
         HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt,
         HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
         HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
-        HttpSessionSnapshot,
+        HttpSessionOpenRequest, HttpSessionSnapshot,
     },
     protocol::HttpCommandEnvelope,
 };
 
 const DEFAULT_IN_MEMORY_COMMAND_CAPACITY: usize = 4_096;
+const MAX_SESSION_OPEN_REFERENCE_BYTES: usize = 512;
+const MAX_SESSION_OPEN_ID_BYTES: usize = 512;
+const MAX_SESSION_OPEN_LABEL_BYTES: usize = 160;
 
 /// Errors returned by the HTTP session/run registry.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
@@ -54,6 +60,21 @@ pub enum HttpRegistryError {
     /// The runtime driver returned an invalid durable binding.
     #[error("http driver returned an invalid durable binding for session {session_id}: {message}")]
     InvalidSessionBinding { session_id: String, message: String },
+    /// The durable reopen request did not contain a bounded direct-child reference and identity.
+    #[error("durable session open request is invalid")]
+    InvalidSessionOpenRequest,
+    /// The requested durable source does not exist in current workspace truth.
+    #[error("durable session was not found")]
+    DurableSessionNotFound,
+    /// The durable source exists but cannot currently be reopened as a ready V2 stream.
+    #[error("durable session is not ready")]
+    DurableSessionNotReady,
+    /// The durable source identity changed after the client selected its catalog row.
+    #[error("durable session identity changed")]
+    DurableSessionIdentityChanged,
+    /// Current lifecycle or durable stream validation could not complete.
+    #[error("durable session is unavailable")]
+    DurableSessionUnavailable,
     /// Another foreground run still owns this adapter session.
     #[error("http session {session_id} already has foreground run {run_id}")]
     SessionForegroundRunActive { session_id: String, run_id: String },
@@ -243,6 +264,66 @@ impl HttpSessionRunRegistry {
         })?;
         validate_session_binding(&id, &binding)?;
         let mut state = self.lock_state();
+        let session = HttpSessionState {
+            id: id.clone(),
+            label: request.label,
+            run_ids: Vec::new(),
+            binding,
+            foreground_run_id: None,
+        };
+        let snapshot = session.snapshot();
+        state.sessions.insert(id, session);
+        Ok(snapshot)
+    }
+
+    /// Reopens one current-workspace durable source as a process-local adapter session.
+    ///
+    /// Repeating the same proven durable scope returns the existing process-local snapshot. This
+    /// operation creates no run and delegates source authorization to the runtime driver.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded typed error for malformed identity, missing/non-ready/drifted sources,
+    /// unavailable lifecycle truth, invalid driver bindings, or shutdown admission.
+    pub fn open_session(
+        &self,
+        request: HttpSessionOpenRequest,
+    ) -> Result<HttpSessionSnapshot, HttpRegistryError> {
+        {
+            let state = self.lock_state();
+            state.ensure_accepting_commands()?;
+        }
+        let session_ref = validate_session_open_request(&request)?;
+        let binding = self
+            .driver
+            .bind_existing_session(&session_ref, &request.session_id)
+            .map_err(|error| match error {
+                HttpSessionOpenBindingError::NotFound => HttpRegistryError::DurableSessionNotFound,
+                HttpSessionOpenBindingError::NotReady => HttpRegistryError::DurableSessionNotReady,
+                HttpSessionOpenBindingError::IdentityChanged => {
+                    HttpRegistryError::DurableSessionIdentityChanged
+                }
+                HttpSessionOpenBindingError::Unavailable => {
+                    HttpRegistryError::DurableSessionUnavailable
+                }
+            })?;
+        let mut state = self.lock_state();
+        state.ensure_accepting_commands()?;
+        if let Some(existing) = state
+            .sessions
+            .values()
+            .find(|session| session.binding.session_scope_id == binding.session_scope_id)
+        {
+            if existing.binding.session_log_path != binding.session_log_path {
+                return Err(HttpRegistryError::InvalidSessionBinding {
+                    session_id: existing.id.clone(),
+                    message: "durable scope resolved to another canonical path".to_owned(),
+                });
+            }
+            return Ok(existing.snapshot());
+        }
+        let id = state.next_session_id();
+        validate_session_binding(&id, &binding)?;
         let session = HttpSessionState {
             id: id.clone(),
             label: request.label,
@@ -1658,6 +1739,38 @@ fn hex_lower(bytes: &[u8]) -> String {
         output.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
     output
+}
+
+fn validate_session_open_request(
+    request: &HttpSessionOpenRequest,
+) -> Result<SessionRef, HttpRegistryError> {
+    let session_ref = request.session_ref.trim();
+    let session_id = request.session_id.trim();
+    if session_ref.is_empty()
+        || session_ref != request.session_ref
+        || session_ref.len() > MAX_SESSION_OPEN_REFERENCE_BYTES
+        || session_ref.contains(['/', '\\'])
+        || session_id.is_empty()
+        || session_id != request.session_id
+        || session_id.len() > MAX_SESSION_OPEN_ID_BYTES
+        || safe_persistence_text(session_id) != session_id
+        || request.label.as_ref().is_some_and(|label| {
+            label.len() > MAX_SESSION_OPEN_LABEL_BYTES || safe_persistence_text(label) != *label
+        })
+    {
+        return Err(HttpRegistryError::InvalidSessionOpenRequest);
+    }
+    let session_ref = SessionRef::new_relative(session_ref)
+        .map_err(|_| HttpRegistryError::InvalidSessionOpenRequest)?;
+    if session_ref
+        .as_path()
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("jsonl")
+    {
+        return Err(HttpRegistryError::InvalidSessionOpenRequest);
+    }
+    Ok(session_ref)
 }
 
 fn validate_session_binding(

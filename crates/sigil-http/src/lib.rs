@@ -26,14 +26,15 @@ pub use disclosure::{
 };
 pub use driver::{
     HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart,
+    HttpRunDriverStart, HttpSessionOpenBindingError,
 };
 pub use dto::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalCommandReceipt, HttpApprovalDecision,
-    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpPendingApproval,
-    HttpRunApprovalMode, HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
-    HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionSnapshot,
+    HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
+    HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
+    HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
+    HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
+    HttpRunTerminalOutcome, HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

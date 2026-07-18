@@ -33,8 +33,9 @@ use super::{
     HttpRunCancelRequest, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
     HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
     HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
-    HttpSseEvent, http_openapi_document, public_run_event_to_sse,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSseError, HttpSseEvent,
+    http_openapi_document, public_run_event_to_sse,
 };
 
 #[test]
@@ -295,6 +296,53 @@ async fn local_server_rejects_unauthenticated_session_command() {
 }
 
 #[tokio::test]
+async fn session_open_http_requires_auth_and_is_idempotent_by_durable_scope() {
+    let (address, shutdown, _driver) = spawn_test_http_server().await;
+    let body = json!({
+        "session_ref": "session-history.jsonl",
+        "session_id": "durable-history-1",
+        "label": "History"
+    })
+    .to_string();
+    let request = |token: Option<&str>| {
+        let authorization = token
+            .map(|token| format!("authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "POST /sessions/open HTTP/1.1\r\nhost: localhost\r\n{authorization}content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+
+    let (status, response) = http_raw_request(address, request(None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(response["error"]["code"], "unauthorized");
+
+    let (status, first) = http_raw_request(address, request(Some("secret-token"))).await;
+    assert_eq!(status, 200);
+    assert_eq!(first["durable_session_scope_id"], "durable-history-1");
+    let (status, second) = http_raw_request(address, request(Some("secret-token"))).await;
+    assert_eq!(status, 200);
+    assert_eq!(second["id"], first["id"]);
+    assert_eq!(second["label"], "History");
+
+    let unknown_field = json!({
+        "session_ref": "session-history.jsonl",
+        "session_id": "durable-history-1",
+        "absolute_path": "/must/not/be/accepted"
+    })
+    .to_string();
+    let (status, response) = http_raw_request(
+        address,
+        http_post("/sessions/open", Some("secret-token"), &unknown_field),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(response["error"]["code"], "invalid_session_open_request");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn non_production_server_authenticates_before_reporting_catalog_unavailable() {
     let (address, shutdown, _driver) = spawn_test_http_server().await;
 
@@ -356,10 +404,16 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         event_bus,
         disclosure_journal,
         projection,
+        "workspace-http-catalog",
+        false,
     )
     .await
     .expect("production listener should bind");
     let address = server.local_addr().expect("address should resolve");
+    let server_info = server
+        .server_info()
+        .cloned()
+        .expect("production server metadata should exist");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let serving = tokio::spawn(async move {
         server
@@ -368,6 +422,25 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             })
             .await
     });
+
+    let (status, body) = http_raw_request(address, http_get("/server-info", None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+    let (status, body) = http_raw_request(
+        address,
+        http_get("/server-info", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_value::<super::HttpServerInfo>(body)
+            .expect("server metadata should decode"),
+        server_info
+    );
+    assert_eq!(server_info.workspace_id, "workspace-http-catalog");
+    assert_eq!(server_info.bind_addr, address.to_string());
+    assert!(server_info.capabilities.durable_session_reopen);
+    assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
         address,
@@ -1044,6 +1117,8 @@ async fn production_listener_exposes_authenticated_durable_disclosure_replay() {
             ),
             temp.path().join("session-catalog.sqlite3"),
         )),
+        "workspace-http-test",
+        false,
     )
     .await
     .expect("production listener should bind");
@@ -1105,6 +1180,17 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/sessions"]["post"]["responses"]["401"].is_object());
     assert!(document["paths"]["/sessions"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions"]["post"]["responses"]["500"].is_object());
+    assert!(document["paths"]["/sessions/open"]["post"]["responses"]["200"].is_object());
+    assert!(document["paths"]["/sessions/open"]["post"]["responses"]["409"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["SessionOpenRequest"]["additionalProperties"],
+        false
+    );
+    assert!(document["paths"]["/server-info"]["get"]["responses"]["200"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["ServerInfo"]["properties"]["authentication"]["enum"][0],
+        "bearer"
+    );
     assert!(document["paths"]["/session-catalog"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/session-catalog"]["get"]["responses"]["409"].is_object());
     assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
@@ -1687,6 +1773,70 @@ fn session_create_get_returns_stable_snapshot() {
             session_id: "missing".to_owned()
         })
     );
+}
+
+#[test]
+fn session_open_validates_wire_identity_and_reuses_existing_handle() {
+    let (registry, _driver) = registry_with_driver();
+    let request = HttpSessionOpenRequest {
+        session_ref: "session-history.jsonl".to_owned(),
+        session_id: "durable-history-1".to_owned(),
+        label: Some("History".to_owned()),
+    };
+
+    let first = registry
+        .open_session(request.clone())
+        .expect("ready synthetic session should open");
+    let second = registry
+        .open_session(HttpSessionOpenRequest {
+            label: Some("Ignored duplicate label".to_owned()),
+            ..request
+        })
+        .expect("duplicate durable scope should reuse the handle");
+
+    assert_eq!(first, second);
+    assert_eq!(first.label.as_deref(), Some("History"));
+    assert_eq!(registry.list_sessions(), vec![first]);
+    for session_ref in ["", "../escape.jsonl", "nested/session.jsonl", "wrong.txt"] {
+        assert_eq!(
+            registry.open_session(HttpSessionOpenRequest {
+                session_ref: session_ref.to_owned(),
+                session_id: "durable".to_owned(),
+                label: None,
+            }),
+            Err(HttpRegistryError::InvalidSessionOpenRequest)
+        );
+    }
+}
+
+#[test]
+fn concurrent_session_open_creates_one_process_local_handle() {
+    let (registry, _driver) = registry_with_driver();
+    let registry = Arc::new(registry);
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|index| {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry
+                    .open_session(HttpSessionOpenRequest {
+                        session_ref: "session-concurrent.jsonl".to_owned(),
+                        session_id: "durable-concurrent-1".to_owned(),
+                        label: Some(format!("client-{index}")),
+                    })
+                    .expect("concurrent durable open should succeed")
+            })
+        })
+        .collect::<Vec<_>>();
+    let snapshots = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("open worker should join"))
+        .collect::<Vec<_>>();
+
+    assert!(snapshots.iter().all(|snapshot| snapshot == &snapshots[0]));
+    assert_eq!(registry.list_sessions(), vec![snapshots[0].clone()]);
 }
 
 #[test]
@@ -3184,6 +3334,17 @@ impl HttpRunDriver for RecordingRunDriver {
         Ok(HttpSessionBinding {
             session_scope_id: format!("scope-{session_id}"),
             session_log_path: recording_session_log_path(session_id),
+        })
+    }
+
+    fn bind_existing_session(
+        &self,
+        _session_ref: &sigil_kernel::SessionRef,
+        expected_session_id: &str,
+    ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
+        Ok(HttpSessionBinding {
+            session_scope_id: expected_session_id.to_owned(),
+            session_log_path: recording_session_log_path(expected_session_id),
         })
     }
 

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use sigil_kernel::SessionRef;
 use thiserror::Error as ThisError;
 
 use crate::dto::{
@@ -53,6 +54,21 @@ pub trait HttpRunDriver: Send + Sync {
     /// Returns an error when the runtime cannot establish a durable V2 session scope and path.
     fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError>;
 
+    /// Resolves an existing durable session after the registry validates its wire identity.
+    ///
+    /// Synthetic drivers that do not model historical sessions reject this operation by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error direction when current workspace truth cannot authorize the reopen.
+    fn bind_existing_session(
+        &self,
+        _session_ref: &SessionRef,
+        _expected_session_id: &str,
+    ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
+        Err(HttpSessionOpenBindingError::Unavailable)
+    }
+
     /// Starts execution for a registered run.
     ///
     /// # Errors
@@ -85,6 +101,23 @@ pub trait HttpRunDriver: Send + Sync {
     fn wait_for_idle(&self, _timeout: Duration) -> Result<(), HttpRunDriverError> {
         Ok(())
     }
+}
+
+/// Bounded, path-free failure direction returned while reopening an existing durable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpSessionOpenBindingError {
+    /// The requested direct-child source is absent from current workspace truth.
+    #[error("durable session was not found")]
+    NotFound,
+    /// The source exists but is not a ready, supported V2 stream.
+    #[error("durable session is not ready")]
+    NotReady,
+    /// The source identity no longer matches the catalog candidate selected by the client.
+    #[error("durable session identity changed")]
+    IdentityChanged,
+    /// Current bounded lifecycle or durable stream validation could not complete.
+    #[error("durable session is unavailable")]
+    Unavailable,
 }
 
 /// Error returned by an HTTP run driver.

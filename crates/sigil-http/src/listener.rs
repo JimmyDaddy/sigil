@@ -20,8 +20,8 @@ use crate::{
     config::HttpServerConfig,
     disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
-        HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest,
-        HttpSessionCreateRequest,
+        HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
+        HttpSessionCreateRequest, HttpSessionOpenRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -145,6 +145,7 @@ pub struct HttpLocalServer {
     event_bus: Arc<HttpLiveEventBus>,
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
+    server_info: Option<HttpServerInfo>,
 }
 
 impl HttpLocalServer {
@@ -180,7 +181,7 @@ impl HttpLocalServer {
         registry: Arc<HttpSessionRunRegistry>,
         event_bus: Arc<HttpLiveEventBus>,
     ) -> Result<Self, HttpListenerError> {
-        Self::bind_with_surfaces(config, token, registry, event_bus, None, None).await
+        Self::bind_with_surfaces(config, token, registry, event_bus, None, None, None).await
     }
 
     /// Binds the production listener with durable run and disclosure replay surfaces.
@@ -195,6 +196,8 @@ impl HttpLocalServer {
         event_bus: Arc<HttpLiveEventBus>,
         disclosure_journal: Arc<HttpDurableEgressDisclosureJournal>,
         session_catalog: Arc<SessionCatalogProjectionService>,
+        workspace_id: impl Into<String>,
+        shutdown_on_stdin_close: bool,
     ) -> Result<Self, HttpListenerError> {
         if !event_bus.has_durable_journal() {
             return Err(HttpListenerError::Config {
@@ -208,6 +211,7 @@ impl HttpLocalServer {
             event_bus,
             Some(disclosure_journal),
             Some(session_catalog),
+            Some((workspace_id.into(), shutdown_on_stdin_close)),
         )
         .await
     }
@@ -219,6 +223,7 @@ impl HttpLocalServer {
         event_bus: Arc<HttpLiveEventBus>,
         disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
         session_catalog: Option<Arc<SessionCatalogProjectionService>>,
+        server_info_context: Option<(String, bool)>,
     ) -> Result<Self, HttpListenerError> {
         config
             .validate()
@@ -233,6 +238,13 @@ impl HttpLocalServer {
                     message: error.to_string(),
                 })?;
         let listener = TcpListener::bind(config.bind_addr()).await?;
+        let server_info = server_info_context
+            .map(|(workspace_id, shutdown_on_stdin_close)| {
+                listener.local_addr().map(|bind_addr| {
+                    HttpServerInfo::new(workspace_id, bind_addr, shutdown_on_stdin_close)
+                })
+            })
+            .transpose()?;
         Ok(Self {
             listener,
             validator,
@@ -240,6 +252,7 @@ impl HttpLocalServer {
             event_bus,
             disclosure_journal,
             session_catalog,
+            server_info,
         })
     }
 
@@ -250,6 +263,12 @@ impl HttpLocalServer {
     /// Returns an error when the operating system cannot report the bound address.
     pub fn local_addr(&self) -> Result<SocketAddr, HttpListenerError> {
         Ok(self.listener.local_addr()?)
+    }
+
+    /// Returns immutable metadata published for a production desktop/app-server listener.
+    #[must_use]
+    pub fn server_info(&self) -> Option<&HttpServerInfo> {
+        self.server_info.as_ref()
     }
 
     /// Serves connections until `shutdown` resolves.
@@ -274,6 +293,7 @@ impl HttpLocalServer {
                     let event_bus = Arc::clone(&self.event_bus);
                     let disclosure_journal = self.disclosure_journal.clone();
                     let session_catalog = self.session_catalog.clone();
+                    let server_info = self.server_info.clone();
                     let connection_shutdown = connection_shutdown.subscribe();
                     connections.spawn(async move {
                         handle_http_connection(
@@ -283,6 +303,7 @@ impl HttpLocalServer {
                             event_bus,
                             disclosure_journal,
                             session_catalog,
+                            server_info,
                             connection_shutdown,
                         )
                         .await
@@ -326,6 +347,7 @@ async fn handle_http_connection(
     event_bus: Arc<HttpLiveEventBus>,
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
+    server_info: Option<HttpServerInfo>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), HttpListenerError> {
     let request = tokio::select! {
@@ -355,6 +377,7 @@ async fn handle_http_connection(
                     &registry,
                     disclosure_journal.as_deref(),
                     session_catalog.as_deref(),
+                    server_info.as_ref(),
                 )
             })
             .await
@@ -382,6 +405,7 @@ fn route_http_request(
     registry: &HttpSessionRunRegistry,
     disclosure_journal: Option<&HttpDurableEgressDisclosureJournal>,
     session_catalog: Option<&SessionCatalogProjectionService>,
+    server_info: Option<&HttpServerInfo>,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -394,6 +418,19 @@ fn route_http_request(
 
     if request.method == "GET" && request.path == "/sessions" {
         return json_response(200, json!({ "sessions": registry.list_sessions() }));
+    }
+
+    if request.method == "GET" && request.path == "/server-info" {
+        return server_info.map_or_else(
+            || {
+                http_error_response(
+                    503,
+                    "server_info_unavailable",
+                    "desktop server metadata is unavailable",
+                )
+            },
+            |server_info| json_response(200, json!(server_info)),
+        );
     }
 
     if request.method == "GET" && request.path == "/session-catalog" {
@@ -453,6 +490,20 @@ fn route_http_request(
         };
         return match registry.create_session(body) {
             Ok(session) => json_response(201, json!(session)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/sessions/open" {
+        let Ok(body) = parse_json_body::<HttpSessionOpenRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_session_open_request",
+                "invalid session open body",
+            );
+        };
+        return match registry.open_session(body) {
+            Ok(session) => json_response(200, json!(session)),
             Err(error) => registry_error_response(error),
         };
     }
@@ -912,8 +963,9 @@ async fn write_http_response(
 }
 
 fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
-    let status = match error {
+    let status = match &error {
         HttpRegistryError::SessionNotFound { .. } | HttpRegistryError::RunNotFound { .. } => 404,
+        HttpRegistryError::DurableSessionNotFound => 404,
         HttpRegistryError::UnsupportedProtocolVersion { .. }
         | HttpRegistryError::CommandSessionMismatch { .. }
         | HttpRegistryError::CommandPathSessionMismatch { .. }
@@ -928,8 +980,12 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
         | HttpRegistryError::CommandKeyConflict { .. }
-        | HttpRegistryError::RunTerminalConflict { .. } => 409,
-        HttpRegistryError::EmptyPrompt | HttpRegistryError::MissingApprovalMode => 400,
+        | HttpRegistryError::RunTerminalConflict { .. }
+        | HttpRegistryError::DurableSessionNotReady
+        | HttpRegistryError::DurableSessionIdentityChanged => 409,
+        HttpRegistryError::EmptyPrompt
+        | HttpRegistryError::MissingApprovalMode
+        | HttpRegistryError::InvalidSessionOpenRequest => 400,
         HttpRegistryError::DriverRejected { .. }
         | HttpRegistryError::DriverPanicked { .. }
         | HttpRegistryError::SessionBindingRejected { .. }
@@ -937,9 +993,19 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::CommandExecutionAborted
         | HttpRegistryError::CommandIdentityEncodingFailed
         | HttpRegistryError::CommandIdentityPersistenceFailed { .. } => 500,
-        HttpRegistryError::CommandRegistrySaturated | HttpRegistryError::ServerShuttingDown => 503,
+        HttpRegistryError::CommandRegistrySaturated
+        | HttpRegistryError::ServerShuttingDown
+        | HttpRegistryError::DurableSessionUnavailable => 503,
     };
-    http_error_response(status, "registry_error", error.to_string())
+    let code = match &error {
+        HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
+        HttpRegistryError::DurableSessionNotFound => "durable_session_not_found",
+        HttpRegistryError::DurableSessionNotReady => "durable_session_not_ready",
+        HttpRegistryError::DurableSessionIdentityChanged => "durable_session_identity_changed",
+        HttpRegistryError::DurableSessionUnavailable => "durable_session_unavailable",
+        _ => "registry_error",
+    };
+    http_error_response(status, code, error.to_string())
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {

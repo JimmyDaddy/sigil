@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, net::SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,12 +6,112 @@ use serde::{Deserialize, Serialize};
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::ToolApprovalUserDecision;
 
+/// Schema version for the desktop launcher/server metadata handshake.
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 1;
+
+/// Authentication mode enforced by the local desktop/app-server adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpServerAuthentication {
+    /// Per-launch bearer token supplied outside argv and response payloads.
+    Bearer,
+}
+
+/// Frozen feature flags a desktop client can use without inspecting OpenAPI text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpServerCapabilities {
+    /// Historical workspace catalog is queryable through the authenticated API.
+    pub session_catalog: bool,
+    /// A catalog candidate can be revalidated and opened as a live adapter session.
+    pub durable_session_reopen: bool,
+    /// Durable run events support cursor-bound replay.
+    pub durable_event_replay: bool,
+    /// Transient and durable run events can be followed while the server is active.
+    pub live_events: bool,
+    /// Pending tool approvals can be resolved by an authenticated client.
+    pub approval: bool,
+    /// Active runs support cooperative cancellation and bounded drain.
+    pub cancellation: bool,
+}
+
+impl HttpServerCapabilities {
+    /// Returns the frozen capability set implemented by the desktop V1 bridge.
+    #[must_use]
+    pub fn desktop_v1() -> Self {
+        Self {
+            session_catalog: true,
+            durable_session_reopen: true,
+            durable_event_replay: true,
+            live_events: true,
+            approval: true,
+            cancellation: true,
+        }
+    }
+}
+
+/// Immutable, secret-free metadata published after the local listener is ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpServerInfo {
+    /// Version of this metadata DTO.
+    pub schema_version: u16,
+    /// Stable command/event protocol version accepted by the listener.
+    pub protocol_version: u16,
+    /// Sigil package version that owns the listener.
+    pub server_version: String,
+    /// Stable identifier for the one workspace owned by this process.
+    pub workspace_id: String,
+    /// Actual loopback socket address selected after bind.
+    pub bind_addr: String,
+    /// Authentication scheme enforced by every non-health route.
+    pub authentication: HttpServerAuthentication,
+    /// Whether owner-pipe EOF is configured as a graceful shutdown trigger.
+    pub shutdown_on_stdin_close: bool,
+    /// Coarse stable features available to a desktop client.
+    pub capabilities: HttpServerCapabilities,
+}
+
+impl HttpServerInfo {
+    /// Builds metadata for one successfully bound production listener.
+    #[must_use]
+    pub fn new(
+        workspace_id: impl Into<String>,
+        bind_addr: SocketAddr,
+        shutdown_on_stdin_close: bool,
+    ) -> Self {
+        Self {
+            schema_version: HTTP_SERVER_INFO_SCHEMA_VERSION,
+            protocol_version: crate::protocol::HTTP_PROTOCOL_VERSION,
+            server_version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_id: workspace_id.into(),
+            bind_addr: bind_addr.to_string(),
+            authentication: HttpServerAuthentication::Bearer,
+            shutdown_on_stdin_close,
+            capabilities: HttpServerCapabilities::desktop_v1(),
+        }
+    }
+}
+
 /// Request body for creating one HTTP adapter session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct HttpSessionCreateRequest {
     /// Optional user-facing label for clients that manage multiple sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Request body for reopening one durable workspace session as a live adapter handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionOpenRequest {
+    /// Relative direct-child reference returned by the historical session catalog.
+    pub session_ref: String,
+    /// Durable identity observed with `session_ref`; used as a stale-source guard.
+    pub session_id: String,
+    /// Optional process-local label. The first successful open wins for duplicate requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
