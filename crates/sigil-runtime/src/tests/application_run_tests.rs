@@ -18,9 +18,10 @@ use super::{
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
     application_run_input, application_terminal_projection, attach_application_request_context,
-    bind_application_session, constrain_application_tool_registry,
-    default_application_session_path, optional_eager_mcp_warning,
-    record_application_preparation_cancellation, validate_execution_contract,
+    bind_application_session, bind_existing_application_session,
+    constrain_application_tool_registry, default_application_session_path,
+    optional_eager_mcp_warning, record_application_preparation_cancellation,
+    validate_execution_contract,
 };
 
 struct NamedTool(&'static str);
@@ -191,6 +192,32 @@ api_key = "test-secret-key"
     assert!(first.session_log_path.is_absolute());
     assert!(first.session_log_path.exists());
     assert!(!first.session_scope_id.is_empty());
+    Ok(())
+}
+
+#[test]
+fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/existing.jsonl");
+    let created = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+
+    let reopened = bind_existing_application_session(&config_path, &created.session_log_path)?;
+
+    assert_eq!(reopened, created);
+    let missing = temp.path().join("state/sessions/missing.jsonl");
+    assert!(bind_existing_application_session(&config_path, &missing).is_err());
+    assert!(!missing.exists());
     Ok(())
 }
 

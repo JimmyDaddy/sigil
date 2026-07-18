@@ -17,6 +17,7 @@ use sigil_kernel::{
     JsonlSessionStore, MessageRole, ModelMessage, SessionLogEntry, SessionRef,
     SessionStreamCompatibilityError, SessionStreamRecord, safe_persistence_text,
 };
+use thiserror::Error as ThisError;
 
 mod journal;
 mod projection;
@@ -111,6 +112,30 @@ pub struct LocalSessionCatalogEntry {
 pub struct LocalSessionCatalog {
     pub entries: Vec<LocalSessionCatalogEntry>,
     pub truncated_entry_count: usize,
+}
+
+/// Canonical durable source proven safe for reopening in the current workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSessionReopenBinding {
+    pub session_ref: SessionRef,
+    pub session_id: String,
+    pub session_log_path: PathBuf,
+}
+
+/// Stable failure direction for a desktop/app-server session reopen request.
+#[derive(Debug, ThisError)]
+pub enum LocalSessionReopenError {
+    #[error("durable session was not found in the current workspace")]
+    NotFound,
+    #[error("durable session is not ready for reopen: {state:?}")]
+    NotReady { state: LocalSessionCatalogState },
+    #[error("durable session identity changed since it was listed")]
+    IdentityChanged,
+    #[error("durable session catalog is unavailable")]
+    CatalogUnavailable {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 /// Provider-neutral message retained in the user-facing export artifact.
@@ -413,6 +438,108 @@ impl LocalSessionLifecycleService {
         Ok(LocalSessionCatalog {
             entries,
             truncated_entry_count,
+        })
+    }
+
+    /// Resolves one catalog candidate against current bounded lifecycle and JSONL truth.
+    ///
+    /// SQLite projection state is deliberately absent from this operation. The returned path is
+    /// a canonical direct child of this service's session directory and is suitable only for a
+    /// second durable binding check by the application runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source disappeared, is not a ready V2 stream, changed durable
+    /// identity, or the current lifecycle catalog cannot be verified.
+    pub fn resolve_session_for_reopen(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+    ) -> std::result::Result<LocalSessionReopenBinding, LocalSessionReopenError> {
+        let reference = session_ref.as_path();
+        if reference.components().count() != 1
+            || reference.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            return Err(LocalSessionReopenError::NotFound);
+        }
+        let directory_metadata = match fs::symlink_metadata(&self.session_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(LocalSessionReopenError::NotFound);
+            }
+            Err(source) => {
+                return Err(LocalSessionReopenError::CatalogUnavailable {
+                    source: source.into(),
+                });
+            }
+        };
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+            return Err(LocalSessionReopenError::CatalogUnavailable {
+                source: anyhow!("configured session directory must be a real directory"),
+            });
+        }
+        let session_dir = fs::canonicalize(&self.session_dir).map_err(|source| {
+            LocalSessionReopenError::CatalogUnavailable {
+                source: source.into(),
+            }
+        })?;
+        let path = session_ref.resolve(&session_dir);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(LocalSessionReopenError::NotFound);
+            }
+            Err(source) => {
+                return Err(LocalSessionReopenError::CatalogUnavailable {
+                    source: source.into(),
+                });
+            }
+        };
+        let symlink_or_non_file = metadata.file_type().is_symlink() || !metadata.is_file();
+        let canonical_path = if symlink_or_non_file {
+            path
+        } else {
+            fs::canonicalize(&path).map_err(|source| {
+                LocalSessionReopenError::CatalogUnavailable {
+                    source: source.into(),
+                }
+            })?
+        };
+        let bytes = metadata.len();
+        let state = if symlink_or_non_file {
+            LocalSessionCatalogState::Invalid
+        } else if bytes > self.limits.max_stream_bytes {
+            LocalSessionCatalogState::Oversized
+        } else if bytes > self.limits.max_total_validation_bytes {
+            LocalSessionCatalogState::ScanBudgetExceeded
+        } else {
+            LocalSessionCatalogState::Ready
+        };
+        let entry = self.catalog_entry(
+            SessionCandidate {
+                session_ref: session_ref.clone(),
+                path: canonical_path,
+                bytes,
+                modified_at_unix_ms: modified_at_unix_ms(&metadata),
+                symlink_or_non_file,
+            },
+            state,
+        );
+        if entry.state != LocalSessionCatalogState::Ready {
+            return Err(LocalSessionReopenError::NotReady { state: entry.state });
+        }
+        let Some(session_id) = entry.session_id else {
+            return Err(LocalSessionReopenError::NotReady {
+                state: LocalSessionCatalogState::Invalid,
+            });
+        };
+        if session_id != expected_session_id {
+            return Err(LocalSessionReopenError::IdentityChanged);
+        }
+        Ok(LocalSessionReopenBinding {
+            session_ref: entry.session_ref,
+            session_id,
+            session_log_path: entry.path,
         })
     }
 

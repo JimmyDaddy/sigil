@@ -91,6 +91,115 @@ fn local_session_catalog_projects_only_bounded_v2_direct_children() -> Result<()
     Ok(())
 }
 
+#[test]
+fn session_reopen_resolves_current_ready_direct_child() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-ready.jsonl");
+    finalized_session(&source, "resume this session")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let listed = service
+        .catalog()?
+        .entries
+        .into_iter()
+        .find(|entry| entry.path.ends_with("session-ready.jsonl"))
+        .expect("ready session should be listed");
+    let expected_session_id = listed
+        .session_id
+        .as_deref()
+        .expect("ready session should have durable identity");
+
+    let binding = service.resolve_session_for_reopen(&listed.session_ref, expected_session_id)?;
+
+    assert_eq!(binding.session_ref, listed.session_ref);
+    assert_eq!(binding.session_id, expected_session_id);
+    assert_eq!(binding.session_log_path, source.canonicalize()?);
+    Ok(())
+}
+
+#[test]
+fn session_reopen_validates_a_direct_source_outside_the_catalog_entry_cap() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let older = sessions.join("z-older.jsonl");
+    finalized_session(&older, "older durable history")?;
+    let newer = sessions.join("a-newer.jsonl");
+    finalized_session(&newer, "newer durable history")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
+            .with_limits(LocalSessionLifecycleLimits {
+                max_catalog_entries: 1,
+                ..LocalSessionLifecycleLimits::default()
+            });
+    let older_records = JsonlSessionStore::read_event_records(&older)?;
+    let expected_session_id = older_records
+        .first()
+        .expect("older durable stream should not be empty")
+        .session_id()
+        .to_owned();
+    let older_ref = SessionRef::new_relative("z-older.jsonl")?;
+    let catalog = service.catalog()?;
+
+    assert_eq!(catalog.entries.len(), 1);
+    assert_eq!(catalog.truncated_entry_count, 1);
+    assert!(
+        catalog
+            .entries
+            .iter()
+            .all(|entry| entry.session_ref != older_ref)
+    );
+    let binding = service.resolve_session_for_reopen(&older_ref, &expected_session_id)?;
+    assert_eq!(binding.session_log_path, older.canonicalize()?);
+    assert_eq!(binding.session_id, expected_session_id);
+    Ok(())
+}
+
+#[test]
+fn session_reopen_rejects_missing_non_ready_and_changed_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let ready = sessions.join("session-ready.jsonl");
+    finalized_session(&ready, "ready")?;
+    fs::write(
+        sessions.join("session-legacy.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+        ),
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    assert!(matches!(
+        service.resolve_session_for_reopen(
+            &sigil_kernel::SessionRef::new_relative("missing.jsonl")?,
+            "missing"
+        ),
+        Err(LocalSessionReopenError::NotFound)
+    ));
+    assert!(matches!(
+        service.resolve_session_for_reopen(
+            &sigil_kernel::SessionRef::new_relative("session-legacy.jsonl")?,
+            "legacy"
+        ),
+        Err(LocalSessionReopenError::NotReady {
+            state: LocalSessionCatalogState::UnsupportedLegacy
+        })
+    ));
+    assert!(matches!(
+        service.resolve_session_for_reopen(
+            &sigil_kernel::SessionRef::new_relative("session-ready.jsonl")?,
+            "stale-session-id"
+        ),
+        Err(LocalSessionReopenError::IdentityChanged)
+    ));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn local_session_catalog_marks_symlink_and_scan_budget_entries_unavailable() -> Result<()> {

@@ -879,6 +879,50 @@ pub fn bind_application_session(
     })
 }
 
+/// Reopens one existing durable V2 session without creating a missing path.
+///
+/// Callers must first establish their own workspace/catalog authorization for `session_path`.
+/// This second binding step rejects a final-component symlink, requires an existing regular file,
+/// and reloads the durable stream before returning its canonical scope.
+///
+/// # Errors
+///
+/// Returns a typed preparation error when configuration cannot load, the existing source is not a
+/// regular non-symlink file, or durable V2 recovery fails.
+pub fn bind_existing_application_session(
+    config_path: &Path,
+    session_path: &Path,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let root_config =
+        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    let metadata = std::fs::symlink_metadata(session_path)
+        .with_context(|| {
+            format!(
+                "failed to inspect existing session {}",
+                session_path.display()
+            )
+        })
+        .map_err(ApplicationRunPrepareError::execution)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ApplicationRunPrepareError::execution(anyhow!(
+            "existing application session must be a regular non-symlink file"
+        )));
+    }
+    let canonical_path = session_path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", session_path.display()))
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let store =
+        JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
+    let session =
+        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
+            .map_err(ApplicationRunPrepareError::execution)?;
+    Ok(ApplicationSessionBinding {
+        session_scope_id: session.session_scope_id().to_owned(),
+        session_log_path: canonical_path,
+    })
+}
+
 /// Durably records a cancellation that won the race with application-run preparation.
 ///
 /// This path proves that no agent execution was admitted, so the terminal cleanup evidence is
