@@ -123,6 +123,22 @@ pub(crate) struct WindowsFilesystemGrant {
 
 impl WindowsFilesystemGrant {
     pub(crate) fn acquire(root: &Path, state_dir: &Path) -> Result<Self> {
+        Self::acquire_with_requested_sid(root, state_dir, None)
+    }
+
+    pub(crate) fn acquire_for_sid(
+        root: &Path,
+        state_dir: &Path,
+        restricting_sid: &WindowsRestrictingSid,
+    ) -> Result<Self> {
+        Self::acquire_with_requested_sid(root, state_dir, Some(restricting_sid.as_str()))
+    }
+
+    fn acquire_with_requested_sid(
+        root: &Path,
+        state_dir: &Path,
+        requested_sid: Option<&str>,
+    ) -> Result<Self> {
         assert_minimal_root_grant()?;
         let root = canonical_directory(root, "grant root")?;
         ensure_supported_local_ntfs(&root)?;
@@ -131,8 +147,13 @@ impl WindowsFilesystemGrant {
         let state_dir = canonical_state_directory(state_dir, &root)?;
         let paths = GrantPaths::for_root(&state_dir, &root_utf16);
         let lock = open_and_lock(&paths.lock)?;
-        let restricting_sid =
-            provision_or_revalidate_locked(&root, &root_utf16, root_identity, &paths)?;
+        let restricting_sid = provision_or_revalidate_locked(
+            &root,
+            &root_utf16,
+            root_identity,
+            &paths,
+            requested_sid,
+        )?;
 
         Ok(Self {
             root,
@@ -208,6 +229,7 @@ fn provision_or_revalidate_locked(
     root_utf16: &[u16],
     root_identity: RootIdentity,
     paths: &GrantPaths,
+    requested_sid: Option<&str>,
 ) -> Result<WindowsRestrictingSid> {
     if !paths.journal.exists() {
         if paths.granted.exists() {
@@ -218,10 +240,15 @@ fn provision_or_revalidate_locked(
             // proves that mutation was not yet allowed to begin.
             remove_if_exists(&paths.snapshot)?;
         }
-        return provision_new_locked(root, root_utf16, root_identity, paths);
+        return provision_new_locked(root, root_utf16, root_identity, paths, requested_sid);
     }
 
     let journal = read_and_validate_journal(root_utf16, root_identity, paths)?;
+    if let Some(requested_sid) = requested_sid
+        && journal.restricting_sid != requested_sid
+    {
+        bail!("Windows durable ACL journal belongs to a different requested SID");
+    }
     let restricting_sid = WindowsRestrictingSid::from_string(&journal.restricting_sid)?;
     verify_root_identity(root, root_identity)?;
     if durable_grant_marker_is_valid(paths)? {
@@ -251,8 +278,12 @@ fn provision_new_locked(
     root_utf16: &[u16],
     root_identity: RootIdentity,
     paths: &GrantPaths,
+    requested_sid: Option<&str>,
 ) -> Result<WindowsRestrictingSid> {
-    let restricting_sid = WindowsRestrictingSid::new_unique()?;
+    let restricting_sid = match requested_sid {
+        Some(value) => WindowsRestrictingSid::from_string(value)?,
+        None => WindowsRestrictingSid::new_unique()?,
+    };
     let original = read_security_descriptor(root)?;
     let snapshot_sha256 = sha256_hex(original.as_bytes());
     write_new_synced(&paths.snapshot, original.as_bytes())?;

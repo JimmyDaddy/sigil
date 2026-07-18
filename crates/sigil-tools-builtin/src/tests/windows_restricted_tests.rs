@@ -374,6 +374,141 @@ fn app_container_profile_recovers_an_interrupted_owned_profile() {
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
+async fn app_container_workspace_grant_writes_inside_and_denies_external_paths() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let workspace = temp.path().join("workspace");
+    let sibling = temp.path().join("sibling");
+    let everyone_root = temp.path().join("everyone-writable");
+    fs::create_dir_all(&workspace).expect("workspace should be created");
+    fs::create_dir_all(&sibling).expect("sibling should be created");
+    fs::create_dir_all(&everyone_root).expect("Everyone fixture should be created");
+    let existing = workspace.join("existing.txt");
+    fs::write(&existing, b"before").expect("existing workspace file should be created");
+
+    let profile =
+        super::WindowsAppContainerProfile::create_private_probe(&temp.path().join("profile-state"))
+            .expect("private AppContainer profile should be created");
+    let app_container_sid = profile
+        .sid()
+        .as_restricting_sid()
+        .expect("AppContainer SID should convert to an ACL principal");
+    let grant = super::WindowsFilesystemGrant::acquire_for_sid(
+        &workspace,
+        &temp.path().join("acl-state"),
+        &app_container_sid,
+    )
+    .expect("AppContainer workspace grant should be provisioned");
+    let root_descriptor = super::WindowsFilesystemGrant::descriptor_hash(&workspace)
+        .expect("workspace descriptor should be captured");
+    let existing_descriptor = super::WindowsFilesystemGrant::descriptor_hash(&existing)
+        .expect("existing file descriptor should be captured");
+
+    let program = cmd_path();
+    let mut inside = probe_request(
+        program.to_string_lossy().into_owned(),
+        vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            "echo created>created.txt && echo modified>existing.txt && echo deleted>deleted.txt && del /Q deleted.txt"
+                .to_owned(),
+        ],
+    );
+    inside.cwd = workspace.clone();
+    let (inside_outcome, _) = supervise_app_container_probe(&inside, profile.sid())
+        .await
+        .expect("AppContainer workspace mutation probe should return a receipt");
+    assert_eq!(inside_outcome.exit_code, Some(0));
+    assert_eq!(
+        fs::read_to_string(workspace.join("created.txt"))
+            .expect("created workspace file should remain readable")
+            .trim(),
+        "created"
+    );
+    assert_eq!(
+        fs::read_to_string(&existing)
+            .expect("modified workspace file should remain readable")
+            .trim(),
+        "modified"
+    );
+    assert!(!workspace.join("deleted.txt").exists());
+
+    let denied = sibling.join("escaped.txt");
+    let mut denied_request = probe_request(
+        program.to_string_lossy().into_owned(),
+        vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            "echo escaped>\"%SIGIL_DENIED_PATH%\"".to_owned(),
+        ],
+    );
+    denied_request.cwd = workspace.clone();
+    denied_request.env.insert(
+        "SIGIL_DENIED_PATH".to_owned(),
+        denied.to_string_lossy().into_owned(),
+    );
+    let (denied_outcome, _) = supervise_app_container_probe(&denied_request, profile.sid())
+        .await
+        .expect("AppContainer sibling denial probe should return a receipt");
+    assert_ne!(denied_outcome.exit_code, Some(0));
+    assert!(!denied.exists(), "AppContainer escaped to a sibling path");
+
+    let everyone_sid =
+        super::WindowsRestrictingSid::new_everyone().expect("Everyone SID should resolve");
+    super::WindowsFilesystemGrant::apply_test_root_grant(&everyone_root, &everyone_sid)
+        .expect("negative fixture should grant Everyone write access");
+    let broad_external = everyone_root.join("escaped.txt");
+    denied_request.env.insert(
+        "SIGIL_DENIED_PATH".to_owned(),
+        broad_external.to_string_lossy().into_owned(),
+    );
+    let (broad_outcome, _) = supervise_app_container_probe(&denied_request, profile.sid())
+        .await
+        .expect("AppContainer Everyone-grant probe should return a receipt");
+    assert_ne!(broad_outcome.exit_code, Some(0));
+    assert!(
+        !broad_external.exists(),
+        "AppContainer escaped through an Everyone-granted external path"
+    );
+
+    grant
+        .release()
+        .expect("AppContainer workspace grant should revalidate on release");
+    let second_grant = super::WindowsFilesystemGrant::acquire_for_sid(
+        &workspace,
+        &temp.path().join("acl-state"),
+        &app_container_sid,
+    )
+    .expect("AppContainer workspace grant should revalidate without ACL mutation");
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&workspace)
+            .expect("revalidated workspace descriptor should be captured"),
+        root_descriptor
+    );
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&existing)
+            .expect("revalidated existing-file descriptor should be captured"),
+        existing_descriptor
+    );
+    assert!(
+        !super::WindowsFilesystemGrant::sid_has_security_control_rights(
+            &workspace.join("created.txt"),
+            second_grant.restricting_sid(),
+        )
+        .expect("AppContainer security-control rights should resolve")
+    );
+    second_grant
+        .release()
+        .expect("revalidated AppContainer grant should release cleanly");
+    profile
+        .close()
+        .expect("AppContainer profile should delete after the filesystem probes");
+}
+
+#[cfg(windows)]
+#[serial]
+#[tokio::test]
 async fn write_restricted_sid_everyone_compatibility_is_not_filesystem_isolation() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let broad_root = temp.path().join("everyone-writable");

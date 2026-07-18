@@ -123,8 +123,8 @@ mod native {
         Security::{
             ACL,
             Authorization::{
-                ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW,
-                TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+                ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+                SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
             },
             CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, FreeSid, GetLengthSid,
             GetTokenInformation,
@@ -204,6 +204,30 @@ mod native {
                 bail!("AppContainer profile creation returned a null SID");
             }
             Ok(Self { sid })
+        }
+
+        pub(super) fn as_restricting_sid(&self) -> Result<WindowsRestrictingSid> {
+            let mut value = null_mut();
+            // SAFETY: self owns a live SID and value is a valid output pointer. The returned
+            // UTF-16 string is released with LocalFree before returning.
+            if unsafe { ConvertSidToStringSidW(self.sid, &raw mut value) } == 0 {
+                return Err(io::Error::last_os_error())
+                    .context("failed to stringify AppContainer SID");
+            }
+            if value.is_null() {
+                bail!("ConvertSidToStringSidW returned a null string");
+            }
+            let mut len = 0_usize;
+            // SAFETY: ConvertSidToStringSidW returned a NUL-terminated allocation.
+            while unsafe { *value.add(len) } != 0 {
+                len += 1;
+            }
+            // SAFETY: the allocation contains len initialized UTF-16 units before its NUL.
+            let sid_string =
+                String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(value, len) });
+            // SAFETY: ConvertSidToStringSidW allocates with LocalAlloc-compatible ownership.
+            let _ = unsafe { LocalFree(value.cast::<c_void>()) };
+            WindowsRestrictingSid::from_string(&sid_string)
         }
 
         fn as_ptr(&self) -> PSID {
