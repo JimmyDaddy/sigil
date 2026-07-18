@@ -61,6 +61,7 @@
           <summary aria-controls="zh-home-primary-navigation">菜单</summary>
           <nav id="zh-home-primary-navigation" aria-label="主要导航">
             <a href="#quickstart">安装</a>
+            <a href="#demo">Demo</a>
             <a href="#workflow">工作流</a>
             <a href="#safety">安全</a>
             <a href="docs/visual-tour/">视觉导览</a>
@@ -154,6 +155,40 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <section class="section demo-showcase" id="demo">
+        <div class="section-heading demo-heading">
+          <div>
+            <p class="eyebrow">45 秒 Demo</p>
+            <h2>看一个真实修改从任务走到验证结果。</h2>
+          </div>
+          <p>
+            使用一次性的仓库和真实 Sigil TUI，只修改 README 中的一条安装命令。成片仅剪掉 provider 等待时间，diff、审批、工具结果和 session 恢复均为真实操作。
+          </p>
+        </div>
+        <div class="demo-frame">
+          <video
+            controls
+            loop
+            muted
+            playsinline
+            preload="metadata"
+            poster="../assets/demo/sigil-45-second-demo-poster.png"
+            aria-label="Sigil 45 秒仓库修改 Demo"
+          >
+            <source src="../assets/demo/sigil-45-second-demo.webm" type="video/webm">
+            <source src="../assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
+            <track kind="captions" srclang="zh-CN" label="简体中文" src="../assets/demo/sigil-45-second-demo.zh-CN.vtt" default>
+            <track kind="captions" srclang="en" label="English" src="../assets/demo/sigil-45-second-demo.en.vtt">
+            <a href="../assets/demo/sigil-45-second-demo.mp4">观看 MP4 Demo。</a>
+          </video>
+        </div>
+        <ol class="demo-beats" aria-label="Demo 展示内容">
+          <li><span>01</span><strong>提出任务</strong><small>一个聚焦的仓库修改。</small></li>
+          <li><span>02</span><strong>检查修改</strong><small>写入前查看准确 diff。</small></li>
+          <li><span>03</span><strong>验证并恢复</strong><small>结果可见，session 可继续。</small></li>
+        </ol>
       </section>
 
       <section class="section" id="quickstart">

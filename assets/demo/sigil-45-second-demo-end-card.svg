@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title description">
+  <title id="title">Install Sigil alpha</title>
+  <desc id="description">Sigil brand card with the alpha install command and project website.</desc>
+  <rect width="1280" height="720" fill="#0A0F17"/>
+  <image href="../social/sigil-social-preview.png" x="0" y="40" width="1280" height="640"/>
+  <rect x="0" y="510" width="1280" height="210" fill="#08111C"/>
+  <text x="640" y="590" text-anchor="middle" fill="#EEF1F3" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="30" font-weight="700">
+    npm install -g @sigil-ai/sigil@alpha
+  </text>
+  <text x="640" y="650" text-anchor="middle" fill="#5EFFF8" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="21">
+    sigil.corerobin.com
+  </text>
+</svg>

@@ -61,6 +61,7 @@
           <summary aria-controls="home-primary-navigation">Menu</summary>
           <nav id="home-primary-navigation" aria-label="Primary navigation">
             <a href="#quickstart">Install</a>
+            <a href="#demo">Demo</a>
             <a href="#workflow">Workflow</a>
             <a href="#safety">Safety</a>
             <a href="docs/visual-tour/">Tour</a>
@@ -154,6 +155,40 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <section class="section demo-showcase" id="demo">
+        <div class="section-heading demo-heading">
+          <div>
+            <p class="eyebrow">45-second demo</p>
+            <h2>Watch a real edit move from request to verified result.</h2>
+          </div>
+          <p>
+            A disposable repository, a real Sigil TUI run, and one narrow README change. Provider wait time is cut; the diff, approval, tool results, and session recovery are untouched.
+          </p>
+        </div>
+        <div class="demo-frame">
+          <video
+            controls
+            loop
+            muted
+            playsinline
+            preload="metadata"
+            poster="assets/demo/sigil-45-second-demo-poster.png"
+            aria-label="Sigil 45-second repository edit demo"
+          >
+            <source src="assets/demo/sigil-45-second-demo.webm" type="video/webm">
+            <source src="assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
+            <track kind="captions" srclang="en" label="English" src="assets/demo/sigil-45-second-demo.en.vtt" default>
+            <track kind="captions" srclang="zh-CN" label="简体中文" src="assets/demo/sigil-45-second-demo.zh-CN.vtt">
+            <a href="assets/demo/sigil-45-second-demo.mp4">Watch the MP4 demo.</a>
+          </video>
+        </div>
+        <ol class="demo-beats" aria-label="What the demo shows">
+          <li><span>01</span><strong>Request</strong><small>One focused repository change.</small></li>
+          <li><span>02</span><strong>Review</strong><small>An exact diff before writing.</small></li>
+          <li><span>03</span><strong>Verify + resume</strong><small>Visible results and a saved session.</small></li>
+        </ol>
       </section>
 
       <section class="section" id="quickstart">

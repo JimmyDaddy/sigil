@@ -102,6 +102,11 @@ required_files=(
   "assets/logo/sigil-wordmark-header-2x.png"
   "assets/social/sigil-social-preview.svg"
   "assets/social/sigil-social-preview.png"
+  "assets/demo/sigil-45-second-demo.mp4"
+  "assets/demo/sigil-45-second-demo.webm"
+  "assets/demo/sigil-45-second-demo-poster.png"
+  "assets/demo/sigil-45-second-demo.en.vtt"
+  "assets/demo/sigil-45-second-demo.zh-CN.vtt"
   "assets/screenshots/tui-session.svg"
   "assets/screenshots/approval-review.svg"
   "assets/screenshots/config-panel.svg"
@@ -194,6 +199,28 @@ if grep -q '<image' "${stage_dir}/assets/social/sigil-social-preview.svg"; then
   exit 1
 fi
 
+ruby -e '
+  png = File.binread(ARGV.fetch(0), 24)
+  abort "demo poster is not a PNG" unless png.start_with?("\x89PNG\r\n\x1A\n".b)
+  width, height = png.byteslice(16, 8).unpack("NN")
+  abort "demo poster must be 1920x1080, found #{width}x#{height}" unless [width, height] == [1920, 1080]
+
+  mp4 = File.binread(ARGV.fetch(1), 12)
+  abort "demo MP4 is missing an ftyp box" unless mp4.byteslice(4, 4) == "ftyp"
+
+  webm = File.binread(ARGV.fetch(2), 4)
+  abort "demo WebM has an invalid EBML header" unless webm == "\x1A\x45\xDF\xA3".b
+
+  ARGV.drop(3).each do |caption|
+    abort "demo caption must start with WEBVTT: #{caption}" unless File.read(caption, 6) == "WEBVTT"
+  end
+' \
+  "${stage_dir}/assets/demo/sigil-45-second-demo-poster.png" \
+  "${stage_dir}/assets/demo/sigil-45-second-demo.mp4" \
+  "${stage_dir}/assets/demo/sigil-45-second-demo.webm" \
+  "${stage_dir}/assets/demo/sigil-45-second-demo.en.vtt" \
+  "${stage_dir}/assets/demo/sigil-45-second-demo.zh-CN.vtt"
+
 for file in "${source_docs[@]}"; do
   if [[ ! -f "${repo_root}/${file}" ]]; then
     echo "missing source documentation file: ${file}" >&2
@@ -258,6 +285,12 @@ grep -q 'data-theme-toggle' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'data-theme-toggle' "${stage_dir}/docs/quickstart/index.html"
 grep -q 'src="assets/site.js"' "${stage_dir}/index.html"
 grep -q 'src="assets/code.js"' "${stage_dir}/index.html"
+grep -q 'id="demo"' "${stage_dir}/index.html"
+grep -q 'poster="assets/demo/sigil-45-second-demo-poster.png"' "${stage_dir}/index.html"
+grep -q 'src="assets/demo/sigil-45-second-demo.mp4"' "${stage_dir}/index.html"
+grep -q 'id="demo"' "${stage_dir}/zh-CN/index.html"
+grep -q 'poster="../assets/demo/sigil-45-second-demo-poster.png"' "${stage_dir}/zh-CN/index.html"
+grep -q 'src="../assets/demo/sigil-45-second-demo.mp4"' "${stage_dir}/zh-CN/index.html"
 grep -q 'src="../assets/site.js"' "${stage_dir}/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/docs/quickstart/index.html"

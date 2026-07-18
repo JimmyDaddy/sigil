@@ -25,10 +25,12 @@
 <p align="center"><a href="README.md">English</a> · 简体中文</p>
 
 <p align="center">
-  <a href="https://sigil.corerobin.com/zh-CN/docs/visual-tour/">
-    <img src="site/assets/screenshots/tui-session.svg" alt="Sigil TUI 中的仓库任务、工具活动与 session 上下文" width="900">
+  <a href="https://sigil.corerobin.com/zh-CN/#demo">
+    <img src="assets/demo/sigil-45-second-demo-poster.png" alt="Sigil 在真实仓库修改中的审批检查界面" width="900">
   </a>
 </p>
+
+<p align="center"><a href="https://sigil.corerobin.com/zh-CN/#demo">观看 45 秒 Demo</a> · <a href="assets/demo/sigil-45-second-demo.mp4">MP4</a></p>
 
 > [!NOTE]
 > Sigil 仍处于早期预览阶段。网站与用户文档跟随 `main`，可能领先于已发布的软件包。依赖新功能前，请先查看[安装指南](docs/zh-CN/installation.md)与[变更记录](docs/zh-CN/changelog.md)。

@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00.000 --> 00:04.000
+Repository work inside one terminal.
+
+00:04.000 --> 00:11.000
+Ask for one focused repository change.
+
+00:11.000 --> 00:16.000
+Review the exact diff before writing.
+
+00:16.000 --> 00:36.000
+Approve once. Sigil applies the edit and verifies the result.
+
+00:36.000 --> 00:41.000
+Resume the saved repository session later.
+
+00:41.000 --> 00:45.000
+Install the Sigil alpha and open it in your repository.
