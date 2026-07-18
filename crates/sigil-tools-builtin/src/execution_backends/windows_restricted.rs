@@ -4,6 +4,10 @@ use sigil_kernel::{
 };
 
 #[cfg(windows)]
+#[path = "windows_app_container_profile.rs"]
+mod app_container_profile;
+
+#[cfg(windows)]
 #[path = "windows_restricted_filesystem.rs"]
 mod filesystem;
 
@@ -151,7 +155,6 @@ mod native {
 
     const TERMINATED_BY_SUPERVISOR_EXIT_CODE: u32 = 1;
     const SE_GROUP_LOGON_ID_MASK: u32 = 0xC000_0000;
-    const PRIVATE_APP_CONTAINER_NAME: &str = "Sigil.Rfc0041.PrivateProbe.V1";
     #[derive(Clone, Copy)]
     pub(crate) struct RestrictedTokenPrivilegeEvidence {
         pub(crate) source_enabled_non_traverse_privilege_count: u32,
@@ -179,8 +182,9 @@ mod native {
     }
 
     impl WindowsAppContainerSid {
-        pub(crate) fn derive_private_probe() -> Result<Self> {
-            let name = nul_terminated(OsStr::new(PRIVATE_APP_CONTAINER_NAME), "AppContainer name")?;
+        #[cfg(test)]
+        pub(super) fn derive_named(name: &str) -> Result<Self> {
+            let name = nul_terminated(OsStr::new(name), "AppContainer name")?;
             let mut sid: PSID = null_mut();
             // SAFETY: name is NUL-terminated and sid is a valid output pointer. The returned SID
             // is released with FreeSid in Drop.
@@ -191,6 +195,13 @@ mod native {
             }
             if sid.is_null() {
                 bail!("AppContainer SID derivation returned a null SID");
+            }
+            Ok(Self { sid })
+        }
+
+        pub(super) fn from_owned(sid: PSID) -> Result<Self> {
+            if sid.is_null() {
+                bail!("AppContainer profile creation returned a null SID");
             }
             Ok(Self { sid })
         }
@@ -1355,6 +1366,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(super) use app_container_profile::WindowsAppContainerProfile;
 #[cfg(windows)]
 pub(super) use filesystem::WindowsFilesystemGrant;
 #[cfg(windows)]

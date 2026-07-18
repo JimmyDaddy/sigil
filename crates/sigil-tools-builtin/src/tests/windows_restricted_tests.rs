@@ -139,13 +139,13 @@ async fn supervise_restricting_sid_probe(
 #[cfg(windows)]
 async fn supervise_app_container_probe(
     request: &ExecutionRequest,
+    app_container_sid: &super::WindowsAppContainerSid,
 ) -> anyhow::Result<(
     super::super::SupervisedExecutionOutcome,
     super::RestrictedTokenPrivilegeEvidence,
 )> {
-    let app_container_sid = super::WindowsAppContainerSid::derive_private_probe()?;
     let child =
-        super::NativeWindowsRestrictedChild::spawn_with_app_container(request, &app_container_sid)?;
+        super::NativeWindowsRestrictedChild::spawn_with_app_container(request, app_container_sid)?;
     anyhow::ensure!(
         child.is_app_container(),
         "child token is not an AppContainer"
@@ -281,7 +281,13 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn app_container_sid_launches_system_command_without_profile_or_acl_mutation() {
+async fn app_container_profile_launches_system_command_and_cleans_up() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let profile =
+        super::WindowsAppContainerProfile::create_private_probe(&temp.path().join("profile-state"))
+            .expect("private AppContainer profile should be created with a durable owner journal");
+    assert!(profile.journal_path().is_file());
+    let profile_name = profile.name().to_owned();
     let program = cmd_path();
     let mut request = probe_request(
         program.to_string_lossy().into_owned(),
@@ -297,9 +303,9 @@ async fn app_container_sid_launches_system_command_without_profile_or_acl_mutati
         .expect("cmd.exe should have a parent directory")
         .to_path_buf();
 
-    let (outcome, evidence) = supervise_app_container_probe(&request)
+    let (outcome, evidence) = supervise_app_container_probe(&request, profile.sid())
         .await
-        .expect("profileless AppContainer launch should return a receipt");
+        .expect("profile-backed AppContainer launch should return a receipt");
 
     assert!(evidence.privileges_constrained());
     assert_eq!(outcome.exit_code, Some(0));
@@ -308,6 +314,61 @@ async fn app_container_sid_launches_system_command_without_profile_or_acl_mutati
         ExecutionTerminationCause::Exited
     );
     assert!(String::from_utf8_lossy(&outcome.stdout).contains("appcontainer-ok"));
+    let journal_path = profile.journal_path().to_path_buf();
+    profile
+        .close()
+        .expect("private AppContainer profile should delete after the child is reaped");
+    assert!(!journal_path.exists());
+
+    let deleted_sid = super::WindowsAppContainerSid::derive_named(&profile_name)
+        .expect("deleted profile SID should remain derivable by name");
+    let launch_error =
+        match super::NativeWindowsRestrictedChild::spawn_with_app_container(&request, &deleted_sid)
+        {
+            Ok(_) => panic!("a deleted AppContainer profile must not remain launchable"),
+            Err(error) => error,
+        };
+    assert!(
+        launch_error
+            .to_string()
+            .contains("CreateProcessW failed for AppContainer")
+    );
+}
+
+#[cfg(windows)]
+#[serial]
+#[test]
+fn app_container_profile_recovers_an_interrupted_owned_profile() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let state_dir = temp.path().join("profile-state");
+    let abandoned = super::WindowsAppContainerProfile::create_private_probe(&state_dir)
+        .expect("first private AppContainer profile should be created");
+    let abandoned_name = abandoned
+        .abandon_for_recovery()
+        .expect("test owner should release only the cross-process lease");
+
+    let recovered = super::WindowsAppContainerProfile::create_private_probe(&state_dir)
+        .expect("next owner should delete the interrupted profile before creating a new one");
+    assert_ne!(recovered.name(), abandoned_name);
+    let abandoned_sid = super::WindowsAppContainerSid::derive_named(&abandoned_name)
+        .expect("abandoned profile SID should remain derivable by name");
+    let program = cmd_path();
+    let mut request = probe_request(
+        program.to_string_lossy().into_owned(),
+        vec!["/D".to_owned(), "/C".to_owned(), "exit 0".to_owned()],
+    );
+    request.cwd = program
+        .parent()
+        .expect("cmd.exe should have a parent directory")
+        .to_path_buf();
+    if super::NativeWindowsRestrictedChild::spawn_with_app_container(&request, &abandoned_sid)
+        .is_ok()
+    {
+        panic!("recovery left the interrupted AppContainer profile launchable");
+    }
+    recovered
+        .close()
+        .expect("recovery probe profile should delete cleanly");
 }
 
 #[cfg(windows)]
