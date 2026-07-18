@@ -122,12 +122,14 @@ mod native {
                 ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW,
                 TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
             },
-            CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetLengthSid,
-            GetTokenInformation, LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME,
-            SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SetTokenInformation,
+            CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, FreeSid, GetLengthSid,
+            GetTokenInformation,
+            Isolation::DeriveAppContainerSidFromAppContainerName,
+            LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED,
+            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SetTokenInformation,
             TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
             TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenGroups,
-            TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
+            TokenIsAppContainer, TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -137,17 +139,19 @@ mod native {
             Pipes::CreatePipe,
             Threading::{
                 CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-                CreateProcessAsUserW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-                OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-                ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-                UpdateProcThreadAttribute, WaitForSingleObject,
+                CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
+                EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
+                InitializeProcThreadAttributeList, OpenProcessToken,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+                TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
             },
         },
     };
 
     const TERMINATED_BY_SUPERVISOR_EXIT_CODE: u32 = 1;
     const SE_GROUP_LOGON_ID_MASK: u32 = 0xC000_0000;
+    const PRIVATE_APP_CONTAINER_NAME: &str = "Sigil.Rfc0041.PrivateProbe.V1";
     #[derive(Clone, Copy)]
     pub(crate) struct RestrictedTokenPrivilegeEvidence {
         pub(crate) source_enabled_non_traverse_privilege_count: u32,
@@ -167,6 +171,42 @@ mod native {
     impl CopiedSid {
         fn as_ptr(&self) -> PSID {
             self.storage.as_ptr().cast_mut().cast::<c_void>()
+        }
+    }
+
+    pub(crate) struct WindowsAppContainerSid {
+        sid: PSID,
+    }
+
+    impl WindowsAppContainerSid {
+        pub(crate) fn derive_private_probe() -> Result<Self> {
+            let name = nul_terminated(OsStr::new(PRIVATE_APP_CONTAINER_NAME), "AppContainer name")?;
+            let mut sid: PSID = null_mut();
+            // SAFETY: name is NUL-terminated and sid is a valid output pointer. The returned SID
+            // is released with FreeSid in Drop.
+            let status =
+                unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };
+            if status < 0 {
+                bail!("failed to derive private AppContainer SID: HRESULT {status:#010x}");
+            }
+            if sid.is_null() {
+                bail!("AppContainer SID derivation returned a null SID");
+            }
+            Ok(Self { sid })
+        }
+
+        fn as_ptr(&self) -> PSID {
+            self.sid
+        }
+    }
+
+    impl Drop for WindowsAppContainerSid {
+        fn drop(&mut self) {
+            if !self.sid.is_null() {
+                // SAFETY: DeriveAppContainerSidFromAppContainerName allocated this SID with
+                // AllocateAndInitializeSid-compatible ownership.
+                let _ = unsafe { FreeSid(self.sid) };
+            }
         }
     }
 
@@ -239,24 +279,36 @@ mod native {
         wait_task: Option<JoinHandle<io::Result<ExitStatus>>>,
         status: Option<ExitStatus>,
         privilege_evidence: RestrictedTokenPrivilegeEvidence,
+        app_container: bool,
     }
 
     impl NativeWindowsRestrictedChild {
         pub(super) fn spawn(request: &ExecutionRequest) -> Result<Self> {
-            Self::spawn_with_optional_restricting_sid(request, None)
+            Self::spawn_with_security(request, None, None)
         }
 
         pub(crate) fn spawn_with_restricting_sid(
             request: &ExecutionRequest,
             restricting_sid: &WindowsRestrictingSid,
         ) -> Result<Self> {
-            Self::spawn_with_optional_restricting_sid(request, Some(restricting_sid))
+            Self::spawn_with_security(request, Some(restricting_sid), None)
         }
 
-        fn spawn_with_optional_restricting_sid(
+        pub(crate) fn spawn_with_app_container(
+            request: &ExecutionRequest,
+            app_container_sid: &WindowsAppContainerSid,
+        ) -> Result<Self> {
+            Self::spawn_with_security(request, None, Some(app_container_sid))
+        }
+
+        fn spawn_with_security(
             request: &ExecutionRequest,
             restricting_sid: Option<&WindowsRestrictingSid>,
+            app_container_sid: Option<&WindowsAppContainerSid>,
         ) -> Result<Self> {
+            if restricting_sid.is_some() && app_container_sid.is_some() {
+                bail!("Windows restricted token and AppContainer launch modes are exclusive");
+            }
             let program = canonical_file(Path::new(&request.program), "program")?;
             let cwd = fs::canonicalize(&request.cwd).with_context(|| {
                 format!(
@@ -272,16 +324,25 @@ mod native {
             }
 
             let process_token = open_current_process_token()?;
-            let restricted_token =
-                create_restricted_token(raw_handle(&process_token), restricting_sid)?;
-            let privilege_evidence = restricted_token_privilege_evidence(
-                raw_handle(&process_token),
-                raw_handle(&restricted_token),
-            )?;
-            if !privilege_evidence.privileges_constrained() {
+            let restricted_token = app_container_sid
+                .is_none()
+                .then(|| create_restricted_token(raw_handle(&process_token), restricting_sid))
+                .transpose()?;
+            let restricted_privilege_evidence = restricted_token
+                .as_ref()
+                .map(|token| {
+                    restricted_token_privilege_evidence(
+                        raw_handle(&process_token),
+                        raw_handle(token),
+                    )
+                })
+                .transpose()?;
+            if let Some(evidence) = restricted_privilege_evidence
+                && !evidence.privileges_constrained()
+            {
                 bail!(
                     "restricted token retains {} enabled non-traverse privilege(s)",
-                    privilege_evidence.restricted_enabled_non_traverse_privilege_count
+                    evidence.restricted_enabled_non_traverse_privilege_count
                 );
             }
 
@@ -293,7 +354,16 @@ mod native {
                 raw_handle(&stdout.write),
                 raw_handle(&stderr.write),
             ];
-            let mut attributes = ProcThreadAttributeList::for_handles(&inherited_handles)?;
+            let mut security_capabilities = app_container_sid.map(|sid| SECURITY_CAPABILITIES {
+                AppContainerSid: sid.as_ptr(),
+                Capabilities: null_mut(),
+                CapabilityCount: 0,
+                Reserved: 0,
+            });
+            let mut attributes = ProcThreadAttributeList::for_launch(
+                &inherited_handles,
+                security_capabilities.as_mut(),
+            )?;
 
             let mut command_line = windows_command_line(&program, &request.args)?;
             let program_wide = nul_terminated(program.as_os_str(), "program")?;
@@ -313,33 +383,102 @@ mod native {
                 | CREATE_NO_WINDOW
                 | EXTENDED_STARTUPINFO_PRESENT;
 
-            // SAFETY: All pointers remain valid for the call, the mutable command line and
-            // environment block are NUL-terminated, and the inherited handle list contains only
-            // live inheritable child-side handles.
-            let created = unsafe {
-                CreateProcessAsUserW(
-                    raw_handle(&restricted_token),
-                    program_wide.as_ptr(),
-                    command_line.as_mut_ptr(),
-                    null(),
-                    null(),
-                    1,
-                    creation_flags,
-                    environment.as_ptr().cast::<c_void>(),
-                    cwd_wide.as_ptr(),
-                    (&raw const startup.StartupInfo),
-                    &raw mut process_info,
-                )
+            // SAFETY: All pointers and optional security capabilities remain live for the call,
+            // the command line and environment are NUL-terminated, and the inherited handle list
+            // contains only live inheritable child-side handles.
+            let created = match restricted_token.as_ref() {
+                Some(token) => unsafe {
+                    CreateProcessAsUserW(
+                        raw_handle(token),
+                        program_wide.as_ptr(),
+                        command_line.as_mut_ptr(),
+                        null(),
+                        null(),
+                        1,
+                        creation_flags,
+                        environment.as_ptr().cast::<c_void>(),
+                        cwd_wide.as_ptr(),
+                        (&raw const startup.StartupInfo),
+                        &raw mut process_info,
+                    )
+                },
+                None => unsafe {
+                    CreateProcessW(
+                        program_wide.as_ptr(),
+                        command_line.as_mut_ptr(),
+                        null(),
+                        null(),
+                        1,
+                        creation_flags,
+                        environment.as_ptr().cast::<c_void>(),
+                        cwd_wide.as_ptr(),
+                        (&raw const startup.StartupInfo),
+                        &raw mut process_info,
+                    )
+                },
             };
             if created == 0 {
-                return Err(io::Error::last_os_error())
-                    .context("CreateProcessAsUserW failed for restricted token");
+                let label = if app_container_sid.is_some() {
+                    "CreateProcessW failed for AppContainer"
+                } else {
+                    "CreateProcessAsUserW failed for restricted token"
+                };
+                return Err(io::Error::last_os_error()).context(label);
             }
 
-            // SAFETY: CreateProcessAsUserW returned ownership of both non-null handles.
+            // SAFETY: process creation returned ownership of both non-null handles.
             let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess) };
-            // SAFETY: CreateProcessAsUserW returned ownership of both non-null handles.
+            // SAFETY: process creation returned ownership of both non-null handles.
             let thread = unsafe { OwnedHandle::from_raw_handle(process_info.hThread) };
+            let (privilege_evidence, app_container) = match app_container_sid {
+                Some(_) => {
+                    let inspection = (|| -> Result<RestrictedTokenPrivilegeEvidence> {
+                        let child_token =
+                            open_process_token(raw_handle(&process), "AppContainer child")?;
+                        if !token_is_app_container(raw_handle(&child_token))? {
+                            bail!("Windows AppContainer launch produced a non-AppContainer token");
+                        }
+                        let evidence = restricted_token_privilege_evidence(
+                            raw_handle(&process_token),
+                            raw_handle(&child_token),
+                        )?;
+                        if !evidence.privileges_constrained() {
+                            bail!(
+                                "Windows AppContainer child retains {} enabled non-traverse privilege(s)",
+                                evidence.restricted_enabled_non_traverse_privilege_count
+                            );
+                        }
+                        Ok(evidence)
+                    })();
+                    let evidence = match inspection {
+                        Ok(evidence) => evidence,
+                        Err(error) => {
+                            // SAFETY: the process remains suspended and process is live.
+                            let _ = unsafe {
+                                TerminateProcess(
+                                    raw_handle(&process),
+                                    TERMINATED_BY_SUPERVISOR_EXIT_CODE,
+                                )
+                            };
+                            return Err(error);
+                        }
+                    };
+                    (evidence, true)
+                }
+                None => match restricted_privilege_evidence {
+                    Some(evidence) => (evidence, false),
+                    None => {
+                        // SAFETY: the process remains suspended and process is live.
+                        let _ = unsafe {
+                            TerminateProcess(
+                                raw_handle(&process),
+                                TERMINATED_BY_SUPERVISOR_EXIT_CODE,
+                            )
+                        };
+                        bail!("restricted token privilege evidence is unavailable");
+                    }
+                },
+            };
             drop(attributes);
             drop(stdin);
             drop(stdout.write);
@@ -356,6 +495,7 @@ mod native {
                 wait_task: None,
                 status: None,
                 privilege_evidence,
+                app_container,
             })
         }
 
@@ -365,6 +505,10 @@ mod native {
 
         pub(crate) fn privilege_evidence(&self) -> RestrictedTokenPrivilegeEvidence {
             self.privilege_evidence
+        }
+
+        pub(crate) fn is_app_container(&self) -> bool {
+            self.app_container
         }
 
         pub(crate) fn take_stdout(&mut self) -> Option<super::super::SupervisedExecutionPipe> {
@@ -515,10 +659,20 @@ mod native {
     }
 
     impl ProcThreadAttributeList {
-        fn for_handles(handles: &[HANDLE]) -> Result<Self> {
+        fn for_launch(
+            handles: &[HANDLE],
+            security_capabilities: Option<&mut SECURITY_CAPABILITIES>,
+        ) -> Result<Self> {
+            let attribute_count = if security_capabilities.is_some() {
+                2
+            } else {
+                1
+            };
             let mut bytes = 0_usize;
             // SAFETY: A null buffer is the documented sizing call; bytes is a valid out pointer.
-            let _ = unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes) };
+            let _ = unsafe {
+                InitializeProcThreadAttributeList(null_mut(), attribute_count, 0, &raw mut bytes)
+            };
             if bytes == 0 {
                 return Err(io::Error::last_os_error())
                     .context("failed to size process thread attribute list");
@@ -529,7 +683,7 @@ mod native {
             if unsafe {
                 InitializeProcThreadAttributeList(
                     storage.as_mut_ptr().cast::<c_void>(),
-                    1,
+                    attribute_count,
                     0,
                     &raw mut bytes,
                 )
@@ -554,6 +708,25 @@ mod native {
             {
                 return Err(io::Error::last_os_error())
                     .context("failed to install exact inherited handle list");
+            }
+            if let Some(capabilities) = security_capabilities {
+                // SAFETY: list is initialized and capabilities, including its SID, remains live
+                // until after CreateProcessW returns.
+                if unsafe {
+                    UpdateProcThreadAttribute(
+                        list.as_ptr(),
+                        0,
+                        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                        (capabilities as *mut SECURITY_CAPABILITIES).cast::<c_void>(),
+                        size_of::<SECURITY_CAPABILITIES>(),
+                        null_mut(),
+                        null(),
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error())
+                        .context("failed to install AppContainer security capabilities");
+                }
             }
             Ok(list)
         }
@@ -583,17 +756,29 @@ mod native {
     }
 
     fn open_current_process_token() -> Result<OwnedHandle> {
+        // SAFETY: GetCurrentProcess returns a non-owning pseudo-handle valid in this process.
+        let process = unsafe { GetCurrentProcess() };
+        open_process_token_with_access(
+            process,
+            TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+            "current process",
+        )
+    }
+
+    fn open_process_token(process: HANDLE, label: &str) -> Result<OwnedHandle> {
+        open_process_token_with_access(process, TOKEN_QUERY, label)
+    }
+
+    fn open_process_token_with_access(
+        process: HANDLE,
+        access: u32,
+        label: &str,
+    ) -> Result<OwnedHandle> {
         let mut token: HANDLE = null_mut();
-        // SAFETY: token is a valid out pointer and GetCurrentProcess returns a pseudo-handle.
-        if unsafe {
-            OpenProcessToken(
-                GetCurrentProcess(),
-                TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
-                &raw mut token,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error()).context("OpenProcessToken failed");
+        // SAFETY: process is a live process or pseudo-handle and token is a valid output pointer.
+        if unsafe { OpenProcessToken(process, access, &raw mut token) } == 0 {
+            return Err(io::Error::last_os_error())
+                .with_context(|| format!("OpenProcessToken failed for {label}"));
         }
         // SAFETY: OpenProcessToken succeeded and transferred ownership of a non-null handle.
         Ok(unsafe { OwnedHandle::from_raw_handle(token) })
@@ -803,6 +988,29 @@ mod native {
             return Err(io::Error::last_os_error()).context("CopySid failed for logon SID");
         }
         Ok(CopiedSid { storage })
+    }
+
+    fn token_is_app_container(token: HANDLE) -> Result<bool> {
+        let mut value = 0_u32;
+        let mut returned = 0_u32;
+        // SAFETY: token is live and value/returned are valid output buffers of the documented size.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenIsAppContainer,
+                (&raw mut value).cast::<c_void>(),
+                u32::try_from(size_of::<u32>()).expect("u32 size fits u32"),
+                &raw mut returned,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error())
+                .context("GetTokenInformation(TokenIsAppContainer) failed");
+        }
+        if returned != u32::try_from(size_of::<u32>()).expect("u32 size fits u32") {
+            bail!("TokenIsAppContainer returned an unexpected buffer length");
+        }
+        Ok(value != 0)
     }
 
     fn restricted_token_privilege_evidence(
@@ -1150,7 +1358,10 @@ mod native {
 #[cfg(windows)]
 pub(super) use filesystem::WindowsFilesystemGrant;
 #[cfg(windows)]
-pub(super) use native::{NativeWindowsRestrictedChild, WindowsRestrictingSid};
+pub(super) use native::{
+    NativeWindowsRestrictedChild, RestrictedTokenPrivilegeEvidence, WindowsAppContainerSid,
+    WindowsRestrictingSid,
+};
 
 #[cfg(test)]
 #[path = "../tests/windows_restricted_tests.rs"]

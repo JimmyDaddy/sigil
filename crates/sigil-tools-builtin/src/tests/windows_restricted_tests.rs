@@ -137,6 +137,35 @@ async fn supervise_restricting_sid_probe(
 }
 
 #[cfg(windows)]
+async fn supervise_app_container_probe(
+    request: &ExecutionRequest,
+) -> anyhow::Result<(
+    super::super::SupervisedExecutionOutcome,
+    super::RestrictedTokenPrivilegeEvidence,
+)> {
+    let app_container_sid = super::WindowsAppContainerSid::derive_private_probe()?;
+    let child =
+        super::NativeWindowsRestrictedChild::spawn_with_app_container(request, &app_container_sid)?;
+    anyhow::ensure!(
+        child.is_app_container(),
+        "child token is not an AppContainer"
+    );
+    let evidence = child.privilege_evidence();
+    let deadline = super::super::execution_deadline(request)?;
+    let outcome = super::super::supervise_execution_child(
+        super::super::SupervisedExecutionChild::WindowsRestricted(child),
+        request,
+        super::super::OutputCollectionLimits::execution(),
+        super::super::PreflightReaderFault::None,
+        None,
+        deadline,
+        None,
+    )
+    .await?;
+    Ok((outcome, evidence))
+}
+
+#[cfg(windows)]
 async fn wait_for_file(path: &std::path::Path) -> anyhow::Result<()> {
     for _ in 0..800 {
         if path.is_file() {
@@ -247,6 +276,38 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
         !denied_target.exists(),
         "ungranted same-user path became writable under the restricting SID"
     );
+}
+
+#[cfg(windows)]
+#[serial]
+#[tokio::test]
+async fn app_container_sid_launches_system_command_without_profile_or_acl_mutation() {
+    let program = cmd_path();
+    let mut request = probe_request(
+        program.to_string_lossy().into_owned(),
+        vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            "echo appcontainer-ok".to_owned(),
+        ],
+    );
+    request.cwd = program
+        .parent()
+        .expect("cmd.exe should have a parent directory")
+        .to_path_buf();
+
+    let (outcome, evidence) = supervise_app_container_probe(&request)
+        .await
+        .expect("profileless AppContainer launch should return a receipt");
+
+    assert!(evidence.privileges_constrained());
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        outcome.output.termination,
+        ExecutionTerminationCause::Exited
+    );
+    assert!(String::from_utf8_lossy(&outcome.stdout).contains("appcontainer-ok"));
 }
 
 #[cfg(windows)]
