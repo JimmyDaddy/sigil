@@ -4,6 +4,10 @@ use sigil_kernel::{
 };
 
 #[cfg(windows)]
+#[path = "windows_restricted_filesystem.rs"]
+mod filesystem;
+
+#[cfg(windows)]
 use super::{
     OutputCollectionLimits, PreflightReaderFault, SupervisedExecutionChild, execution_deadline,
     supervise_execution_child,
@@ -154,6 +158,7 @@ mod native {
 
     pub(crate) struct WindowsRestrictingSid {
         sid: PSID,
+        value: String,
     }
 
     struct CopiedSid {
@@ -191,11 +196,18 @@ mod native {
             if sid.is_null() {
                 bail!("ConvertStringSidToSidW returned a null restricting SID");
             }
-            Ok(Self { sid })
+            Ok(Self {
+                sid,
+                value: value.to_owned(),
+            })
         }
 
         pub(crate) fn as_ptr(&self) -> PSID {
             self.sid
+        }
+
+        pub(crate) fn as_str(&self) -> &str {
+            &self.value
         }
     }
 
@@ -1131,6 +1143,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(super) use filesystem::WindowsFilesystemGrant;
 #[cfg(windows)]
 pub(super) use native::{NativeWindowsRestrictedChild, WindowsRestrictingSid};
 

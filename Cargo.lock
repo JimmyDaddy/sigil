@@ -3157,6 +3157,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "encoding_rs",
+ "fs2",
  "futures",
  "globset",
  "ignore",

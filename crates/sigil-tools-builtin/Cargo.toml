@@ -33,6 +33,7 @@ sigil-process = { path = "../sigil-process" }
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+fs2.workspace = true
 uuid.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

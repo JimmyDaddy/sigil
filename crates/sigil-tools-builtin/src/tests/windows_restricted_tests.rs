@@ -250,6 +250,79 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
+async fn write_restricted_sid_grants_one_root_and_restores_its_dacl() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let granted_root = temp.path().join("workspace");
+    let denied_root = temp.path().join("sibling");
+    let state_dir = temp.path().join("acl-state");
+    fs::create_dir_all(&granted_root).expect("granted root should be created");
+    fs::create_dir_all(&denied_root).expect("denied root should be created");
+    let existing = granted_root.join("existing.txt");
+    fs::write(&existing, b"before").expect("existing workspace file should be created");
+    let existing_descriptor_before = super::WindowsFilesystemGrant::descriptor_hash(&existing)
+        .expect("existing file descriptor should be captured");
+    let denied = denied_root.join("escape.txt");
+    let restricting_sid =
+        super::WindowsRestrictingSid::new_unique().expect("unique restricting SID should resolve");
+    let grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir, &restricting_sid)
+        .expect("minimal workspace grant should be applied durably");
+    let mut request = fixture_request("filesystem-grant");
+    request.env.insert(
+        "SIGIL_GRANTED_ROOT".to_owned(),
+        granted_root.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "SIGIL_GRANTED_EXISTING".to_owned(),
+        existing.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "SIGIL_RESTRICTED_DENIED_PATH".to_owned(),
+        denied.to_string_lossy().into_owned(),
+    );
+
+    let run_result = supervise_restricting_sid_probe(&request, &restricting_sid).await;
+    let restore_result = grant.restore();
+    let (outcome, restricting_sid_count) =
+        run_result.expect("filesystem containment fixture should return a receipt");
+    restore_result.expect("workspace DACL should restore exactly after child cleanup");
+
+    assert_eq!(restricting_sid_count, 3);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        fs::read_to_string(&existing).expect("existing file should remain readable"),
+        "modified"
+    );
+    assert_eq!(
+        fs::read_to_string(granted_root.join("created.txt"))
+            .expect("new workspace file should remain readable"),
+        "created"
+    );
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&existing)
+            .expect("restored existing file descriptor should be captured"),
+        existing_descriptor_before,
+        "existing child descriptor retained inherited grant residue"
+    );
+    assert!(
+        !super::WindowsFilesystemGrant::sid_has_mutating_rights(
+            &granted_root.join("created.txt"),
+            &restricting_sid,
+        )
+        .expect("created file effective rights should resolve"),
+        "new child retained the run-specific SID's mutating rights after restore"
+    );
+    assert!(!granted_root.join("deleted.txt").exists());
+    assert!(!denied.exists(), "sibling path escaped the root grant");
+    assert!(
+        !super::WindowsFilesystemGrant::recover(&granted_root, &state_dir)
+            .expect("clean grant state should be recoverable"),
+        "successful restore left a recovery record"
+    );
+}
+
+#[cfg(windows)]
+#[serial]
+#[tokio::test]
 async fn restricted_launch_probe_preserves_unicode_environment_and_path() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let marker = temp.path().join("值 with spaces.txt");
@@ -569,6 +642,26 @@ fn restricted_process_fixture() {
                 .expect("denied write path should be provided");
             let error = fs::write(denied_path, b"escaped")
                 .expect_err("write-restricted token unexpectedly wrote an ungranted path");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        "filesystem-grant" => {
+            let root = std::env::var_os("SIGIL_GRANTED_ROOT")
+                .map(PathBuf::from)
+                .expect("granted root should be provided");
+            let existing = std::env::var_os("SIGIL_GRANTED_EXISTING")
+                .map(PathBuf::from)
+                .expect("existing granted file should be provided");
+            let denied_path = std::env::var_os("SIGIL_RESTRICTED_DENIED_PATH")
+                .map(PathBuf::from)
+                .expect("denied write path should be provided");
+            fs::write(existing, b"modified").expect("granted existing file should be modified");
+            fs::write(root.join("created.txt"), b"created")
+                .expect("file should be created in granted root");
+            let deleted = root.join("deleted.txt");
+            fs::write(&deleted, b"delete").expect("file should be created before delete");
+            fs::remove_file(deleted).expect("file should be deleted in granted root");
+            let error = fs::write(denied_path, b"escaped")
+                .expect_err("write-restricted token unexpectedly wrote outside granted root");
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
         "descendant-parent" => {
