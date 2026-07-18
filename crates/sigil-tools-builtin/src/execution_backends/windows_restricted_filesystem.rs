@@ -32,10 +32,10 @@ use windows_sys::Win32::{
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_DELETE_CHILD,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE,
-        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW, GetFileInformationByHandle,
-        GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
-        WRITE_OWNER,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW,
+        GetFileInformationByHandle, GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING,
+        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
 };
 
@@ -185,6 +185,14 @@ impl WindowsFilesystemGrant {
         let effective = effective_rights_for_path(path, restricting_sid)?;
         Ok(effective & FORBIDDEN_ROOT_GRANT_ACCESS != 0)
     }
+
+    #[cfg(test)]
+    pub(crate) fn apply_test_root_grant(
+        root: &Path,
+        restricting_sid: &WindowsRestrictingSid,
+    ) -> Result<()> {
+        apply_root_grant(root, restricting_sid)
+    }
 }
 
 impl Drop for WindowsFilesystemGrant {
@@ -321,6 +329,11 @@ fn durable_grant_marker_is_valid(paths: &GrantPaths) -> Result<bool> {
 }
 
 fn apply_and_verify_root_grant(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<()> {
+    apply_root_grant(root, restricting_sid)?;
+    verify_effective_root_grant(root, restricting_sid)
+}
+
+fn apply_root_grant(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<()> {
     let wide = nul_terminated(root.as_os_str(), "grant root")?;
     let mut current_dacl: *mut ACL = null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
@@ -403,7 +416,7 @@ fn apply_and_verify_root_grant(root: &Path, restricting_sid: &WindowsRestricting
             .context("SetNamedSecurityInfoW failed for Windows grant root");
     }
 
-    verify_effective_root_grant(root, restricting_sid)
+    Ok(())
 }
 
 fn verify_effective_root_grant(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<()> {
@@ -700,6 +713,7 @@ fn ensure_supported_local_ntfs(root: &Path) -> Result<()> {
 fn root_identity(root: &Path) -> Result<RootIdentity> {
     let file = open_root_identity_handle(
         root,
+        FILE_READ_ATTRIBUTES | READ_CONTROL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         "identity",
     )?;
@@ -707,19 +721,28 @@ fn root_identity(root: &Path) -> Result<RootIdentity> {
 }
 
 fn open_root_guard(root: &Path) -> Result<(File, RootIdentity)> {
-    let file =
-        open_root_identity_handle(root, FILE_SHARE_READ | FILE_SHARE_WRITE, "identity guard")?;
+    let file = open_root_identity_handle(
+        root,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        "identity guard",
+    )?;
     let identity = root_identity_from_handle(&file)?;
     Ok((file, identity))
 }
 
-fn open_root_identity_handle(root: &Path, share_mode: u32, label: &str) -> Result<File> {
+fn open_root_identity_handle(
+    root: &Path,
+    desired_access: u32,
+    share_mode: u32,
+    label: &str,
+) -> Result<File> {
     let wide = nul_terminated(root.as_os_str(), "grant root")?;
     // SAFETY: wide is NUL-terminated. The returned handle is checked and then owned by File.
     let raw = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            FILE_READ_ATTRIBUTES | READ_CONTROL,
+            desired_access,
             share_mode,
             null(),
             OPEN_EXISTING,

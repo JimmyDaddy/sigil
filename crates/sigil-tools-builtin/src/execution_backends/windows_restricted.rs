@@ -122,12 +122,12 @@ mod native {
                 ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW,
                 TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
             },
-            CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetLengthSid,
-            GetTokenInformation, LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME,
-            SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SetTokenInformation,
-            TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
-            TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenGroups,
-            TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation,
+            LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED,
+            SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
+            TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
+            TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenPrivileges, TokenRestrictedSids,
+            WRITE_RESTRICTED,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -147,8 +147,6 @@ mod native {
     };
 
     const TERMINATED_BY_SUPERVISOR_EXIT_CODE: u32 = 1;
-    const SE_GROUP_LOGON_ID_MASK: u32 = 0xC000_0000;
-
     #[derive(Clone, Copy)]
     pub(crate) struct RestrictedTokenPrivilegeEvidence {
         pub(crate) source_enabled_non_traverse_privilege_count: u32,
@@ -159,16 +157,6 @@ mod native {
     pub(crate) struct WindowsRestrictingSid {
         sid: PSID,
         value: String,
-    }
-
-    struct CopiedSid {
-        storage: Vec<usize>,
-    }
-
-    impl CopiedSid {
-        fn as_ptr(&self) -> PSID {
-            self.storage.as_ptr().cast_mut().cast::<c_void>()
-        }
     }
 
     impl WindowsRestrictingSid {
@@ -600,31 +588,14 @@ mod native {
         restricting_sid: Option<&WindowsRestrictingSid>,
     ) -> Result<OwnedHandle> {
         let mut restricted: HANDLE = null_mut();
-        let logon_sid = restricting_sid
-            .map(|_| current_logon_sid(existing))
-            .transpose()?;
-        let everyone_sid = restricting_sid
-            .map(|_| WindowsRestrictingSid::from_string("S-1-1-0"))
-            .transpose()?;
-        let restricting_entries = match (restricting_sid, logon_sid.as_ref(), everyone_sid.as_ref())
-        {
-            (Some(capability), Some(logon), Some(everyone)) => vec![
-                SID_AND_ATTRIBUTES {
+        let restricting_entries = restricting_sid
+            .map(|capability| {
+                vec![SID_AND_ATTRIBUTES {
                     Sid: capability.as_ptr(),
                     Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: logon.as_ptr(),
-                    Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: everyone.as_ptr(),
-                    Attributes: 0,
-                },
-            ],
-            (None, None, None) => Vec::new(),
-            _ => bail!("incomplete Windows restricting SID set"),
-        };
+                }]
+            })
+            .unwrap_or_default();
         let restricting_count = u32::try_from(restricting_entries.len())
             .context("restricting SID count exceeds u32")?;
         let restricting_entries_ptr = if restricting_entries.is_empty() {
@@ -658,13 +629,8 @@ mod native {
         }
         // SAFETY: CreateRestrictedToken succeeded and transferred ownership of the token handle.
         let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
-        if let (Some(capability), Some(logon), Some(everyone)) =
-            (restricting_sid, logon_sid.as_ref(), everyone_sid.as_ref())
-        {
-            set_restricted_token_default_dacl(
-                raw_handle(&restricted),
-                &[capability.as_ptr(), logon.as_ptr(), everyone.as_ptr()],
-            )?;
+        if let Some(capability) = restricting_sid {
+            set_restricted_token_default_dacl(raw_handle(&restricted), &[capability.as_ptr()])?;
         }
         Ok(restricted)
     }
@@ -724,81 +690,6 @@ mod native {
             return Err(error).context("SetTokenInformation(TokenDefaultDacl) failed");
         }
         Ok(())
-    }
-
-    fn current_logon_sid(token: HANDLE) -> Result<CopiedSid> {
-        let mut bytes = 0_u32;
-        // SAFETY: This is the documented sizing call and bytes is a valid output pointer.
-        let _ = unsafe { GetTokenInformation(token, TokenGroups, null_mut(), 0, &raw mut bytes) };
-        if bytes < u32::try_from(size_of::<TOKEN_GROUPS>()).expect("TOKEN_GROUPS size fits u32") {
-            bail!("TokenGroups sizing returned an invalid buffer length");
-        }
-        let words = usize::try_from(bytes)
-            .context("TokenGroups buffer length exceeds usize")?
-            .div_ceil(size_of::<usize>());
-        let mut storage = vec![0_usize; words];
-        let storage_bytes = u32::try_from(storage.len() * size_of::<usize>())
-            .context("TokenGroups storage length exceeds u32")?;
-        let mut returned_bytes = 0_u32;
-        // SAFETY: storage is aligned and sized for TOKEN_GROUPS, token remains live, and
-        // returned_bytes is a valid output pointer.
-        if unsafe {
-            GetTokenInformation(
-                token,
-                TokenGroups,
-                storage.as_mut_ptr().cast::<c_void>(),
-                storage_bytes,
-                &raw mut returned_bytes,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error())
-                .context("GetTokenInformation(TokenGroups) failed");
-        }
-        let token_groups = storage.as_ptr().cast::<TOKEN_GROUPS>();
-        // SAFETY: GetTokenInformation initialized a TOKEN_GROUPS header in storage.
-        let count = unsafe { (*token_groups).GroupCount as usize };
-        // SAFETY: token_groups points at a complete TOKEN_GROUPS header in storage.
-        let groups_ptr =
-            unsafe { std::ptr::addr_of!((*token_groups).Groups).cast::<SID_AND_ATTRIBUTES>() };
-        let groups_offset = groups_ptr as usize - token_groups as usize;
-        let required_bytes = groups_offset
-            .checked_add(
-                count
-                    .checked_mul(size_of::<SID_AND_ATTRIBUTES>())
-                    .context("TokenGroups entry count overflowed")?,
-            )
-            .context("TokenGroups buffer size overflowed")?;
-        let returned_bytes =
-            usize::try_from(returned_bytes).context("TokenGroups returned length exceeds usize")?;
-        if required_bytes > returned_bytes.min(storage.len() * size_of::<usize>()) {
-            bail!("TokenGroups returned a truncated group array");
-        }
-        // SAFETY: The validated variable-length array contains count SID_AND_ATTRIBUTES entries.
-        let groups = unsafe { std::slice::from_raw_parts(groups_ptr, count) };
-        let logon_sid = groups
-            .iter()
-            .find(|group| group.Attributes & SE_GROUP_LOGON_ID_MASK == SE_GROUP_LOGON_ID_MASK)
-            .map(|group| group.Sid)
-            .context("current token does not contain a logon SID")?;
-        copy_sid(logon_sid)
-    }
-
-    fn copy_sid(source: PSID) -> Result<CopiedSid> {
-        // SAFETY: source points into the validated TokenGroups buffer for this call.
-        let bytes = unsafe { GetLengthSid(source) };
-        if bytes == 0 {
-            return Err(io::Error::last_os_error()).context("GetLengthSid failed for logon SID");
-        }
-        let words = usize::try_from(bytes)
-            .context("logon SID length exceeds usize")?
-            .div_ceil(size_of::<usize>());
-        let mut storage = vec![0_usize; words];
-        // SAFETY: storage is aligned and large enough for bytes, and source is a valid SID.
-        if unsafe { CopySid(bytes, storage.as_mut_ptr().cast::<c_void>(), source) } == 0 {
-            return Err(io::Error::last_os_error()).context("CopySid failed for logon SID");
-        }
-        Ok(CopiedSid { storage })
     }
 
     fn restricted_token_privilege_evidence(

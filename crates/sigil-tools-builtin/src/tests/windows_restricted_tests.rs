@@ -229,8 +229,8 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
             .expect("write-restricted probe should return a receipt");
 
     assert_eq!(
-        restricting_sid_count, 3,
-        "token should carry the unique capability, logon, and Everyone runtime SIDs"
+        restricting_sid_count, 1,
+        "token should carry only the unique workspace restricting SID"
     );
     assert_eq!(
         outcome.exit_code,
@@ -254,12 +254,19 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let granted_root = temp.path().join("workspace");
     let denied_root = temp.path().join("sibling");
+    let broad_root = temp.path().join("broad-sibling");
     let state_dir = temp.path().join("acl-state");
     fs::create_dir_all(&granted_root).expect("granted root should be created");
     fs::create_dir_all(&denied_root).expect("denied root should be created");
+    fs::create_dir_all(&broad_root).expect("broad sibling root should be created");
+    let everyone_sid =
+        super::WindowsRestrictingSid::from_string("S-1-1-0").expect("Everyone SID should resolve");
+    super::WindowsFilesystemGrant::apply_test_root_grant(&broad_root, &everyone_sid)
+        .expect("broad sibling should grant write access to Everyone for the negative fixture");
     let existing = granted_root.join("existing.txt");
     fs::write(&existing, b"before").expect("existing workspace file should be created");
     let denied = denied_root.join("escape.txt");
+    let broad_denied = broad_root.join("escape.txt");
     let grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir)
         .expect("minimal durable workspace grant should be provisioned");
     let renamed_root = temp.path().join("renamed-workspace");
@@ -286,6 +293,10 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         "SIGIL_RESTRICTED_DENIED_PATH".to_owned(),
         denied.to_string_lossy().into_owned(),
     );
+    request.env.insert(
+        "SIGIL_RESTRICTED_BROAD_PATH".to_owned(),
+        broad_denied.to_string_lossy().into_owned(),
+    );
 
     let run_result = supervise_restricting_sid_probe(&request, grant.restricting_sid()).await;
     let (outcome, restricting_sid_count) =
@@ -294,7 +305,7 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         .release()
         .expect("durable workspace grant should revalidate before releasing its lease");
 
-    assert_eq!(restricting_sid_count, 3);
+    assert_eq!(restricting_sid_count, 1);
     assert_eq!(outcome.exit_code, Some(0));
     assert_eq!(
         fs::read_to_string(&existing).expect("existing file should remain readable"),
@@ -360,7 +371,7 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         supervise_restricting_sid_probe(&request, second_grant.restricting_sid())
             .await
             .expect("second filesystem containment run should return a receipt");
-    assert_eq!(second_restricting_sid_count, 3);
+    assert_eq!(second_restricting_sid_count, 1);
     assert_eq!(second_outcome.exit_code, Some(0));
     assert_eq!(
         super::WindowsFilesystemGrant::descriptor_hash(&granted_root.join("created.txt"))
@@ -373,6 +384,10 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         .expect("revalidated durable workspace lease should release cleanly");
     assert!(!granted_root.join("deleted.txt").exists());
     assert!(!denied.exists(), "sibling path escaped the root grant");
+    assert!(
+        !broad_denied.exists(),
+        "Everyone-writable sibling escaped the unique restricting SID"
+    );
 }
 
 #[cfg(windows)]
@@ -709,6 +724,9 @@ fn restricted_process_fixture() {
             let denied_path = std::env::var_os("SIGIL_RESTRICTED_DENIED_PATH")
                 .map(PathBuf::from)
                 .expect("denied write path should be provided");
+            let broad_path = std::env::var_os("SIGIL_RESTRICTED_BROAD_PATH")
+                .map(PathBuf::from)
+                .expect("broad denied write path should be provided");
             fs::write(existing, b"modified").expect("granted existing file should be modified");
             fs::write(root.join("created.txt"), b"created")
                 .expect("file should be created in granted root");
@@ -717,6 +735,10 @@ fn restricted_process_fixture() {
             fs::remove_file(deleted).expect("file should be deleted in granted root");
             let error = fs::write(denied_path, b"escaped")
                 .expect_err("write-restricted token unexpectedly wrote outside granted root");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            let error = fs::write(broad_path, b"escaped").expect_err(
+                "unique workspace SID unexpectedly wrote an Everyone-writable external path",
+            );
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
         "descendant-parent" => {
