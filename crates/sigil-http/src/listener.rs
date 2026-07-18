@@ -3,6 +3,10 @@ use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sigil_kernel::PublicRunEventKind;
+use sigil_runtime::{
+    LocalSessionCatalogState, SessionCatalogProjectionError, SessionCatalogProjectionQuery,
+    SessionCatalogProjectionService,
+};
 use thiserror::Error as ThisError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -65,6 +69,7 @@ pub struct HttpLocalServer {
     registry: Arc<HttpSessionRunRegistry>,
     event_bus: Arc<HttpLiveEventBus>,
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
+    session_catalog: Option<Arc<SessionCatalogProjectionService>>,
 }
 
 impl HttpLocalServer {
@@ -100,7 +105,7 @@ impl HttpLocalServer {
         registry: Arc<HttpSessionRunRegistry>,
         event_bus: Arc<HttpLiveEventBus>,
     ) -> Result<Self, HttpListenerError> {
-        Self::bind_with_surfaces(config, token, registry, event_bus, None).await
+        Self::bind_with_surfaces(config, token, registry, event_bus, None, None).await
     }
 
     /// Binds the production listener with durable run and disclosure replay surfaces.
@@ -114,13 +119,22 @@ impl HttpLocalServer {
         registry: Arc<HttpSessionRunRegistry>,
         event_bus: Arc<HttpLiveEventBus>,
         disclosure_journal: Arc<HttpDurableEgressDisclosureJournal>,
+        session_catalog: Arc<SessionCatalogProjectionService>,
     ) -> Result<Self, HttpListenerError> {
         if !event_bus.has_durable_journal() {
             return Err(HttpListenerError::Config {
                 message: "production listener requires a durable protocol journal".to_owned(),
             });
         }
-        Self::bind_with_surfaces(config, token, registry, event_bus, Some(disclosure_journal)).await
+        Self::bind_with_surfaces(
+            config,
+            token,
+            registry,
+            event_bus,
+            Some(disclosure_journal),
+            Some(session_catalog),
+        )
+        .await
     }
 
     async fn bind_with_surfaces(
@@ -129,6 +143,7 @@ impl HttpLocalServer {
         registry: Arc<HttpSessionRunRegistry>,
         event_bus: Arc<HttpLiveEventBus>,
         disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
+        session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     ) -> Result<Self, HttpListenerError> {
         config
             .validate()
@@ -149,6 +164,7 @@ impl HttpLocalServer {
             registry,
             event_bus,
             disclosure_journal,
+            session_catalog,
         })
     }
 
@@ -182,6 +198,7 @@ impl HttpLocalServer {
                     let registry = Arc::clone(&self.registry);
                     let event_bus = Arc::clone(&self.event_bus);
                     let disclosure_journal = self.disclosure_journal.clone();
+                    let session_catalog = self.session_catalog.clone();
                     let connection_shutdown = connection_shutdown.subscribe();
                     connections.spawn(async move {
                         handle_http_connection(
@@ -190,6 +207,7 @@ impl HttpLocalServer {
                             registry,
                             event_bus,
                             disclosure_journal,
+                            session_catalog,
                             connection_shutdown,
                         )
                         .await
@@ -232,6 +250,7 @@ async fn handle_http_connection(
     registry: Arc<HttpSessionRunRegistry>,
     event_bus: Arc<HttpLiveEventBus>,
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
+    session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), HttpListenerError> {
     let request = tokio::select! {
@@ -260,6 +279,7 @@ async fn handle_http_connection(
                     &validator,
                     &registry,
                     disclosure_journal.as_deref(),
+                    session_catalog.as_deref(),
                 )
             })
             .await
@@ -286,6 +306,7 @@ fn route_http_request(
     validator: &HttpAuthValidator,
     registry: &HttpSessionRunRegistry,
     disclosure_journal: Option<&HttpDurableEgressDisclosureJournal>,
+    session_catalog: Option<&SessionCatalogProjectionService>,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -298,6 +319,39 @@ fn route_http_request(
 
     if request.method == "GET" && request.path == "/sessions" {
         return json_response(200, json!({ "sessions": registry.list_sessions() }));
+    }
+
+    if request.method == "GET" && request.path == "/session-catalog" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let query = match parse_session_catalog_query(request.query.as_deref()) {
+            Ok(query) => query,
+            Err(message) => return http_error_response(400, "invalid_query", message),
+        };
+        return match session_catalog.reconcile_and_query(query) {
+            Ok(page) => json_response(200, json!(page)),
+            Err(SessionCatalogProjectionError::InvalidQuery { message }) => {
+                http_error_response(400, "invalid_query", message)
+            }
+            Err(SessionCatalogProjectionError::InvalidCursor { message }) => {
+                http_error_response(400, "invalid_cursor", message)
+            }
+            Err(SessionCatalogProjectionError::StaleCursor { .. }) => http_error_response(
+                409,
+                "stale_cursor",
+                "session catalog changed; restart pagination from the first page",
+            ),
+            Err(_) => http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            ),
+        };
     }
 
     if request.method == "GET" && request.path == "/openapi.json" {
@@ -580,6 +634,80 @@ fn parse_json_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Er
     serde_json::from_slice(body)
 }
 
+fn parse_session_catalog_query(
+    raw_query: Option<&str>,
+) -> Result<SessionCatalogProjectionQuery, String> {
+    let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
+        return Ok(SessionCatalogProjectionQuery::default());
+    };
+    validate_percent_encoding(raw_query)?;
+    let mut query = SessionCatalogProjectionQuery::default();
+    let mut seen = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
+            return Err("query must use valid UTF-8".to_owned());
+        }
+        let name = name.into_owned();
+        if seen.insert(name.clone(), ()).is_some() {
+            return Err(format!("query parameter '{name}' must appear at most once"));
+        }
+        let value = value.into_owned();
+        match name.as_str() {
+            "limit" => {
+                query.limit = value
+                    .parse()
+                    .map_err(|_| "limit must be a positive integer".to_owned())?;
+            }
+            "cursor" => query.cursor = Some(value),
+            "q" => query.search = Some(value),
+            "provider" => query.provider_name = Some(value),
+            "pinned" => {
+                query.pinned = Some(match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("pinned must be 'true' or 'false'".to_owned()),
+                });
+            }
+            "state" => {
+                query.source_state = Some(match value.as_str() {
+                    "ready" => LocalSessionCatalogState::Ready,
+                    "oversized" => LocalSessionCatalogState::Oversized,
+                    "scan_budget_exceeded" => LocalSessionCatalogState::ScanBudgetExceeded,
+                    "unsupported_legacy" => LocalSessionCatalogState::UnsupportedLegacy,
+                    "invalid" => LocalSessionCatalogState::Invalid,
+                    _ => {
+                        return Err(
+                            "state must be ready, oversized, scan_budget_exceeded, unsupported_legacy, or invalid"
+                                .to_owned(),
+                        );
+                    }
+                });
+            }
+            _ => return Err(format!("unknown query parameter '{name}'")),
+        }
+    }
+    Ok(query)
+}
+
+fn validate_percent_encoding(value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return Err("query contains invalid percent encoding".to_owned());
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
 async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpListenerError> {
     let mut buffer = Vec::new();
     let header_end = loop {
@@ -616,12 +744,28 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpLi
             message: "missing request method".to_owned(),
         })?
         .to_owned();
-    let path = request_parts
+    let request_target = request_parts
         .next()
         .ok_or_else(|| HttpListenerError::Request {
             message: "missing request path".to_owned(),
         })?
         .to_owned();
+    if request_target.contains('#') {
+        return Err(HttpListenerError::Request {
+            message: "request target must not contain a fragment".to_owned(),
+        });
+    }
+    let (path, query) = request_target
+        .split_once('?')
+        .map_or((request_target.as_str(), None), |(path, query)| {
+            (path, Some(query.to_owned()))
+        });
+    if !path.starts_with('/') {
+        return Err(HttpListenerError::Request {
+            message: "request path must be absolute".to_owned(),
+        });
+    }
+    let path = path.to_owned();
     let mut headers = BTreeMap::new();
     for line in lines {
         if line.trim().is_empty() {
@@ -665,6 +809,7 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpLi
     Ok(HttpRequest {
         method,
         path,
+        query,
         headers,
         body,
     })
@@ -782,6 +927,7 @@ fn http_reason(status: u16) -> &'static str {
 struct HttpRequest {
     method: String,
     path: String,
+    query: Option<String>,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
 }

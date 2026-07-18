@@ -1,4 +1,5 @@
 use std::{
+    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc, Barrier, Mutex, MutexGuard,
@@ -9,10 +10,11 @@ use std::{
 
 use serde_json::{Value, json};
 use sigil_kernel::{
-    EgressDataCategory, EgressDisclosureKind, EgressNetworkRoute, PreEgressDisclosure,
-    PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision, ToolExecutionId,
-    ToolProgressEvent,
+    AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
+    EgressNetworkRoute, JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent,
+    PublicRunEventKind, Session, ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent,
 };
+use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -290,6 +292,136 @@ async fn local_server_rejects_unauthenticated_session_command() {
     assert_eq!(body["error"]["code"], "unauthorized");
     assert!(driver.starts().is_empty());
     let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn non_production_server_authenticates_before_reporting_catalog_unavailable() {
+    let (address, shutdown, _driver) = spawn_test_http_server().await;
+
+    let (status, body) = http_raw_request(address, http_get("/session-catalog", None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) = http_raw_request(
+        address,
+        http_get("/session-catalog", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(body["error"]["code"], "session_catalog_unavailable");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn production_session_catalog_queries_durable_history_and_rejects_stale_cursor() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).expect("session directory should exist");
+    write_catalog_session(
+        &sessions.join("first.jsonl"),
+        "Desktop catalog first",
+        "deepseek",
+        "chat",
+    );
+    write_catalog_session(
+        &sessions.join("second.jsonl"),
+        "Desktop catalog second",
+        "deepseek",
+        "chat",
+    );
+    let projection = Arc::new(SessionCatalogProjectionService::new(
+        LocalSessionLifecycleService::new(
+            "workspace-http-catalog",
+            &sessions,
+            temp.path().join("exports"),
+        ),
+        temp.path().join("projection/session-catalog.sqlite3"),
+    ));
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 8)
+            .expect("protocol journal should open"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 8)
+            .expect("disclosure journal should open"),
+    );
+    let registry = Arc::new(HttpSessionRunRegistry::new(Arc::new(
+        RecordingRunDriver::default(),
+    )));
+    let server = HttpLocalServer::bind_production(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        registry,
+        event_bus,
+        disclosure_journal,
+        projection,
+    )
+    .await
+    .expect("production listener should bind");
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, first_page) = http_raw_request(
+        address,
+        http_get(
+            "/session-catalog?limit=1&provider=deepseek&q=Desktop",
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(first_page["workspace_id"], "workspace-http-catalog");
+    assert_eq!(first_page["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first_page["entries"][0]["provider_name"], "deepseek");
+    assert!(first_page["entries"][0].get("session_log_path").is_none());
+    let cursor = first_page["next_cursor"]
+        .as_str()
+        .expect("first page should have a cursor")
+        .to_owned();
+
+    for path in [
+        "/session-catalog?unknown=value",
+        "/session-catalog?limit=1&limit=2",
+        "/session-catalog?q=%zz",
+    ] {
+        let (status, body) =
+            http_raw_request(address, http_get(path, Some("secret-token"), None)).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_query");
+    }
+
+    write_catalog_session(
+        &sessions.join("third.jsonl"),
+        "Desktop catalog third",
+        "deepseek",
+        "chat",
+    );
+    let stale_target =
+        format!("/session-catalog?limit=1&provider=deepseek&q=Desktop&cursor={cursor}");
+    let (status, body) =
+        http_raw_request(address, http_get(&stale_target, Some("secret-token"), None)).await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "stale_cursor");
+    assert!(
+        !body
+            .to_string()
+            .contains(&temp.path().display().to_string())
+    );
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server task should join")
+        .expect("server should drain");
 }
 
 #[tokio::test]
@@ -878,6 +1010,14 @@ async fn production_listener_exposes_authenticated_durable_disclosure_replay() {
         registry,
         event_bus,
         disclosure_journal,
+        Arc::new(SessionCatalogProjectionService::new(
+            LocalSessionLifecycleService::new(
+                "workspace-http-test",
+                temp.path().join("sessions"),
+                temp.path().join("exports"),
+            ),
+            temp.path().join("session-catalog.sqlite3"),
+        )),
     )
     .await
     .expect("production listener should bind");
@@ -939,6 +1079,9 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/sessions"]["post"]["responses"]["401"].is_object());
     assert!(document["paths"]["/sessions"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions"]["post"]["responses"]["500"].is_object());
+    assert!(document["paths"]["/session-catalog"]["get"]["responses"]["200"].is_object());
+    assert!(document["paths"]["/session-catalog"]["get"]["responses"]["409"].is_object());
+    assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
@@ -3062,6 +3205,27 @@ fn recording_session_log_path(session_id: &str) -> String {
         .join(format!("{session_id}.jsonl"))
         .display()
         .to_string()
+}
+
+fn write_catalog_session(path: &std::path::Path, prompt: &str, provider: &str, model: &str) {
+    let store = JsonlSessionStore::new(path).expect("session store should open");
+    let mut session = Session::new(provider, model).with_store(store);
+    session
+        .append_control(ControlEntry::SessionIdentity {
+            provider_name: provider.to_owned(),
+            model_name: model.to_owned(),
+        })
+        .expect("identity should persist");
+    session
+        .append_user_message(ModelMessage::user(prompt))
+        .expect("user message should persist");
+    session
+        .append_assistant_message(ModelMessage::assistant_with_kind(
+            Some("done".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ))
+        .expect("assistant message should persist");
 }
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;

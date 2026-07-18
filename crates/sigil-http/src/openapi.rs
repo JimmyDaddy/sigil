@@ -7,8 +7,7 @@ pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
 
 /// Returns the MVP OpenAPI description for the local HTTP command surface.
 ///
-/// The document intentionally covers only routes implemented by this crate:
-/// health, session creation, run start, and approval decision submission.
+/// The document intentionally covers only routes implemented by this crate.
 #[must_use]
 pub fn http_openapi_document() -> Value {
     json!({
@@ -105,6 +104,68 @@ pub fn http_openapi_document() -> Value {
                         },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/session-catalog": {
+                "get": {
+                    "summary": "List durable historical sessions for the current workspace",
+                    "description": "Reconciles the rebuildable SQLite projection from durable JSONL sources, then returns a generation-consistent keyset page. Active run, approval, and progress state are not included.",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+                        },
+                        {
+                            "name": "cursor",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" }
+                        },
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": false,
+                            "description": "Literal case-insensitive title search",
+                            "schema": { "type": "string", "maxLength": 160 }
+                        },
+                        {
+                            "name": "provider",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string", "maxLength": 128 }
+                        },
+                        {
+                            "name": "pinned",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "boolean" }
+                        },
+                        {
+                            "name": "state",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["ready", "oversized", "scan_budget_exceeded", "unsupported_legacy", "invalid"]
+                            }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Generation-consistent historical session page",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionCatalogPage" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
             },
@@ -332,6 +393,48 @@ pub fn http_openapi_document() -> Value {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/SessionSnapshot" }
                         }
+                    }
+                },
+                "SessionCatalogPage": {
+                    "type": "object",
+                    "required": ["workspace_id", "generation", "reconciled_at_unix_ms", "degraded_source_count", "identity_conflict_count", "truncated_source_count", "entries"],
+                    "properties": {
+                        "workspace_id": { "type": "string" },
+                        "generation": { "type": "integer", "format": "uint64" },
+                        "reconciled_at_unix_ms": { "type": "integer", "format": "uint64" },
+                        "degraded_source_count": { "type": "integer", "format": "uint64" },
+                        "identity_conflict_count": { "type": "integer", "format": "uint64" },
+                        "truncated_source_count": { "type": "integer", "format": "uint64" },
+                        "entries": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/SessionCatalogEntry" }
+                        },
+                        "next_cursor": { "type": ["string", "null"] }
+                    }
+                },
+                "SessionCatalogEntry": {
+                    "type": "object",
+                    "description": "Compact historical metadata only; message and tool bodies are absent.",
+                    "required": ["workspace_id", "session_ref", "source_state", "source_bytes", "source_modified_at_unix_ms", "user_message_count", "assistant_message_count", "tool_result_count", "control_entry_count", "pinned", "indexed_at_unix_ms"],
+                    "properties": {
+                        "workspace_id": { "type": "string" },
+                        "session_ref": { "type": "string" },
+                        "session_id": { "type": ["string", "null"] },
+                        "source_state": {
+                            "type": "string",
+                            "enum": ["ready", "oversized", "scan_budget_exceeded", "unsupported_legacy", "invalid"]
+                        },
+                        "source_bytes": { "type": "integer", "format": "uint64" },
+                        "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" },
+                        "provider_name": { "type": ["string", "null"] },
+                        "model_name": { "type": ["string", "null"] },
+                        "title": { "type": ["string", "null"] },
+                        "user_message_count": { "type": "integer", "format": "uint64" },
+                        "assistant_message_count": { "type": "integer", "format": "uint64" },
+                        "tool_result_count": { "type": "integer", "format": "uint64" },
+                        "control_entry_count": { "type": "integer", "format": "uint64" },
+                        "pinned": { "type": "boolean" },
+                        "indexed_at_unix_ms": { "type": "integer", "format": "uint64" }
                     }
                 },
                 "DisclosureListResponse": {

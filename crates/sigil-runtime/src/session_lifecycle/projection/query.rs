@@ -94,6 +94,24 @@ struct ValidatedSessionCatalogQuery {
 }
 
 impl SessionCatalogProjectionService {
+    /// Validates a query, reconciles durable sources, then reads one generation-consistent page.
+    ///
+    /// This is the preferred boundary for interactive clients that need current historical
+    /// session state. Query validation happens before filesystem reconciliation so malformed
+    /// client input cannot trigger projection work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed query, reconciliation, schema, cursor, or row decoding error.
+    pub fn reconcile_and_query(
+        &self,
+        query: SessionCatalogProjectionQuery,
+    ) -> Result<SessionCatalogProjectionPage, SessionCatalogProjectionError> {
+        validate_query(&self.lifecycle.workspace_id, query.clone())?;
+        self.reconcile()?;
+        self.query(query)
+    }
+
     /// Queries one generation-consistent historical page without reconciling durable sources.
     ///
     /// Callers that require latest durable history should call [`Self::reconcile`] first. Active

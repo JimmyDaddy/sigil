@@ -453,6 +453,26 @@ fn catalog_query_rejects_unbounded_blank_and_malformed_inputs() -> Result<()> {
 }
 
 #[test]
+fn reconcile_and_query_rejects_invalid_input_before_database_creation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+
+    let error = projection
+        .reconcile_and_query(SessionCatalogProjectionQuery {
+            limit: 0,
+            ..SessionCatalogProjectionQuery::default()
+        })
+        .expect_err("invalid query must fail before reconciliation");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::InvalidQuery { .. }
+    ));
+    assert!(!projection.database_path().exists());
+    Ok(())
+}
+
+#[test]
 fn generation_compare_and_swap_rejects_an_older_scan() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

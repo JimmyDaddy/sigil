@@ -11,10 +11,11 @@ use anyhow::{Result, anyhow};
 use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess,
-    ToolCall, ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
-    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
-    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
+    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, RootConfig, RunEvent,
+    SessionConfig, StorageConfig, ToolAccess, ToolCall, ToolCategory, ToolErrorKind,
+    ToolExecutionId, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceTrust, resolve_workspace_root,
+    workspace_trust_from_entries,
 };
 use sigil_runtime::application_run::{application_run_input, default_application_session_path};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
@@ -26,10 +27,10 @@ use tokio::{
 
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, RunOutput, ServeOptions,
-    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, drain_provider_stream,
-    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_plan, render_version, run_machine_command_with_cancellation,
-    run_machine_command_with_writer,
+    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
+    drain_provider_stream, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
+    render_run_event, render_serve_startup_plan, render_version,
+    run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
 fn boxed_chunk_stream(
@@ -52,6 +53,25 @@ fn resolve_workspace_root_uses_config_parent() -> Result<()> {
             .parent()
             .expect("config path should have a parent")
             .join("workspace/project")
+    );
+    Ok(())
+}
+
+#[test]
+fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let paths = sigil_runtime::resolve_sigil_paths(
+        &StorageConfig::default(),
+        &SessionConfig::default(),
+        workspace.path(),
+    );
+
+    let service = build_session_catalog_service(&paths);
+
+    assert_eq!(service.database_path(), paths.session_catalog_db);
+    assert_eq!(
+        paths.session_catalog_db.parent(),
+        Some(paths.projections_root.as_path())
     );
     Ok(())
 }

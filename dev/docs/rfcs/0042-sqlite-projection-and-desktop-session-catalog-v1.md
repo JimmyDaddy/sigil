@@ -1,6 +1,6 @@
 # RFC-0042 SQLite Projection and Desktop Session Catalog V1
 
-状态：accepted / R42.0-R42.2 implemented；R42.3-R42.5 pending
+状态：accepted / R42.0-R42.3 implemented；R42.4-R42.5 pending
 
 创建日期：2026-07-19
 
@@ -271,3 +271,16 @@ session registry。缺口是跨进程重启的历史 catalog、稳定分页/sear
   bounded Unicode-lowercase title literal search，`%`、`_`和escape char不获得wildcard语义。
 - 测试覆盖unchanged reuse、append/delete/pin增量更新、generation CAS、三页无重无漏、filter-bound cursor、
   stale cursor、literal search、provider/pin/state filter和malformed/unbounded query拒绝。
+
+## 18. R42.3 result
+
+- production `sigil serve` 只在完成既有 durable HTTP journal/driver 装配后注入 workspace-bound catalog；启动
+  warm reconcile失败只降级历史查询并给出bounded warning，不影响run、approval或session append。
+- 新增鉴权的`GET /session-catalog`，同时保留`GET /sessions`的process-local live handle语义。library/test
+  server未注入projection时在鉴权后返回503，SQLite错误不会泄漏database/source绝对路径。
+- HTTP query parser显式拆分path/query，拒绝fragment、错误percent encoding、重复/未知field、非法UTF-8、
+  bool/state/limit；runtime在filesystem reconcile前再次执行bound/filter/cursor验证。
+- projection generation变化时旧cursor稳定映射为409 `stale_cursor`；invalid query/cursor分别映射为400，
+  incompatible/corrupt/busy/reconcile失败映射为503，客户端可以确定何时重启分页。
+- OpenAPI补齐分页、search/provider/pin/state参数、catalog DTO与400/401/409/503响应；HTTP集成测试覆盖auth、
+  unavailable、真实durable JSONL查询、严格parser、stale cursor及绝对路径不泄漏。

@@ -48,6 +48,7 @@ use sigil_runtime::{
         project_doctor_support_report_v1,
     },
 };
+use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService, SigilPaths};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BuildInfo {
@@ -615,9 +616,25 @@ async fn serve_command(
         tokio::runtime::Handle::current(),
     )?);
     let registry = driver.build_registry(command_store)?;
-    let server =
-        HttpLocalServer::bind_production(config, token, registry, event_bus, disclosure_journal)
-            .await?;
+    let session_catalog = std::sync::Arc::new(build_session_catalog_service(&paths));
+    let warm_catalog = std::sync::Arc::clone(&session_catalog);
+    let catalog_ready = tokio::task::spawn_blocking(move || warm_catalog.reconcile())
+        .await
+        .is_ok_and(|result| result.is_ok());
+    if !catalog_ready {
+        eprintln!(
+            "warning: historical session catalog is unavailable; catalog requests will return 503"
+        );
+    }
+    let server = HttpLocalServer::bind_production(
+        config,
+        token,
+        registry,
+        event_bus,
+        disclosure_journal,
+        session_catalog,
+    )
+    .await?;
     plan.bind_addr = server.local_addr()?;
     print!("{}", render_serve_startup_plan(&plan));
     io::stdout().flush()?;
@@ -627,6 +644,15 @@ async fn serve_command(
         })
         .await?;
     Ok(())
+}
+
+fn build_session_catalog_service(paths: &SigilPaths) -> SessionCatalogProjectionService {
+    let lifecycle = LocalSessionLifecycleService::new(
+        paths.workspace_id.clone(),
+        &paths.session_log_dir,
+        &paths.session_exports_root,
+    );
+    SessionCatalogProjectionService::new(lifecycle, &paths.session_catalog_db)
 }
 
 fn build_serve_startup_plan(
