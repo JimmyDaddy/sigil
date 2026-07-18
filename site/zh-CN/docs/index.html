@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sigil 文档</title>
-    <meta name="description" content="按任务选择 Sigil 文档：首次使用、日常 TUI、工作流、配置、provider、安全、排障或参考。">
+    <meta name="description" content="按任务选择 Sigil 文档：首次使用、日常 TUI、工作流、配置、模型服务、安全、排障或参考。">
     <link rel="canonical" href="https://sigil.corerobin.com/zh-CN/docs/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/docs/">
     <link rel="alternate" hreflang="zh-CN" href="https://sigil.corerobin.com/zh-CN/docs/">
@@ -52,14 +52,25 @@
         <details class="nav-menu">
           <summary aria-controls="zh-docs-primary-navigation">菜单</summary>
           <nav id="zh-docs-primary-navigation" aria-label="主要导航">
+            <a href="../#quickstart">安装</a>
+            <a href="../#demo">演示</a>
             <a href="../#workflow">工作流</a>
             <a href="../#safety">安全</a>
+            <a href="visual-tour/">界面导览</a>
             <a href="./" aria-current="page">文档</a>
+            <a href="status/">支持状态</a>
             <a href="../../docs/">English</a>
             <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
           </nav>
         </details>
-        <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">☾</button>
+        <details class="theme-menu" data-theme-menu>
+          <summary data-theme-summary aria-label="主题：跟随系统" title="主题：跟随系统"><span data-theme-icon aria-hidden="true">◐</span></summary>
+          <div class="theme-options" role="group" aria-label="主题">
+            <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>跟随系统</button>
+            <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>浅色</button>
+            <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>深色</button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -72,10 +83,10 @@
         <div class="docs-hero-copy">
           <p class="eyebrow">文档</p>
           <h1>你现在想完成什么？</h1>
-          <p class="lede">从下面选择一个任务，或者搜索精确命令、设置、provider 与问题。</p>
+          <p class="lede">选择你想完成的事情，或者直接搜索命令、设置、模型服务与具体问题。</p>
           <aside class="docs-version-notice" aria-label="开发版本文档">
             <strong>开发版本文档</strong>
-            <span>这些页面跟随 <code>main</code>，已发布的软件包可能稍晚。</span>
+            <span>这些页面基于 <code>main</code> 分支，安装包的更新可能稍晚。</span>
             <a href="installation/">查看安装支持</a>
           </aside>
           <div class="docs-search-panel">
@@ -83,7 +94,7 @@
               <label for="docs-search-zh">搜索文档</label>
               <div class="docs-command-line">
                 <span class="docs-command-prefix" aria-hidden="true">sigil docs &gt;</span>
-                <input id="docs-search-zh" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh" aria-autocomplete="list">
+                <input id="docs-search-zh" type="search" name="q" autocomplete="off" placeholder="搜索模型服务、配置、审批..." aria-controls="docs-search-results-zh" aria-autocomplete="list">
               </div>
               <div class="search-results" id="docs-search-results-zh" aria-label="搜索结果" aria-live="polite"></div>
             </form>
@@ -94,18 +105,18 @@
       <section class="section docs-section" id="user-docs">
         <div class="section-heading">
           <p class="eyebrow">按任务选择</p>
-          <h2>八个入口，每个只解决一类问题。</h2>
+          <h2>从最符合当前任务的指南开始。</h2>
         </div>
         <div class="resource-grid resource-grid-featured task-router">
           <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="01">
             <span class="resource-kicker">首次使用</span>
             <h3>试用 Sigil</h3>
-            <p>安装、完成 Quick Setup、执行只读任务，再检查一个小改动。</p>
+            <p>安装 Sigil、完成引导式设置、提出只读问题，再检查一个小改动。</p>
           </a>
           <a class="resource-card task-card" id="user-guide" href="user-guide/" data-step="02">
             <span class="resource-kicker">日常工作</span>
             <h3>使用 TUI</h3>
-            <p>了解工作界面、常用操作、审批、session 与恢复。</p>
+            <p>熟悉主界面、常用操作、审批、已保存会话和恢复流程。</p>
           </a>
           <a class="resource-card task-card" id="workflows" href="workflows/" data-step="03">
             <span class="resource-kicker">任务模式</span>
@@ -119,8 +130,8 @@
           </a>
           <a class="resource-card task-card" id="providers" href="providers/" data-step="05">
             <span class="resource-kicker">模型与工具</span>
-            <h3>选择 provider 或集成</h3>
-            <p>设置模型 provider、认证方式和 MCP 连接。</p>
+            <h3>选择模型服务或外部工具</h3>
+            <p>接入支持的模型服务，配置认证方式，并添加 MCP 工具。</p>
           </a>
           <a class="resource-card task-card" id="safety" href="safety/" data-step="06">
             <span class="resource-kicker">决策与数据</span>
@@ -130,12 +141,12 @@
           <a class="resource-card task-card" id="troubleshooting" href="troubleshooting/" data-step="07">
             <span class="resource-kicker">解决问题</span>
             <h3>故障排查</h3>
-            <p>从症状进入检查、处理动作和对应的详细指南。</p>
+            <p>根据现象找到第一项检查、处理方法和对应的详细指南。</p>
           </a>
           <a class="resource-card task-card" id="reference" href="reference/" data-step="08">
             <span class="resource-kicker">精确查询</span>
             <h3>打开参考</h3>
-            <p>查找命令、键位、路径、机器输出和恢复行为。</p>
+            <p>查找命令、键位、路径、脚本输出格式和恢复行为。</p>
           </a>
         </div>
       </section>

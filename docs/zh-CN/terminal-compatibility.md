@@ -4,51 +4,51 @@
 
 [文档首页](README.md) · [故障排查](troubleshooting.md) · [English](../en/terminal-compatibility.md)
 
-终端、multiplexer、远程 shell 和桌面设置可能在 Sigil 进程外阻止键位、鼠标、剪贴板序列、图片或通知。先运行 `sigil doctor`；需要保存本机报告时使用 `scripts/tui-mouse-smoke.sh`。
+终端、终端复用器、远程 Shell 和桌面设置都可能在 Sigil 进程之外拦截键位、鼠标、剪贴板序列、图片或通知。请先运行 `sigil doctor`；需要保存本机检查报告时，可以使用 `scripts/tui-mouse-smoke.sh`。
 
 ## 基线
 
 1. 通过 Doctor 或[配置指南](configuration.md#解析顺序)找到当前用户 `sigil.toml`。
 2. 除非下面测试失败，否则保持 `keyboard_enhancement = "auto"`、`mouse_capture = true`、`osc52_clipboard = true` 和 `scroll_sensitivity = 3`；这些 `[terminal]` 字段需要在 TOML 中修改，然后重启 Sigil。
-3. 不需要失焦提示时保持 notification 关闭；notification 字段也可以在 `/config` → **Terminal** 中修改。
-4. 测试可选功能前，先确认普通文本输入、transcript 滚动、`Esc` 和 `Ctrl-C` 正常。
+3. 不需要失焦提示时，保持通知关闭；通知字段也可以在 `/config` → **Terminal** 中修改。
+4. 测试可选功能前，先确认普通文本输入、会话记录滚动、`Esc` 和 `Ctrl-C` 正常。
 
-Windows 上分别运行无害的 `Write-Output 'hello'` 和 `exit 7`；活动应显示实际 shell、UTF-8 输出和 exit code。Local execution 不是 OS sandbox。
+Windows 上分别运行无害的 `Write-Output 'hello'` 和 `exit 7`；活动卡片应该显示实际使用的 Shell、UTF-8 输出和退出码。本机命令执行不等于操作系统沙箱。
 
-## Attention Notification Smoke
+## 失焦通知检查
 
-临时开启 notification，并把长任务阈值设为 `1000` ms。启动一个超过一秒的 run，移出焦点，预期只收到一次固定完成提示。审批和 MCP 等待输入可以不受长任务阈值限制。如果 tmux 或 screen 显示控制文本或忽略提示，尝试 `bell` 或关闭 notification。
+临时开启通知，并把长任务阈值设为 `1000` ms。启动一个超过一秒的任务后移出焦点，预期只收到一次固定的完成提示。等待审批或 MCP 输入时，可以不受长任务阈值限制。如果 tmux 或 screen 显示控制文本或忽略提示，请尝试 `bell`，或者关闭通知。
 
-真实 binary 的 default-off 与 BEL 检查使用 `scripts/tui-attention-signals-pty-acceptance.py`。
+真实可执行文件的默认关闭状态与 BEL 检查使用 `scripts/tui-attention-signals-pty-acceptance.py`。
 
-## 鼠标 Smoke
+## 鼠标检查
 
-修改 mouse capture 后重启，再检查：
+修改 `mouse_capture` 后重启，再检查：
 
 1. 点击输入框并输入；
-2. 打开 `/` 并点击 command candidate；
-3. 滚动 transcript；
+2. 打开 `/` 并点击候选命令；
+3. 滚动会话记录；
 4. 修改一个 `/config` 字段；
-5. 打开 `/resume`、选择一行，并分别用右键和 `Ctrl-O` 打开 Session Actions；
-6. 使用审批中的 file、diff、allow 和 deny 控件。
+5. 打开 `/resume`、选择一行，并分别用右键和 `Ctrl-O` 打开会话操作；
+6. 使用审批中的文件、差异、允许和拒绝控件。
 
 点击与滚轮应只影响聚焦界面；键盘操作始终可用。
 
 ## 文本选择与复制
 
-在 transcript 中分别拖选单行、多行和宽字符文本，按 `Ctrl-C`，再粘贴到其他位置。确认存在选区时 `Ctrl-L` 也复制该选区；然后点击 transcript 选区之外清除选择，再按 `Ctrl-L`，确认复制最新 assistant 回复。所有复制内容都不应包含右侧信息栏。OSC52 被关闭或拦截时，Sigil 会报告 clipboard 不可用。
+在会话记录中分别拖选单行、多行和宽字符文本，按 `Ctrl-C`，再粘贴到其他位置。确认存在选区时，`Ctrl-L` 也会复制该选区；然后点击选区之外清除选择，再按 `Ctrl-L`，确认复制的是最新助手回复。所有复制内容都不应包含右侧信息栏。OSC52 被关闭或拦截时，Sigil 会报告剪贴板不可用。
 
-## 图片粘贴 Smoke
+## 图片粘贴检查
 
-配置识别为支持图片的 OpenAI Responses、Anthropic 或 Gemini model 后：
+选择明确支持图片的 OpenAI Responses、Anthropic 或 Gemini 模型后：
 
 1. 复制 PNG，在空闲输入框按 `Ctrl-V`；
-2. 确认 metadata chip 出现且不显示本机路径；
-3. 选中并删除 chip；
+2. 确认图片信息标签出现，而且不显示本机路径；
+3. 选中并删除该标签；
 4. 粘贴本机 PNG、JPEG 或 WebP 路径；
-5. 提交纯图片或图文 turn。
+5. 提交纯图片消息或图文消息。
 
-不支持的 model 必须保留 draft，并在发送前拒绝图片。远程层可能无法暴露 host 图片剪贴板；此时粘贴本机路径。
+不支持图片的模型必须保留输入草稿，并在发送前拒绝图片。远程环境可能无法访问宿主机的图片剪贴板；此时请粘贴本机图片路径。
 
 ## tmux、screen、SSH 与 WSL
 

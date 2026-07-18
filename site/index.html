@@ -71,7 +71,14 @@
             <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
           </nav>
         </details>
-        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">☾</button>
+        <details class="theme-menu" data-theme-menu>
+          <summary data-theme-summary aria-label="Theme: Follow system" title="Theme: Follow system"><span data-theme-icon aria-hidden="true">◐</span></summary>
+          <div class="theme-options" role="group" aria-label="Theme">
+            <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>Follow system</button>
+            <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>Light</button>
+            <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>Dark</button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -164,7 +171,7 @@
             <h2>Watch a real edit move from request to verified result.</h2>
           </div>
           <p>
-            A disposable repository, a real Sigil TUI run, and one narrow README change. Provider wait time is cut; the diff, approval, tool results, and session recovery are untouched.
+            This is a real Sigil TUI run in a disposable repository, making one focused README change. The video skips only model wait time; the diff, approval, tool results, and session recovery are shown as they happened.
           </p>
         </div>
         <div class="demo-frame">
@@ -241,25 +248,66 @@ sigil</code></pre>
 
       <section class="section" id="workflow">
         <div class="section-heading">
-          <p class="eyebrow">Workflow</p>
-          <h2>Four things that matter during real work.</h2>
+          <p class="eyebrow">Why Sigil feels different</p>
+          <h2>The important parts stay visible while the agent works.</h2>
         </div>
-        <div class="feature-grid">
-          <article>
-            <h3>One working surface</h3>
-            <p>Keep the conversation, tool activity, changes, and next action visible in the TUI.</p>
+        <div class="feature-grid feature-showcase">
+          <article class="feature-card">
+            <p class="feature-kicker">Stay oriented</p>
+            <h3>Know what is happening</h3>
+            <p>Conversation, tool activity, file changes, and the next decision live in one TUI, so you do not have to reconstruct the task from logs.</p>
+            <ul class="feature-benefits">
+              <li>Live task state</li>
+              <li>Reviewable results</li>
+            </ul>
+            <div class="feature-visual feature-activity" aria-hidden="true">
+              <div class="feature-visual-bar"><span>current run</span><b>in progress</b></div>
+              <div class="feature-activity-row"><i class="is-complete"></i><span>Read repository guidance</span><small>done</small></div>
+              <div class="feature-activity-row"><i class="is-live"></i><span>Prepare focused change</span><small>working</small></div>
+              <div class="feature-activity-row"><i></i><span>Run targeted checks</span><small>next</small></div>
+            </div>
           </article>
-          <article>
-            <h3>Review before risk</h3>
-            <p>Inspect approvals and diffs before writes, commands, network access, or integrations proceed.</p>
+          <article class="feature-card">
+            <p class="feature-kicker">Decide before action</p>
+            <h3>Pause before risky work</h3>
+            <p>Before a write, command, network request, or external integration runs, Sigil shows the scope and gives you a chance to approve or deny it.</p>
+            <ul class="feature-benefits">
+              <li>Exact files and commands</li>
+              <li>One-time or session decision</li>
+            </ul>
+            <div class="feature-visual feature-diff" aria-hidden="true">
+              <div class="feature-visual-bar"><span>approval · README.md</span><b>review</b></div>
+              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
+              <div class="feature-visual-actions"><span>deny</span><strong>allow once</strong></div>
+            </div>
           </article>
-          <article>
-            <h3>Resume with context</h3>
-            <p>Return to saved sessions and recover interrupted work without silently rerunning an unfinished tool.</p>
+          <article class="feature-card">
+            <p class="feature-kicker">Return with confidence</p>
+            <h3>Come back without losing the thread</h3>
+            <p>Saved sessions preserve the conversation and tool history. Interrupted work is recorded honestly instead of being silently rerun.</p>
+            <ul class="feature-benefits">
+              <li>Conversation and task state</li>
+              <li>Interrupted tools stay interrupted</li>
+            </ul>
+            <div class="feature-visual feature-sessions" aria-hidden="true">
+              <div class="feature-visual-bar"><span>saved sessions</span><b>3 found</b></div>
+              <div class="feature-session-row is-selected"><span>Release docs audit</span><small>2 min ago · ready</small></div>
+              <div class="feature-session-row"><span>MCP setup review</span><small>yesterday · saved</small></div>
+              <div class="feature-session-row"><span>Provider diagnostics</span><small>Jul 15 · interrupted</small></div>
+            </div>
           </article>
-          <article>
-            <h3>Models and tools that fit</h3>
-            <p>Choose a supported provider, connect MCP tools, and enable repository-aware assistance as needed.</p>
+          <article class="feature-card">
+            <p class="feature-kicker">Fit the repository</p>
+            <h3>Bring the model and tools you need</h3>
+            <p>Choose a supported model service, connect MCP tools, and add repository-aware code intelligence without changing how work is reviewed.</p>
+            <ul class="feature-benefits">
+              <li>Five model integrations</li>
+              <li>MCP and code intelligence</li>
+            </ul>
+            <div class="feature-visual feature-stack" aria-hidden="true">
+              <div class="feature-chip-row"><span>DeepSeek</span><span>OpenAI</span><span>Anthropic</span><span>Gemini</span></div>
+              <div class="feature-stack-flow"><span>model</span><i>→</i><span>tools</span><i>→</i><strong>your review</strong></div>
+            </div>
           </article>
         </div>
       </section>
@@ -275,7 +323,7 @@ sigil</code></pre>
       <section class="section contrast" id="docs">
         <div class="section-heading">
           <p class="eyebrow">Documentation</p>
-          <h2>Read the focused guide for the job at hand.</h2>
+          <h2>Open the guide that matches the job.</h2>
         </div>
         <div class="doc-grid">
           <a href="docs/#quickstart">
@@ -284,11 +332,11 @@ sigil</code></pre>
           </a>
           <a href="docs/#workflows">
             <span>Workflows</span>
-            Prompt patterns for exploring, editing, debugging, reviewing, and resuming work.
+            Follow practical checkpoints for exploring, editing, debugging, reviewing, and resuming work.
           </a>
           <a href="docs/#configuration">
             <span>Config</span>
-            Find the focused guide for providers, permissions, appearance, or advanced settings.
+            Find the right page for model services, permissions, appearance, or advanced settings.
           </a>
           <a href="docs/#troubleshooting">
             <span>Troubleshooting</span>

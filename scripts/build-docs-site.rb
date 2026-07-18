@@ -65,7 +65,7 @@ NAV_GROUP_TITLES = {
     "get-started" => "开始使用",
     "use-sigil" => "使用 Sigil",
     "configure-sigil" => "配置 Sigil",
-    "providers-and-integrations" => "Provider 与集成",
+    "providers-and-integrations" => "模型服务与集成",
     "safety-and-troubleshooting" => "安全与排障",
     "project-status" => "项目状态"
   }
@@ -75,7 +75,7 @@ ZH_PAGE_TITLES = {
   "overview" => "用户文档",
   "quickstart" => "快速开始",
   "installation" => "安装",
-  "visual-tour" => "视觉导览",
+  "visual-tour" => "界面导览",
   "workflows" => "常见工作流",
   "cookbook" => "任务手册",
   "user-guide" => "TUI 用户指南",
@@ -85,12 +85,12 @@ ZH_PAGE_TITLES = {
   "appearance" => "外观",
   "advanced-configuration" => "高级配置",
   "configuration-reference" => "配置字段参考",
-  "providers" => "Provider 指南",
-  "provider-deepseek" => "DeepSeek provider",
-  "provider-openai-compatible" => "OpenAI-compatible provider",
-  "provider-openai-responses" => "OpenAI Responses provider",
-  "provider-anthropic" => "Anthropic provider",
-  "provider-gemini" => "Gemini provider",
+  "providers" => "模型服务指南",
+  "provider-deepseek" => "接入 DeepSeek",
+  "provider-openai-compatible" => "接入 OpenAI-compatible 服务",
+  "provider-openai-responses" => "接入 OpenAI Responses",
+  "provider-anthropic" => "接入 Anthropic",
+  "provider-gemini" => "接入 Gemini",
   "privacy" => "隐私与数据处理",
   "troubleshooting" => "故障排查",
   "reference" => "命令与快捷键参考",
@@ -112,8 +112,12 @@ LOCALES = {
     html_lang: "en",
     home_label: "Home",
     docs_label: "Docs",
+    install_label: "Install",
+    demo_label: "Demo",
     workflow_label: "Workflow",
     safety_label: "Safety",
+    tour_label: "Tour",
+    status_label: "Status",
     github_label: "GitHub",
     language_label: "简体中文",
     previous_label: "Previous",
@@ -139,8 +143,12 @@ LOCALES = {
     html_lang: "zh-CN",
     home_label: "首页",
     docs_label: "文档",
+    install_label: "安装",
+    demo_label: "演示",
     workflow_label: "工作流",
     safety_label: "安全",
+    tour_label: "界面导览",
+    status_label: "支持状态",
     github_label: "GitHub",
     language_label: "English",
     previous_label: "上一篇",
@@ -155,10 +163,10 @@ LOCALES = {
     home_aria_label: "Sigil 首页",
     search_label: "搜索文档",
     search_results_label: "搜索结果",
-    search_placeholder: "搜索 provider、配置、审批...",
+    search_placeholder: "搜索模型服务、配置、审批...",
     version_notice_label: "开发版本文档",
-    version_notice_text: "这些页面跟随 main，已打包版本可能稍有滞后。",
-    version_notice_link: "查看 Unreleased"
+    version_notice_text: "这些页面基于 main 分支，安装包的更新可能稍晚。",
+    version_notice_link: "查看尚未发布的变更"
   }
 }.freeze
 
@@ -223,9 +231,43 @@ def theme_boot_script
   HTML
 end
 
-def theme_toggle_html(locale)
-  label = locale == "zh-CN" ? "切换到深色主题" : "Switch to dark theme"
-  %(<button class="theme-toggle" type="button" data-theme-toggle aria-label="#{html_escape(label)}" aria-pressed="false" title="#{html_escape(label)}">☾</button>)
+def theme_menu_html(locale)
+  labels = if locale == "zh-CN"
+             { theme: "主题", system: "跟随系统", light: "浅色", dark: "深色" }
+           else
+             { theme: "Theme", system: "Follow system", light: "Light", dark: "Dark" }
+           end
+  summary_label = "#{labels.fetch(:theme)}: #{labels.fetch(:system)}"
+  <<~HTML
+    <details class="theme-menu" data-theme-menu>
+      <summary data-theme-summary aria-label="#{html_escape(summary_label)}" title="#{html_escape(summary_label)}"><span data-theme-icon aria-hidden="true">◐</span></summary>
+      <div class="theme-options" role="group" aria-label="#{html_escape(labels.fetch(:theme))}">
+        <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>#{html_escape(labels.fetch(:system))}</button>
+        <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>#{html_escape(labels.fetch(:light))}</button>
+        <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>#{html_escape(labels.fetch(:dark))}</button>
+      </div>
+    </details>
+  HTML
+end
+
+def primary_nav_html(locale, home_href:, docs_home:, language_href:, current: nil)
+  locale_config = LOCALES.fetch(locale)
+  links = [
+    ["#{home_href}#quickstart", locale_config.fetch(:install_label), nil],
+    ["#{home_href}#demo", locale_config.fetch(:demo_label), nil],
+    ["#{home_href}#workflow", locale_config.fetch(:workflow_label), nil],
+    ["#{home_href}#safety", locale_config.fetch(:safety_label), nil],
+    ["#{docs_home}visual-tour/", locale_config.fetch(:tour_label), "visual-tour"],
+    [docs_home, locale_config.fetch(:docs_label), "docs"],
+    ["#{docs_home}status/", locale_config.fetch(:status_label), "status"],
+    [language_href, locale_config.fetch(:language_label), nil]
+  ]
+  rendered = links.map do |href, label, key|
+    current_attribute = current == key ? ' aria-current="page"' : ""
+    %(<a href="#{html_escape(href)}"#{current_attribute}>#{html_escape(label)}</a>)
+  end
+  rendered << %(<a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>)
+  rendered.join("\n")
 end
 
 def brand_html(asset_prefix, home_href, locale = "en")
@@ -660,6 +702,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
   language_href = locale == "en" ? "../../zh-CN/docs/#{slug}/" : "../../../docs/#{slug}/"
   home_href = "../../"
   docs_home = locale == "en" ? "../" : "../"
+  current_nav = %w[visual-tour status].include?(slug) ? slug : "docs"
   canonical = "#{SITE_URL}/#{page_url(locale, slug)}"
   alternate_en = "#{SITE_URL}/#{page_url("en", slug)}"
   alternate_zh = "#{SITE_URL}/#{page_url("zh-CN", slug)}"
@@ -724,14 +767,10 @@ def rendered_page(locale, slug, source_file, fallback_title)
             <details class="nav-menu">
               <summary>#{html_escape(locale_config.fetch(:menu_label))}</summary>
               <nav aria-label="#{html_escape(locale_config.fetch(:primary_nav_label))}">
-                <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
-                <a href="#{home_href}#safety">#{html_escape(locale_config.fetch(:safety_label))}</a>
-                <a href="#{docs_home}" aria-current="page">#{html_escape(locale_config.fetch(:docs_label))}</a>
-                <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
-                <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>
+                #{primary_nav_html(locale, home_href: home_href, docs_home: docs_home, language_href: language_href, current: current_nav)}
               </nav>
             </details>
-            #{theme_toggle_html(locale)}
+            #{theme_menu_html(locale)}
           </div>
         </header>
         <main class="doc-shell" id="main-content">
@@ -866,11 +905,10 @@ def write_examples_index
             <details class="nav-menu">
               <summary>Menu</summary>
               <nav aria-label="Primary navigation">
-                <a href="../../docs/" aria-current="page">Docs</a>
-                <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+                #{primary_nav_html("en", home_href: "../../", docs_home: "../../docs/", language_href: "../../zh-CN/docs/", current: "docs")}
               </nav>
             </details>
-            #{theme_toggle_html("en")}
+            #{theme_menu_html("en")}
           </div>
         </header>
         <main class="doc-shell examples-shell" id="main-content">

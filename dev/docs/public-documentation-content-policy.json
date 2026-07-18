@@ -73,8 +73,8 @@
         "zh-CN": [
           "开始前",
           "1. 安装 Sigil",
-          "2. 在要编辑的 Workspace 中启动",
-          "3. 完成 Quick Setup",
+          "2. 在要编辑的工作区中启动",
+          "3. 完成快速设置",
           "4. 跑第一轮检查",
           "5. 尝试一个小的安全任务"
         ]
@@ -123,7 +123,7 @@
           "通过 Cargo 安装",
           "从源码安装",
           "启动",
-          "从 Release Archive 安装",
+          "从发布压缩包安装",
           "更新",
           "卸载"
         ]
@@ -161,7 +161,7 @@
           "审批检查",
           "配置面板",
           "任务验证",
-          "Checkpoint 恢复",
+          "检查点恢复",
           "上下文压缩预览"
         ]
       },
@@ -204,17 +204,17 @@
           "安全地做小改动",
           "计划较大的功能或重构",
           "调试失败命令",
-          "Review 本地改动",
+          "审查本地改动",
           "恢复历史工作",
-          "使用 Code Intelligence",
+          "使用代码智能",
           "用 MCP 连接外部工具",
-          "需要你自己 Review 的内容"
+          "需要你亲自检查的内容"
         ]
       },
       "cta_target": "cookbook.md",
       "cta_labels": {
         "en": "Open the Cookbook for copyable prompts",
-        "zh-CN": "打开 Cookbook 获取可复制提示词"
+        "zh-CN": "打开任务手册，获取可复制的提示词"
       }
     },
     {
@@ -253,14 +253,14 @@
           "探索仓库",
           "做一个小文档改动",
           "做一个小代码改动",
-          "Review Diff",
+          "审查文件差异",
           "修复失败测试",
           "改进文档结构",
-          "使用 Planning",
+          "使用计划模式",
           "处理 MCP",
           "排查终端问题",
           "要求先出方案",
-          "可加到 Prompt 里的护栏"
+          "可加到提示词里的边界"
         ]
       },
       "cta_target": "workflows.md",
@@ -307,18 +307,18 @@
         ],
         "zh-CN": [
           "启动",
-          "Headless 与本地 API 工作流",
+          "非交互与本地 API 工作流",
           "主界面",
           "高频操作",
           "图片附件",
-          "Slash Commands",
+          "斜杠命令",
           "配置面板",
-          "Web Search 与 Fetch",
+          "Web 搜索与页面抓取",
           "计划任务",
           "审批和文件变更",
-          "Session 和恢复",
+          "会话与恢复",
           "长上下文和压缩",
-          "Code Intelligence"
+          "代码智能"
         ]
       },
       "cta_target": "reference.md",
@@ -384,9 +384,9 @@
           "选择正确的页面",
           "解析顺序",
           "最小配置路径",
-          "Workspace",
-          "存储与 Session 路径",
-          "Setup 异常时使用 Doctor"
+          "工作区",
+          "存储与会话路径",
+          "设置异常时使用 Doctor"
         ]
       },
       "cta_target": "configuration-reference.md",
@@ -421,7 +421,7 @@
           "Sandbox Expectations"
         ],
         "zh-CN": [
-          "选择 Permission Mode",
+          "选择权限模式",
           "动作运行前检查",
           "收窄命令与路径规则",
           "网络与 Web 工具",
@@ -498,10 +498,10 @@
         "zh-CN": [
           "任务规划",
           "验证",
-          "Memory、Skills 与 Agents",
-          "Compaction 与代码智能",
+          "记忆、技能与子智能体",
+          "上下文精简与代码智能",
           "终端与模型请求环境变量覆盖",
-          "Plugins 与 MCP"
+          "插件与 MCP"
         ]
       },
       "cta_target": "configuration-reference.md",
@@ -539,15 +539,15 @@
           "Code Intelligence, Terminal, Plugins, And MCP"
         ],
         "zh-CN": [
-          "Workspace、Storage 与 Session",
-          "Agent 与 Providers",
-          "Execution",
-          "Verification",
-          "Appearance",
-          "Task",
-          "Permission",
-          "Web、Memory、Skills 与 Compaction",
-          "代码智能、Terminal、Plugins 与 MCP"
+          "工作区、存储与会话",
+          "智能体与模型服务",
+          "执行",
+          "验证",
+          "外观",
+          "任务",
+          "权限",
+          "Web、记忆、技能与上下文精简",
+          "代码智能、终端、插件与 MCP"
         ]
       },
       "cta_target": "configuration.md",
@@ -575,7 +575,7 @@
           "Troubleshooting Path"
         ],
         "zh-CN": [
-          "选择 Provider",
+          "选择模型服务",
           "认证优先级",
           "可复制起点",
           "排障路径"
@@ -584,7 +584,7 @@
       "cta_target": "provider-deepseek.md",
       "cta_labels": {
         "en": "Set up DeepSeek or choose another provider",
-        "zh-CN": "设置 DeepSeek 或选择其他 Provider"
+        "zh-CN": "设置 DeepSeek，或选择其他模型服务"
       }
     },
     {
@@ -618,7 +618,7 @@
       "cta_target": "providers.md",
       "cta_labels": {
         "en": "Return to Providers",
-        "zh-CN": "返回 Provider 指南"
+        "zh-CN": "返回模型服务指南"
       }
     },
     {
@@ -652,7 +652,7 @@
       "cta_target": "providers.md",
       "cta_labels": {
         "en": "Return to Providers",
-        "zh-CN": "返回 Provider 指南"
+        "zh-CN": "返回模型服务指南"
       }
     },
     {
@@ -686,7 +686,7 @@
       "cta_target": "providers.md",
       "cta_labels": {
         "en": "Return to Providers",
-        "zh-CN": "返回 Provider 指南"
+        "zh-CN": "返回模型服务指南"
       }
     },
     {
@@ -720,7 +720,7 @@
       "cta_target": "providers.md",
       "cta_labels": {
         "en": "Return to Providers",
-        "zh-CN": "返回 Provider 指南"
+        "zh-CN": "返回模型服务指南"
       }
     },
     {
@@ -754,7 +754,7 @@
       "cta_target": "providers.md",
       "cta_labels": {
         "en": "Return to Providers",
-        "zh-CN": "返回 Provider 指南"
+        "zh-CN": "返回模型服务指南"
       }
     },
     {
@@ -789,10 +789,10 @@
         "zh-CN": [
           "什么可能离开本机",
           "什么默认留在本机",
-          "API Keys",
-          "Session 日志",
+          "API 密钥",
+          "会话日志",
           "MCP 与 Web 数据",
-          "Doctor 与 Feedback 输出",
+          "Doctor 与支持报告输出",
           "分享日志或报告前"
         ]
       },
@@ -846,20 +846,20 @@
         ],
         "zh-CN": [
           "决策树",
-          "Quick Setup 每次都打开",
-          "Sigil 找不到 API Key",
+          "每次都会进入快速设置",
+          "Sigil 找不到 API 密钥",
           "主题颜色难以阅读",
-          "Workspace 不对",
+          "工作区不对",
           "文件工具不能访问某个路径",
-          "Headless `run` 里工具需要审批",
+          "非交互 `run` 中的工具需要审批",
           "审批被拒绝或超时",
           "鼠标或剪贴板不可用",
-          "Attention Notification 没有出现",
-          "Session 恢复后显示 Interrupted Tools",
-          "Context Usage 很高",
-          "MCP Server 缺失、失败或 Deferred",
-          "Code Intelligence 未就绪",
-          "安装后 Command Not Found",
+          "失焦通知没有出现",
+          "恢复会话后显示工具已中断",
+          "上下文用量很高",
+          "MCP 服务缺失、失败或尚未激活",
+          "代码智能未就绪",
+          "安装后找不到命令",
           "报告问题"
         ]
       },
@@ -899,14 +899,14 @@
         ],
         "zh-CN": [
           "TUI 键位",
-          "Slash Commands",
-          "CLI Commands",
-          "Machine Output 与本地服务",
-          "Config 解析顺序",
+          "斜杠命令",
+          "CLI 命令",
+          "脚本输出与本地服务",
+          "配置解析顺序",
           "重要路径",
-          "Web Tool 输入",
-          "Approval Outcomes",
-          "Session Recovery Facts"
+          "Web 工具输入",
+          "审批结果",
+          "会话恢复要点"
         ]
       },
       "cta_target": "user-guide.md",
@@ -947,8 +947,8 @@
           "进程环境与凭据",
           "启动与刷新",
           "兼容性与限制",
-          "Trust 与 Identity",
-          "Roots、Resources、Prompts 与输入",
+          "信任与身份",
+          "根目录、资源、提示词与输入",
           "故障排查"
         ]
       },
@@ -984,10 +984,10 @@
         ],
         "zh-CN": [
           "基线",
-          "Attention Notification Smoke",
-          "鼠标 Smoke",
+          "失焦通知检查",
+          "鼠标检查",
           "文本选择与复制",
-          "图片粘贴 Smoke",
+          "图片粘贴检查",
           "tmux、screen、SSH 与 WSL",
           "结果模板"
         ]
@@ -1023,7 +1023,7 @@
       "cta_target": "changelog.md",
       "cta_labels": {
         "en": "Read the Changelog",
-        "zh-CN": "阅读 Changelog"
+        "zh-CN": "阅读变更记录"
       }
     },
     {
@@ -1051,7 +1051,7 @@
           "v0.0.1-alpha - 2026-07-07"
         ],
         "zh-CN": [
-          "Unreleased - main",
+          "尚未发布 - main",
           "v0.0.1-alpha.5 - 2026-07-18",
           "v0.0.1-alpha.4 - 2026-07-16",
           "v0.0.1-alpha.3 - 2026-07-15",

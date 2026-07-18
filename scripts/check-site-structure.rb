@@ -27,6 +27,10 @@ def all_tags(html)
   structural_markup(html).scan(/<[a-z][^>]*>/im)
 end
 
+def visible_text(value)
+  CGI.unescapeHTML(value.gsub(/<[^>]+>/, " ")).gsub(/\s+/, " ").strip
+end
+
 def class_token?(tag_attributes, token)
   tag_attributes.fetch("class", "").split.include?(token)
 end
@@ -269,6 +273,39 @@ html_paths.each do |path|
 
   if nav_menu_tags.any? { |tag| attributes(tag).key?("open") }
     failures << "#{page}: primary navigation must be closed in source HTML for mobile-first disclosure"
+  end
+end
+
+expected_nav_labels = {
+  "en" => ["Install", "Demo", "Workflow", "Safety", "Tour", "Docs", "Status", "简体中文", "GitHub"],
+  "zh-CN" => ["安装", "演示", "工作流", "安全", "界面导览", "文档", "支持状态", "English", "GitHub"]
+}.freeze
+
+html_paths.each do |path|
+  page = relative_path(path, site_root)
+  html = File.read(path)
+  header = html[%r{<header\b[^>]*class=(?:"[^"]*\bsite-header\b[^"]*"|'[^']*\bsite-header\b[^']*')[^>]*>.*?</header>}im]
+  next unless header
+
+  html_tag = tags(html, "html").first
+  locale = attributes(html_tag || "").fetch("lang", "en")
+  locale = locale.start_with?("zh") ? "zh-CN" : "en"
+  primary_nav = header[%r{<nav\b[^>]*>.*?</nav>}im]
+  if primary_nav
+    labels = primary_nav.scan(%r{<a\b[^>]*>(.*?)</a>}im).flatten.map { |content| visible_text(content) }
+    expected = expected_nav_labels.fetch(locale)
+    unless labels == expected
+      failures << "#{page}: primary navigation labels must be #{expected.inspect}, found #{labels.inspect}"
+    end
+  else
+    failures << "#{page}: site header is missing primary navigation"
+  end
+
+  theme_menus = tags(header, "details").select { |tag| attributes(tag).key?("data-theme-menu") }
+  failures << "#{page}: expected one three-state theme menu, found #{theme_menus.length}" unless theme_menus.length == 1
+  theme_options = tags(header, "button").filter_map { |tag| attributes(tag)["data-theme-option"] }
+  unless theme_options == %w[system light dark]
+    failures << "#{page}: theme choices must be system, light, dark; found #{theme_options.inspect}"
   end
 end
 

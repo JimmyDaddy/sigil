@@ -1,28 +1,28 @@
 <!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
 
-# Provider 指南
+# 模型服务指南
 
 [文档首页](README.md) · [配置](configuration.md) · [English](../en/providers.md)
 
-先在这里选择模型服务，再进入对应页面完成设置并查看可见限制。共享权限、session 和工具行为不需要在每个 provider 页面重复学习。
+先在这里选择模型服务，再进入对应页面完成设置并了解当前限制。权限、会话和工具的通用行为在所有模型服务间保持一致，不需要重复学习。
 
-## 选择 Provider
+## 选择模型服务
 
-| Provider | 适合场景 | 图片输入 | 配置值 |
+| 模型服务 | 适合场景 | 图片输入 | 配置值 |
 | --- | --- | --- | --- |
-| [DeepSeek](provider-deepseek.md) | 默认 Quick Setup 路径和 DeepSeek 专项选项 | 不支持 | `deepseek` |
-| [OpenAI-compatible](provider-openai-compatible.md) | Chat Completions-compatible `/v1` gateway | 不支持 | `openai_compat` |
-| [OpenAI Responses](provider-openai-responses.md) | OpenAI Responses model | 识别到的 model ID | `openai_responses` |
+| [DeepSeek](provider-deepseek.md) | 快速设置的默认路径，以及 DeepSeek 专用选项 | 不支持 | `deepseek` |
+| [OpenAI-compatible](provider-openai-compatible.md) | 兼容 Chat Completions 的 `/v1` 网关 | 不支持 | `openai_compat` |
+| [OpenAI Responses](provider-openai-responses.md) | 使用 OpenAI Responses 接口 | 识别到的模型 ID | `openai_responses` |
 | [Anthropic](provider-anthropic.md) | 通过 Anthropic Messages 使用 Claude | 识别到的 Claude ID | `anthropic` |
-| [Gemini](provider-gemini.md) | Gemini 与 function calling | 识别到的 Gemini ID | `gemini` |
+| [Gemini](provider-gemini.md) | Gemini 与函数调用 | 识别到的 Gemini ID | `gemini` |
 
-首次使用最短路径是 Quick Setup。需要可重复的本机或 CI 默认值时，再使用手写配置。
+首次使用时，最快的方式是跟随快速设置。需要在本机或 CI 中重复使用相同设置时，再改用手写配置。
 
 ## 认证优先级
 
-优先使用环境变量。Config 中的 `api_key` fallback 会以明文写入 `sigil.toml`。
+优先使用环境变量。配置中的 `api_key` 备用值会以明文写入 `sigil.toml`。
 
-| Provider | 环境变量 | Config fallback |
+| 模型服务 | 环境变量 | 配置备用值 |
 | --- | --- | --- |
 | DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
 | OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
@@ -34,11 +34,11 @@
 
 ## 可复制起点
 
-模板位于 [`docs/examples/config`](../examples/config)。使用前检查 model、base URL、凭据来源和权限设置。
+模板位于 [`docs/examples/config`](../examples/config)。使用前请检查具体模型、基础 URL、凭据来源和权限设置。
 
 ## 排障路径
 
-依次检查 `[agent].provider`、所选 model、provider block、base URL、启动 shell 中的凭据可见性和 provider 专项限制。排障期间保持 `permission.mode = "manual"`，共享症状再进入[故障排查](troubleshooting.md)。
+依次检查 `[agent].provider`、所选模型、对应的配置区块、基础 URL、启动 Shell 能否读取凭据，以及模型服务的专用限制。排障期间保持 `permission.mode = "manual"`；如果问题并非某个模型服务特有，再进入[故障排查](troubleshooting.md)。
 
 <!-- public-doc-cta: open-provider-guide -->
-下一步：[设置 DeepSeek 或选择其他 Provider](provider-deepseek.md)。
+下一步：[设置 DeepSeek，或选择其他模型服务](provider-deepseek.md)。

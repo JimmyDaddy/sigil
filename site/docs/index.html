@@ -52,14 +52,25 @@
         <details class="nav-menu">
           <summary aria-controls="docs-primary-navigation">Menu</summary>
           <nav id="docs-primary-navigation" aria-label="Primary navigation">
+            <a href="../#quickstart">Install</a>
+            <a href="../#demo">Demo</a>
             <a href="../#workflow">Workflow</a>
             <a href="../#safety">Safety</a>
+            <a href="visual-tour/">Tour</a>
             <a href="./" aria-current="page">Docs</a>
+            <a href="status/">Status</a>
             <a href="../zh-CN/docs/">简体中文</a>
             <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
           </nav>
         </details>
-        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">☾</button>
+        <details class="theme-menu" data-theme-menu>
+          <summary data-theme-summary aria-label="Theme: Follow system" title="Theme: Follow system"><span data-theme-icon aria-hidden="true">◐</span></summary>
+          <div class="theme-options" role="group" aria-label="Theme">
+            <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>Follow system</button>
+            <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>Light</button>
+            <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>Dark</button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -72,7 +83,7 @@
         <div class="docs-hero-copy">
           <p class="eyebrow">Documentation</p>
           <h1>What do you want to do?</h1>
-          <p class="lede">Choose a task below or search for an exact command, setting, provider, or problem.</p>
+          <p class="lede">Choose what you want to accomplish, or search for a command, setting, model service, or problem.</p>
           <aside class="docs-version-notice" aria-label="Development documentation">
             <strong>Development documentation</strong>
             <span>These pages follow <code>main</code>. Packaged releases can lag behind.</span>
@@ -94,18 +105,18 @@
       <section class="section docs-section" id="user-docs">
         <div class="section-heading">
           <p class="eyebrow">Choose by task</p>
-          <h2>Eight routes, each with one job.</h2>
+          <h2>Start with the guide that matches your task.</h2>
         </div>
         <div class="resource-grid resource-grid-featured task-router">
           <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="01">
             <span class="resource-kicker">First run</span>
             <h3>Try Sigil</h3>
-            <p>Install, complete Quick Setup, run a read-only task, and review a small change.</p>
+            <p>Install Sigil, finish the guided setup, ask a read-only question, and review a small change.</p>
           </a>
           <a class="resource-card task-card" id="user-guide" href="user-guide/" data-step="02">
             <span class="resource-kicker">Daily work</span>
             <h3>Use the TUI</h3>
-            <p>Learn the working surface, common controls, approvals, sessions, and recovery.</p>
+            <p>Learn the main screen, common controls, approvals, saved sessions, and recovery.</p>
           </a>
           <a class="resource-card task-card" id="workflows" href="workflows/" data-step="03">
             <span class="resource-kicker">Task patterns</span>
@@ -119,8 +130,8 @@
           </a>
           <a class="resource-card task-card" id="providers" href="providers/" data-step="05">
             <span class="resource-kicker">Models and tools</span>
-            <h3>Choose a provider or integration</h3>
-            <p>Set up model providers, authentication, and MCP connections.</p>
+            <h3>Choose a model service or integration</h3>
+            <p>Connect a supported model service, configure authentication, and add MCP tools.</p>
           </a>
           <a class="resource-card task-card" id="safety" href="safety/" data-step="06">
             <span class="resource-kicker">Decisions and data</span>

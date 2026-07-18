@@ -353,20 +353,20 @@ end
 
 assert_rule("homepage feature budget", "homepage-feature-budget") do |root|
   rewrite(root, "site/index.html") do |text|
-    text.sub(%(<div class="feature-grid">), %(<div class="feature-grid"><article><h3>Extra</h3></article>))
+    text.sub(%(<div class="feature-grid feature-showcase">), %(<div class="feature-grid feature-showcase"><article><h3>Extra</h3></article>))
   end
 end
 
 assert_rule("nested homepage feature budget", "homepage-feature-budget") do |root|
   rewrite(root, "site/index.html") do |text|
     insertion = %(<article><div><h3>Nested extra</h3></div></article>)
-    text.sub(%(<div class="feature-grid">), %(<div class="feature-grid">#{insertion}))
+    text.sub(%(<div class="feature-grid feature-showcase">), %(<div class="feature-grid feature-showcase">#{insertion}))
   end
 end
 
 assert_rule("single-quoted homepage feature budget", "homepage-feature-budget") do |root|
   rewrite(root, "site/index.html") do |text|
-    text.sub(%(<div class="feature-grid">), %(<div class='feature-grid'><article><h3>Extra</h3></article>))
+    text.sub(%(<div class="feature-grid feature-showcase">), %(<div class='feature-grid feature-showcase'><article><h3>Extra</h3></article>))
   end
 end
 

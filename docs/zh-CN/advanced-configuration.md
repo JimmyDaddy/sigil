@@ -4,7 +4,7 @@
 
 [文档首页](README.md) · [配置](configuration.md) · [权限](permissions-and-sandbox.md) · [字段参考](configuration-reference.md) · [English](../en/advanced-configuration.md)
 
-普通 setup 已经工作后再使用这些设置。一次只修改一个区域；结果不清楚时运行 `sigil doctor`。
+请先完成普通设置并确认 Sigil 可以正常工作，再使用本页选项。一次只修改一个区域；结果不清楚时运行 `sigil doctor`。
 
 ## 任务规划
 
@@ -21,7 +21,7 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-普通输入保持 chat-first。只读计划使用 `/plan`，多步骤执行使用 `/task`。保守 agent mode 只会在你或 workspace 指令要求 delegation 时使用 child agent。Role 专项 model 与 tool 限制见[配置字段参考](configuration-reference.md#task)。
+普通输入始终从对话开始。只读计划使用 `/plan`，多步骤执行使用 `/task`。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
 
 ## 验证
 
@@ -35,17 +35,17 @@ effect = "read_only"
 
 只添加你理解的检查。仓库提示可以被建议，但不会仅因存在而运行。会修改相关文件的检查必须再由不写入的检查跟进，结果才是当前的。
 
-## Memory、Skills 与 Agents
+## 记忆、技能与子智能体
 
 <!-- public-doc-topic: memory -->
 
-`[memory].enabled = true` 允许 Sigil 加载 `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等 workspace 指令文件。保持内容简短、最新，并适合仓库中的每个 session。
+`[memory].enabled = true` 允许 Sigil 加载 `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等工作区指令文件。请保持内容简短、及时更新，并确保这些说明适用于仓库中的每个会话。
 
 <!-- public-doc-topic: skills-agents -->
 
-可复用 workspace skill、command、agent 和 plugin 分别位于 `.sigil/skills`、`.sigil/commands`、`.sigil/agents` 和 `.sigil/plugins`。用户资源和兼容导入由 `[skills]` 控制。允许导入指令工作前请先检查。
+可复用的工作区技能、命令、子智能体和插件分别位于 `.sigil/skills`、`.sigil/commands`、`.sigil/agents` 和 `.sigil/plugins`。用户资源和兼容格式导入由 `[skills]` 控制。允许导入的指令参与工作前，请先检查其内容。
 
-## Compaction 与代码智能
+## 上下文精简与代码智能
 
 <!-- public-doc-topic: compaction -->
 
@@ -57,7 +57,7 @@ hard_threshold_ratio = 0.8
 tail_messages = 6
 ```
 
-Compaction 会在预览显示 ready 时精简较早的对话上下文。手动入口是 `/compact`。Model window 未知时设置 `fallback_context_window_tokens`；失败不会改变活动对话。
+当预览显示可以应用时，上下文精简会压缩较早的对话内容。手动入口是 `/compact`。无法确定模型上下文窗口大小时，可以设置 `fallback_context_window_tokens`；精简失败不会改变当前对话。
 
 <!-- public-doc-topic: code-intelligence -->
 
@@ -68,7 +68,7 @@ server_startup = "lazy"
 auto_discover = true
 ```
 
-启用后，Sigil 可以使用已安装 language server 提供导航、诊断和经过检查的编辑。`Alt-D` 检查已修改源码。缺少 language server 不会阻止普通 chat 或文件工具。
+启用后，Sigil 可以使用已经安装的语言服务器提供代码导航、诊断和经过检查的编辑。按 `Alt-D` 检查已修改源码。缺少语言服务器不会阻止普通对话或文件工具继续工作。
 
 ## 终端与模型请求环境变量覆盖
 
@@ -87,21 +87,21 @@ method = "auto"
 minimum_run_duration_ms = 10000
 ```
 
-终端、远程层或 multiplexer 不支持某项能力时，将其关闭。Notification 默认关闭，并使用不含 prompt、路径、工具详情、provider、model 或 session id 的固定文本。用[终端兼容性](terminal-compatibility.md)测试结果。
+终端、远程环境或终端复用器不支持某项能力时，请将其关闭。通知默认关闭，并使用不含提示词、路径、工具详情、模型服务、具体模型或会话 ID 的固定文本。可以按照[终端兼容性](terminal-compatibility.md)检查实际效果。
 
 <!-- public-doc-topic: model-request-env -->
 
-`SIGIL_MODEL_REQUEST_TIMEOUT_SECS`、`SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 和 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 可以临时覆盖共享 model-request timeout。Provider 凭据与 endpoint 设置仍留在 provider 页面。
+`SIGIL_MODEL_REQUEST_TIMEOUT_SECS`、`SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 和 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 可以临时覆盖共享的模型请求超时。模型服务凭据和端点设置仍放在各服务的专用页面。
 
-## Plugins 与 MCP
+## 插件与 MCP
 
 <!-- public-doc-topic: plugins -->
 
-Plugin 从 `.sigil/plugins/<id>/plugin.toml` 发现，并在 `/config` 中 review。Plugin 改变后要重新检查再允许运行。Plugin entry 不能请求继承 credential variable。
+Sigil 会从 `.sigil/plugins/<id>/plugin.toml` 发现插件，并在 `/config` 中等待你检查。插件发生变化后，需要重新检查才能允许运行。插件入口不能请求继承凭据环境变量。
 
 <!-- public-doc-topic: mcp -->
 
-使用 `[[mcp_servers]]` 配置 MCP。Local server 会从清空的环境启动；只通过用户根配置中的 `inherit_env` 授予必要变量名。远端认证、trust 与兼容性见 [MCP 指南](mcp.md)，精确字段见[配置字段参考](configuration-reference.md)。
+使用 `[[mcp_servers]]` 配置 MCP。本机服务端会从清空的环境启动；只有通过用户级配置中的 `inherit_env`，才能授予确实需要的环境变量。远端认证、信任与兼容性见 [MCP 指南](mcp.md)，精确字段见[配置字段参考](configuration-reference.md)。
 
 <!-- public-doc-cta: open-configuration-reference -->
 下一步：[查找精确配置字段](configuration-reference.md)。

@@ -1,34 +1,34 @@
 <!-- public-doc-role: status; authority: maturity-and-limit-authority; sections: supported-today,limited-or-advanced,not-supported-yet; cta: open-changelog -->
 
-# 当前支持状态与未来工作
+# 当前支持状态与后续计划
 
-[文档首页](README.md) · [安装](installation.md) · [Changelog](changelog.md) · [English](../en/status.md)
+[文档首页](README.md) · [安装](installation.md) · [变更记录](changelog.md) · [English](../en/status.md)
 
-Sigil 仍是 early preview。核心 TUI 工作流已经可用，但配置、插件、高级 sandbox 行为和自动化接口仍可能调整。Release 版本与安装命令统一在[安装](installation.md)和 [Changelog](changelog.md)维护。
+Sigil 仍处于早期预览阶段。核心 TUI 工作流已经可用，但配置、插件、高级沙箱行为和自动化接口仍可能调整。发布版本与安装命令统一在[安装](installation.md)和[变更记录](changelog.md)中维护。
 
 ## 当前支持
 
 | 范围 | 当前支持 |
 |---|---|
-| Provider | DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 与 Gemini；见 [Providers](providers.md) |
-| 非交互入口 | Headless `run` 支持 text、JSON、JSONL；高级集成可使用带认证且仅监听本机的 `serve` |
-| 平台 | macOS 与 Linux 是主要测试路径；Windows 使用 native PowerShell，并在 Doctor 中显示限制 |
+| 模型服务 | DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 与 Gemini；见[模型服务指南](providers.md) |
+| 非交互入口 | `run` 支持纯文本、JSON 和 JSONL；高级集成可以使用带认证且仅监听本机的 `serve` |
+| 平台 | macOS 与 Linux 是主要测试平台；Windows 使用原生 PowerShell，已知限制会显示在 Doctor 中 |
 
 ## 有限制或高级用法
 
-- Headless 模式不能发起交互审批，策略必须预先决定。
-- 本地服务只监听本机，并要求 bearer 认证。
-- Code intelligence 依赖启动环境中可用的语言工具。
-- 外部目录默认不可访问；sandbox 强度随平台和后端而不同。
-- Deferred MCP server 必须先激活，工具才可用。
-- 图片输入受格式、来源、provider 与模型能力限制。
-- 只有 Sigil 能为所选模型安全执行时，才会提供 context compaction。
+- 非交互模式无法发起人工审批，相关策略必须提前配置。
+- 本地服务只监听本机，并要求 Bearer 令牌认证。
+- 代码智能依赖启动环境中可用的语言工具。
+- 外部目录默认不可访问；沙箱强度会因平台和执行后端而异。
+- 延迟启动的 MCP 服务必须先激活，工具才可用。
+- 图片输入受格式、来源、模型服务和具体模型能力限制。
+- 只有能够为所选模型安全精简上下文时，Sigil 才会提供相应操作。
 
 ## 暂不支持
 
-当前不承诺自更新、稳定 plugin API、桌面应用、跨平台一致的 sandbox 保证，也不能在重启后继续当时仍在运行的子进程。
+目前尚不提供自动更新、稳定的插件 API 或桌面应用，也不承诺跨平台一致的沙箱能力；重启后同样无法继续之前仍在运行的子进程。
 
 精确命令和键位见[参考](reference.md)，配置字段见[配置字段参考](configuration-reference.md)，问题处理见[排障](troubleshooting.md)。
 
 <!-- public-doc-cta: open-changelog -->
-下一步：[阅读 Changelog](changelog.md)。
+下一步：[阅读变更记录](changelog.md)。

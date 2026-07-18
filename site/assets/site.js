@@ -5,45 +5,59 @@
   const themeColor = document.querySelector('meta[name="theme-color"]');
   const labels = {
     en: {
-      dark: "Switch to dark theme",
-      light: "Switch to light theme",
+      theme: "Theme",
+      system: "Follow system",
+      light: "Light",
+      dark: "Dark",
     },
     "zh-CN": {
-      dark: "切换到深色主题",
-      light: "切换到浅色主题",
+      theme: "主题",
+      system: "跟随系统",
+      light: "浅色",
+      dark: "深色",
     },
+  };
+  const themeIcons = {
+    system: "◐",
+    light: "☀",
+    dark: "☾",
   };
 
   function pageLocale() {
     return root.lang && root.lang.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   }
 
-  function storedTheme() {
+  function selectedTheme() {
     try {
       const value = window.localStorage.getItem(storageKey);
-      return value === "dark" || value === "light" ? value : null;
+      return value === "dark" || value === "light" ? value : "system";
     } catch (_error) {
-      return null;
+      return "system";
     }
   }
 
   function setStoredTheme(value) {
     try {
-      window.localStorage.setItem(storageKey, value);
+      if (value === "system") {
+        window.localStorage.removeItem(storageKey);
+      } else {
+        window.localStorage.setItem(storageKey, value);
+      }
     } catch (_error) {
       // Theme persistence is best-effort; the current document still updates.
     }
   }
 
   function effectiveTheme() {
-    return storedTheme() || (media.matches ? "dark" : "light");
+    const selected = selectedTheme();
+    return selected === "system" ? (media.matches ? "dark" : "light") : selected;
   }
 
   function applyTheme() {
-    const selectedTheme = storedTheme();
+    const selected = selectedTheme();
     const resolvedTheme = effectiveTheme();
-    if (selectedTheme) {
-      root.dataset.theme = selectedTheme;
+    if (selected === "dark" || selected === "light") {
+      root.dataset.theme = selected;
     } else {
       delete root.dataset.theme;
     }
@@ -53,19 +67,49 @@
     }
 
     const localeLabels = labels[pageLocale()] || labels.en;
-    document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
-      const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
-      button.textContent = resolvedTheme === "dark" ? "☀" : "☾";
-      button.dataset.themeState = resolvedTheme;
-      button.setAttribute("aria-pressed", String(resolvedTheme === "dark"));
-      button.setAttribute("aria-label", localeLabels[nextTheme]);
-      button.setAttribute("title", localeLabels[nextTheme]);
+    document.querySelectorAll("[data-theme-menu]").forEach((menu) => {
+      const summary = menu.querySelector("[data-theme-summary]");
+      const icon = menu.querySelector("[data-theme-icon]");
+      const summaryLabel = `${localeLabels.theme}: ${localeLabels[selected]}`;
+      if (summary) {
+        summary.dataset.themeState = selected;
+        summary.setAttribute("aria-label", summaryLabel);
+        summary.setAttribute("title", summaryLabel);
+      }
+      if (icon) {
+        icon.textContent = themeIcons[selected];
+      }
+      menu.querySelectorAll("[data-theme-option]").forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.themeOption === selected));
+      });
     });
   }
 
-  function toggleTheme() {
-    setStoredTheme(effectiveTheme() === "dark" ? "light" : "dark");
-    applyTheme();
+  function attachThemeMenus() {
+    document.querySelectorAll("[data-theme-menu]").forEach((menu) => {
+      menu.querySelectorAll("[data-theme-option]").forEach((button) => {
+        button.addEventListener("click", () => {
+          setStoredTheme(button.dataset.themeOption);
+          applyTheme();
+          menu.removeAttribute("open");
+          menu.querySelector("[data-theme-summary]")?.focus();
+        });
+      });
+      menu.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && menu.open) {
+          menu.removeAttribute("open");
+          menu.querySelector("[data-theme-summary]")?.focus();
+        }
+      });
+    });
+
+    document.addEventListener("click", (event) => {
+      document.querySelectorAll("[data-theme-menu][open]").forEach((menu) => {
+        if (!menu.contains(event.target)) {
+          menu.removeAttribute("open");
+        }
+      });
+    });
   }
 
   const compactNavigation = window.matchMedia("(max-width: 980px)");
@@ -287,12 +331,8 @@
     });
   }
 
-  document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
-    button.addEventListener("click", toggleTheme);
-  });
-
   media.addEventListener("change", () => {
-    if (!storedTheme()) {
+    if (selectedTheme() === "system") {
       applyTheme();
     }
   });
@@ -306,6 +346,7 @@
   });
 
   applyTheme();
+  attachThemeMenus();
   applyNavigationMode();
   attachCompactNavigationDismissal();
   attachTableOfContentsState();

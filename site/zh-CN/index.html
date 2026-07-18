@@ -61,17 +61,24 @@
           <summary aria-controls="zh-home-primary-navigation">菜单</summary>
           <nav id="zh-home-primary-navigation" aria-label="主要导航">
             <a href="#quickstart">安装</a>
-            <a href="#demo">Demo</a>
+            <a href="#demo">演示</a>
             <a href="#workflow">工作流</a>
             <a href="#safety">安全</a>
-            <a href="docs/visual-tour/">视觉导览</a>
+            <a href="docs/visual-tour/">界面导览</a>
             <a href="docs/">文档</a>
             <a href="docs/status/">支持状态</a>
             <a href="../">English</a>
             <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
           </nav>
         </details>
-        <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">☾</button>
+        <details class="theme-menu" data-theme-menu>
+          <summary data-theme-summary aria-label="主题：跟随系统" title="主题：跟随系统"><span data-theme-icon aria-hidden="true">◐</span></summary>
+          <div class="theme-options" role="group" aria-label="主题">
+            <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>跟随系统</button>
+            <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>浅色</button>
+            <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>深色</button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -96,18 +103,18 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first coding agent</p>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>以 TUI 为核心的编码智能体</p>
           <h1>在一个终端里<br><span class="hero-accent">完成仓库工作。</span></h1>
           <p class="lede">
             在终端里跟进任务、检查建议修改，并决定下一步。
           </p>
           <div class="alpha-status" aria-label="发布状态">
             <strong>早期预览</strong>
-            <span>网站跟随 <code>main</code>，已发布的软件包可能稍晚。采用 Sigil 前请先查看<a href="docs/status/">当前支持状态</a>。</span>
+            <span>官网内容基于 <code>main</code> 分支，安装包的更新可能稍晚。正式使用前请先查看<a href="docs/status/">当前支持状态</a>。</span>
           </div>
           <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
-            <a class="button secondary" href="docs/visual-tour/">视觉导览</a>
+            <a class="button secondary" href="docs/visual-tour/">界面导览</a>
             <a class="button secondary" href="docs/">阅读文档</a>
           </div>
         </div>
@@ -160,11 +167,11 @@
       <section class="section demo-showcase" id="demo">
         <div class="section-heading demo-heading">
           <div>
-            <p class="eyebrow">45 秒 Demo</p>
+            <p class="eyebrow">45 秒演示</p>
             <h2>看一个真实修改从任务走到验证结果。</h2>
           </div>
           <p>
-            使用一次性的仓库和真实 Sigil TUI，只修改 README 中的一条安装命令。成片仅剪掉 provider 等待时间，diff、审批、工具结果和 session 恢复均为真实操作。
+            这是一次真实的 Sigil TUI 操作：在临时仓库里只修改 README 中的一条安装命令。视频仅剪掉模型响应的等待时间，差异、审批、工具结果和会话恢复都按实际过程呈现。
           </p>
         </div>
         <div class="demo-frame">
@@ -175,19 +182,19 @@
             playsinline
             preload="metadata"
             poster="../assets/demo/sigil-45-second-demo-poster.png"
-            aria-label="Sigil 45 秒仓库修改 Demo"
+            aria-label="Sigil 45 秒仓库修改演示"
           >
             <source src="../assets/demo/sigil-45-second-demo.webm" type="video/webm">
             <source src="../assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
             <track kind="captions" srclang="zh-CN" label="简体中文" src="../assets/demo/sigil-45-second-demo.zh-CN.vtt" default>
             <track kind="captions" srclang="en" label="English" src="../assets/demo/sigil-45-second-demo.en.vtt">
-            <a href="../assets/demo/sigil-45-second-demo.mp4">观看 MP4 Demo。</a>
+            <a href="../assets/demo/sigil-45-second-demo.mp4">观看 MP4 演示。</a>
           </video>
         </div>
-        <ol class="demo-beats" aria-label="Demo 展示内容">
+        <ol class="demo-beats" aria-label="演示内容">
           <li><span>01</span><strong>提出任务</strong><small>一个聚焦的仓库修改。</small></li>
-          <li><span>02</span><strong>检查修改</strong><small>写入前查看准确 diff。</small></li>
-          <li><span>03</span><strong>验证并恢复</strong><small>结果可见，session 可继续。</small></li>
+          <li><span>02</span><strong>检查修改</strong><small>写入前查看准确的文件差异。</small></li>
+          <li><span>03</span><strong>验证并恢复</strong><small>结果清楚可见，会话随时可继续。</small></li>
         </ol>
       </section>
 
@@ -213,14 +220,14 @@ sigil</code></pre>
           <div class="step">
             <span>2</span>
             <h3>配置</h3>
-            <p>缺少配置时，Sigil 会打开 Quick Setup。选择 provider 和 model，再填写认证信息。所有受支持的软件包路径见<a href="docs/installation/">安装指南</a>。</p>
+            <p>缺少配置时，Sigil 会打开快速设置。选择模型服务和具体模型，再填写认证信息。所有受支持的安装方式见<a href="docs/installation/">安装指南</a>。</p>
           </div>
         </div>
       </section>
 
       <section class="section contrast" id="visual-preview">
         <div class="section-heading">
-          <p class="eyebrow">视觉导览</p>
+          <p class="eyebrow">界面导览</p>
           <h2>看清工作内容与决策点。</h2>
         </div>
         <div class="visual-grid terminal-deck">
@@ -233,7 +240,7 @@ sigil</code></pre>
             <span>审批检查</span>
           </a>
           <a class="visual-card terminal-window-verification" href="docs/visual-tour/#任务验证">
-            <img src="../assets/screenshots/verification-card.svg" alt="Sigil 任务 Verification card 截图" loading="lazy" decoding="async">
+            <img src="../assets/screenshots/verification-card.svg" alt="Sigil 任务验证卡片截图" loading="lazy" decoding="async">
             <span>任务验证</span>
           </a>
         </div>
@@ -241,25 +248,66 @@ sigil</code></pre>
 
       <section class="section" id="workflow">
         <div class="section-heading">
-          <p class="eyebrow">工作流</p>
-          <h2>真实工作中最重要的四件事。</h2>
+          <p class="eyebrow">为什么用起来不一样</p>
+          <h2>智能体工作时，重要信息始终看得见。</h2>
         </div>
-        <div class="feature-grid">
-          <article>
-            <h3>统一工作界面</h3>
-            <p>在 TUI 中同时查看对话、工具活动、修改内容和下一步操作。</p>
+        <div class="feature-grid feature-showcase">
+          <article class="feature-card">
+            <p class="feature-kicker">随时掌握进度</p>
+            <h3>知道它正在做什么</h3>
+            <p>对话、工具活动、文件改动和下一步决策都留在同一个 TUI 里，不用再翻日志猜任务进行到哪一步。</p>
+            <ul class="feature-benefits">
+              <li>任务状态实时可见</li>
+              <li>每个结果都能检查</li>
+            </ul>
+            <div class="feature-visual feature-activity" aria-hidden="true">
+              <div class="feature-visual-bar"><span>当前任务</span><b>进行中</b></div>
+              <div class="feature-activity-row"><i class="is-complete"></i><span>读取仓库说明</span><small>完成</small></div>
+              <div class="feature-activity-row"><i class="is-live"></i><span>准备小范围改动</span><small>处理中</small></div>
+              <div class="feature-activity-row"><i></i><span>运行相关检查</span><small>下一步</small></div>
+            </div>
           </article>
-          <article>
-            <h3>风险操作先审查</h3>
-            <p>写文件、运行命令、访问网络或调用集成前，先检查审批信息和 diff。</p>
+          <article class="feature-card">
+            <p class="feature-kicker">执行前由你决定</p>
+            <h3>危险操作先停一下</h3>
+            <p>写文件、执行命令、访问网络或调用外部集成前，Sigil 会说明影响范围，由你决定允许还是拒绝。</p>
+            <ul class="feature-benefits">
+              <li>文件与命令写得清楚</li>
+              <li>可选择单次或会话内允许</li>
+            </ul>
+            <div class="feature-visual feature-diff" aria-hidden="true">
+              <div class="feature-visual-bar"><span>审批 · README.md</span><b>请检查</b></div>
+              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
+              <div class="feature-visual-actions"><span>拒绝</span><strong>仅允许这次</strong></div>
+            </div>
           </article>
-          <article>
-            <h3>带上下文恢复</h3>
-            <p>回到已保存的 session；恢复中断工作时，不会静默重跑未完成的工具。</p>
+          <article class="feature-card">
+            <p class="feature-kicker">放心离开，随时回来</p>
+            <h3>接着上次的思路继续做</h3>
+            <p>保存的会话会保留对话和工具记录。任务如果被打断，Sigil 会如实标记，不会在恢复时擅自重跑。</p>
+            <ul class="feature-benefits">
+              <li>保留对话与任务状态</li>
+              <li>中断的工具不会自动重跑</li>
+            </ul>
+            <div class="feature-visual feature-sessions" aria-hidden="true">
+              <div class="feature-visual-bar"><span>已保存会话</span><b>找到 3 个</b></div>
+              <div class="feature-session-row is-selected"><span>检查发布文档</span><small>2 分钟前 · 可继续</small></div>
+              <div class="feature-session-row"><span>检查 MCP 设置</span><small>昨天 · 已保存</small></div>
+              <div class="feature-session-row"><span>诊断模型服务</span><small>7 月 15 日 · 已中断</small></div>
+            </div>
           </article>
-          <article>
-            <h3>按需组合模型与工具</h3>
-            <p>选择受支持的 provider，接入 MCP，并按需启用仓库感知能力。</p>
+          <article class="feature-card">
+            <p class="feature-kicker">适配你的仓库</p>
+            <h3>按需要组合模型和工具</h3>
+            <p>选择支持的模型服务，接入 MCP 工具和代码智能；无论怎么组合，检查与审批方式都保持一致。</p>
+            <ul class="feature-benefits">
+              <li>五种模型服务接入方式</li>
+              <li>支持 MCP 与代码智能</li>
+            </ul>
+            <div class="feature-visual feature-stack" aria-hidden="true">
+              <div class="feature-chip-row"><span>DeepSeek</span><span>OpenAI</span><span>Anthropic</span><span>Gemini</span></div>
+              <div class="feature-stack-flow"><span>模型</span><i>→</i><span>工具</span><i>→</i><strong>由你检查</strong></div>
+            </div>
           </article>
         </div>
       </section>
@@ -269,26 +317,26 @@ sigil</code></pre>
           <p class="eyebrow">安全模型</p>
           <h2>在需要决策的地方保留控制权。</h2>
         </div>
-        <p class="lede">不同动作有不同限制。<a href="docs/safety/">安全指南</a>说明决策前要检查什么；<a href="docs/permissions-and-sandbox/">权限与沙箱</a>说明精确控制项与平台边界。</p>
+        <p class="lede">不同操作有不同的风险边界。<a href="docs/safety/">安全指南</a>说明批准前应该检查什么；<a href="docs/permissions-and-sandbox/">权限与沙箱</a>列出具体控制项和平台限制。</p>
       </section>
 
       <section class="section contrast" id="docs">
         <div class="section-heading">
           <p class="eyebrow">文档</p>
-          <h2>按任务读取对应的聚焦文档。</h2>
+          <h2>按手头的任务找到对应指南。</h2>
         </div>
         <div class="doc-grid">
           <a href="docs/#quickstart">
             <span>快速上手</span>
-            安装、启动、完成 setup、运行诊断，并完成第一个安全编辑。
+            安装、启动、完成快速设置、运行诊断，再完成第一个安全的小改动。
           </a>
           <a href="docs/#workflows">
             <span>常见工作流</span>
-            探索、编辑、调试、review 和恢复工作时可直接套用的提示词模式。
+            按清晰的检查点完成探索、编辑、调试、代码审查和恢复工作。
           </a>
           <a href="docs/#configuration">
             <span>配置</span>
-            按 provider、权限、外观或高级设置进入对应指南。
+            查找模型服务、权限、外观和高级设置的对应说明。
           </a>
           <a href="docs/#troubleshooting">
             <span>排障</span>

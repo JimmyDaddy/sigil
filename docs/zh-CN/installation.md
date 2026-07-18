@@ -4,28 +4,28 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本页是 Sigil 安装渠道、更新与卸载命令以及 release archive 处理方式的权威来源。其他用户指南只链接到这里，不复制这些细节。如果你想按首次使用流程走一遍，先看 [快速上手](quickstart.md)。`v0.0.1-alpha.5` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
+本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。`v0.0.1-alpha.5` 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
 
-下方包管理器和 Cargo tag 命令安装的是已发布的 `v0.0.1-alpha.5`。GitHub Pages 文档跟随 `main`，因此 [Unreleased](changelog.md#unreleased-main) 中的能力在下一个 alpha 发布前可能需要从源码安装。
+下方的包管理器命令和 Cargo 标签命令安装的是 `v0.0.1-alpha.5`。官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 alpha 版本发布前可能只能从源码体验。
 
 ## 前置条件
 
 - 一个现代终端模拟器。
-- 一种安装器：npm、Homebrew，或通过 `rustup` / 系统包安装的 Rust toolchain。
-- 一个模型 provider 凭据。首次启动时可以通过 Quick Setup 填写。
+- 一种安装工具：npm、Homebrew，或通过 `rustup` / 系统软件包安装的 Rust 工具链。
+- 一份模型服务凭据。首次启动时可以在快速设置中填写。
 
 ## 当前安装渠道
 
 | 渠道 | 当前覆盖 | 适合场景 |
 | --- | --- | --- |
-| npm alpha | `@sigil-ai/sigil@alpha` 背后使用 platform-specific optional binary package。 | 想要最短的跨平台安装路径。 |
-| Homebrew tap | macOS formula 位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，命令仍是 `sigil`。 | 你习惯用 Homebrew 管理终端工具。 |
-| Cargo git tag | 使用本地 Rust toolchain 从 tagged Git release 构建。 | 你已有 Rust 工具链，或需要源码构建路径。 |
-| GitHub release archive | 提供可下载 release archive 和 checksum 文件。 | 需要手动或离线安装。 |
+| npm alpha | `@sigil-ai/sigil@alpha` 会自动选择当前平台对应的软件包。 | 想用最短路径完成跨平台安装。 |
+| Homebrew tap | macOS 配方位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，最终命令仍是 `sigil`。 | 习惯用 Homebrew 管理终端工具。 |
+| Cargo git tag | 使用本机 Rust 工具链，从带版本标签的 Git 发布构建。 | 已有 Rust 工具链，或希望从源码构建。 |
+| GitHub 发布压缩包 | 提供各平台的压缩包与校验文件。 | 需要手动或离线安装。 |
 
 ## 通过 npm 安装
 
-npm 包名使用 scoped package：`@sigil-ai/sigil`。它安装一个很小的 Node.js launcher，并通过 platform-specific optional package 携带实际 binary。最终命令仍然是 `sigil`。
+npm 包名是 `@sigil-ai/sigil`。安装时会先放置一个很小的 Node.js 启动器，再下载当前平台对应的 Sigil 可执行文件。最终命令仍然是 `sigil`。
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha
@@ -38,11 +38,11 @@ sigil --version
 sigil doctor
 ```
 
-首个 release 不使用 unscoped npm 包名 `sigil`。
+首个发布版本不使用未带 scope 的 npm 包名 `sigil`。
 
 ## 通过 Homebrew 安装
 
-Homebrew 使用专用 tap formula `sigil-ai`，避免和其他名为 Sigil 的 Homebrew 软件混淆。formula 安装后的 binary 仍然叫 `sigil`。
+Homebrew 使用专用配方 `sigil-ai`，避免和其他同名软件混淆。安装后的可执行文件仍然叫 `sigil`。
 
 ```bash
 brew install JimmyDaddy/sigil/sigil-ai
@@ -55,23 +55,23 @@ sigil --version
 sigil doctor
 ```
 
-release workflow 会从 macOS release archives 生成 `sigil-ai.rb`。该 formula 已发布到 `JimmyDaddy/homebrew-sigil` tap。
+发布流程会根据 macOS 压缩包生成 `sigil-ai.rb`，并将配方发布到 `JimmyDaddy/homebrew-sigil` tap。
 
 ## 通过 Cargo 安装
 
-首个 release 通过 Git tag 安装，而不是 crates.io：
+首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.5 --locked sigil
 ```
 
-这会把 `sigil` binary 安装到 Cargo 的 binary 目录。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
+这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
 
-crates.io 上 `sigil` 包名已被其他 package 使用，因此 crates.io 分发需要后续再决定 package name；binary 仍然可以保持 `sigil`。
+crates.io 上的 `sigil` 包名已被其他项目占用，因此后续需要为 crates.io 分发选择新的软件包名；最终命令仍然可以保持为 `sigil`。
 
 ## 从源码安装
 
-如果你希望从本地 checkout 构建，在仓库根目录运行：
+如果你已经检出源码，希望从本地构建，请在仓库根目录运行：
 
 ```bash
 cargo install --path crates/sigil --locked
@@ -93,7 +93,7 @@ cd /path/to/workspace
 sigil
 ```
 
-如果没有可用配置，Sigil 会进入 Quick Setup。完成后，`workspace.root = "."` 表示启动 `sigil` 时所在目录就是当前工作区。
+如果没有可用配置，Sigil 会进入快速设置。完成后，`workspace.root = "."` 表示启动 `sigil` 时所在的目录就是当前工作区。
 
 显式子命令只用于自动化、诊断或脚本：
 
@@ -102,13 +102,13 @@ sigil doctor
 sigil run "总结一下当前仓库"
 ```
 
-在 TUI 内也可以用 `/doctor`，同一份诊断报告会渲染到 transcript。
+在 TUI 内也可以使用 `/doctor`，同一份诊断结果会显示在会话记录中。
 
-## 从 Release Archive 安装
+## 从发布压缩包安装
 
-能使用包管理器时优先使用上面的安装路径。手动安装时，从 [GitHub releases 页面](https://github.com/JimmyDaddy/sigil/releases)下载匹配平台的 archive 和 checksum，校验 checksum，解压 archive，并把 `sigil` binary 放到 `PATH` 中。
+能使用包管理器时，请优先选择上面的安装方式。手动安装时，从 [GitHub Releases 页面](https://github.com/JimmyDaddy/sigil/releases)下载当前平台对应的压缩包和校验文件，核对校验和，解压后把 `sigil` 可执行文件放到 `PATH` 中。
 
-archive 内包含 `sigil` binary、用户 README、logo assets 和安装文档。自更新仍属于后续 packaging 工作。
+压缩包内包含 `sigil` 可执行文件、用户 README、Logo 资源和安装文档。自动更新功能尚未提供。
 
 ## 更新
 

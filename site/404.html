@@ -20,15 +20,47 @@
     <link rel="stylesheet" href="/assets/site.css">
     <script defer src="/assets/site.js"></script>
   </head>
-  <body class="not-found">
+  <body class="not-found-page">
     <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Sigil home">
+        <img class="brand-mark" src="/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
+        <span class="brand-wordmark" aria-hidden="true"></span>
+      </a>
+      <div class="header-actions">
+        <details class="nav-menu">
+          <summary aria-controls="not-found-primary-navigation">Menu</summary>
+          <nav id="not-found-primary-navigation" aria-label="Primary navigation">
+            <a href="/#quickstart">Install</a>
+            <a href="/#demo">Demo</a>
+            <a href="/#workflow">Workflow</a>
+            <a href="/#safety">Safety</a>
+            <a href="/docs/visual-tour/">Tour</a>
+            <a href="/docs/">Docs</a>
+            <a href="/docs/status/">Status</a>
+            <a href="/zh-CN/">简体中文</a>
+            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+          </nav>
+        </details>
+        <details class="theme-menu" data-theme-menu>
+          <summary data-theme-summary aria-label="Theme: Follow system" title="Theme: Follow system"><span data-theme-icon aria-hidden="true">◐</span></summary>
+          <div class="theme-options" role="group" aria-label="Theme">
+            <button type="button" data-theme-option="system" aria-pressed="true"><span aria-hidden="true">◐</span>Follow system</button>
+            <button type="button" data-theme-option="light" aria-pressed="false"><span aria-hidden="true">☀</span>Light</button>
+            <button type="button" data-theme-option="dark" aria-pressed="false"><span aria-hidden="true">☾</span>Dark</button>
+          </div>
+        </details>
+      </div>
+    </header>
     <main class="not-found-panel" id="main-content">
-      <img src="/assets/logo/sigil-mark-staff-glow.svg" alt="" width="72" height="72">
-      <h1>Page not found</h1>
-      <p>The page may have moved. Return home or open the documentation index.</p>
-      <div class="hero-actions">
-        <a class="button primary" href="/">Go home</a>
-        <a class="button secondary" href="/docs/">Open docs</a>
+      <div>
+        <img src="/assets/logo/sigil-mark-staff-glow.svg" alt="" width="72" height="72">
+        <h1>Page not found</h1>
+        <p>The page may have moved. Return home or open the documentation index.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="/">Go home</a>
+          <a class="button secondary" href="/docs/">Open docs</a>
+        </div>
       </div>
     </main>
   </body>

@@ -9,7 +9,7 @@
 ## 从这里开始
 
 1. [安装](installation.md) — 选择软件包、更新或卸载。
-2. [快速开始](quickstart.md) — 完成 setup，并检查第一个小改动。
+2. [快速开始](quickstart.md) — 完成首次设置，并检查第一个小改动。
 3. [TUI 用户指南](user-guide.md) — 熟悉日常工作界面。
 
 ## 按任务选择
@@ -18,7 +18,7 @@
 | --- | --- |
 | 探索、修改、调试、评审或恢复工作 | [常见工作流](workflows.md) |
 | 修改设置 | [配置](configuration.md) |
-| 选择模型或外部工具 | [Provider](providers.md) 与 [MCP](mcp.md) |
+| 选择模型服务或外部工具 | [模型服务](providers.md)与 [MCP](mcp.md) |
 | 判断操作是否安全 | [安全](safety.md)、[权限](permissions-and-sandbox.md)与[隐私](privacy.md) |
 | 解决问题 | [故障排查](troubleshooting.md) |
 | 查询精确命令、键位、路径或字段 | [参考](reference.md)与[配置字段参考](configuration-reference.md) |
