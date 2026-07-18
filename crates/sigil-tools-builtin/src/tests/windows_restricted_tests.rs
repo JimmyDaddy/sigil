@@ -262,6 +262,10 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
     let denied = denied_root.join("escape.txt");
     let grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir)
         .expect("minimal durable workspace grant should be provisioned");
+    let renamed_root = temp.path().join("renamed-workspace");
+    let rename_error = fs::rename(&granted_root, &renamed_root)
+        .expect_err("an active grant lease should pin the workspace root identity");
+    assert_eq!(rename_error.kind(), io::ErrorKind::PermissionDenied);
     let restricting_sid_value = grant.restricting_sid().as_str().to_owned();
     let root_descriptor_after_provision =
         super::WindowsFilesystemGrant::descriptor_hash(&granted_root)

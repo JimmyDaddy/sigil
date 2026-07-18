@@ -4,7 +4,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     mem::{size_of, size_of_val},
-    os::windows::{ffi::OsStrExt, io::FromRawHandle},
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle},
+    },
     path::{Path, PathBuf},
     ptr::{null, null_mut},
 };
@@ -112,6 +115,7 @@ impl GrantPaths {
 pub(crate) struct WindowsFilesystemGrant {
     root: PathBuf,
     root_identity: RootIdentity,
+    root_guard: File,
     lock: File,
     restricting_sid: WindowsRestrictingSid,
     lease_held: bool,
@@ -123,7 +127,7 @@ impl WindowsFilesystemGrant {
         let root = canonical_directory(root, "grant root")?;
         ensure_supported_local_ntfs(&root)?;
         let root_utf16 = wide_without_nul(root.as_os_str());
-        let root_identity = root_identity(&root)?;
+        let (root_guard, root_identity) = open_root_guard(&root)?;
         let state_dir = canonical_state_directory(state_dir, &root)?;
         let paths = GrantPaths::for_root(&state_dir, &root_utf16);
         let lock = open_and_lock(&paths.lock)?;
@@ -133,6 +137,7 @@ impl WindowsFilesystemGrant {
         Ok(Self {
             root,
             root_identity,
+            root_guard,
             lock,
             restricting_sid,
             lease_held: true,
@@ -144,6 +149,7 @@ impl WindowsFilesystemGrant {
     }
 
     pub(crate) fn release(mut self) -> Result<()> {
+        verify_open_root_identity(&self.root_guard, self.root_identity)?;
         verify_root_identity(&self.root, self.root_identity)?;
         verify_effective_root_grant(&self.root, &self.restricting_sid)?;
         FileExt::unlock(&self.lock).context("failed to release Windows ACL lease")?;
@@ -692,15 +698,29 @@ fn ensure_supported_local_ntfs(root: &Path) -> Result<()> {
 }
 
 fn root_identity(root: &Path) -> Result<RootIdentity> {
-    use std::os::windows::io::AsRawHandle;
+    let file = open_root_identity_handle(
+        root,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        "identity",
+    )?;
+    root_identity_from_handle(&file)
+}
 
+fn open_root_guard(root: &Path) -> Result<(File, RootIdentity)> {
+    let file =
+        open_root_identity_handle(root, FILE_SHARE_READ | FILE_SHARE_WRITE, "identity guard")?;
+    let identity = root_identity_from_handle(&file)?;
+    Ok((file, identity))
+}
+
+fn open_root_identity_handle(root: &Path, share_mode: u32, label: &str) -> Result<File> {
     let wide = nul_terminated(root.as_os_str(), "grant root")?;
     // SAFETY: wide is NUL-terminated. The returned handle is checked and then owned by File.
     let raw = unsafe {
         CreateFileW(
             wide.as_ptr(),
             FILE_READ_ATTRIBUTES | READ_CONTROL,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            share_mode,
             null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -709,10 +729,13 @@ fn root_identity(root: &Path) -> Result<RootIdentity> {
     };
     if raw == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error())
-            .context("CreateFileW failed for Windows grant root identity");
+            .with_context(|| format!("CreateFileW failed for Windows grant root {label}"));
     }
     // SAFETY: CreateFileW returned an owned, non-sentinel handle.
-    let file = unsafe { File::from_raw_handle(raw) };
+    Ok(unsafe { File::from_raw_handle(raw) })
+}
+
+fn root_identity_from_handle(file: &File) -> Result<RootIdentity> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: file is live and info is a valid output pointer.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
@@ -723,6 +746,13 @@ fn root_identity(root: &Path) -> Result<RootIdentity> {
         volume_serial_number: info.dwVolumeSerialNumber,
         file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
     })
+}
+
+fn verify_open_root_identity(root_guard: &File, expected: RootIdentity) -> Result<()> {
+    if root_identity_from_handle(root_guard)? != expected {
+        bail!("Windows grant root handle identity changed during the ACL lease");
+    }
+    Ok(())
 }
 
 fn verify_root_identity(root: &Path, expected: RootIdentity) -> Result<()> {
