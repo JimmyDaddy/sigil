@@ -209,7 +209,7 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn write_restricted_sid_denies_ungranted_same_user_path() {
+async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user_path() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let host_can_write = temp.path().join("host-can-write.txt");
     fs::write(&host_can_write, b"host")
@@ -232,7 +232,11 @@ async fn write_restricted_sid_denies_ungranted_same_user_path() {
         restricting_sid_count, 3,
         "token should carry the unique capability, logon, and Everyone runtime SIDs"
     );
-    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "restricted Rust runtime should initialize before proving the denied write"
+    );
     assert_eq!(
         outcome.output.termination,
         ExecutionTerminationCause::Exited

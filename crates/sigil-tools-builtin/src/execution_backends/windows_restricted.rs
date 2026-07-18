@@ -108,16 +108,22 @@ mod native {
     use tokio::{fs::File as TokioFile, task::JoinHandle};
     use windows_sys::Win32::{
         Foundation::{
-            HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
-            WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            ERROR_SUCCESS, GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+            LocalFree, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
         Security::{
-            Authorization::ConvertStringSidToSidW, CopySid, CreateRestrictedToken,
-            DISABLE_MAX_PRIVILEGE, GetLengthSid, GetTokenInformation, LookupPrivilegeValueW, PSID,
-            SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES,
-            TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY,
-            TokenGroups, TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
+            ACL,
+            Authorization::{
+                ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW,
+                TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+            },
+            CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetLengthSid,
+            GetTokenInformation, LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME,
+            SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SetTokenInformation,
+            TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
+            TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenGroups,
+            TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -566,7 +572,7 @@ mod native {
         if unsafe {
             OpenProcessToken(
                 GetCurrentProcess(),
-                TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+                TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
                 &raw mut token,
             )
         } == 0
@@ -639,7 +645,73 @@ mod native {
             return Err(io::Error::last_os_error()).context("CreateRestrictedToken failed");
         }
         // SAFETY: CreateRestrictedToken succeeded and transferred ownership of the token handle.
-        Ok(unsafe { OwnedHandle::from_raw_handle(restricted) })
+        let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
+        if let (Some(capability), Some(logon), Some(everyone)) =
+            (restricting_sid, logon_sid.as_ref(), everyone_sid.as_ref())
+        {
+            set_restricted_token_default_dacl(
+                raw_handle(&restricted),
+                &[capability.as_ptr(), logon.as_ptr(), everyone.as_ptr()],
+            )?;
+        }
+        Ok(restricted)
+    }
+
+    fn set_restricted_token_default_dacl(token: HANDLE, sids: &[PSID]) -> Result<()> {
+        if sids.is_empty() {
+            return Ok(());
+        }
+
+        // This DACL applies only to securable objects created by the restricted process (for
+        // example runtime synchronization objects and anonymous-pipe internals). It is not a
+        // filesystem-root grant: R41.2 root ACEs are managed separately and must remain minimal.
+        let entries = sids
+            .iter()
+            .map(|sid| EXPLICIT_ACCESS_W {
+                grfAccessPermissions: GENERIC_ALL,
+                grfAccessMode: GRANT_ACCESS,
+                grfInheritance: 0,
+                Trustee: TRUSTEE_W {
+                    pMultipleTrustee: null_mut(),
+                    MultipleTrusteeOperation: 0,
+                    TrusteeForm: TRUSTEE_IS_SID,
+                    TrusteeType: TRUSTEE_IS_UNKNOWN,
+                    ptstrName: (*sid).cast::<u16>(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let entry_count = u32::try_from(entries.len()).context("default DACL count exceeds u32")?;
+        let mut acl: *mut ACL = null_mut();
+        // SAFETY: entries and their referenced SIDs remain live for the call; acl is a valid
+        // output pointer and is released with LocalFree on every path after allocation.
+        let status =
+            unsafe { SetEntriesInAclW(entry_count, entries.as_ptr(), null(), &raw mut acl) };
+        if status != ERROR_SUCCESS {
+            bail!("SetEntriesInAclW failed for restricted token default DACL: {status}");
+        }
+        if acl.is_null() {
+            bail!("SetEntriesInAclW returned a null restricted token default DACL");
+        }
+
+        let info = TOKEN_DEFAULT_DACL { DefaultDacl: acl };
+        // SAFETY: token is live and has TOKEN_ADJUST_DEFAULT access. info and acl remain valid for
+        // the duration of the call; SetTokenInformation copies the DACL into the token.
+        let updated = unsafe {
+            SetTokenInformation(
+                token,
+                TokenDefaultDacl,
+                (&raw const info).cast::<c_void>(),
+                u32::try_from(size_of::<TOKEN_DEFAULT_DACL>())
+                    .expect("TOKEN_DEFAULT_DACL size fits u32"),
+            )
+        };
+        let update_error = (updated == 0).then(io::Error::last_os_error);
+        // SAFETY: SetEntriesInAclW allocated acl with LocalAlloc.
+        let _ = unsafe { LocalFree(acl.cast::<c_void>()) };
+        if let Some(error) = update_error {
+            return Err(error).context("SetTokenInformation(TokenDefaultDacl) failed");
+        }
+        Ok(())
     }
 
     fn current_logon_sid(token: HANDLE) -> Result<CopiedSid> {
