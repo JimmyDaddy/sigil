@@ -127,13 +127,14 @@ mod native {
                 SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
             },
             CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, FreeSid, GetLengthSid,
-            GetTokenInformation,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             Isolation::DeriveAppContainerSidFromAppContainerName,
             LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME, SE_PRIVILEGE_ENABLED,
             SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SetTokenInformation,
             TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
-            TOKEN_GROUPS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenGroups,
-            TokenIsAppContainer, TokenPrivileges, TokenRestrictedSids, WRITE_RESTRICTED,
+            TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl,
+            TokenGroups, TokenIntegrityLevel, TokenIsAppContainer, TokenPrivileges,
+            TokenRestrictedSids, WRITE_RESTRICTED,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
@@ -160,6 +161,7 @@ mod native {
         pub(crate) source_enabled_non_traverse_privilege_count: u32,
         pub(crate) restricted_enabled_non_traverse_privilege_count: u32,
         pub(crate) restricting_sid_count: u32,
+        pub(crate) integrity_rid: u32,
     }
 
     pub(crate) struct WindowsRestrictingSid {
@@ -1058,11 +1060,76 @@ mod native {
         let restricted_enabled_non_traverse_privilege_count =
             enabled_non_traverse_privilege_count(restricted, traverse_privilege)?;
         let restricting_sid_count = restricted_sid_count(restricted)?;
+        let integrity_rid = token_integrity_rid(restricted)?;
         Ok(RestrictedTokenPrivilegeEvidence {
             source_enabled_non_traverse_privilege_count,
             restricted_enabled_non_traverse_privilege_count,
             restricting_sid_count,
+            integrity_rid,
         })
+    }
+
+    fn token_integrity_rid(token: HANDLE) -> Result<u32> {
+        let mut bytes = 0_u32;
+        // SAFETY: This is the documented sizing call and bytes is a valid output pointer.
+        let _ = unsafe {
+            GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &raw mut bytes)
+        };
+        if bytes
+            < u32::try_from(size_of::<TOKEN_MANDATORY_LABEL>())
+                .expect("TOKEN_MANDATORY_LABEL size fits u32")
+        {
+            bail!("TokenIntegrityLevel sizing returned an invalid buffer length");
+        }
+        let words = usize::try_from(bytes)
+            .context("TokenIntegrityLevel buffer length exceeds usize")?
+            .div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let mut returned = 0_u32;
+        // SAFETY: storage is aligned and large enough for the requested token information.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                storage.as_mut_ptr().cast::<c_void>(),
+                bytes,
+                &raw mut returned,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error())
+                .context("GetTokenInformation(TokenIntegrityLevel) failed");
+        }
+        if returned
+            < u32::try_from(size_of::<TOKEN_MANDATORY_LABEL>())
+                .expect("TOKEN_MANDATORY_LABEL size fits u32")
+            || returned > bytes
+        {
+            bail!("TokenIntegrityLevel returned an invalid buffer length");
+        }
+        let label = storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+        // SAFETY: GetTokenInformation initialized the fixed TOKEN_MANDATORY_LABEL header.
+        let sid = unsafe { (*label).Label.Sid };
+        if sid.is_null() {
+            bail!("TokenIntegrityLevel returned a null SID");
+        }
+        // SAFETY: sid is the validated integrity SID embedded in the returned token buffer.
+        let count = unsafe { GetSidSubAuthorityCount(sid) };
+        if count.is_null() {
+            bail!("GetSidSubAuthorityCount returned null for token integrity SID");
+        }
+        // SAFETY: count points into the live integrity SID.
+        let count = u32::from(unsafe { *count });
+        if count == 0 {
+            bail!("token integrity SID has no sub-authority");
+        }
+        // SAFETY: the final sub-authority is the documented integrity-level RID.
+        let rid = unsafe { GetSidSubAuthority(sid, count - 1) };
+        if rid.is_null() {
+            bail!("GetSidSubAuthority returned null for token integrity RID");
+        }
+        // SAFETY: rid points into the live integrity SID buffer.
+        Ok(unsafe { *rid })
     }
 
     fn restricted_sid_count(token: HANDLE) -> Result<u32> {

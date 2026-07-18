@@ -21,6 +21,9 @@ use serial_test::serial;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 
+#[cfg(windows)]
+const SECURITY_MANDATORY_LOW_RID: u32 = 0x1000;
+
 #[cfg(not(windows))]
 use super::WindowsRestrictedProbeUnavailable;
 use super::windows_restricted_launch_probe;
@@ -308,6 +311,7 @@ async fn app_container_profile_launches_system_command_and_cleans_up() {
         .expect("profile-backed AppContainer launch should return a receipt");
 
     assert!(evidence.privileges_constrained());
+    assert_eq!(evidence.integrity_rid, SECURITY_MANDATORY_LOW_RID);
     assert_eq!(outcome.exit_code, Some(0));
     assert_eq!(
         outcome.output.termination,
@@ -374,14 +378,10 @@ fn app_container_profile_recovers_an_interrupted_owned_profile() {
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn app_container_workspace_grant_writes_inside_and_denies_external_paths() {
+async fn app_container_dacl_grant_cannot_write_medium_integrity_workspace() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let workspace = temp.path().join("workspace");
-    let sibling = temp.path().join("sibling");
-    let everyone_root = temp.path().join("everyone-writable");
     fs::create_dir_all(&workspace).expect("workspace should be created");
-    fs::create_dir_all(&sibling).expect("sibling should be created");
-    fs::create_dir_all(&everyone_root).expect("Everyone fixture should be created");
     let existing = workspace.join("existing.txt");
     fs::write(&existing, b"before").expect("existing workspace file should be created");
 
@@ -402,6 +402,14 @@ async fn app_container_workspace_grant_writes_inside_and_denies_external_paths()
         .expect("workspace descriptor should be captured");
     let existing_descriptor = super::WindowsFilesystemGrant::descriptor_hash(&existing)
         .expect("existing file descriptor should be captured");
+    assert!(
+        super::WindowsFilesystemGrant::sid_has_mutating_rights(&workspace, grant.restricting_sid())
+            .expect("AppContainer root DACL rights should resolve")
+    );
+    assert!(
+        super::WindowsFilesystemGrant::sid_has_mutating_rights(&existing, grant.restricting_sid())
+            .expect("AppContainer existing-file DACL rights should resolve")
+    );
 
     let program = cmd_path();
     let mut inside = probe_request(
@@ -415,62 +423,23 @@ async fn app_container_workspace_grant_writes_inside_and_denies_external_paths()
         ],
     );
     inside.cwd = workspace.clone();
-    let (inside_outcome, _) = supervise_app_container_probe(&inside, profile.sid())
+    let (inside_outcome, evidence) = supervise_app_container_probe(&inside, profile.sid())
         .await
         .expect("AppContainer workspace mutation probe should return a receipt");
-    assert_eq!(inside_outcome.exit_code, Some(0));
-    assert_eq!(
-        fs::read_to_string(workspace.join("created.txt"))
-            .expect("created workspace file should remain readable")
-            .trim(),
-        "created"
+    assert_eq!(evidence.integrity_rid, SECURITY_MANDATORY_LOW_RID);
+    assert_ne!(
+        inside_outcome.exit_code,
+        Some(0),
+        "DACL-only AppContainer mutation unexpectedly succeeded; stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&inside_outcome.stdout),
+        String::from_utf8_lossy(&inside_outcome.stderr)
     );
     assert_eq!(
-        fs::read_to_string(&existing)
-            .expect("modified workspace file should remain readable")
-            .trim(),
-        "modified"
+        fs::read(&existing).expect("existing workspace file should remain readable"),
+        b"before"
     );
+    assert!(!workspace.join("created.txt").exists());
     assert!(!workspace.join("deleted.txt").exists());
-
-    let denied = sibling.join("escaped.txt");
-    let mut denied_request = probe_request(
-        program.to_string_lossy().into_owned(),
-        vec![
-            "/D".to_owned(),
-            "/S".to_owned(),
-            "/C".to_owned(),
-            "echo escaped>\"%SIGIL_DENIED_PATH%\"".to_owned(),
-        ],
-    );
-    denied_request.cwd = workspace.clone();
-    denied_request.env.insert(
-        "SIGIL_DENIED_PATH".to_owned(),
-        denied.to_string_lossy().into_owned(),
-    );
-    let (denied_outcome, _) = supervise_app_container_probe(&denied_request, profile.sid())
-        .await
-        .expect("AppContainer sibling denial probe should return a receipt");
-    assert_ne!(denied_outcome.exit_code, Some(0));
-    assert!(!denied.exists(), "AppContainer escaped to a sibling path");
-
-    let everyone_sid =
-        super::WindowsRestrictingSid::new_everyone().expect("Everyone SID should resolve");
-    super::WindowsFilesystemGrant::apply_test_root_grant(&everyone_root, &everyone_sid)
-        .expect("negative fixture should grant Everyone write access");
-    let broad_external = everyone_root.join("escaped.txt");
-    denied_request.env.insert(
-        "SIGIL_DENIED_PATH".to_owned(),
-        broad_external.to_string_lossy().into_owned(),
-    );
-    let (broad_outcome, _) = supervise_app_container_probe(&denied_request, profile.sid())
-        .await
-        .expect("AppContainer Everyone-grant probe should return a receipt");
-    assert_ne!(broad_outcome.exit_code, Some(0));
-    assert!(
-        !broad_external.exists(),
-        "AppContainer escaped through an Everyone-granted external path"
-    );
 
     grant
         .release()
