@@ -397,6 +397,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogPage": {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": ["workspace_id", "generation", "reconciled_at_unix_ms", "degraded_source_count", "identity_conflict_count", "truncated_source_count", "entries"],
                     "properties": {
                         "workspace_id": { "type": "string" },
@@ -414,6 +415,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogEntry": {
                     "type": "object",
+                    "additionalProperties": false,
                     "description": "Compact historical metadata only; message and tool bodies are absent.",
                     "required": ["workspace_id", "session_ref", "source_state", "source_bytes", "source_modified_at_unix_ms", "user_message_count", "assistant_message_count", "tool_result_count", "control_entry_count", "pinned", "indexed_at_unix_ms"],
                     "properties": {

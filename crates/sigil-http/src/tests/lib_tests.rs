@@ -383,6 +383,21 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(first_page["entries"].as_array().map(Vec::len), Some(1));
     assert_eq!(first_page["entries"][0]["provider_name"], "deepseek");
     assert!(first_page["entries"][0].get("session_log_path").is_none());
+    for internal_field in [
+        "source_content_sha256",
+        "first_stream_sequence",
+        "last_stream_sequence",
+        "last_event_id",
+        "last_record_checksum",
+        "latest_usage",
+        "latest_task",
+        "latest_readiness",
+    ] {
+        assert!(
+            first_page["entries"][0].get(internal_field).is_none(),
+            "storage field {internal_field} must not enter the HTTP DTO"
+        );
+    }
     let cursor = first_page["next_cursor"]
         .as_str()
         .expect("first page should have a cursor")
@@ -398,6 +413,17 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "invalid_query");
     }
+    let (status, body) = http_raw_request(
+        address,
+        http_get(
+            "/session-catalog?cursor=not-base64!",
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
 
     write_catalog_session(
         &sessions.join("third.jsonl"),

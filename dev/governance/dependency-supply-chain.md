@@ -7,6 +7,8 @@
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
 | `rusqlite` | `0.39.0`；`bundled`（`libsqlite3-sys 0.37.0`，SQLite 3.51.3） | `sigil-runtime/session_lifecycle/projection` | 为 desktop/local HTTP 提供可删除、可从 JSONL/lifecycle journal 重建的历史 session catalog；参数化 SQL、固定 schema、WAL、trusted schema off、bounded busy wait，不进入 run/approval/resume 事实链 | `MIT`；`rusqlite/rusqlite`，bundled SQLite 为 public domain | 直接依赖固定到 0.39.0：最新 0.40.1 的 build script 使用 Rust 1.94.1 尚未稳定的 `cfg_select!`，本仓库预检无法编译；升级前必须重新验证稳定工具链、三平台编译、`cargo deny` 与 `cargo audit` |
+| `base64` | 复用 workspace `0.22.1`；默认 feature | `sigil-runtime/session_lifecycle/projection/query` | 编码 runtime-owned、generation/filter-bound 的 opaque keyset cursor；payload不含secret且不作为授权凭据，解码后仍执行schema、byte cap、filter hash与generation验证 | `MIT OR Apache-2.0`；`marshallpierce/rust-base64` | 只新增runtime直接消费，不引入新版本或来源；不能复用kernel单stream apply cursor |
+| `url` | 复用 workspace 声明 `2.5.7`（lock `2.5.8`）；默认 feature | `sigil-http/listener` | 严格解析loopback HTTP query的percent encoding与UTF-8，再由adapter拒绝duplicate/unknown/bounded-invalid字段；不发起网络请求 | `MIT OR Apache-2.0`；`servo/rust-url` | 只新增HTTP crate直接消费，不引入第二套URL实现、新版本或来源 |
 
 bundled 模式避免 desktop 分发依赖目标机系统 SQLite ABI，同时会增加二进制体积和 C build surface。数据库只
 在 production `sigil serve` / future desktop catalog owner 显式初始化；普通 TUI/CLI startup 不创建它。

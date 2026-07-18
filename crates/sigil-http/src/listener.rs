@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc, time::Duration};
 
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sigil_kernel::PublicRunEventKind;
 use sigil_runtime::{
-    LocalSessionCatalogState, SessionCatalogProjectionError, SessionCatalogProjectionQuery,
-    SessionCatalogProjectionService,
+    LocalSessionCatalogState, SessionCatalogProjectionEntry, SessionCatalogProjectionError,
+    SessionCatalogProjectionPage, SessionCatalogProjectionQuery, SessionCatalogProjectionService,
 };
 use thiserror::Error as ThisError;
 use tokio::{
@@ -35,6 +35,81 @@ const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
 const HTTP_SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP_GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct HttpSessionCatalogPage {
+    workspace_id: String,
+    generation: u64,
+    reconciled_at_unix_ms: u64,
+    degraded_source_count: usize,
+    identity_conflict_count: usize,
+    truncated_source_count: usize,
+    entries: Vec<HttpSessionCatalogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct HttpSessionCatalogEntry {
+    workspace_id: String,
+    session_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    source_state: LocalSessionCatalogState,
+    source_bytes: u64,
+    source_modified_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    user_message_count: u64,
+    assistant_message_count: u64,
+    tool_result_count: u64,
+    control_entry_count: u64,
+    pinned: bool,
+    indexed_at_unix_ms: u64,
+}
+
+impl From<SessionCatalogProjectionPage> for HttpSessionCatalogPage {
+    fn from(page: SessionCatalogProjectionPage) -> Self {
+        Self {
+            workspace_id: page.workspace_id,
+            generation: page.generation,
+            reconciled_at_unix_ms: page.reconciled_at_unix_ms,
+            degraded_source_count: page.degraded_source_count,
+            identity_conflict_count: page.identity_conflict_count,
+            truncated_source_count: page.truncated_source_count,
+            entries: page.entries.into_iter().map(Into::into).collect(),
+            next_cursor: page.next_cursor,
+        }
+    }
+}
+
+impl From<SessionCatalogProjectionEntry> for HttpSessionCatalogEntry {
+    fn from(entry: SessionCatalogProjectionEntry) -> Self {
+        Self {
+            workspace_id: entry.workspace_id,
+            session_ref: entry.session_ref,
+            session_id: entry.session_id,
+            source_state: entry.source_state,
+            source_bytes: entry.source_bytes,
+            source_modified_at_unix_ms: entry.source_modified_at_unix_ms,
+            provider_name: entry.provider_name,
+            model_name: entry.model_name,
+            title: entry.title,
+            user_message_count: entry.user_message_count,
+            assistant_message_count: entry.assistant_message_count,
+            tool_result_count: entry.tool_result_count,
+            control_entry_count: entry.control_entry_count,
+            pinned: entry.pinned,
+            indexed_at_unix_ms: entry.indexed_at_unix_ms,
+        }
+    }
+}
 
 /// Errors returned by the localhost HTTP listener boundary.
 #[derive(Debug, ThisError)]
@@ -334,7 +409,7 @@ fn route_http_request(
             Err(message) => return http_error_response(400, "invalid_query", message),
         };
         return match session_catalog.reconcile_and_query(query) {
-            Ok(page) => json_response(200, json!(page)),
+            Ok(page) => json_response(200, json!(HttpSessionCatalogPage::from(page))),
             Err(SessionCatalogProjectionError::InvalidQuery { message }) => {
                 http_error_response(400, "invalid_query", message)
             }

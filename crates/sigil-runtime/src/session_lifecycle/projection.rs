@@ -7,14 +7,14 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     JsonlSessionStore, SessionListProjectionEntry, SessionListReadinessSummary,
     SessionListTaskSummary, SessionListUsageSummary, SessionStreamCompatibilityError,
-    session_list_projection_from_records,
+    safe_persistence_text, session_list_projection_from_records,
 };
 use thiserror::Error as ThisError;
 
@@ -34,6 +34,8 @@ pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 1;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
+const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
+const SESSION_CATALOG_IDENTITY_MAX_BYTES: usize = 128;
 
 const CREATE_SCHEMA_SQL: &str = r#"
 CREATE TABLE session_catalog_workspace_v1 (
@@ -213,6 +215,8 @@ pub struct SessionCatalogProjectionRecoveryReport {
     pub workspace_id: String,
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_workspace_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarantine_directory_name: Option<String>,
     pub quarantined_file_count: usize,
     pub rebuilt_source_count: usize,
@@ -319,28 +323,33 @@ impl SessionCatalogProjectionService {
         list_workspace_entries(&connection, &self.lifecycle.workspace_id)
     }
 
-    /// Quarantines the current SQLite files under an exclusive process lease and rebuilds from
-    /// durable JSONL/lifecycle sources before releasing that lease.
+    /// Quarantines the global SQLite files under an exclusive process lease and rebuilds the
+    /// current workspace from durable JSONL/lifecycle sources before releasing that lease.
     ///
     /// This is an explicit owner recovery action. Automatic queries never move or delete a
-    /// projection. The quarantine directory remains beside the database for inspection.
+    /// projection. Because the database is global, this invalidates cached rows for every
+    /// workspace; their JSONL truth remains intact and each workspace is restored on its next
+    /// reconcile. The report includes the previous workspace count when it could be read safely.
+    /// The quarantine directory remains beside the database for inspection.
     ///
     /// # Errors
     ///
     /// Returns [`SessionCatalogProjectionError::RecoveryBusy`] while another Sigil process holds
     /// a catalog connection, or a typed filesystem/rebuild error without deleting the durable
     /// session sources.
-    pub fn quarantine_and_rebuild(
+    pub fn quarantine_global_catalog_and_rebuild_workspace(
         &self,
     ) -> Result<SessionCatalogProjectionRecoveryReport, SessionCatalogProjectionError> {
         prepare_database_parent(&self.database_path)?;
         let recovery_lease = self.acquire_exclusive_recovery_lease()?;
+        let invalidated_workspace_count = self.workspace_count_under_recovery();
         let quarantine = quarantine_sqlite_files(&self.database_path)?;
         let rebuilt = self.reconcile_internal_with_recovery(true, Some(&recovery_lease));
         match rebuilt {
             Ok(rebuilt) => Ok(SessionCatalogProjectionRecoveryReport {
                 workspace_id: rebuilt.workspace_id,
                 generation: rebuilt.generation,
+                invalidated_workspace_count,
                 quarantine_directory_name: quarantine
                     .as_ref()
                     .and_then(|quarantine| quarantine.path.file_name())
@@ -383,23 +392,48 @@ impl SessionCatalogProjectionService {
     }
 
     fn open_database_connection(&self) -> Result<Connection, SessionCatalogProjectionError> {
-        validate_optional_regular_projection_file(&self.database_path, "database")?;
+        ensure_secure_database_file(&self.database_path)?;
+        for sidecar in [
+            sqlite_sidecar_path(&self.database_path, "-wal"),
+            sqlite_sidecar_path(&self.database_path, "-shm"),
+        ] {
+            validate_optional_regular_projection_file(&sidecar, "SQLite sidecar")?;
+        }
+        let canonical_database_path = fs::canonicalize(&self.database_path).map_err(|error| {
+            SessionCatalogProjectionError::UnsafePath {
+                message: format!("failed to resolve database path: {error}"),
+            }
+        })?;
         let mut connection = Connection::open_with_flags(
-            &self.database_path,
+            &canonical_database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(SESSION_CATALOG_BUSY_TIMEOUT)?;
-        connection.execute_batch(
-            "PRAGMA trusted_schema = OFF; \
-             PRAGMA foreign_keys = ON; \
-             PRAGMA journal_mode = WAL; \
-             PRAGMA synchronous = FULL;",
-        )?;
-        initialize_or_validate_schema(&mut connection)?;
-        tighten_database_permissions(&self.database_path)?;
+        connection.execute_batch("PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON;")?;
+        initialize_or_validate_schema(&mut connection, &self.database_path)?;
+        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
+        tighten_catalog_permissions(&self.database_path)?;
         Ok(connection)
+    }
+
+    fn workspace_count_under_recovery(&self) -> Option<usize> {
+        if !matches!(
+            validate_optional_regular_projection_file(&self.database_path, "database"),
+            Ok(true)
+        ) {
+            return Some(0);
+        }
+        let connection = self.open_database_connection().ok()?;
+        let count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_catalog_workspace_v1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()?;
+        usize::try_from(count).ok()
     }
 
     fn acquire_shared_usage_lease(&self) -> Result<File, SessionCatalogProjectionError> {
@@ -464,14 +498,18 @@ impl SessionCatalogProjectionService {
                 .iter()
                 .map(|entry| (entry.session_ref.clone(), entry))
                 .collect::<BTreeMap<_, _>>();
-            let updated_source_count = next_by_ref
+            let updated_entries = next_by_ref
                 .iter()
                 .filter(|(session_ref, entry)| existing.get(*session_ref) != Some(*entry))
-                .count();
-            let removed_source_count = existing
+                .map(|(_, entry)| *entry)
+                .collect::<Vec<_>>();
+            let removed_session_refs = existing
                 .keys()
                 .filter(|session_ref| !next_by_ref.contains_key(*session_ref))
-                .count();
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let updated_source_count = updated_entries.len();
+            let removed_source_count = removed_session_refs.len();
             let metadata_changed = base_metadata.as_ref().is_none_or(|metadata| {
                 metadata.degraded_source_count != degraded_source_count
                     || metadata.identity_conflict_count != identity_conflict_count
@@ -501,7 +539,7 @@ impl SessionCatalogProjectionService {
                 continue;
             }
             if generation_changed {
-                replace_workspace_entries(
+                apply_workspace_entry_changes(
                     &transaction,
                     &self.lifecycle.workspace_id,
                     generation,
@@ -509,7 +547,8 @@ impl SessionCatalogProjectionService {
                     degraded_source_count,
                     identity_conflict_count,
                     scan.truncated_source_count,
-                    &scan.entries,
+                    &updated_entries,
+                    &removed_session_refs,
                 )?;
             } else {
                 upsert_workspace_metadata(
@@ -547,15 +586,13 @@ impl SessionCatalogProjectionService {
         force_rebuild: bool,
         indexed_at_unix_ms: u64,
     ) -> Result<SessionCatalogScan, SessionCatalogProjectionError> {
-        if !self
-            .lifecycle
-            .session_dir
-            .try_exists()
-            .map_err(source_error)?
-        {
-            return Ok(SessionCatalogScan::default());
-        }
-        let metadata = fs::symlink_metadata(&self.lifecycle.session_dir).map_err(source_error)?;
+        let metadata = match fs::symlink_metadata(&self.lifecycle.session_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SessionCatalogScan::default());
+            }
+            Err(error) => return Err(source_error(error)),
+        };
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(SessionCatalogProjectionError::Source {
                 message: "configured session directory must be a real directory".to_owned(),
@@ -712,7 +749,12 @@ fn source_fingerprint_matches(
     candidate: &SessionCandidate,
     state: LocalSessionCatalogState,
 ) -> bool {
-    previous.source_state == state
+    (previous.source_state == state
+        || (state == LocalSessionCatalogState::Ready
+            && matches!(
+                previous.source_state,
+                LocalSessionCatalogState::Invalid | LocalSessionCatalogState::UnsupportedLegacy
+            )))
         && previous.source_bytes == candidate.bytes
         && previous.source_modified_at_unix_ms == candidate.modified_at_unix_ms
 }
@@ -770,15 +812,16 @@ struct SessionCatalogQuarantine {
 fn open_recovery_lease_file(database_path: &Path) -> Result<File, SessionCatalogProjectionError> {
     let lease_path = sqlite_sidecar_path(database_path, ".recovery-lock");
     validate_optional_regular_projection_file(&lease_path, "recovery lease")?;
-    let lease = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lease_path)
-        .map_err(|error| SessionCatalogProjectionError::Recovery {
-            message: format!("failed to open recovery lease: {error}"),
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let lease =
+        options
+            .open(&lease_path)
+            .map_err(|error| SessionCatalogProjectionError::Recovery {
+                message: format!("failed to open recovery lease: {error}"),
+            })?;
     validate_regular_projection_file(&lease_path, "recovery lease")?;
     tighten_open_file_permissions(&lease)?;
     Ok(lease)
@@ -948,7 +991,7 @@ fn tighten_open_file_permissions(_file: &File) -> Result<(), SessionCatalogProje
 fn tighten_directory_permissions(path: &Path) -> Result<(), SessionCatalogProjectionError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
         SessionCatalogProjectionError::Recovery {
-            message: format!("failed to restrict quarantine directory permissions: {error}"),
+            message: format!("failed to restrict projection directory permissions: {error}"),
         }
     })
 }
@@ -988,6 +1031,7 @@ fn prepare_database_parent(path: &Path) -> Result<(), SessionCatalogProjectionEr
                     message: "created database parent must be a real directory".to_owned(),
                 });
             }
+            tighten_directory_permissions(parent)?;
         }
         Err(error) => {
             return Err(SessionCatalogProjectionError::UnsafePath {
@@ -1000,13 +1044,26 @@ fn prepare_database_parent(path: &Path) -> Result<(), SessionCatalogProjectionEr
 
 fn initialize_or_validate_schema(
     connection: &mut Connection,
+    database_path: &Path,
 ) -> Result<(), SessionCatalogProjectionError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let application_id: i32 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let user_version: i32 =
-        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if application_id == 0 && user_version == 0 {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let user_object_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_'",
+            [],
+            |row| row.get(0),
+        )?;
+        if user_object_count != 0 {
+            return Err(SessionCatalogProjectionError::IncompatibleSchema {
+                application_id,
+                user_version,
+            });
+        }
+        tighten_catalog_permissions(database_path)?;
         transaction.execute_batch(CREATE_SCHEMA_SQL)?;
         transaction.pragma_update(None, "application_id", SESSION_CATALOG_APPLICATION_ID)?;
         transaction.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION)?;
@@ -1020,6 +1077,90 @@ fn initialize_or_validate_schema(
             application_id,
             user_version,
         });
+    }
+    validate_schema_object_names(&transaction).map_err(|()| {
+        SessionCatalogProjectionError::IncompatibleSchema {
+            application_id,
+            user_version,
+        }
+    })?;
+    tighten_catalog_permissions(database_path)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_schema_object_names(connection: &Connection) -> Result<(), ()> {
+    let expected = BTreeSet::from([
+        (
+            "index".to_owned(),
+            "session_catalog_entry_workspace_pinned_v1".to_owned(),
+        ),
+        (
+            "index".to_owned(),
+            "session_catalog_entry_workspace_provider_v1".to_owned(),
+        ),
+        (
+            "index".to_owned(),
+            "session_catalog_entry_workspace_sort_v1".to_owned(),
+        ),
+        (
+            "index".to_owned(),
+            "session_catalog_entry_workspace_state_v1".to_owned(),
+        ),
+        ("table".to_owned(), "session_catalog_entry_v1".to_owned()),
+        (
+            "table".to_owned(),
+            "session_catalog_workspace_v1".to_owned(),
+        ),
+    ]);
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name FROM sqlite_schema \
+             WHERE substr(name, 1, 7) <> 'sqlite_' ORDER BY type, name",
+        )
+        .map_err(|_| ())?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| ())?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| ())?;
+    (actual == expected).then_some(()).ok_or(())
+}
+
+fn ensure_secure_database_file(path: &Path) -> Result<(), SessionCatalogProjectionError> {
+    match validate_optional_regular_projection_file(path, "database")? {
+        true => Ok(()),
+        false => {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            match options.open(path) {
+                Ok(file) => tighten_open_file_permissions(&file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_regular_projection_file(path, "database")
+                }
+                Err(error) => Err(SessionCatalogProjectionError::UnsafePath {
+                    message: format!("failed to create database securely: {error}"),
+                }),
+            }
+        }
+    }
+}
+
+fn tighten_catalog_permissions(path: &Path) -> Result<(), SessionCatalogProjectionError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| SessionCatalogProjectionError::UnsafePath {
+            message: "database has no parent directory".to_owned(),
+        })?;
+    tighten_directory_permissions(parent)?;
+    for candidate in sqlite_projection_files(path) {
+        if validate_optional_regular_projection_file(&candidate, "SQLite projection file")? {
+            tighten_database_permissions(&candidate)?;
+        }
     }
     Ok(())
 }
@@ -1113,16 +1254,41 @@ fn apply_session_projection(
     entry.last_stream_sequence = Some(projection.last_stream_sequence);
     entry.last_event_id = Some(projection.last_event_id);
     entry.last_record_checksum = last_record.map(|record| record.record_checksum().to_owned());
-    entry.provider_name = projection.provider_name;
-    entry.model_name = projection.model_name;
-    entry.title = projection.title;
+    entry.provider_name = projection
+        .provider_name
+        .map(|value| safe_bounded_projection_text(&value, SESSION_CATALOG_IDENTITY_MAX_BYTES));
+    entry.model_name = projection
+        .model_name
+        .map(|value| safe_bounded_projection_text(&value, SESSION_CATALOG_IDENTITY_MAX_BYTES));
+    entry.title = projection
+        .title
+        .map(|value| safe_bounded_projection_text(&value, SESSION_CATALOG_TITLE_MAX_BYTES));
     entry.user_message_count = projection.user_message_count;
     entry.assistant_message_count = projection.assistant_message_count;
     entry.tool_result_count = projection.tool_result_count;
     entry.control_entry_count = projection.control_entry_count;
     entry.latest_usage = projection.latest_usage;
-    entry.latest_task = projection.latest_task;
+    entry.latest_task = projection.latest_task.map(|mut task| {
+        task.objective =
+            safe_bounded_projection_text(&task.objective, SESSION_CATALOG_TITLE_MAX_BYTES);
+        task
+    });
     entry.latest_readiness = projection.latest_readiness;
+}
+
+fn safe_bounded_projection_text(value: &str, max_bytes: usize) -> String {
+    let safe = safe_persistence_text(value);
+    if safe.len() <= max_bytes {
+        return safe;
+    }
+    let suffix = "…";
+    let mut end = max_bytes.saturating_sub(suffix.len());
+    while !safe.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let mut bounded = safe[..end].to_owned();
+    bounded.push_str(suffix);
+    bounded
 }
 
 fn identity_conflict_count(entries: &[SessionCatalogProjectionEntry]) -> usize {
@@ -1162,7 +1328,7 @@ fn workspace_generation_matches(
     Ok(current == expected)
 }
 
-fn replace_workspace_entries(
+fn apply_workspace_entry_changes(
     transaction: &Transaction<'_>,
     workspace_id: &str,
     generation: u64,
@@ -1170,7 +1336,8 @@ fn replace_workspace_entries(
     degraded_source_count: usize,
     identity_conflict_count: usize,
     truncated_source_count: usize,
-    entries: &[SessionCatalogProjectionEntry],
+    updated_entries: &[&SessionCatalogProjectionEntry],
+    removed_session_refs: &[&str],
 ) -> Result<(), SessionCatalogProjectionError> {
     upsert_workspace_metadata(
         transaction,
@@ -1181,12 +1348,15 @@ fn replace_workspace_entries(
         identity_conflict_count,
         truncated_source_count,
     )?;
-    transaction.execute(
-        "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1",
-        params![workspace_id],
+    let mut delete_statement = transaction.prepare(
+        "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1 AND session_ref = ?2",
     )?;
-    for entry in entries {
-        insert_entry(transaction, entry)?;
+    for session_ref in removed_session_refs {
+        delete_statement.execute(params![workspace_id, session_ref])?;
+    }
+    drop(delete_statement);
+    for entry in updated_entries {
+        upsert_entry(transaction, entry)?;
     }
     Ok(())
 }
@@ -1223,7 +1393,7 @@ fn upsert_workspace_metadata(
     Ok(())
 }
 
-fn insert_entry(
+fn upsert_entry(
     transaction: &Transaction<'_>,
     entry: &SessionCatalogProjectionEntry,
 ) -> Result<(), SessionCatalogProjectionError> {
@@ -1238,7 +1408,29 @@ fn insert_entry(
          ) VALUES (\
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
              ?18, ?19, ?20, ?21, ?22, ?23, ?24\
-         )",
+         ) ON CONFLICT(workspace_id, session_ref) DO UPDATE SET \
+             session_id = excluded.session_id, \
+             source_state = excluded.source_state, \
+             source_bytes = excluded.source_bytes, \
+             source_modified_at_unix_ms = excluded.source_modified_at_unix_ms, \
+             source_content_sha256 = excluded.source_content_sha256, \
+             first_stream_sequence = excluded.first_stream_sequence, \
+             last_stream_sequence = excluded.last_stream_sequence, \
+             last_event_id = excluded.last_event_id, \
+             last_record_checksum = excluded.last_record_checksum, \
+             provider_name = excluded.provider_name, \
+             model_name = excluded.model_name, \
+             title = excluded.title, \
+             title_search = excluded.title_search, \
+             user_message_count = excluded.user_message_count, \
+             assistant_message_count = excluded.assistant_message_count, \
+             tool_result_count = excluded.tool_result_count, \
+             control_entry_count = excluded.control_entry_count, \
+             latest_usage_json = excluded.latest_usage_json, \
+             latest_task_json = excluded.latest_task_json, \
+             latest_readiness_json = excluded.latest_readiness_json, \
+             pinned = excluded.pinned, \
+             indexed_at_unix_ms = excluded.indexed_at_unix_ms",
         params![
             entry.workspace_id,
             entry.session_ref,
