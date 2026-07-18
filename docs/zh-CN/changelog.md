@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户 Changelog
 
@@ -8,11 +8,27 @@
 
 ## Unreleased - main
 
+`v0.0.1-alpha.5` 之后暂时还没有新增用户可见变更。
+
+## v0.0.1-alpha.5 - 2026-07-18
+
+以下变更已包含在打包发布的 `v0.0.1-alpha.5` 中。
+
+### 新增
+
+- 增加远端 Streamable HTTP MCP server 的显式 OAuth 登录，包括自动或手动 callback、原生凭据存储、刷新、退出和具体的恢复错误。每个目标仍经过常规网络提示与目标检查；headless 启动不会打开浏览器。
+- 增加可配置的 info rail 显示状态、通过 `F2` 显示或隐藏的快捷键，以及复制选中 transcript 或最新 assistant reply 的命令。
+
 ### 调整
 
 - Windows shell 与 terminal 工具现在默认使用 PowerShell，在 Doctor 和 tool card 中显示检测到的 shell，并能在超时后更可靠地停止子进程；本地执行仍不提供隔离。
-- 远端 Streamable HTTP MCP server 现在支持从 TUI 显式完成 OAuth 登录、自动或手动 callback、原生凭据存储、刷新、退出和具体的恢复错误。每个目标仍经过常规网络提示与目标检查；headless 启动不会打开浏览器。
 - 激活或刷新远端 MCP server 时，可用工具会同步更新，不再留下旧的重复项。Windows 也能更可靠地清理已停止的本机 MCP 进程树。
+- 围绕一致的产品表达，更新 Sigil logo、仓库首页、文档站、社交预览图和 launch materials。
+
+### 修复
+
+- Reply completion、排队任务与 session transition 现在可以更可靠地恢复，避免 final response 重复或滞留。
+- 长 session 会限制 timeline tail index 的更新范围，减少 history 增长后的重复渲染工作。
 
 ## v0.0.1-alpha.4 - 2026-07-16
 

@@ -1032,6 +1032,7 @@
       "role": "user-visible-release-history",
       "heading_keys": [
         "unreleased-main",
+        "v0-0-1-alpha-5-2026-07-18",
         "v0-0-1-alpha-4-2026-07-16",
         "v0-0-1-alpha-3-2026-07-15",
         "v0-0-1-alpha-2-2026-07-15",
@@ -1042,6 +1043,7 @@
       "heading_labels": {
         "en": [
           "Unreleased - main",
+          "v0.0.1-alpha.5 - 2026-07-18",
           "v0.0.1-alpha.4 - 2026-07-16",
           "v0.0.1-alpha.3 - 2026-07-15",
           "v0.0.1-alpha.2 - 2026-07-15",
@@ -1050,6 +1052,7 @@
         ],
         "zh-CN": [
           "Unreleased - main",
+          "v0.0.1-alpha.5 - 2026-07-18",
           "v0.0.1-alpha.4 - 2026-07-16",
           "v0.0.1-alpha.3 - 2026-07-15",
           "v0.0.1-alpha.2 - 2026-07-15",

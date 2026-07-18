@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,11 +8,27 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No user-facing changes have been added after `v0.0.1-alpha.5` yet.
+
+## v0.0.1-alpha.5 - 2026-07-18
+
+These changes are included in the packaged `v0.0.1-alpha.5` release.
+
+### Added
+
+- Added explicit OAuth sign-in for remote Streamable HTTP MCP servers, including automatic or manual callback, native credential storage, refresh, sign-out, and specific recovery errors. Every destination still passes the normal network disclosure and destination checks; headless startup never opens a browser.
+- Added configurable info-rail visibility, an `F2` show/hide shortcut, and a copy command that uses selected transcript text or the latest assistant reply.
+
 ### Changed
 
 - Windows shell and terminal tools now use PowerShell by default, show the detected shell in Doctor and tool cards, and stop child processes more reliably after a timeout. Local execution remains unconfined.
-- Remote Streamable HTTP MCP servers now support explicit OAuth sign-in from the TUI, automatic or manual callback, native credential storage, refresh, sign-out, and specific recovery errors. Every destination still passes the normal network disclosure and destination checks; headless startup never opens a browser.
 - Activating or refreshing a remote MCP server now updates its available tools without leaving stale duplicates. Windows also cleans up stopped local MCP process trees more reliably.
+- Refreshed the Sigil logo, repository landing page, documentation site, social preview, and launch materials around one consistent product story.
+
+### Fixed
+
+- Reply completion, queued work, and session transitions now recover more reliably without duplicating or stranding a final response.
+- Long sessions keep timeline tail-index updates bounded, reducing redraw work as histories grow.
 
 ## v0.0.1-alpha.4 - 2026-07-16
 

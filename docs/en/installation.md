@@ -4,9 +4,9 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). `v0.0.1-alpha.4` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
+This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). `v0.0.1-alpha.5` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
-The package-manager and Cargo tag commands below install the published `v0.0.1-alpha.4` release. The GitHub Pages documentation tracks `main`, so features listed under [Unreleased](changelog.md#unreleased-main) may require a source install until the next alpha is tagged.
+The package-manager and Cargo tag commands below install the published `v0.0.1-alpha.5` release. The GitHub Pages documentation tracks `main`, so features listed under [Unreleased](changelog.md#unreleased-main) may require a source install until the next alpha is tagged.
 
 ## Requirements
 
@@ -62,7 +62,7 @@ The release workflow generates `sigil-ai.rb` from the macOS release archives. Th
 For the first release, Cargo installs from the Git tag rather than crates.io:
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.5 --locked sigil
 ```
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
@@ -117,7 +117,7 @@ Use the installer you used originally:
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.5 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 
