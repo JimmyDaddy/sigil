@@ -2,7 +2,9 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::{Arc, atomic::AtomicU64},
     thread,
@@ -20,6 +22,7 @@ use sigil_kernel::{
     ResolvedProcessEnvironment, validate_extension_process_isolation,
 };
 use tokio::{
+    io::AsyncRead,
     process::{Child, Command},
     sync::mpsc,
     task::JoinHandle,
@@ -40,6 +43,9 @@ mod docker;
 mod local;
 mod output;
 mod seatbelt;
+// R41.1 keeps this probe callable inside the crate but intentionally unselected until R41.2.
+#[allow(dead_code)]
+mod windows_restricted;
 
 pub use bubblewrap::LinuxBubblewrapExecutionBackend;
 pub use docker::DockerExecutionBackend;
@@ -49,15 +55,171 @@ pub use seatbelt::MacosSeatbeltExecutionBackend;
 pub(crate) use bubblewrap::ensure_linux_bubblewrap_available;
 pub(crate) use bubblewrap::linux_bubblewrap_args;
 pub(crate) use docker::ensure_docker_available;
+use output::{CollectedPipe, OutputAlert, OutputCollectionLimits, collect_async_pipe};
 pub(crate) use seatbelt::ensure_macos_seatbelt_available;
 pub(crate) use seatbelt::macos_seatbelt_workspace_write_profile;
 
-use output::{CollectedPipe, OutputAlert, OutputCollectionLimits, collect_async_pipe};
-
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
+#[cfg(unix)]
 const PROCESS_TERM_GRACE: Duration = Duration::from_millis(500);
 const PROCESS_KILL_VERIFY_GRACE: Duration = Duration::from_secs(3);
 const PROCESS_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
+type SupervisedExecutionPipe = Box<dyn AsyncRead + Send + Unpin>;
+
+enum SupervisedExecutionChild {
+    Tokio(Child),
+    #[cfg(windows)]
+    WindowsRestricted(windows_restricted::NativeWindowsRestrictedChild),
+}
+
+impl SupervisedExecutionChild {
+    fn process_id(&self) -> Option<u32> {
+        match self {
+            Self::Tokio(child) => child.id(),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => Some(child.process_id()),
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<SupervisedExecutionPipe> {
+        match self {
+            Self::Tokio(child) => child
+                .stdout
+                .take()
+                .map(|stdout| Box::new(stdout) as SupervisedExecutionPipe),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.take_stdout(),
+        }
+    }
+
+    fn take_stderr(&mut self) -> Option<SupervisedExecutionPipe> {
+        match self {
+            Self::Tokio(child) => child
+                .stderr
+                .take()
+                .map(|stderr| Box::new(stderr) as SupervisedExecutionPipe),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.take_stderr(),
+        }
+    }
+
+    fn resume_after_owner(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tokio(_) => Ok(()),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.resume(),
+        }
+    }
+
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Tokio(child) => child.wait().await,
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.wait().await,
+        }
+    }
+
+    #[cfg(unix)]
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Tokio(child) => child.try_wait(),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.try_wait(),
+        }
+    }
+
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tokio(child) => child.start_kill(),
+            #[cfg(windows)]
+            Self::WindowsRestricted(child) => child.start_kill(),
+        }
+    }
+
+    fn as_tokio_mut(&mut self) -> Option<&mut Child> {
+        match self {
+            Self::Tokio(child) => Some(child),
+            #[cfg(windows)]
+            Self::WindowsRestricted(_) => None,
+        }
+    }
+}
+
+trait ExecutionChildControl {
+    fn start_kill_controlled(&mut self) -> std::io::Result<()>;
+    #[cfg(unix)]
+    fn try_wait_controlled(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+    fn wait_controlled(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>>;
+}
+
+impl ExecutionChildControl for Child {
+    fn start_kill_controlled(&mut self) -> std::io::Result<()> {
+        self.start_kill()
+    }
+
+    #[cfg(unix)]
+    fn try_wait_controlled(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn wait_controlled(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>> {
+        Box::pin(self.wait())
+    }
+}
+
+impl ExecutionChildControl for SupervisedExecutionChild {
+    fn start_kill_controlled(&mut self) -> std::io::Result<()> {
+        self.start_kill()
+    }
+
+    #[cfg(unix)]
+    fn try_wait_controlled(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn wait_controlled(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>> {
+        Box::pin(self.wait())
+    }
+}
+
+struct SupervisedExecutionOutcome {
+    resources: ExecutionResourceReceipt,
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    output: ExecutionOutputReceipt,
+    timed_out: bool,
+}
+
+impl SupervisedExecutionOutcome {
+    fn into_receipt(
+        self,
+        backend: ExecutionBackendKind,
+        capabilities: ExecutionBackendCapabilities,
+        network: ExecutionNetworkReceipt,
+        environment_policy: ProcessEnvironmentPolicy,
+    ) -> ExecutionReceipt {
+        ExecutionReceipt {
+            backend,
+            capabilities,
+            network,
+            resources: self.resources,
+            environment_policy,
+            exit_code: self.exit_code,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            output: self.output,
+            timed_out: self.timed_out,
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) use docker::current_user_group_flag;
@@ -664,25 +826,50 @@ async fn command_output_to_receipt_with_limits(
     docker_cleanup: Option<docker::DockerContainerCleanup>,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
-    #[cfg(not(test))]
-    let _ = reader_fault;
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(true);
     configure_execution_process_group(&mut command);
 
-    let deadline = request
+    let deadline = execution_deadline(request)?;
+    let child = SupervisedExecutionChild::Tokio(command.spawn()?);
+    let outcome = supervise_execution_child(
+        child,
+        request,
+        output_limits,
+        reader_fault,
+        docker_cleanup,
+        deadline,
+        cancellation,
+    )
+    .await?;
+    Ok(outcome.into_receipt(backend, capabilities, network, request.environment_policy))
+}
+
+fn execution_deadline(request: &ExecutionRequest) -> Result<Option<TokioInstant>> {
+    request
         .timeout_duration()
         .map(|timeout| {
             TokioInstant::now().checked_add(timeout).ok_or_else(|| {
                 anyhow::anyhow!("execution timeout exceeds the supported monotonic deadline")
             })
         })
-        .transpose()?;
+        .transpose()
+}
 
-    let mut child = command.spawn()?;
-    let process_id = child.id();
+async fn supervise_execution_child(
+    mut child: SupervisedExecutionChild,
+    request: &ExecutionRequest,
+    output_limits: OutputCollectionLimits,
+    reader_fault: PreflightReaderFault,
+    docker_cleanup: Option<docker::DockerContainerCleanup>,
+    deadline: Option<TokioInstant>,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<SupervisedExecutionOutcome> {
+    #[cfg(not(test))]
+    let _ = reader_fault;
+    let process_id = child.process_id();
     let _process_owner = match ProcessTreeOwnerGuard::assign(process_id) {
         Ok(owner) => owner,
         Err(error) => {
@@ -693,7 +880,14 @@ async fn command_output_to_receipt_with_limits(
             );
         }
     };
-    let stdout = match child.stdout.take() {
+    if let Err(error) = child.resume_after_owner() {
+        let cleanup =
+            cleanup_execution_child(&mut child, process_id, docker_cleanup.as_ref()).await;
+        bail!(
+            "failed to resume execution child after process-tree ownership: {error}; cleanup={cleanup:?}"
+        );
+    }
+    let stdout = match child.take_stdout() {
         Some(stdout) => stdout,
         None => {
             let cleanup =
@@ -701,7 +895,7 @@ async fn command_output_to_receipt_with_limits(
             bail!("execution stdout pipe is unavailable after spawn; cleanup={cleanup:?}");
         }
     };
-    let stderr = match child.stderr.take() {
+    let stderr = match child.take_stderr() {
         Some(stderr) => stderr,
         None => {
             drop(stdout);
@@ -876,9 +1070,16 @@ async fn command_output_to_receipt_with_limits(
     if matches!(termination, ExecutionTerminationCause::Exited)
         && let Some(docker_cleanup) = docker_cleanup.as_ref()
     {
-        cleanup = docker_cleanup
-            .reconcile_after_cli_exit(&mut child, process_id, exit_code)
-            .await;
+        cleanup = match child.as_tokio_mut() {
+            Some(child) => {
+                docker_cleanup
+                    .reconcile_after_cli_exit(child, process_id, exit_code)
+                    .await
+            }
+            None => ExecutionCleanupReceipt::failed(
+                "docker cleanup was attached to a non-Tokio execution child",
+            ),
+        };
     }
     let timed_out = matches!(termination, ExecutionTerminationCause::TimedOut);
     let resources = resource_receipt_for_request(request, timed_out, cleanup);
@@ -887,12 +1088,8 @@ async fn command_output_to_receipt_with_limits(
         .total_bytes
         .saturating_add(stderr.evidence.total_bytes);
 
-    Ok(ExecutionReceipt {
-        backend,
-        capabilities,
-        network,
+    Ok(SupervisedExecutionOutcome {
         resources,
-        environment_policy: request.environment_policy,
         exit_code,
         stdout: stdout.bytes,
         stderr: stderr.bytes,
@@ -926,7 +1123,7 @@ enum SupervisorWake {
 }
 
 async fn wait_for_child_or_output_alert(
-    child: &mut Child,
+    child: &mut SupervisedExecutionChild,
     alert_rx: &mut mpsc::Receiver<OutputAlert>,
     deadline: Option<TokioInstant>,
     stdout_task: &mut PipeTaskState,
@@ -1184,14 +1381,19 @@ pub(crate) fn resource_receipt_for_request(
 }
 
 async fn cleanup_execution_child(
-    child: &mut tokio::process::Child,
+    child: &mut SupervisedExecutionChild,
     process_id: Option<u32>,
     docker_cleanup: Option<&docker::DockerContainerCleanup>,
 ) -> ExecutionCleanupReceipt {
     if let Some(docker_cleanup) = docker_cleanup {
-        docker_cleanup.cleanup(child, process_id).await
+        match child.as_tokio_mut() {
+            Some(child) => docker_cleanup.cleanup(child, process_id).await,
+            None => ExecutionCleanupReceipt::failed(
+                "docker cleanup was attached to a non-Tokio execution child",
+            ),
+        }
     } else {
-        cleanup_timed_out_child(child, process_id).await
+        cleanup_controlled_child(child, process_id).await
     }
 }
 
@@ -1199,6 +1401,16 @@ pub(crate) async fn cleanup_timed_out_child(
     child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> ExecutionCleanupReceipt {
+    cleanup_controlled_child(child, process_id).await
+}
+
+async fn cleanup_controlled_child<C>(
+    child: &mut C,
+    process_id: Option<u32>,
+) -> ExecutionCleanupReceipt
+where
+    C: ExecutionChildControl + Send,
+{
     #[cfg(unix)]
     {
         return cleanup_unix_process_group(child, process_id).await;
@@ -1215,23 +1427,24 @@ pub(crate) async fn cleanup_timed_out_child(
 
 #[cfg(unix)]
 async fn cleanup_unix_process_group(
-    child: &mut tokio::process::Child,
+    child: &mut (impl ExecutionChildControl + Send),
     process_id: Option<u32>,
 ) -> ExecutionCleanupReceipt {
     let Some(process_id) = process_id else {
-        let direct_kill = child.start_kill();
-        let direct_wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+        let direct_kill = child.start_kill_controlled();
+        let direct_wait =
+            tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
         return ExecutionCleanupReceipt::failed(format!(
             "process id unavailable; process-group cleanup could not be proven: direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
         ));
     };
 
-    let direct_already_reaped = match child.try_wait() {
+    let direct_already_reaped = match child.try_wait_controlled() {
         Ok(Some(_)) => true,
         Ok(None) => false,
         Err(error) => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+            let _ = child.start_kill_controlled();
+            let _ = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
             return ExecutionCleanupReceipt::failed(format!(
                 "failed to inspect child before process-group cleanup: {error}; direct-child fallback attempted"
             ));
@@ -1248,12 +1461,12 @@ async fn cleanup_unix_process_group(
     let direct_reaped = if direct_already_reaped {
         true
     } else {
-        match tokio::time::timeout(PROCESS_TERM_GRACE, child.wait()).await {
+        match tokio::time::timeout(PROCESS_TERM_GRACE, child.wait_controlled()).await {
             Ok(Ok(_)) => true,
             Ok(Err(error)) => {
-                let direct_kill = child.start_kill();
+                let direct_kill = child.start_kill_controlled();
                 let direct_wait =
-                    tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+                    tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
                 return ExecutionCleanupReceipt::failed(format!(
                     "process-group cleanup wait failed: {error}; direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
                 ));
@@ -1265,8 +1478,8 @@ async fn cleanup_unix_process_group(
     let group_alive = match process_group_is_alive(process_id).await {
         Ok(alive) => alive,
         Err(error) => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+            let _ = child.start_kill_controlled();
+            let _ = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
             return ExecutionCleanupReceipt::failed(format!(
                 "failed to inspect process group {process_id}: {error}; direct-child fallback attempted"
             ));
@@ -1276,9 +1489,9 @@ async fn cleanup_unix_process_group(
         match process_group_is_alive(process_id).await {
             Ok(false) => {}
             Ok(true) | Err(_) => {
-                let direct_kill = child.start_kill();
+                let direct_kill = child.start_kill_controlled();
                 let direct_wait =
-                    tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+                    tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
                 return ExecutionCleanupReceipt::failed(format!(
                     "failed to send SIGKILL to process group {process_id}: {error}; direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
                 ));
@@ -1286,7 +1499,7 @@ async fn cleanup_unix_process_group(
         }
     }
     if !direct_reaped {
-        match tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await {
+        match tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 return ExecutionCleanupReceipt::failed(format!(
@@ -1294,7 +1507,7 @@ async fn cleanup_unix_process_group(
                 ));
             }
             Err(_) => {
-                let _ = child.start_kill();
+                let _ = child.start_kill_controlled();
                 return ExecutionCleanupReceipt::failed(format!(
                     "process group {process_id} was killed but direct child reap timed out"
                 ));
@@ -1328,21 +1541,22 @@ async fn cleanup_unix_process_group(
 
 #[cfg(windows)]
 async fn cleanup_windows_process_tree(
-    child: &mut tokio::process::Child,
+    child: &mut (impl ExecutionChildControl + Send),
     process_id: Option<u32>,
 ) -> ExecutionCleanupReceipt {
     let Some(process_id) = process_id else {
-        let direct_kill = child.start_kill();
-        let direct_wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+        let direct_kill = child.start_kill_controlled();
+        let direct_wait =
+            tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
         return ExecutionCleanupReceipt::unsupported(format!(
             "process id unavailable; Windows process-tree cleanup could not be requested: direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
         ));
     };
     let terminate = terminate_owned_process_tree(process_id);
     if terminate.is_err() {
-        let _ = child.start_kill();
+        let _ = child.start_kill_controlled();
     }
-    let wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+    let wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
     match (&terminate, &wait) {
         (Ok(()), Ok(Ok(_))) => ExecutionCleanupReceipt::completed(format!(
             "Windows Job Object terminated process tree {process_id} and direct child was reaped"
@@ -1355,11 +1569,11 @@ async fn cleanup_windows_process_tree(
 
 #[cfg(not(any(unix, windows)))]
 async fn cleanup_unsupported_process_tree(
-    child: &mut tokio::process::Child,
+    child: &mut (impl ExecutionChildControl + Send),
     process_id: Option<u32>,
 ) -> ExecutionCleanupReceipt {
-    let kill = child.start_kill();
-    let wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+    let kill = child.start_kill_controlled();
+    let wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait_controlled()).await;
     ExecutionCleanupReceipt::unsupported(format!(
         "platform has no process-tree cleanup implementation; direct child cleanup only: pid={process_id:?}, kill={kill:?}, wait={wait:?}"
     ))
