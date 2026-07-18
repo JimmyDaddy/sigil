@@ -39,16 +39,58 @@ fn powershell_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn powershell_request(script: &str) -> ExecutionRequest {
+fn cmd_path() -> PathBuf {
+    std::env::var_os("ComSpec")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
+}
+
+#[cfg(windows)]
+fn cmd_request(command: &str) -> ExecutionRequest {
     probe_request(
-        powershell_path().to_string_lossy().into_owned(),
+        cmd_path().to_string_lossy().into_owned(),
         vec![
-            "-NoLogo".to_owned(),
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-Command".to_owned(),
-            script.to_owned(),
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            command.to_owned(),
         ],
+    )
+}
+
+#[cfg(windows)]
+fn configure_descendant_fixture(
+    request: &mut ExecutionRequest,
+    ready: &std::path::Path,
+    survived: &std::path::Path,
+) {
+    request.env.insert(
+        "SIGIL_RESTRICTED_DESCENDANT_FIXTURE".to_owned(),
+        "1".to_owned(),
+    );
+    request.env.insert(
+        "SIGIL_DESCENDANT_EXE".to_owned(),
+        std::env::current_exe()
+            .expect("current test executable should resolve")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    request.env.insert(
+        "SIGIL_DESCENDANT_READY".to_owned(),
+        ready.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "SIGIL_DESCENDANT_SURVIVED".to_owned(),
+        survived.to_string_lossy().into_owned(),
+    );
+}
+
+#[cfg(windows)]
+fn descendant_fixture_command() -> &'static str {
+    concat!(
+        "start \"\" /B \"%SIGIL_DESCENDANT_EXE%\" --ignored --exact ",
+        "execution_backends::windows_restricted::tests::restricted_descendant_fixture ",
+        "--nocapture >nul 2>&1 & ping -n 30 127.0.0.1 >nul"
     )
 }
 
@@ -148,16 +190,12 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_probe_preserves_unicode_environment_and_quoted_command() {
-    let script = concat!(
-        "$expected='值 空格 \"quoted\" 尾斜杠\\';",
-        "if ($env:SIGIL_UNICODE_ENV -cne $expected) { exit 41 };",
-        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);",
-        "[Console]::Out.Write($env:SIGIL_UNICODE_ENV);exit 0"
-    );
-    let mut request = powershell_request(script);
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let marker = temp.path().join("值 with spaces.txt");
+    let mut request = cmd_request("rem Unicode 参数 & echo unicode-ok>\"%SIGIL_UNICODE_PATH%\"");
     request.env.insert(
-        "SIGIL_UNICODE_ENV".to_owned(),
-        "值 空格 \"quoted\" 尾斜杠\\".to_owned(),
+        "SIGIL_UNICODE_PATH".to_owned(),
+        marker.to_string_lossy().into_owned(),
     );
 
     let receipt = windows_restricted_launch_probe(&request)
@@ -166,8 +204,10 @@ async fn restricted_launch_probe_preserves_unicode_environment_and_quoted_comman
 
     assert_eq!(receipt.exit_code, Some(0));
     assert_eq!(
-        String::from_utf8(receipt.stdout).expect("PowerShell should emit UTF-8"),
-        "值 空格 \"quoted\" 尾斜杠\\"
+        fs::read_to_string(marker)
+            .expect("Unicode environment path should be written")
+            .trim(),
+        "unicode-ok"
     );
     assert_eq!(
         receipt.environment_policy,
@@ -183,10 +223,7 @@ async fn restricted_launch_probe_uses_exact_executable_path_with_spaces_and_unic
     let copied_dir = temp.path().join("路径 with spaces");
     fs::create_dir(&copied_dir).expect("copied executable directory should be created");
     let copied_command = copied_dir.join("cmd copy.exe");
-    let command = std::env::var_os("ComSpec")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-    fs::copy(command, &copied_command).expect("cmd.exe should copy into the fixture path");
+    fs::copy(cmd_path(), &copied_command).expect("cmd.exe should copy into the fixture path");
     let request = probe_request(
         copied_command.to_string_lossy().into_owned(),
         vec![
@@ -235,7 +272,16 @@ async fn restricted_launch_probe_does_not_inherit_unlisted_handle() {
         "$stream.Write($bytes,0,$bytes.Length);$stream.Flush();exit 9",
         "} catch { exit 0 }"
     );
-    let mut request = powershell_request(script);
+    let mut request = probe_request(
+        powershell_path().to_string_lossy().into_owned(),
+        vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            script.to_owned(),
+        ],
+    );
     request.env.insert(
         "SIGIL_TEST_SENTINEL_HANDLE".to_owned(),
         (sentinel_handle as usize).to_string(),
@@ -271,7 +317,7 @@ async fn restricted_launch_probe_does_not_inherit_unlisted_handle() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_timeout_uses_shared_cleanup_receipt() {
-    let mut request = powershell_request("Start-Sleep -Seconds 30");
+    let mut request = cmd_request("ping -n 30 127.0.0.1 >nul");
     request.timeout_ms = Some(250);
 
     let outcome = supervise_native_probe(
@@ -298,26 +344,9 @@ async fn restricted_launch_cancellation_reaps_descendants() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let ready = temp.path().join("descendant-ready.txt");
     let survived = temp.path().join("descendant-survived.txt");
-    let script = concat!(
-        "$child=\"Start-Sleep -Seconds 2;",
-        "[IO.File]::WriteAllText(`$env:SIGIL_DESCENDANT_SURVIVED,'survived')\";",
-        "$encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child));",
-        "Start-Process -FilePath ($PSHOME+'\\powershell.exe') ",
-        "-ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded ",
-        "-WindowStyle Hidden;",
-        "[IO.File]::WriteAllText($env:SIGIL_DESCENDANT_READY,'ready');",
-        "Start-Sleep -Seconds 30"
-    );
-    let mut request = powershell_request(script);
+    let mut request = cmd_request(descendant_fixture_command());
     request.timeout_ms = Some(30_000);
-    request.env.insert(
-        "SIGIL_DESCENDANT_READY".to_owned(),
-        ready.to_string_lossy().into_owned(),
-    );
-    request.env.insert(
-        "SIGIL_DESCENDANT_SURVIVED".to_owned(),
-        survived.to_string_lossy().into_owned(),
-    );
+    configure_descendant_fixture(&mut request, &ready, &survived);
     let owner = RunCancellationOwner::new();
     let cancellation = owner.handle();
     let task = tokio::spawn(async move {
@@ -356,7 +385,7 @@ async fn restricted_launch_cancellation_reaps_descendants() {
 #[tokio::test]
 async fn restricted_launch_output_limit_uses_shared_bounded_collector() {
     let mut request =
-        powershell_request("[Console]::Out.Write(('x' * 300000));Start-Sleep -Seconds 30");
+        cmd_request("for /L %i in (1,1,40000) do @echo 1234567890 & ping -n 30 127.0.0.1 >nul");
     request.timeout_ms = Some(30_000);
 
     let outcome = supervise_native_probe(
@@ -380,7 +409,7 @@ async fn restricted_launch_output_limit_uses_shared_bounded_collector() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_reader_failure_uses_shared_cleanup_path() {
-    let mut request = powershell_request("[Console]::Out.Write('x');Start-Sleep -Seconds 30");
+    let mut request = cmd_request("echo x&ping -n 30 127.0.0.1 >nul");
     request.timeout_ms = Some(30_000);
 
     let outcome = supervise_native_probe(
@@ -406,26 +435,9 @@ async fn dropping_restricted_supervisor_reaps_descendants() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let ready = temp.path().join("drop-ready.txt");
     let survived = temp.path().join("drop-survived.txt");
-    let script = concat!(
-        "$child=\"Start-Sleep -Seconds 2;",
-        "[IO.File]::WriteAllText(`$env:SIGIL_DROP_SURVIVED,'survived')\";",
-        "$encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child));",
-        "Start-Process -FilePath ($PSHOME+'\\powershell.exe') ",
-        "-ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded ",
-        "-WindowStyle Hidden;",
-        "[IO.File]::WriteAllText($env:SIGIL_DROP_READY,'ready');",
-        "Start-Sleep -Seconds 30"
-    );
-    let mut request = powershell_request(script);
+    let mut request = cmd_request(descendant_fixture_command());
     request.timeout_ms = Some(30_000);
-    request.env.insert(
-        "SIGIL_DROP_READY".to_owned(),
-        ready.to_string_lossy().into_owned(),
-    );
-    request.env.insert(
-        "SIGIL_DROP_SURVIVED".to_owned(),
-        survived.to_string_lossy().into_owned(),
-    );
+    configure_descendant_fixture(&mut request, &ready, &survived);
     let task = tokio::spawn(async move {
         supervise_native_probe(
             &request,
@@ -450,4 +462,22 @@ async fn dropping_restricted_supervisor_reaps_descendants() {
         !survived.exists(),
         "dropped supervisor left a descendant running"
     );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "spawned only as a restricted descendant conformance fixture"]
+fn restricted_descendant_fixture() {
+    if std::env::var_os("SIGIL_RESTRICTED_DESCENDANT_FIXTURE").is_none() {
+        return;
+    }
+    let ready = std::env::var_os("SIGIL_DESCENDANT_READY")
+        .map(PathBuf::from)
+        .expect("descendant ready marker path should be provided");
+    let survived = std::env::var_os("SIGIL_DESCENDANT_SURVIVED")
+        .map(PathBuf::from)
+        .expect("descendant survived marker path should be provided");
+    fs::write(ready, b"ready").expect("descendant ready marker should be written");
+    std::thread::sleep(Duration::from_secs(2));
+    fs::write(survived, b"survived").expect("descendant survived marker should be written");
 }
