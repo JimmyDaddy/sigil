@@ -18,6 +18,8 @@ use sigil_kernel::{
 
 #[cfg(windows)]
 use serial_test::serial;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 
 #[cfg(not(windows))]
 use super::WindowsRestrictedProbeUnavailable;
@@ -229,8 +231,8 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
             .expect("write-restricted probe should return a receipt");
 
     assert_eq!(
-        restricting_sid_count, 1,
-        "token should carry only the unique workspace restricting SID"
+        restricting_sid_count, 2,
+        "token should carry the workspace and logon compatibility restricting SIDs"
     );
     assert_eq!(
         outcome.exit_code,
@@ -244,6 +246,39 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
     assert!(
         !denied_target.exists(),
         "ungranted same-user path became writable under the restricting SID"
+    );
+}
+
+#[cfg(windows)]
+#[serial]
+#[tokio::test]
+async fn write_restricted_sid_logon_compatibility_is_not_filesystem_isolation() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let logon_root = temp.path().join("logon-writable");
+    fs::create_dir_all(&logon_root).expect("logon-writable root should be created");
+    let logon_sid = super::WindowsRestrictingSid::new_current_logon()
+        .expect("current logon SID should resolve");
+    super::WindowsFilesystemGrant::apply_test_root_grant(&logon_root, &logon_sid)
+        .expect("negative fixture should grant the current logon SID write access");
+    let external = logon_root.join("escaped.txt");
+    let mut request = fixture_request("expect-write");
+    request.env.insert(
+        "SIGIL_RESTRICTED_EXPECTED_WRITE".to_owned(),
+        external.to_string_lossy().into_owned(),
+    );
+    let workspace_sid =
+        super::WindowsRestrictingSid::new_unique().expect("workspace SID should resolve");
+
+    let (outcome, restricting_sid_count) =
+        supervise_restricting_sid_probe(&request, &workspace_sid)
+            .await
+            .expect("logon compatibility probe should return a receipt");
+
+    assert_eq!(restricting_sid_count, 2);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        fs::read(&external).expect("logon-granted external write should be observable"),
+        b"written"
     );
 }
 
@@ -272,7 +307,10 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
     let renamed_root = temp.path().join("renamed-workspace");
     let rename_error = fs::rename(&granted_root, &renamed_root)
         .expect_err("an active grant lease should pin the workspace root identity");
-    assert_eq!(rename_error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        rename_error.raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION.cast_signed())
+    );
     let restricting_sid_value = grant.restricting_sid().as_str().to_owned();
     let root_descriptor_after_provision =
         super::WindowsFilesystemGrant::descriptor_hash(&granted_root)
@@ -305,7 +343,7 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         .release()
         .expect("durable workspace grant should revalidate before releasing its lease");
 
-    assert_eq!(restricting_sid_count, 1);
+    assert_eq!(restricting_sid_count, 2);
     assert_eq!(outcome.exit_code, Some(0));
     assert_eq!(
         fs::read_to_string(&existing).expect("existing file should remain readable"),
@@ -371,7 +409,7 @@ async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
         supervise_restricting_sid_probe(&request, second_grant.restricting_sid())
             .await
             .expect("second filesystem containment run should return a receipt");
-    assert_eq!(second_restricting_sid_count, 1);
+    assert_eq!(second_restricting_sid_count, 2);
     assert_eq!(second_outcome.exit_code, Some(0));
     assert_eq!(
         super::WindowsFilesystemGrant::descriptor_hash(&granted_root.join("created.txt"))
@@ -713,6 +751,12 @@ fn restricted_process_fixture() {
             let error = fs::write(denied_path, b"escaped")
                 .expect_err("write-restricted token unexpectedly wrote an ungranted path");
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        "expect-write" => {
+            let target = std::env::var_os("SIGIL_RESTRICTED_EXPECTED_WRITE")
+                .map(PathBuf::from)
+                .expect("expected write path should be provided");
+            fs::write(target, b"written").expect("compatibility SID should permit this write");
         }
         "filesystem-grant" => {
             let root = std::env::var_os("SIGIL_GRANTED_ROOT")
