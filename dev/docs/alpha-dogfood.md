@@ -15,8 +15,8 @@ Select a standalone native Sigil executable explicitly, such as the binary from 
 ```bash
 python3 scripts/alpha-dogfood-campaign.py \
   --binary /path/to/sigil \
-  --expected-version 0.0.1-alpha.4 \
-  --expected-commit f4e6c5aeea86b3283988efe20db44a0f97454f97
+  --expected-version 0.0.1-alpha.5 \
+  --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121
 ```
 
 Use `--expected-sha256` when a binary digest is available. Before creating any case state, the runner copies the executable into a private temporary directory, hashes that frozen copy, and inspects its `sigil --version`. Every case executes the same admitted copy, so replacing the source binary during a campaign cannot drift the evidence. The runner never builds a binary implicitly.
@@ -47,8 +47,8 @@ sigil tokenizer install deepseek-v4-flash
 python3 scripts/tui-stateful-pty-acceptance.py \
   --binary /path/to/sigil \
   --tokenizer-json /path/printed/by/tokenizer-install/tokenizer.json \
-  --expected-version 0.0.1-alpha.4 \
-  --expected-commit f4e6c5aeea86b3283988efe20db44a0f97454f97 \
+  --expected-version 0.0.1-alpha.5 \
+  --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121 \
   --expected-binary-sha256 <sha256>
 ```
 

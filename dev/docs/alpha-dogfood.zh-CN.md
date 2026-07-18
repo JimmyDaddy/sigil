@@ -15,8 +15,8 @@ Alpha dogfood 是发布证据，不是遥测。Sigil 不会上传 campaign artif
 ```bash
 python3 scripts/alpha-dogfood-campaign.py \
   --binary /path/to/sigil \
-  --expected-version 0.0.1-alpha.4 \
-  --expected-commit f4e6c5aeea86b3283988efe20db44a0f97454f97
+  --expected-version 0.0.1-alpha.5 \
+  --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121
 ```
 
 已有 binary digest 时再传 `--expected-sha256`。创建任何 case state 之前，Runner 会把 executable 复制到私有临时目录，对冻结副本计算 SHA-256 并检查 `sigil --version`。所有 case 只执行同一份已准入副本，因此 campaign 期间替换源 binary 不会让 evidence 漂移；Runner 也不会隐式构建 binary。
@@ -47,8 +47,8 @@ sigil tokenizer install deepseek-v4-flash
 python3 scripts/tui-stateful-pty-acceptance.py \
   --binary /path/to/sigil \
   --tokenizer-json /path/printed/by/tokenizer-install/tokenizer.json \
-  --expected-version 0.0.1-alpha.4 \
-  --expected-commit f4e6c5aeea86b3283988efe20db44a0f97454f97 \
+  --expected-version 0.0.1-alpha.5 \
+  --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121 \
   --expected-binary-sha256 <sha256>
 ```
 
