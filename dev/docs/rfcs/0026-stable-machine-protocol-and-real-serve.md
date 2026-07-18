@@ -265,3 +265,5 @@ P26.1-P26.5 已全部完成，并按独立 commit 边界交付：
   为同一loopback bearer listener增加独立`GET /session-catalog`历史read model与OpenAPI描述。
 - `/sessions`仍是process-local live adapter handles；`/session-catalog`只返回从JSONL/lifecycle truth可重建的
   compact metadata。SQLite unavailable不会阻止server run、approval、SSE或session append。
+- [RFC-0043](0043-desktop-runtime-bridge-v1.md) 新增鉴权的`POST /sessions/open`、`GET /server-info`、单行JSON
+  bootstrap与opt-in stdin owner channel；reopen每次回到lifecycle/JSONL truth，projection仍不拥有resume权限。

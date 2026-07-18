@@ -84,7 +84,17 @@ sigil serve
 
 服务会打印选中的回环地址。`GET /health` 无需认证；OpenAPI、披露记录、会话、运行、事件、取消、审批和历史目录路由都要求 `Authorization: Bearer <token>`。这不是远端或多用户服务，不使用 Cookie 认证或通配符 CORS，并会在按下 `Ctrl-C` 时关闭。
 
+受信任的本机 launcher 可以请求一行不含 secret 的就绪 JSON，并用私有 stdin pipe 绑定子进程生命周期：
+
+```bash
+sigil serve --startup-output json --shutdown-on-stdin-close
+```
+
+带认证的 `GET /server-info` 使用同一份版本化 schema。每个工作区应运行一个服务；bearer token 只放在子进程环境中，不应进入参数或日志。关闭 owner pipe 会触发与 `Ctrl-C` 相同的优雅收尾；未提供该 flag 时，终端 stdin 不控制服务生命周期。
+
 `GET /sessions` 只列出当前服务进程拥有的实时句柄。需要查询跨重启保留的工作区历史时，使用 `GET /session-catalog?limit=50&q=...&provider=...&pinned=true&state=ready`。历史目录只返回 OpenAPI 白名单中经过安全投影的精简元数据和不透明的 `next_cursor`；存储哈希、记录校验和、当前运行、审批和进度都不属于该响应。如果翻页期间历史发生变化，服务会返回 `409 stale_cursor`，客户端应从第一页重新查询。历史目录只是可从会话日志重建的索引，因此目录故障不会阻止运行或会话记录。
+
+服务重启后，如需继续使用一条 ready 历史记录，将目录返回的相对 `session_ref` 和预期 durable `session_id` 发送给带认证的 `POST /sessions/open`。服务会重新验证会话日志，不会直接信任 SQLite，也不会创建运行或发起模型请求；成功后返回一个进程内会话句柄。同一服务进程内重复打开同一 durable session 会返回同一个句柄。来源缺失、未就绪或 identity 已变化时会 fail closed；客户端应重新查询目录，而不是自行拼接文件路径。
 
 ## 配置解析顺序
 

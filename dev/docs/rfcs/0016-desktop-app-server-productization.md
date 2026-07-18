@@ -157,8 +157,8 @@ cargo test -p sigil-tui runner
 ## 8. Open Questions
 
 - Whether OpenAPI should cover all commands in MVP or only session/run/approval commands.
-- Whether a future desktop shell should launch one `sigil serve` per workspace or reuse a supervised multi-workspace
-  local process; RFC-0042 deliberately does not decide launcher topology.
+- Launcher topology is resolved by [RFC-0043](0043-desktop-runtime-bridge-v1.md): Desktop V1 supervises one
+  `sigil serve` per workspace. A multi-workspace daemon requires a separate RFC.
 
 ## 8.1 Production Closure Track
 
@@ -169,6 +169,8 @@ SSE、loopback bearer listener、真实 `sigil serve`、process E2E 与 graceful
 后续 [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md) 已基于真实historical list query
 contract完成E16.7：SQLite只承担可重建历史read model，不扩大app-server control plane，也不改变RFC-0026的
 production run closure。
+[RFC-0043](0043-desktop-runtime-bridge-v1.md) 在此基础上完成durable catalog row reopen、机器可读bootstrap/
+server metadata与stdin owner channel；桌面端仍只使用HTTP，不直接读取SQLite或复制agent loop。
 
 ## 9. References
 

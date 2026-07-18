@@ -84,7 +84,17 @@ sigil serve
 
 The service prints its selected loopback address. `GET /health` is unauthenticated; OpenAPI, disclosure, session, run, event, cancellation, approval, and historical catalog routes require `Authorization: Bearer <token>`. It is not a remote or multi-user service, does not use cookie auth or wildcard CORS, and shuts down on `Ctrl-C`.
 
+Trusted local launchers can request a one-line, secret-free readiness object and tie the child lifetime to a private stdin pipe:
+
+```bash
+sigil serve --startup-output json --shutdown-on-stdin-close
+```
+
+The authenticated `GET /server-info` response uses the same versioned schema. Run one server per workspace; the bearer token belongs in the child environment, never in arguments or logs. Closing the owner pipe starts the same graceful drain as `Ctrl-C`; without the flag, terminal stdin does not control server lifetime.
+
 `GET /sessions` lists live handles owned by the current server process. For restart-durable workspace history, use `GET /session-catalog?limit=50&q=...&provider=...&pinned=true&state=ready`. The catalog returns an OpenAPI-defined allowlist of compact, safely projected metadata with an opaque `next_cursor`; storage hashes, record checksums, active runs, approvals, and progress are not part of this response. If history changes between pages, a `409 stale_cursor` response means the client must restart from the first page. The catalog is a rebuildable index over session logs, so a catalog failure does not stop runs or session recording.
+
+To continue a ready catalog entry after a server restart, send its relative `session_ref` and expected durable `session_id` to authenticated `POST /sessions/open`. The server revalidates the session log rather than trusting SQLite, creates no run or provider request, and returns one process-local session handle. Repeating the same open in one server process returns that same handle. Missing, non-ready, or identity-changed sources fail closed; clients should query the catalog again instead of constructing filesystem paths.
 
 ## Config Resolution
 

@@ -11,6 +11,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 ### Added
 
 - Added an authenticated, restart-durable historical session catalog to `sigil serve` for future desktop clients, with bounded pagination, title search, provider/pin/state filters, and explicit stale-cursor recovery. Session logs remain the source of truth, and catalog failures do not stop runs or recording.
+- Added a desktop runtime bridge for trusted local clients: durable catalog entries can be reopened after restart, startup and server metadata have one versioned JSON shape, and an opt-in stdin owner pipe triggers graceful shutdown without PID polling.
 
 ## v0.0.1-alpha.5 - 2026-07-18
 
