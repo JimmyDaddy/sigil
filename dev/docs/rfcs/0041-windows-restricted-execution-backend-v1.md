@@ -1,6 +1,6 @@
 # RFC-0041 Windows Restricted Execution Backend V1
 
-状态：active / R41.0 preflight complete; implementation remains capability-gated
+状态：closed / R41.2 stop；未进入 R41.3-R41.5，Windows 仍为 truthful local unconfined
 
 创建日期：2026-07-18
 
@@ -264,3 +264,33 @@ filesystem + process isolation，因此单独增加 Restricted Token backend 会
 R41.0 决定不直接复制 Gemini 的 Low Integrity helper，也不直接复制 Reasonix 的递归 ACL/label mutation。
 下一步只打开 R41.1 private native launcher；R41.2 filesystem proof 仍是公开 backend 的硬 gate。若该 gate
 失败，保留 Windows local execution 与明确 unsupported 状态比发布弱 sandbox 更正确。
+
+## 13. R41.1-R41.2 result and stop decision
+
+R41.1 在 hosted Windows 上证明了 private native process primitive：exact executable/argv/environment、
+restricted primary token、allowlisted inherited handles、suspended launch、Job assignment-before-resume、
+bounded output，以及 timeout/cancel/reader failure/parent-drop descendant cleanup。该证据只支持进程生命周期
+与 privilege 收缩，不支持 filesystem 或 network sandbox claim。
+
+R41.2 依次验证了两个候选，并均触发第 6 节的停止条件：
+
+1. `WRITE_RESTRICTED` 只有在 restricting set 同时包含 workspace SID、logon SID 和 Everyone 时才能稳定
+   初始化 Rust/Windows runtime；该兼容集合可写入显式授予 Everyone 的 workspace 外路径，因此不能作为
+   filesystem isolation。
+2. classic AppContainer 的 profile-first launch、显式删除、跨进程 lease 和 abandoned-owner recovery 均
+   通过。package SID 也确实取得了 workspace 根与既有文件的最小 DACL 写权限；但 hosted child token 的
+   integrity RID 为 Low，真实 create/modify/delete 仍在普通 Medium workspace 上被拒绝。依据 Microsoft
+   MIC contract，DACL 不会绕过 mandatory no-write-up。让该候选可写需要递归降低 workspace integrity 或
+   等价的 SACL mutation，而这条路线已被第 6-7 节排除，且此前 ACL 恢复探针已证明递归恢复会归一化用户
+   子对象 descriptor。
+
+因此 `workspace_write` 的 inside-write gate 未通过，后续 reparse/hard-link/toolchain 矩阵没有安全前提；
+R41.3-R41.5 不进入实施。仓库不增加 `WindowsRestricted` public enum/config、capability、Doctor/TUI surface，
+也不修改用户默认行为。Windows shell 继续明确报告 `local unconfined`。
+
+2026-06 出现的 Microsoft
+[`Experimental_CreateProcessInSandbox`/Bound File System API](https://learn.microsoft.com/en-us/windows/win32/secauthz/createprocessinsandbox)
+不用于本 RFC 的补救：官方仍将其标记为 experimental，header 尚未公开、仅支持 Windows 11，并且当前 contract 要求
+`inheritHandles = FALSE`，无法直接满足 Sigil 已证明的 exact stdio handle allowlist。若 API 稳定且能证明
+stdio、Job nesting、filesystem alias 与最低系统版本，应通过新的 RFC 重新预检，而不是在本 RFC 中静默
+替换 backend。
