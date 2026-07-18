@@ -2,6 +2,17 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## SQLite desktop session catalog（RFC-0042 R42.1）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `rusqlite` | `0.39.0`；`bundled`（`libsqlite3-sys 0.37.0`，SQLite 3.51.3） | `sigil-runtime/session_lifecycle/projection` | 为 desktop/local HTTP 提供可删除、可从 JSONL/lifecycle journal 重建的历史 session catalog；参数化 SQL、固定 schema、WAL、trusted schema off、bounded busy wait，不进入 run/approval/resume 事实链 | `MIT`；`rusqlite/rusqlite`，bundled SQLite 为 public domain | 直接依赖固定到 0.39.0：最新 0.40.1 的 build script 使用 Rust 1.94.1 尚未稳定的 `cfg_select!`，本仓库预检无法编译；升级前必须重新验证稳定工具链、三平台编译、`cargo deny` 与 `cargo audit` |
+
+bundled 模式避免 desktop 分发依赖目标机系统 SQLite ABI，同时会增加二进制体积和 C build surface。数据库只
+在 production `sigil serve` / future desktop catalog owner 显式初始化；普通 TUI/CLI startup 不创建它。
+SQLite row 不保存 raw message、tool body、URL、secret、absolute source path 或 workspace root，且数据库
+故障不能反向阻断 JSONL append、approval 或 run execution。
+
 ## Image & Attachment Input V1（RFC-0033）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

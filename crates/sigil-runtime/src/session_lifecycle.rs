@@ -19,12 +19,18 @@ use sigil_kernel::{
 };
 
 mod journal;
+mod projection;
 mod retention;
 
 pub use journal::{
     LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionDeleteJournalBinding,
     LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
     LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
+};
+pub use projection::{
+    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogProjectionEntry,
+    SessionCatalogProjectionError, SessionCatalogProjectionRebuildReport,
+    SessionCatalogProjectionService,
 };
 
 use journal::LocalSessionLifecycleJournal;

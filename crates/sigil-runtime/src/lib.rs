@@ -143,7 +143,8 @@ pub use mcp_oauth_flow::{
 pub use mcp_oauth_http::{RuntimeMcpOAuthHttpExecutor, runtime_mcp_oauth_executor_for_user_action};
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
-    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR, DEFAULT_SESSION_EXPORTS_DIR,
+    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_PROJECTIONS_DIR, DEFAULT_SCRATCH_DIR,
+    DEFAULT_SESSION_CATALOG_DB_FILE, DEFAULT_SESSION_EXPORTS_DIR,
     DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
     DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF,
     DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV,
@@ -207,9 +208,11 @@ pub use session_lifecycle::{
     LocalSessionLifecycleRecord, LocalSessionLifecycleRecoveryEntry,
     LocalSessionLifecycleRecoveryStatus, LocalSessionLifecycleService,
     LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
-    SESSION_EXPORT_SCHEMA_VERSION, SessionDeleteOutput, SessionDeletePreview,
-    SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1, SessionExportV1,
-    SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
+    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SESSION_EXPORT_SCHEMA_VERSION,
+    SessionCatalogProjectionEntry, SessionCatalogProjectionError,
+    SessionCatalogProjectionRebuildReport, SessionCatalogProjectionService, SessionDeleteOutput,
+    SessionDeletePreview, SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1,
+    SessionExportV1, SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
     SessionRetentionPreview, SessionRetentionReason,
 };
 pub use skills::{
