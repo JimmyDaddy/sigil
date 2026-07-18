@@ -1,7 +1,13 @@
 use std::collections::BTreeMap;
 
 #[cfg(windows)]
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use sigil_kernel::{ExecutionRequest, ProcessEnvironmentPolicy};
 
@@ -46,16 +52,27 @@ fn cmd_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn cmd_request(command: &str) -> ExecutionRequest {
-    probe_request(
-        cmd_path().to_string_lossy().into_owned(),
+const RESTRICTED_FIXTURE_TEST: &str =
+    "execution_backends::windows_restricted::tests::restricted_process_fixture";
+
+#[cfg(windows)]
+fn fixture_request(mode: &str) -> ExecutionRequest {
+    let mut request = probe_request(
+        std::env::current_exe()
+            .expect("current test executable should resolve")
+            .to_string_lossy()
+            .into_owned(),
         vec![
-            "/D".to_owned(),
-            "/S".to_owned(),
-            "/C".to_owned(),
-            command.to_owned(),
+            "--ignored".to_owned(),
+            "--exact".to_owned(),
+            RESTRICTED_FIXTURE_TEST.to_owned(),
+            "--nocapture".to_owned(),
         ],
-    )
+    );
+    request
+        .env
+        .insert("SIGIL_RESTRICTED_FIXTURE_MODE".to_owned(), mode.to_owned());
+    request
 }
 
 #[cfg(windows)]
@@ -65,17 +82,6 @@ fn configure_descendant_fixture(
     survived: &std::path::Path,
 ) {
     request.env.insert(
-        "SIGIL_RESTRICTED_DESCENDANT_FIXTURE".to_owned(),
-        "1".to_owned(),
-    );
-    request.env.insert(
-        "SIGIL_DESCENDANT_EXE".to_owned(),
-        std::env::current_exe()
-            .expect("current test executable should resolve")
-            .to_string_lossy()
-            .into_owned(),
-    );
-    request.env.insert(
         "SIGIL_DESCENDANT_READY".to_owned(),
         ready.to_string_lossy().into_owned(),
     );
@@ -83,15 +89,6 @@ fn configure_descendant_fixture(
         "SIGIL_DESCENDANT_SURVIVED".to_owned(),
         survived.to_string_lossy().into_owned(),
     );
-}
-
-#[cfg(windows)]
-fn descendant_fixture_command() -> &'static str {
-    concat!(
-        "start \"\" /B \"%SIGIL_DESCENDANT_EXE%\" --ignored --exact ",
-        "execution_backends::windows_restricted::tests::restricted_descendant_fixture ",
-        "--nocapture >nul 2>&1 & ping -n 30 127.0.0.1 >nul"
-    )
 }
 
 #[cfg(windows)]
@@ -189,13 +186,17 @@ async fn restricted_launch_probe_captures_output_and_exit_status() {
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn restricted_launch_probe_preserves_unicode_environment_and_quoted_command() {
+async fn restricted_launch_probe_preserves_unicode_environment_and_path() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let marker = temp.path().join("值 with spaces.txt");
-    let mut request = cmd_request("rem Unicode 参数 & echo unicode-ok>\"%SIGIL_UNICODE_PATH%\"");
+    let mut request = fixture_request("unicode-environment");
     request.env.insert(
         "SIGIL_UNICODE_PATH".to_owned(),
         marker.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "SIGIL_UNICODE_VALUE".to_owned(),
+        "值 空格 \"quoted\" 尾斜杠\\".to_owned(),
     );
 
     let receipt = windows_restricted_launch_probe(&request)
@@ -317,7 +318,7 @@ async fn restricted_launch_probe_does_not_inherit_unlisted_handle() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_timeout_uses_shared_cleanup_receipt() {
-    let mut request = cmd_request("ping -n 30 127.0.0.1 >nul");
+    let mut request = fixture_request("sleep");
     request.timeout_ms = Some(250);
 
     let outcome = supervise_native_probe(
@@ -344,7 +345,7 @@ async fn restricted_launch_cancellation_reaps_descendants() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let ready = temp.path().join("descendant-ready.txt");
     let survived = temp.path().join("descendant-survived.txt");
-    let mut request = cmd_request(descendant_fixture_command());
+    let mut request = fixture_request("descendant-parent");
     request.timeout_ms = Some(30_000);
     configure_descendant_fixture(&mut request, &ready, &survived);
     let owner = RunCancellationOwner::new();
@@ -384,8 +385,7 @@ async fn restricted_launch_cancellation_reaps_descendants() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_output_limit_uses_shared_bounded_collector() {
-    let mut request =
-        cmd_request("for /L %i in (1,1,40000) do @echo 1234567890 & ping -n 30 127.0.0.1 >nul");
+    let mut request = fixture_request("output-limit");
     request.timeout_ms = Some(30_000);
 
     let outcome = supervise_native_probe(
@@ -409,7 +409,7 @@ async fn restricted_launch_output_limit_uses_shared_bounded_collector() {
 #[serial]
 #[tokio::test]
 async fn restricted_launch_reader_failure_uses_shared_cleanup_path() {
-    let mut request = cmd_request("echo x&ping -n 30 127.0.0.1 >nul");
+    let mut request = fixture_request("reader-failure");
     request.timeout_ms = Some(30_000);
 
     let outcome = supervise_native_probe(
@@ -435,7 +435,7 @@ async fn dropping_restricted_supervisor_reaps_descendants() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let ready = temp.path().join("drop-ready.txt");
     let survived = temp.path().join("drop-survived.txt");
-    let mut request = cmd_request(descendant_fixture_command());
+    let mut request = fixture_request("descendant-parent");
     request.timeout_ms = Some(30_000);
     configure_descendant_fixture(&mut request, &ready, &survived);
     let task = tokio::spawn(async move {
@@ -466,18 +466,70 @@ async fn dropping_restricted_supervisor_reaps_descendants() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "spawned only as a restricted descendant conformance fixture"]
-fn restricted_descendant_fixture() {
-    if std::env::var_os("SIGIL_RESTRICTED_DESCENDANT_FIXTURE").is_none() {
-        return;
+#[ignore = "spawned only as a native Windows restricted-launch conformance fixture"]
+fn restricted_process_fixture() {
+    let mode = std::env::var("SIGIL_RESTRICTED_FIXTURE_MODE")
+        .expect("restricted fixture mode should be provided");
+    match mode.as_str() {
+        "unicode-environment" => {
+            assert_eq!(
+                std::env::var("SIGIL_UNICODE_VALUE")
+                    .expect("Unicode fixture value should be provided"),
+                "值 空格 \"quoted\" 尾斜杠\\"
+            );
+            let marker = std::env::var_os("SIGIL_UNICODE_PATH")
+                .map(PathBuf::from)
+                .expect("Unicode marker path should be provided");
+            fs::write(marker, b"unicode-ok").expect("Unicode marker should be written");
+        }
+        "sleep" => std::thread::sleep(Duration::from_secs(30)),
+        "output-limit" => {
+            let mut stdout = io::stdout().lock();
+            stdout
+                .write_all(&vec![b'x'; 300_000])
+                .expect("fixture output should be written");
+            stdout.flush().expect("fixture output should flush");
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        "reader-failure" => {
+            let mut stdout = io::stdout().lock();
+            stdout
+                .write_all(b"x")
+                .expect("fixture output should be written");
+            stdout.flush().expect("fixture output should flush");
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        "descendant-parent" => {
+            let mut descendant =
+                Command::new(std::env::current_exe().expect("fixture executable should resolve"))
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        RESTRICTED_FIXTURE_TEST,
+                        "--nocapture",
+                    ])
+                    .env("SIGIL_RESTRICTED_FIXTURE_MODE", "descendant-child")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("restricted descendant should spawn");
+            let status = descendant
+                .wait()
+                .expect("restricted descendant should remain waitable");
+            assert!(status.success(), "restricted descendant should succeed");
+        }
+        "descendant-child" => {
+            let ready = std::env::var_os("SIGIL_DESCENDANT_READY")
+                .map(PathBuf::from)
+                .expect("descendant ready marker path should be provided");
+            let survived = std::env::var_os("SIGIL_DESCENDANT_SURVIVED")
+                .map(PathBuf::from)
+                .expect("descendant survived marker path should be provided");
+            fs::write(ready, b"ready").expect("descendant ready marker should be written");
+            std::thread::sleep(Duration::from_secs(2));
+            fs::write(survived, b"survived").expect("descendant survived marker should be written");
+        }
+        other => panic!("unknown restricted fixture mode: {other}"),
     }
-    let ready = std::env::var_os("SIGIL_DESCENDANT_READY")
-        .map(PathBuf::from)
-        .expect("descendant ready marker path should be provided");
-    let survived = std::env::var_os("SIGIL_DESCENDANT_SURVIVED")
-        .map(PathBuf::from)
-        .expect("descendant survived marker path should be provided");
-    fs::write(ready, b"ready").expect("descendant ready marker should be written");
-    std::thread::sleep(Duration::from_secs(2));
-    fs::write(survived, b"survived").expect("descendant survived marker should be written");
 }
