@@ -16,15 +16,15 @@ use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
     Foundation::{ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree},
     Security::{
-        ACL,
+        ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
         Authorization::{
             EXPLICIT_ACCESS_W, GRANT_ACCESS, GetEffectiveRightsFromAclW, GetNamedSecurityInfoW,
             SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
             TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
         },
-        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetFileSecurityW,
-        GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetFileSecurityW,
+        CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GROUP_SECURITY_INFORMATION,
+        GetAce, GetAclInformation, GetFileSecurityW, INHERIT_ONLY_ACE, INHERITED_ACE,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_DELETE_CHILD,
@@ -38,13 +38,17 @@ use windows_sys::Win32::{
 
 use super::native::WindowsRestrictingSid;
 
-const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_VERSION: u32 = 2;
 const DRIVE_REMOTE: u32 = 4;
+const ACCESS_ALLOWED_ACE_TYPE_VALUE: u8 = 0;
 const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
 const ROOT_SECURITY_INFORMATION: u32 =
     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-const ROOT_GRANT_ACCESS: u32 =
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD;
+const ROOT_DIRECTORY_ACCESS: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_CHILD;
+const DESCENDANT_DIRECTORY_ACCESS: u32 = ROOT_DIRECTORY_ACCESS | DELETE;
+const DESCENDANT_FILE_ACCESS: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const FORBIDDEN_ROOT_GRANT_ACCESS: u32 = WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,30 +75,6 @@ struct SecurityDescriptorBuffer {
 }
 
 impl SecurityDescriptorBuffer {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.is_empty() {
-            bail!("Windows security descriptor snapshot is empty");
-        }
-        let words = bytes.len().div_ceil(size_of::<usize>());
-        let mut storage = vec![0_usize; words];
-        // SAFETY: storage has at least bytes.len() writable bytes and does not overlap bytes.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                storage.as_mut_ptr().cast::<u8>(),
-                bytes.len(),
-            );
-        }
-        Ok(Self {
-            storage,
-            len: bytes.len(),
-        })
-    }
-
-    fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
-        self.storage.as_ptr().cast_mut().cast::<c_void>()
-    }
-
     fn as_bytes(&self) -> &[u8] {
         // SAFETY: storage contains at least len initialized bytes and remains live for the slice.
         unsafe { std::slice::from_raw_parts(self.storage.as_ptr().cast::<u8>(), self.len) }
@@ -106,8 +86,6 @@ struct GrantPaths {
     journal: PathBuf,
     snapshot: PathBuf,
     granted: PathBuf,
-    restoring: PathBuf,
-    restored: PathBuf,
 }
 
 impl GrantPaths {
@@ -122,30 +100,25 @@ impl GrantPaths {
             journal: state_dir.join(format!("{root_key}.journal.json")),
             snapshot: state_dir.join(format!("{root_key}.security-descriptor")),
             granted: state_dir.join(format!("{root_key}.granted")),
-            restoring: state_dir.join(format!("{root_key}.restoring")),
-            restored: state_dir.join(format!("{root_key}.restored")),
         }
     }
 }
 
-/// Private R41.2 lease for one temporary root DACL grant.
+/// Private R41.2 lease for one durable per-workspace DACL grant.
 ///
-/// Construction records the exact pre-mutation security descriptor before applying an ACE.
-/// Explicit restoration is required for conformance; Drop only provides a best-effort retry.
+/// Provisioning records the exact pre-mutation root descriptor before applying the workspace SID.
+/// Later runs only revalidate the durable grant and never rewrite the ACL. Public configuration
+/// remains gated until explicit revalidate/remove actions and the full containment matrix pass.
 pub(crate) struct WindowsFilesystemGrant {
     root: PathBuf,
     root_identity: RootIdentity,
-    paths: GrantPaths,
     lock: File,
-    active: bool,
+    restricting_sid: WindowsRestrictingSid,
+    lease_held: bool,
 }
 
 impl WindowsFilesystemGrant {
-    pub(crate) fn acquire(
-        root: &Path,
-        state_dir: &Path,
-        restricting_sid: &WindowsRestrictingSid,
-    ) -> Result<Self> {
+    pub(crate) fn acquire(root: &Path, state_dir: &Path) -> Result<Self> {
         assert_minimal_root_grant()?;
         let root = canonical_directory(root, "grant root")?;
         ensure_supported_local_ntfs(&root)?;
@@ -154,65 +127,28 @@ impl WindowsFilesystemGrant {
         let state_dir = canonical_state_directory(state_dir, &root)?;
         let paths = GrantPaths::for_root(&state_dir, &root_utf16);
         let lock = open_and_lock(&paths.lock)?;
-        recover_existing_locked(&root, &root_utf16, root_identity, &paths)?;
-
-        let original = read_security_descriptor(&root)?;
-        let snapshot_sha256 = sha256_hex(original.as_bytes());
-        write_new_synced(&paths.snapshot, original.as_bytes())?;
-        let journal = GrantJournal {
-            version: JOURNAL_VERSION,
-            owner_marker: uuid::Uuid::new_v4().to_string(),
-            root_utf16,
-            root_identity,
-            restricting_sid: restricting_sid.as_str().to_owned(),
-            snapshot_sha256,
-            snapshot_len: u64::try_from(original.len)
-                .context("security descriptor length exceeds u64")?,
-            phase: "prepared".to_owned(),
-        };
-        let journal_bytes = serde_json::to_vec(&journal).context("failed to encode ACL journal")?;
-        if let Err(error) = write_new_synced(&paths.journal, &journal_bytes) {
-            let _ = remove_if_exists(&paths.snapshot);
-            return Err(error);
-        }
-
-        let apply_result = apply_and_verify_root_grant(&root, restricting_sid);
-        if let Err(error) = apply_result {
-            return rollback_failed_acquire(&root, root_identity, &paths, error);
-        }
-        if let Err(error) = write_new_synced(&paths.granted, b"granted\n") {
-            return rollback_failed_acquire(&root, root_identity, &paths, error);
-        }
+        let restricting_sid =
+            provision_or_revalidate_locked(&root, &root_utf16, root_identity, &paths)?;
 
         Ok(Self {
             root,
             root_identity,
-            paths,
             lock,
-            active: true,
+            restricting_sid,
+            lease_held: true,
         })
     }
 
-    pub(crate) fn recover(root: &Path, state_dir: &Path) -> Result<bool> {
-        let root = canonical_directory(root, "recovery root")?;
-        ensure_supported_local_ntfs(&root)?;
-        let root_utf16 = wide_without_nul(root.as_os_str());
-        let root_identity = root_identity(&root)?;
-        let state_dir = canonical_state_directory(state_dir, &root)?;
-        let paths = GrantPaths::for_root(&state_dir, &root_utf16);
-        let lock = open_and_lock(&paths.lock)?;
-        let had_record = paths.journal.exists() || paths.snapshot.exists();
-        let result = recover_existing_locked(&root, &root_utf16, root_identity, &paths);
-        let _ = FileExt::unlock(&lock);
-        result.map(|()| had_record)
+    pub(crate) fn restricting_sid(&self) -> &WindowsRestrictingSid {
+        &self.restricting_sid
     }
 
-    pub(crate) fn restore(mut self) -> Result<()> {
-        let result = self.restore_active();
-        if result.is_ok() {
-            self.active = false;
-        }
-        result
+    pub(crate) fn release(mut self) -> Result<()> {
+        verify_root_identity(&self.root, self.root_identity)?;
+        verify_effective_root_grant(&self.root, &self.restricting_sid)?;
+        FileExt::unlock(&self.lock).context("failed to release Windows ACL lease")?;
+        self.lease_held = false;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -235,81 +171,125 @@ impl WindowsFilesystemGrant {
         Ok(effective & mutating != 0)
     }
 
-    fn restore_active(&mut self) -> Result<()> {
-        verify_root_identity(&self.root, self.root_identity)?;
-        write_marker_if_absent(&self.paths.restoring, b"restoring\n")?;
-        restore_from_snapshot(&self.root, &self.paths)?;
-        verify_restored_snapshot(&self.root, &self.paths)?;
-        write_marker_if_absent(&self.paths.restored, b"restored\n")?;
-        clear_grant_artifacts(&self.paths)
+    #[cfg(test)]
+    pub(crate) fn sid_has_security_control_rights(
+        path: &Path,
+        restricting_sid: &WindowsRestrictingSid,
+    ) -> Result<bool> {
+        let effective = effective_rights_for_path(path, restricting_sid)?;
+        Ok(effective & FORBIDDEN_ROOT_GRANT_ACCESS != 0)
     }
 }
 
 impl Drop for WindowsFilesystemGrant {
     fn drop(&mut self) {
-        if self.active && self.restore_active().is_ok() {
-            self.active = false;
+        if self.lease_held {
+            let _ = FileExt::unlock(&self.lock);
         }
-        let _ = FileExt::unlock(&self.lock);
     }
 }
 
-fn rollback_failed_acquire(
-    root: &Path,
-    root_identity: RootIdentity,
-    paths: &GrantPaths,
-    source: anyhow::Error,
-) -> Result<WindowsFilesystemGrant> {
-    let rollback = verify_root_identity(root, root_identity)
-        .and_then(|()| restore_from_snapshot(root, paths))
-        .and_then(|()| verify_restored_snapshot(root, paths))
-        .and_then(|()| clear_grant_artifacts(paths));
-    match rollback {
-        Ok(()) => Err(source.context("Windows root grant failed and was restored")),
-        Err(rollback_error) => Err(source.context(format!(
-            "Windows root grant failed; rollback also failed: {rollback_error:#}"
-        ))),
-    }
-}
-
-fn recover_existing_locked(
+fn provision_or_revalidate_locked(
     root: &Path,
     root_utf16: &[u16],
     root_identity: RootIdentity,
     paths: &GrantPaths,
-) -> Result<()> {
+) -> Result<WindowsRestrictingSid> {
     if !paths.journal.exists() {
-        if paths.granted.exists() || paths.restoring.exists() || paths.restored.exists() {
-            bail!("Windows ACL recovery markers exist without an owner journal");
+        if paths.granted.exists() {
+            bail!("Windows durable ACL marker exists without an owner journal");
         }
         if paths.snapshot.exists() {
             // Snapshot publication precedes journal publication, so a snapshot without a journal
             // proves that mutation was not yet allowed to begin.
             remove_if_exists(&paths.snapshot)?;
         }
-        return Ok(());
+        return provision_new_locked(root, root_utf16, root_identity, paths);
     }
 
+    let journal = read_and_validate_journal(root_utf16, root_identity, paths)?;
+    let restricting_sid = WindowsRestrictingSid::from_string(&journal.restricting_sid)?;
+    verify_root_identity(root, root_identity)?;
+    if durable_grant_marker_is_valid(paths)? {
+        verify_effective_root_grant(root, &restricting_sid).context(
+            "durable Windows workspace grant no longer matches its owner journal; explicit revalidation is required",
+        )?;
+        return Ok(restricting_sid);
+    }
+
+    // A durable prepared journal is the owner marker for an interrupted provisioning attempt.
+    // Resume the exact owned grant instead of trying to reverse inheritance and normalize user
+    // ACLs. The child cannot start until this grant is reread and the active marker is durable.
+    match owned_root_grant_ace_count(root, &restricting_sid)? {
+        0 => apply_and_verify_root_grant(root, &restricting_sid)
+            .context("failed to resume durable Windows workspace grant provisioning")?,
+        3 => verify_effective_root_grant(root, &restricting_sid)?,
+        count => {
+            bail!("durable Windows workspace grant has {count} owned root ACEs before activation")
+        }
+    }
+    write_new_synced(&paths.granted, b"durable-grant-active\n")?;
+    Ok(restricting_sid)
+}
+
+fn provision_new_locked(
+    root: &Path,
+    root_utf16: &[u16],
+    root_identity: RootIdentity,
+    paths: &GrantPaths,
+) -> Result<WindowsRestrictingSid> {
+    let restricting_sid = WindowsRestrictingSid::new_unique()?;
+    let original = read_security_descriptor(root)?;
+    let snapshot_sha256 = sha256_hex(original.as_bytes());
+    write_new_synced(&paths.snapshot, original.as_bytes())?;
+    let journal = GrantJournal {
+        version: JOURNAL_VERSION,
+        owner_marker: uuid::Uuid::new_v4().to_string(),
+        root_utf16: root_utf16.to_vec(),
+        root_identity,
+        restricting_sid: restricting_sid.as_str().to_owned(),
+        snapshot_sha256,
+        snapshot_len: u64::try_from(original.len)
+            .context("security descriptor length exceeds u64")?,
+        phase: "durable-prepared".to_owned(),
+    };
+    let journal_bytes = serde_json::to_vec(&journal).context("failed to encode ACL journal")?;
+    if let Err(error) = write_new_synced(&paths.journal, &journal_bytes) {
+        let _ = remove_if_exists(&paths.snapshot);
+        return Err(error);
+    }
+
+    // From this point on, failures retain the durable owner record. A later acquire can safely
+    // resume the exact SID grant; attempting an automatic rollback would rewrite inherited child
+    // ACLs and violate the no-normalization boundary proven by hosted Windows conformance.
+    apply_and_verify_root_grant(root, &restricting_sid)
+        .context("failed to provision durable Windows workspace grant; owner record retained")?;
+    write_new_synced(&paths.granted, b"durable-grant-active\n").context(
+        "durable Windows workspace grant is active but its marker was not published; owner record retained",
+    )?;
+    Ok(restricting_sid)
+}
+
+fn read_and_validate_journal(
+    root_utf16: &[u16],
+    root_identity: RootIdentity,
+    paths: &GrantPaths,
+) -> Result<GrantJournal> {
     let journal_bytes = fs::read(&paths.journal)
         .with_context(|| format!("failed to read {}", paths.journal.display()))?;
     let journal: GrantJournal = serde_json::from_slice(&journal_bytes)
         .with_context(|| format!("failed to parse {}", paths.journal.display()))?;
     if journal.version != JOURNAL_VERSION
-        || journal.phase != "prepared"
+        || journal.phase != "durable-prepared"
         || journal.root_utf16 != root_utf16
         || journal.root_identity != root_identity
         || journal.owner_marker.is_empty()
         || journal.restricting_sid.is_empty()
     {
-        bail!("Windows ACL recovery journal does not match the canonical root identity");
+        bail!("Windows durable ACL journal does not match the canonical root identity");
     }
     verify_snapshot_metadata(paths, &journal)?;
-    verify_root_identity(root, root_identity)?;
-    write_marker_if_absent(&paths.restoring, b"restoring\n")?;
-    restore_from_snapshot(root, paths)?;
-    verify_restored_snapshot(root, paths)?;
-    write_marker_if_absent(&paths.restored, b"restored\n")?;
-    clear_grant_artifacts(paths)
+    Ok(journal)
 }
 
 fn verify_snapshot_metadata(paths: &GrantPaths, journal: &GrantJournal) -> Result<()> {
@@ -321,6 +301,17 @@ fn verify_snapshot_metadata(paths: &GrantPaths, journal: &GrantJournal) -> Resul
         bail!("Windows ACL recovery snapshot does not match its durable journal");
     }
     Ok(())
+}
+
+fn durable_grant_marker_is_valid(paths: &GrantPaths) -> Result<bool> {
+    match fs::read(&paths.granted) {
+        Ok(marker) if marker == b"durable-grant-active\n" => Ok(true),
+        Ok(_) => bail!("Windows durable ACL marker is corrupt"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read {}", paths.granted.display()))
+        }
+    }
 }
 
 fn apply_and_verify_root_grant(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<()> {
@@ -346,17 +337,37 @@ fn apply_and_verify_root_grant(root: &Path, restricting_sid: &WindowsRestricting
             .context("GetNamedSecurityInfoW failed for Windows grant root");
     }
 
-    let explicit = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: ROOT_GRANT_ACCESS,
-        grfAccessMode: GRANT_ACCESS,
-        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-        Trustee: trustee_for_sid(restricting_sid.as_ptr()),
-    };
+    let explicit = [
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: ROOT_DIRECTORY_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: 0,
+            Trustee: trustee_for_sid(restricting_sid.as_ptr()),
+        },
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: DESCENDANT_DIRECTORY_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+            Trustee: trustee_for_sid(restricting_sid.as_ptr()),
+        },
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: DESCENDANT_FILE_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE,
+            Trustee: trustee_for_sid(restricting_sid.as_ptr()),
+        },
+    ];
     let mut updated_dacl: *mut ACL = null_mut();
     // SAFETY: explicit and its SID remain live, current_dacl points into descriptor, and
     // updated_dacl is a valid output pointer.
-    let merge_status =
-        unsafe { SetEntriesInAclW(1, &raw const explicit, current_dacl, &raw mut updated_dacl) };
+    let merge_status = unsafe {
+        SetEntriesInAclW(
+            u32::try_from(explicit.len()).expect("owned grant ACE count fits u32"),
+            explicit.as_ptr(),
+            current_dacl,
+            &raw mut updated_dacl,
+        )
+    };
     if merge_status != ERROR_SUCCESS {
         free_local(descriptor);
         return Err(io::Error::from_raw_os_error(merge_status.cast_signed()))
@@ -390,14 +401,126 @@ fn apply_and_verify_root_grant(root: &Path, restricting_sid: &WindowsRestricting
 }
 
 fn verify_effective_root_grant(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<()> {
+    let owned_ace_count = owned_root_grant_ace_count(root, restricting_sid)?;
+    if owned_ace_count != 3 {
+        bail!(
+            "Windows grant root must contain exactly three owned SID ACEs; found {owned_ace_count}"
+        );
+    }
     let effective = effective_rights_for_path(root, restricting_sid)?;
-    if effective & ROOT_GRANT_ACCESS != ROOT_GRANT_ACCESS {
+    if effective & ROOT_DIRECTORY_ACCESS != ROOT_DIRECTORY_ACCESS {
         bail!("Windows grant root did not expose the required minimal effective rights");
+    }
+    if effective & DELETE != 0 {
+        bail!("Windows grant root exposed delete rights on the workspace root itself");
     }
     if effective & FORBIDDEN_ROOT_GRANT_ACCESS != 0 {
         bail!("Windows grant root exposed forbidden owner or ACL mutation rights");
     }
     Ok(())
+}
+
+fn owned_root_grant_ace_count(root: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<u32> {
+    let wide = nul_terminated(root.as_os_str(), "owned-grant path")?;
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: wide is NUL-terminated and all output pointers remain valid for the call.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &raw mut dacl,
+            null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status.cast_signed()))
+            .context("failed to read Windows owned-grant DACL");
+    }
+    if dacl.is_null() {
+        free_local(descriptor);
+        bail!("Windows owned-grant root unexpectedly has a null DACL");
+    }
+
+    let mut information = ACL_SIZE_INFORMATION::default();
+    // SAFETY: dacl points into the live descriptor and information is a valid output buffer.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut information).cast::<c_void>(),
+            u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).expect("ACL size info fits u32"),
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        free_local(descriptor);
+        return Err(io::Error::last_os_error())
+            .context("failed to inspect Windows owned-grant ACL");
+    }
+
+    let expected = [
+        (ROOT_DIRECTORY_ACCESS, 0_u8),
+        (
+            DESCENDANT_DIRECTORY_ACCESS,
+            u8::try_from(CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE)
+                .expect("Windows directory inheritance flags fit u8"),
+        ),
+        (
+            DESCENDANT_FILE_ACCESS,
+            u8::try_from(OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE)
+                .expect("Windows file inheritance flags fit u8"),
+        ),
+    ];
+    let mut matching = [false; 3];
+    for index in 0..information.AceCount {
+        let mut raw_ace: *mut c_void = null_mut();
+        // SAFETY: dacl is live, index is bounded by AceCount, and raw_ace is a valid output.
+        if unsafe { GetAce(dacl, index, &raw mut raw_ace) } == 0 {
+            free_local(descriptor);
+            return Err(io::Error::last_os_error())
+                .context("failed to enumerate Windows owned-grant ACE");
+        }
+        if raw_ace.is_null() {
+            free_local(descriptor);
+            bail!("GetAce returned a null Windows owned-grant ACE");
+        }
+        // SAFETY: GetAce returned a pointer to an ACE in the live ACL. Reading the common header
+        // is valid for every ACE; ACCESS_ALLOWED_ACE fields are read only after checking AceType.
+        let header = unsafe { &*raw_ace.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE_VALUE
+            || u32::from(header.AceFlags) & INHERITED_ACE != 0
+        {
+            continue;
+        }
+        let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+        let ace_sid = (&raw const ace.SidStart).cast_mut().cast::<c_void>();
+        // SAFETY: ace_sid addresses the variable-length SID following ACCESS_ALLOWED_ACE and both
+        // SID pointers remain live for the call.
+        if unsafe { EqualSid(ace_sid, restricting_sid.as_ptr()) } == 0 {
+            continue;
+        }
+        let Some(position) = expected
+            .iter()
+            .position(|candidate| *candidate == (ace.Mask, header.AceFlags))
+        else {
+            free_local(descriptor);
+            bail!("Windows owned workspace SID ACE has an unexpected mask or inheritance flags");
+        };
+        if matching[position] {
+            free_local(descriptor);
+            bail!("Windows owned workspace SID ACE is duplicated");
+        }
+        matching[position] = true;
+    }
+    free_local(descriptor);
+    Ok(
+        u32::try_from(matching.into_iter().filter(|matched| *matched).count())
+            .expect("owned grant ACE count fits u32"),
+    )
 }
 
 fn effective_rights_for_path(path: &Path, restricting_sid: &WindowsRestrictingSid) -> Result<u32> {
@@ -447,79 +570,6 @@ fn trustee_for_sid(sid: *mut c_void) -> TRUSTEE_W {
         TrusteeType: TRUSTEE_IS_UNKNOWN,
         ptstrName: sid.cast::<u16>(),
     }
-}
-
-fn restore_from_snapshot(root: &Path, paths: &GrantPaths) -> Result<()> {
-    let bytes = fs::read(&paths.snapshot)
-        .with_context(|| format!("failed to read {}", paths.snapshot.display()))?;
-    let descriptor = SecurityDescriptorBuffer::from_bytes(&bytes)?;
-    let wide = nul_terminated(root.as_os_str(), "grant root")?;
-    let mut dacl_present = 0;
-    let mut dacl_defaulted = 0;
-    let mut dacl: *mut ACL = null_mut();
-    // SAFETY: descriptor is an aligned, self-relative security descriptor captured from
-    // GetFileSecurityW, and all output pointers are valid for the call.
-    if unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor.as_ptr(),
-            &raw mut dacl_present,
-            &raw mut dacl,
-            &raw mut dacl_defaulted,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error())
-            .context("GetSecurityDescriptorDacl failed for Windows grant snapshot");
-    }
-    if dacl_present == 0 || dacl.is_null() {
-        bail!("Windows grant root with an absent or null original DACL is unsupported");
-    }
-
-    // SAFETY: wide is NUL-terminated and dacl points into the live snapshot descriptor.
-    // SetNamedSecurityInfoW is used intentionally because it propagates the restored inheritable
-    // DACL to existing descendants, unlike SetFileSecurityW's root-only replacement.
-    let status = unsafe {
-        SetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            dacl,
-            null(),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(status.cast_signed()))
-            .context("SetNamedSecurityInfoW failed to restore Windows grant root DACL");
-    }
-
-    // SetNamedSecurityInfoW can normalize the root descriptor while propagating inheritance.
-    // Reapply the exact captured DACL to the root after descendant cleanup so both properties hold:
-    // descendants lose the run SID and the root returns byte-for-byte to its original descriptor.
-    // SAFETY: wide and the aligned self-relative snapshot remain live for the call.
-    if unsafe {
-        SetFileSecurityW(
-            wide.as_ptr(),
-            DACL_SECURITY_INFORMATION,
-            descriptor.as_ptr(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error())
-            .context("SetFileSecurityW failed to finalize exact Windows grant root restoration");
-    }
-    Ok(())
-}
-
-fn verify_restored_snapshot(root: &Path, paths: &GrantPaths) -> Result<()> {
-    let expected = fs::read(&paths.snapshot)
-        .with_context(|| format!("failed to read {}", paths.snapshot.display()))?;
-    let actual = read_security_descriptor(root)?;
-    if actual.as_bytes() != expected {
-        bail!("Windows grant root security descriptor did not restore exactly");
-    }
-    Ok(())
 }
 
 fn read_security_descriptor(path: &Path) -> Result<SecurityDescriptorBuffer> {
@@ -720,23 +770,6 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
-fn write_marker_if_absent(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    write_new_synced(path, bytes)
-}
-
-fn clear_grant_artifacts(paths: &GrantPaths) -> Result<()> {
-    remove_if_exists(&paths.granted)?;
-    remove_if_exists(&paths.restoring)?;
-    remove_if_exists(&paths.restored)?;
-    // Remove the owner journal before the snapshot. A crash between these removals leaves only a
-    // pre-journal snapshot, which recovery can prove was safe to discard.
-    remove_if_exists(&paths.journal)?;
-    remove_if_exists(&paths.snapshot)
-}
-
 fn remove_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -746,8 +779,17 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 }
 
 fn assert_minimal_root_grant() -> Result<()> {
-    if ROOT_GRANT_ACCESS & FORBIDDEN_ROOT_GRANT_ACCESS != 0 {
-        bail!("Windows restricted root grant contains forbidden security-control rights");
+    for access in [
+        ROOT_DIRECTORY_ACCESS,
+        DESCENDANT_DIRECTORY_ACCESS,
+        DESCENDANT_FILE_ACCESS,
+    ] {
+        if access & FORBIDDEN_ROOT_GRANT_ACCESS != 0 {
+            bail!("Windows restricted root grant contains forbidden security-control rights");
+        }
+    }
+    if ROOT_DIRECTORY_ACCESS & DELETE != 0 {
+        bail!("Windows restricted root grant permits deletion of the workspace root");
     }
     Ok(())
 }

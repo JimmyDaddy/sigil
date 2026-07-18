@@ -250,7 +250,7 @@ async fn write_restricted_sid_initializes_runtime_and_denies_ungranted_same_user
 #[cfg(windows)]
 #[serial]
 #[tokio::test]
-async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
+async fn write_restricted_sid_durable_grant_is_stable_across_runs() {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let granted_root = temp.path().join("workspace");
     let denied_root = temp.path().join("sibling");
@@ -259,13 +259,16 @@ async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
     fs::create_dir_all(&denied_root).expect("denied root should be created");
     let existing = granted_root.join("existing.txt");
     fs::write(&existing, b"before").expect("existing workspace file should be created");
-    let existing_descriptor_before = super::WindowsFilesystemGrant::descriptor_hash(&existing)
-        .expect("existing file descriptor should be captured");
     let denied = denied_root.join("escape.txt");
-    let restricting_sid =
-        super::WindowsRestrictingSid::new_unique().expect("unique restricting SID should resolve");
-    let grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir, &restricting_sid)
-        .expect("minimal workspace grant should be applied durably");
+    let grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir)
+        .expect("minimal durable workspace grant should be provisioned");
+    let restricting_sid_value = grant.restricting_sid().as_str().to_owned();
+    let root_descriptor_after_provision =
+        super::WindowsFilesystemGrant::descriptor_hash(&granted_root)
+            .expect("provisioned root descriptor should be captured");
+    let existing_descriptor_after_provision =
+        super::WindowsFilesystemGrant::descriptor_hash(&existing)
+            .expect("provisioned existing-file descriptor should be captured");
     let mut request = fixture_request("filesystem-grant");
     request.env.insert(
         "SIGIL_GRANTED_ROOT".to_owned(),
@@ -280,11 +283,12 @@ async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
         denied.to_string_lossy().into_owned(),
     );
 
-    let run_result = supervise_restricting_sid_probe(&request, &restricting_sid).await;
-    let restore_result = grant.restore();
+    let run_result = supervise_restricting_sid_probe(&request, grant.restricting_sid()).await;
     let (outcome, restricting_sid_count) =
         run_result.expect("filesystem containment fixture should return a receipt");
-    restore_result.expect("workspace and descendant DACLs should restore after child cleanup");
+    grant
+        .release()
+        .expect("durable workspace grant should revalidate before releasing its lease");
 
     assert_eq!(restricting_sid_count, 3);
     assert_eq!(outcome.exit_code, Some(0));
@@ -297,32 +301,74 @@ async fn write_restricted_sid_grant_propagates_exact_restore_without_residue() {
             .expect("new workspace file should remain readable"),
         "created"
     );
+    let second_grant = super::WindowsFilesystemGrant::acquire(&granted_root, &state_dir)
+        .expect("durable workspace grant should revalidate without ACL mutation");
+    assert_eq!(
+        second_grant.restricting_sid().as_str(),
+        restricting_sid_value
+    );
     assert!(
-        !super::WindowsFilesystemGrant::sid_has_mutating_rights(&existing, &restricting_sid)
-            .expect("existing file effective rights should resolve"),
-        "existing child retained the run-specific SID's mutating rights after restore"
+        super::WindowsFilesystemGrant::sid_has_mutating_rights(
+            &existing,
+            second_grant.restricting_sid(),
+        )
+        .expect("existing file effective rights should resolve"),
+        "existing child lost the durable workspace SID's mutating rights"
     );
     assert_eq!(
         super::WindowsFilesystemGrant::descriptor_hash(&existing)
-            .expect("restored existing file descriptor should be captured"),
-        existing_descriptor_before,
-        "existing child descriptor changed even after the run-specific SID lost mutating rights"
+            .expect("existing file descriptor should remain readable"),
+        existing_descriptor_after_provision,
+        "ordinary restricted execution rewrote an existing child descriptor"
+    );
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&granted_root)
+            .expect("revalidated root descriptor should be captured"),
+        root_descriptor_after_provision,
+        "durable grant revalidation rewrote the root descriptor"
+    );
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&existing)
+            .expect("revalidated existing-file descriptor should be captured"),
+        existing_descriptor_after_provision,
+        "durable grant revalidation rewrote an existing child descriptor"
     );
     assert!(
-        !super::WindowsFilesystemGrant::sid_has_mutating_rights(
+        super::WindowsFilesystemGrant::sid_has_mutating_rights(
             &granted_root.join("created.txt"),
-            &restricting_sid,
+            second_grant.restricting_sid(),
         )
         .expect("created file effective rights should resolve"),
-        "new child retained the run-specific SID's mutating rights after restore"
+        "new child did not inherit the durable workspace SID's mutating rights"
     );
+    assert!(
+        !super::WindowsFilesystemGrant::sid_has_security_control_rights(
+            &granted_root.join("created.txt"),
+            second_grant.restricting_sid(),
+        )
+        .expect("created file security-control rights should resolve"),
+        "new child inherited forbidden ACL or owner mutation rights"
+    );
+    let created_descriptor_before_second_run =
+        super::WindowsFilesystemGrant::descriptor_hash(&granted_root.join("created.txt"))
+            .expect("created-file descriptor should be captured before the second run");
+    let (second_outcome, second_restricting_sid_count) =
+        supervise_restricting_sid_probe(&request, second_grant.restricting_sid())
+            .await
+            .expect("second filesystem containment run should return a receipt");
+    assert_eq!(second_restricting_sid_count, 3);
+    assert_eq!(second_outcome.exit_code, Some(0));
+    assert_eq!(
+        super::WindowsFilesystemGrant::descriptor_hash(&granted_root.join("created.txt"))
+            .expect("created-file descriptor should be captured after the second run"),
+        created_descriptor_before_second_run,
+        "a repeated restricted run rewrote the durable child descriptor"
+    );
+    second_grant
+        .release()
+        .expect("revalidated durable workspace lease should release cleanly");
     assert!(!granted_root.join("deleted.txt").exists());
     assert!(!denied.exists(), "sibling path escaped the root grant");
-    assert!(
-        !super::WindowsFilesystemGrant::recover(&granted_root, &state_dir)
-            .expect("clean grant state should be recoverable"),
-        "successful restore left a recovery record"
-    );
 }
 
 #[cfg(windows)]

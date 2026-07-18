@@ -184,7 +184,7 @@ mod native {
             ))
         }
 
-        fn from_string(value: &str) -> Result<Self> {
+        pub(super) fn from_string(value: &str) -> Result<Self> {
             let wide = nul_terminated(OsStr::new(value), "restricting SID")?;
             let mut sid: PSID = null_mut();
             // SAFETY: wide is NUL-terminated and sid is a valid output pointer. The returned SID
