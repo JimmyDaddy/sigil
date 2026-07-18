@@ -119,8 +119,8 @@ mod native {
         Security::{
             ACL,
             Authorization::{
-                ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
-                SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+                ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW,
+                TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
             },
             CopySid, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetLengthSid,
             GetTokenInformation, LookupPrivilegeValueW, PSID, SE_CHANGE_NOTIFY_NAME,
@@ -184,10 +184,8 @@ mod native {
         }
 
         #[cfg(test)]
-        pub(crate) fn new_current_logon() -> Result<Self> {
-            let token = open_current_process_token()?;
-            let copied = current_logon_sid(raw_handle(&token))?;
-            Self::from_string(&sid_to_string(copied.as_ptr())?)
+        pub(crate) fn new_everyone() -> Result<Self> {
+            Self::from_string("S-1-1-0")
         }
 
         pub(super) fn from_string(value: &str) -> Result<Self> {
@@ -609,8 +607,12 @@ mod native {
         let logon_sid = restricting_sid
             .map(|_| current_logon_sid(existing))
             .transpose()?;
-        let restricting_entries = match (restricting_sid, logon_sid.as_ref()) {
-            (Some(capability), Some(logon)) => vec![
+        let everyone_sid = restricting_sid
+            .map(|_| WindowsRestrictingSid::from_string("S-1-1-0"))
+            .transpose()?;
+        let restricting_entries = match (restricting_sid, logon_sid.as_ref(), everyone_sid.as_ref())
+        {
+            (Some(capability), Some(logon), Some(everyone)) => vec![
                 SID_AND_ATTRIBUTES {
                     Sid: capability.as_ptr(),
                     Attributes: 0,
@@ -619,8 +621,12 @@ mod native {
                     Sid: logon.as_ptr(),
                     Attributes: 0,
                 },
+                SID_AND_ATTRIBUTES {
+                    Sid: everyone.as_ptr(),
+                    Attributes: 0,
+                },
             ],
-            (None, None) => Vec::new(),
+            (None, None, None) => Vec::new(),
             _ => bail!("incomplete Windows restricting SID set"),
         };
         let restricting_count = u32::try_from(restricting_entries.len())
@@ -656,10 +662,12 @@ mod native {
         }
         // SAFETY: CreateRestrictedToken succeeded and transferred ownership of the token handle.
         let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
-        if let (Some(capability), Some(logon)) = (restricting_sid, logon_sid.as_ref()) {
+        if let (Some(capability), Some(logon), Some(everyone)) =
+            (restricting_sid, logon_sid.as_ref(), everyone_sid.as_ref())
+        {
             set_restricted_token_default_dacl(
                 raw_handle(&restricted),
-                &[capability.as_ptr(), logon.as_ptr()],
+                &[capability.as_ptr(), logon.as_ptr(), everyone.as_ptr()],
             )?;
         }
         Ok(restricted)
@@ -795,32 +803,6 @@ mod native {
             return Err(io::Error::last_os_error()).context("CopySid failed for logon SID");
         }
         Ok(CopiedSid { storage })
-    }
-
-    #[cfg(test)]
-    fn sid_to_string(source: PSID) -> Result<String> {
-        let mut value: *mut u16 = null_mut();
-        // SAFETY: source is a valid SID and value is a valid output pointer. The returned string
-        // is NUL-terminated and released with LocalFree after it is copied.
-        if unsafe { ConvertSidToStringSidW(source, &raw mut value) } == 0 {
-            return Err(io::Error::last_os_error()).context("ConvertSidToStringSidW failed");
-        }
-        if value.is_null() {
-            bail!("ConvertSidToStringSidW returned a null string");
-        }
-        let mut len = 0_usize;
-        // SAFETY: ConvertSidToStringSidW returned a live NUL-terminated UTF-16 string.
-        while unsafe { *value.add(len) } != 0 {
-            len = len
-                .checked_add(1)
-                .context("Windows SID string is too long")?;
-        }
-        // SAFETY: the scan above found the NUL terminator, so the preceding len units are valid.
-        let units = unsafe { std::slice::from_raw_parts(value, len) };
-        let decoded = String::from_utf16(units).context("Windows SID string is not valid UTF-16");
-        // SAFETY: ConvertSidToStringSidW allocated value with LocalAlloc.
-        let _ = unsafe { LocalFree(value.cast::<c_void>()) };
-        decoded
     }
 
     fn restricted_token_privilege_evidence(
