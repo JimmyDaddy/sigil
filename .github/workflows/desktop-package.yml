@@ -120,7 +120,10 @@ jobs:
         run: |
           package="$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)"
           test -n "$package"
-          dpkg-deb --contents "$package" | grep -Eq '/usr/bin/sigil-runtime$'
+          package_root="$(mktemp -d)"
+          dpkg-deb --extract "$package" "$package_root"
+          test -x "$package_root/usr/bin/sigil-runtime"
+          "$package_root/usr/bin/sigil-runtime" --version
 
       - name: Verify Windows package and staged runtime sidecar
         if: runner.os == 'Windows'
