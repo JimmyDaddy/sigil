@@ -4624,10 +4624,12 @@ name = "sigil-desktop-app"
 version = "0.0.1-alpha.5"
 dependencies = [
  "serde",
+ "serde_json",
  "sigil-desktop",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]

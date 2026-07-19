@@ -552,6 +552,31 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
             .len(),
         1
     );
+    let catalog = client
+        .catalog(&sigil_desktop::DesktopCatalogQuery::default())
+        .await
+        .expect("typed catalog route should reconcile durable history");
+    assert_eq!(catalog.workspace_id, first.id);
+    let historical = catalog
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.session_id.as_deref() == Some(session.durable_session_scope_id.as_str())
+        })
+        .expect("new durable session should enter the catalog");
+    let reopened = client
+        .open_session(sigil_desktop::DesktopSessionOpenRequest {
+            session_ref: historical.session_ref.clone(),
+            session_id: historical
+                .session_id
+                .clone()
+                .expect("ready catalog row should have an identity"),
+            label: Some("desktop reopened".to_owned()),
+        })
+        .await
+        .expect("typed open route should revalidate durable history");
+    assert_eq!(reopened.id, session.id);
+    assert_eq!(reopened.label.as_deref(), Some("desktop smoke"));
 
     let report = manager
         .close(&first.id)

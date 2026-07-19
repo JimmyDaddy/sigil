@@ -1,6 +1,6 @@
 # RFC-0044 Desktop Shell MVP V1
 
-状态：active / R44.0-R44.2 complete；R44.3 ready
+状态：active / R44.0-R44.3 complete；R44.4 ready
 
 创建日期：2026-07-19
 
@@ -234,3 +234,23 @@ debug native build已通过。Cargo/npm供应链扫描均通过；当前Tauri Li
 
 该结果只交付可启动的安全桌面骨架与连接状态，不宣称已有history、conversation、approval或可安装bundle。
 R44.3现可在不读取SQLite/JSONL的前提下实现recent workspace与HTTP catalog/new/open session surface。
+
+## 12. R44.3 result
+
+R44.3已交付workspace/history shell。native recent store只在Tauri app config目录持有canonical workspace path，
+使用versioned bounded JSON与同目录临时文件原子替换；renderer只得到workspace ID、display name和open状态。
+recent reopen仍重新经过`DesktopWorkspaceManager` canonicalization、config验证、独立server readiness与authenticated
+HTTP contract，不把recent记录当授权或durable session truth。
+
+新增IPC只暴露bounded catalog query、renderer-safe catalog row、create/open session summary。catalog经
+`sigil-desktop` typed client请求`/session-catalog`，支持generation-consistent pagination、search、provider、pinned与
+source-state filter；绝对路径、session log path和durable scope不会进入IPC。open只接受server catalog返回的direct-child
+reference与durable ID，并由server再次验证JSONL/lifecycle truth。
+
+React shell已覆盖recent reopen、workspace切换、history rebuild/loading/empty/degraded/error/stale cursor、load more、
+new conversation和ready-only durable reopen。stale cursor不会把两代row拼接，而是要求从第一页刷新。4个UI interaction
+tests覆盖空/recent、new/close、分页/open和stale恢复；8个native tests覆盖recent持久化/上限/脱敏、query/reference边界
+与session私有字段丢弃。真实production server test已通过typed catalog和reopen后再graceful close。
+
+该结果只建立conversation选择与process-local session handle；尚未展示message timeline、发送prompt或消费SSE。
+R44.4现在可以在同一session handle上实现start run、durable/live event merge和terminal reconciliation。

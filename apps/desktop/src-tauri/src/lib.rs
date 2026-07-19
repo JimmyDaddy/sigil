@@ -1,4 +1,6 @@
 mod commands;
+mod ipc;
+mod recent;
 mod state;
 
 use std::sync::{
@@ -6,11 +8,13 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
-use tauri::RunEvent;
+use tauri::{Manager, RunEvent};
 
 use crate::{
     commands::{
-        desktop_bootstrap, desktop_close_workspace, desktop_pick_workspace, resolve_sigil_binary,
+        desktop_bootstrap, desktop_catalog, desktop_close_workspace, desktop_create_session,
+        desktop_open_recent_workspace, desktop_open_session, desktop_pick_workspace,
+        resolve_sigil_binary,
     },
     state::DesktopAppState,
 };
@@ -21,18 +25,32 @@ const EXIT_ALLOWED: u8 = 2;
 
 /// Builds and runs the native shell while preserving workspace process ownership on exit.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let state = DesktopAppState::new(resolve_sigil_binary()?);
-    let shutdown_manager = Arc::clone(&state.manager);
+    let sigil_binary = resolve_sigil_binary()?;
     let exit_state = Arc::new(AtomicU8::new(EXIT_IDLE));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(state)
+        .setup(move |app| {
+            let recent_workspaces_path = app
+                .path()
+                .app_config_dir()?
+                .join("recent-workspaces-v1.json");
+            app.manage(DesktopAppState::new(
+                sigil_binary.clone(),
+                recent_workspaces_path,
+            ));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             desktop_bootstrap,
             desktop_pick_workspace,
-            desktop_close_workspace
+            desktop_open_recent_workspace,
+            desktop_close_workspace,
+            desktop_catalog,
+            desktop_create_session,
+            desktop_open_session
         ])
         .build(tauri::generate_context!())?;
+    let shutdown_manager = Arc::clone(&app.state::<DesktopAppState>().manager);
 
     app.run(move |app_handle, event| {
         let RunEvent::ExitRequested { api, .. } = event else {

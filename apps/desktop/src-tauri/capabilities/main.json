@@ -7,6 +7,9 @@
   "permissions": [
     "allow-desktop-bootstrap",
     "allow-desktop-pick-workspace",
-    "allow-desktop-close-workspace"
+    "allow-desktop-close-workspace",
+    "allow-desktop-open-recent-workspace",
+    "allow-desktop-catalog",
+    "allow-desktop-session"
   ]
 }

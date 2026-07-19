@@ -12,3 +12,18 @@ commands.allow = ["desktop_pick_workspace"]
 identifier = "allow-desktop-close-workspace"
 description = "Allows the main local window to gracefully close one owned workspace server."
 commands.allow = ["desktop_close_workspace"]
+
+[[permission]]
+identifier = "allow-desktop-open-recent-workspace"
+description = "Allows the Rust backend to reopen one native-stored recent workspace without disclosing its path."
+commands.allow = ["desktop_open_recent_workspace"]
+
+[[permission]]
+identifier = "allow-desktop-catalog"
+description = "Allows the main local window to query the bounded server-owned session catalog."
+commands.allow = ["desktop_catalog"]
+
+[[permission]]
+identifier = "allow-desktop-session"
+description = "Allows the main local window to create or reopen one server-owned conversation handle."
+commands.allow = ["desktop_create_session", "desktop_open_session"]
