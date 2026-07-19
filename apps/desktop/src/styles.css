@@ -250,6 +250,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   background: #211514;
   font-size: 12px;
 }
+.timeline-gap { padding: 10px 12px; border: 1px solid #665d39; border-radius: 9px; color: #d4c587; background: #201f15; font-size: 13px; line-height: 1.45; }
 .timeline-empty { display: grid; place-content: center; gap: 7px; min-height: 150px; color: #829188; text-align: center; }
 .timeline-empty span { max-width: 600px; font-size: 12px; line-height: 1.5; }
 .timeline-row { max-width: min(82%, 720px); padding: 11px 13px; border: 1px solid #2f4037; border-radius: 11px; background: #141d18; }
@@ -373,6 +374,12 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .status-exited { background: #d4ae69; }
 .status-crashed { background: #e17878; }
 .statusbar { justify-content: flex-start; gap: 10px; border-top: 1px solid #29352f; color: #97a69d; font-size: 13px; }
+
+.modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(2 6 4 / 72%); }
+.confirmation-dialog { display: grid; width: min(520px, 100%); gap: 12px; padding: 22px; border: 1px solid #62413e; border-radius: 14px; color: #e2e9e4; background: #141b17; box-shadow: 0 22px 70px rgb(0 0 0 / 45%); }
+.confirmation-dialog h2, .confirmation-dialog p { margin: 0; }
+.confirmation-dialog > p:not(.eyebrow) { color: #abb8b0; line-height: 1.55; }
+.confirmation-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 

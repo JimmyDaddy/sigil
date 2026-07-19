@@ -8,6 +8,7 @@ import type {
   SessionOpenInput,
   SessionSummary,
   RunStreamStatus,
+  RunAttachment,
   RunSummary,
   TimelineEvent,
   WorkspaceSelection,
@@ -24,7 +25,7 @@ export interface DesktopBridge {
   bootstrap(): Promise<DesktopBootstrap>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
-  closeWorkspace(workspaceId: string): Promise<WorkspaceSummary[]>;
+  closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
   catalog(workspaceId: string, request: CatalogRequest): Promise<CatalogPage>;
   createSession(workspaceId: string, label?: string): Promise<SessionSummary>;
   openSession(
@@ -37,6 +38,7 @@ export interface DesktopBridge {
     request: TranscriptRequest,
   ): Promise<TranscriptPage>;
   startRun(workspaceId: string, sessionId: string, prompt: string): Promise<RunSummary>;
+  attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
   resolveApproval(
     workspaceId: string,
@@ -61,8 +63,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>
     invoke<WorkspaceSummary>("desktop_open_recent_workspace", { recentId }),
-  closeWorkspace: (workspaceId) =>
-    invoke<WorkspaceSummary[]>("desktop_close_workspace", { workspaceId }),
+  closeWorkspace: (workspaceId, confirmActiveRuns = false) =>
+    invoke<WorkspaceSummary[]>("desktop_close_workspace", {
+      workspaceId,
+      confirmActiveRuns,
+    }),
   catalog: (workspaceId, request) =>
     invoke<CatalogPage>("desktop_catalog", { workspaceId, request }),
   createSession: (workspaceId, label) =>
@@ -82,6 +87,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
       input: { sessionId, prompt },
+    }),
+  attachRun: (workspaceId, sessionId, runId) =>
+    invoke<RunAttachment>("desktop_attach_run", {
+      workspaceId,
+      input: { sessionId, runId },
     }),
   cancelRun: (workspaceId, sessionId, runId) =>
     invoke<RunSummary>("desktop_cancel_run", {

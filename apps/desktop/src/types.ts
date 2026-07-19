@@ -127,6 +127,14 @@ export interface RunSummary {
   streamSequence: number;
 }
 
+export interface RunAttachment {
+  run: RunSummary;
+  events: TimelineEvent[];
+  streamState: RunStreamState;
+  streamMessage?: string;
+  hasGap: boolean;
+}
+
 export interface ApprovalDecisionSummary {
   runId: string;
   callId: string;

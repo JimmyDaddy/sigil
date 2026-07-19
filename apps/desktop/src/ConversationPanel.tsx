@@ -45,9 +45,11 @@ export function ConversationPanel({
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [transcriptError, setTranscriptError] = useState(false);
   const [transcriptReload, setTranscriptReload] = useState(0);
+  const [attachmentGap, setAttachmentGap] = useState(false);
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
+  const activeRunIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     setRun(undefined);
@@ -58,6 +60,8 @@ export function ConversationPanel({
     setTranscriptTotal(0);
     setNextBefore(undefined);
     setTranscriptError(false);
+    setAttachmentGap(false);
+    activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
   useEffect(() => {
@@ -98,24 +102,41 @@ export function ConversationPanel({
   useEffect(() => {
     let disposed = false;
     const unsubscribers: Array<() => void> = [];
-    void bridge.subscribeRunEvents((event) => {
-      if (
-        !disposed &&
-        event.workspaceId === workspaceId &&
-        event.sessionId === session.id
-      ) {
+    const setup = async () => {
+      const unsubscribeEvents = await bridge.subscribeRunEvents((event) => {
+        if (
+          disposed ||
+          event.workspaceId !== workspaceId ||
+          event.sessionId !== session.id
+        ) {
+          return;
+        }
+        if (activeRunIdRef.current === undefined) activeRunIdRef.current = event.runId;
+        if (activeRunIdRef.current !== event.runId) return;
         setEvents((current) => mergeTimelineEvent(current, event));
+        const terminalStatus = terminalStatusForEvent(event);
+        if (terminalStatus !== undefined) {
+          setRun((current) =>
+            current?.id === event.runId ? { ...current, status: terminalStatus } : current,
+          );
+        }
+      });
+      if (disposed) {
+        unsubscribeEvents();
+        return;
       }
-    }).then((unsubscribe) => {
-      if (disposed) unsubscribe();
-      else unsubscribers.push(unsubscribe);
-    });
-    void bridge.subscribeRunStreamStatus((status) => {
-      if (
-        !disposed &&
-        status.workspaceId === workspaceId &&
-        status.sessionId === session.id
-      ) {
+      unsubscribers.push(unsubscribeEvents);
+
+      const unsubscribeStatus = await bridge.subscribeRunStreamStatus((status) => {
+        if (
+          disposed ||
+          status.workspaceId !== workspaceId ||
+          status.sessionId !== session.id
+        ) {
+          return;
+        }
+        if (activeRunIdRef.current === undefined) activeRunIdRef.current = status.runId;
+        if (activeRunIdRef.current !== status.runId) return;
         setStreamStatus(status);
         if (status.message !== undefined) onNotice(status.message, status.state === "error");
         if (status.state === "terminal") {
@@ -123,16 +144,60 @@ export function ConversationPanel({
             setVerification(undefined);
           });
         }
+      });
+      if (disposed) {
+        unsubscribeStatus();
+        return;
       }
-    }).then((unsubscribe) => {
-      if (disposed) unsubscribe();
-      else unsubscribers.push(unsubscribe);
+      unsubscribers.push(unsubscribeStatus);
+
+      if (session.foregroundRunId === undefined) return;
+      activeRunIdRef.current = session.foregroundRunId;
+      try {
+        const attachment = await bridge.attachRun(
+          workspaceId,
+          session.id,
+          session.foregroundRunId,
+        );
+        if (disposed) return;
+        setRun(attachment.run);
+        setEvents((current) =>
+          attachment.events.reduce(mergeTimelineEvent, current),
+        );
+        setStreamStatus({
+          workspaceId,
+          sessionId: session.id,
+          runId: attachment.run.id,
+          state: attachment.streamState,
+          message: attachment.streamMessage,
+        });
+        setAttachmentGap(attachment.hasGap);
+        if (attachment.streamMessage !== undefined) {
+          onNotice(
+            attachment.streamMessage,
+            attachment.streamState === "error",
+          );
+        }
+      } catch {
+        if (!disposed) {
+          activeRunIdRef.current = undefined;
+          onNotice(
+            "The active run changed while reopening this conversation. Refresh its durable history.",
+            true,
+          );
+        }
+      }
+    };
+    void setup().catch(() => {
+      if (!disposed) {
+        onNotice("Live run controls could not be connected.", true);
+      }
     });
     return () => {
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [bridge, onNotice, session.id, workspaceId]);
+  }, [bridge, onNotice, session.foregroundRunId, session.id, workspaceId]);
 
   const rows = useMemo(
     () => [...reduceTranscript(transcript), ...reduceTimeline(events)],
@@ -185,6 +250,7 @@ export function ConversationPanel({
     onNotice("Starting the run…");
     try {
       const started = await bridge.startRun(workspaceId, session.id, nextPrompt);
+      activeRunIdRef.current = started.id;
       setRun(started);
       setPrompt("");
       onNotice("Run started. Live updates are connected.");
@@ -278,6 +344,11 @@ export function ConversationPanel({
             timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
         }}
       >
+        {attachmentGap ? (
+          <div className="timeline-gap" role="status">
+            Some live details were not retained while this conversation was away. Durable messages and terminal state remain authoritative.
+          </div>
+        ) : null}
         {nextBefore !== undefined ? (
           <div className="transcript-pagination">
             <button
@@ -641,4 +712,11 @@ function eventKey(event: TimelineEvent): string {
 
 function isTerminal(status: RunSummary["status"]): boolean {
   return ["finished", "failed", "cancelled", "interrupted"].includes(status);
+}
+
+function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | undefined {
+  if (event.kind === "run_finished") return "finished";
+  if (event.kind === "run_failed") return "failed";
+  if (event.kind === "run_cancelled") return "cancelled";
+  return undefined;
 }

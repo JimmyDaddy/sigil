@@ -19,11 +19,11 @@ use tokio::sync::oneshot;
 use crate::{
     ipc::{
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
-        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopRunCancelInput,
-        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
-        DesktopSessionOpenInput, DesktopSessionSummary, DesktopTranscriptPage,
-        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection,
+        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopRunAttachInput,
+        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunStartInput, DesktopRunSummary,
+        DesktopSessionCreateInput, DesktopSessionOpenInput, DesktopSessionSummary,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
+        DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -36,12 +36,15 @@ const DESKTOP_PROTOCOL_VERSION: u16 = 1;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopCommandError {
     pub(crate) code: &'static str,
-    pub(crate) message: &'static str,
+    pub(crate) message: String,
 }
 
 impl DesktopCommandError {
-    fn new(code: &'static str, message: &'static str) -> Self {
-        Self { code, message }
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -179,6 +182,7 @@ pub(crate) async fn desktop_open_recent_workspace(
 #[tauri::command]
 pub(crate) async fn desktop_close_workspace(
     workspace_id: String,
+    confirm_active_runs: Option<bool>,
     state: State<'_, DesktopAppState>,
 ) -> Result<Vec<DesktopWorkspaceSummary>, DesktopCommandError> {
     if !valid_workspace_id(&workspace_id) {
@@ -187,6 +191,34 @@ pub(crate) async fn desktop_close_workspace(
             "The workspace identifier is invalid.",
         ));
     }
+    if confirm_active_runs != Some(true) {
+        let client = state.manager.lock().await.client(&workspace_id);
+        match client {
+            Ok(client) => {
+                let sessions = client.list_sessions().await.map_err(|_| {
+                    DesktopCommandError::new(
+                        "workspace_run_state_unavailable",
+                        "Active-run state could not be verified. Confirm before closing the runtime.",
+                    )
+                })?;
+                let active_run_count = sessions
+                    .sessions
+                    .iter()
+                    .filter(|session| session.foreground_run_id.is_some())
+                    .count();
+                if active_run_count > 0 {
+                    return Err(DesktopCommandError::new(
+                        "workspace_active_runs",
+                        format!(
+                            "{active_run_count} active run(s) still belong to this workspace. Confirm before closing the runtime."
+                        ),
+                    ));
+                }
+            }
+            Err(DesktopWorkspaceManagerError::WorkspaceUnavailable) => {}
+            Err(error) => return Err(project_manager_error(error)),
+        }
+    }
     state.run_streams.stop_workspace(&workspace_id).await;
     let mut manager = state.manager.lock().await;
     manager
@@ -194,6 +226,62 @@ pub(crate) async fn desktop_close_workspace(
         .await
         .map_err(project_manager_error)?;
     manager.list().map_err(project_manager_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_attach_run(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    input: DesktopRunAttachInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunAttachment, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.run_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let session = client
+        .session(&input.session_id)
+        .await
+        .map_err(project_client_error)?;
+    if session.foreground_run_id.as_deref() != Some(input.run_id.as_str()) {
+        return Err(DesktopCommandError::new(
+            "run_no_longer_foreground",
+            "The run is no longer the active run for this conversation.",
+        ));
+    }
+    let run = client
+        .run(&input.run_id)
+        .await
+        .map_err(project_client_error)?;
+    if run.session_id != input.session_id {
+        return Err(DesktopCommandError::new(
+            "run_session_mismatch",
+            "The run does not belong to this conversation.",
+        ));
+    }
+    let projection = state
+        .run_streams
+        .attach(
+            app,
+            client,
+            workspace_id,
+            input.session_id,
+            session.durable_session_scope_id,
+            run.clone(),
+        )
+        .await;
+    Ok(DesktopRunAttachment {
+        run: run.into(),
+        events: projection.events,
+        stream_state: projection.stream_state,
+        stream_message: projection.stream_message,
+        has_gap: projection.has_gap,
+    })
 }
 
 #[tauri::command]

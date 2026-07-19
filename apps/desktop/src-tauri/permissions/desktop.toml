@@ -10,7 +10,7 @@ commands.allow = ["desktop_pick_workspace"]
 
 [[permission]]
 identifier = "allow-desktop-close-workspace"
-description = "Allows the main local window to gracefully close one owned workspace server."
+description = "Allows the main local window to close one owned workspace server after active-run confirmation."
 commands.allow = ["desktop_close_workspace"]
 
 [[permission]]
@@ -30,8 +30,8 @@ commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_tra
 
 [[permission]]
 identifier = "allow-desktop-run"
-description = "Allows the main local window to start or cooperatively cancel one run through the authenticated local server."
-commands.allow = ["desktop_start_run", "desktop_cancel_run"]
+description = "Allows the main local window to start, reattach, or cooperatively cancel one run through the authenticated local server."
+commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run"]
 
 [[permission]]
 identifier = "allow-desktop-approval"

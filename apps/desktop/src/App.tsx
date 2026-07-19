@@ -19,6 +19,11 @@ interface AppProps {
 }
 
 type LoadState = "loading" | "ready" | "working" | "error";
+interface PendingWorkspaceClose {
+  id: string;
+  displayName: string;
+  message: string;
+}
 const EMPTY_CATALOG: CatalogPage = {
   workspaceId: "",
   generation: 0,
@@ -43,6 +48,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
   const [sourceFilter, setSourceFilter] = useState<CatalogSourceState | "all">("all");
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
+  const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
@@ -148,7 +154,6 @@ export function App({ bridge = desktopBridge }: AppProps) {
   );
 
   useEffect(() => {
-    setSelectedSession(undefined);
     if (activeWorkspaceId === undefined) {
       setCatalog(EMPTY_CATALOG);
       setHistoryState("idle");
@@ -156,6 +161,10 @@ export function App({ bridge = desktopBridge }: AppProps) {
     }
     void loadHistory(activeWorkspaceId);
   }, [activeWorkspaceId, loadHistory]);
+
+  useEffect(() => {
+    setSelectedSession(undefined);
+  }, [activeWorkspaceId]);
 
   const rememberOpenWorkspace = (workspace: WorkspaceSummary) => {
     setWorkspaces((current) => [
@@ -208,11 +217,11 @@ export function App({ bridge = desktopBridge }: AppProps) {
     }
   };
 
-  const closeWorkspace = async (workspaceId: string) => {
+  const closeWorkspace = async (workspaceId: string, confirmed = false) => {
     setLoadState("working");
     setMessage("Closing the workspace server…");
     try {
-      const remaining = await bridge.closeWorkspace(workspaceId);
+      const remaining = await bridge.closeWorkspace(workspaceId, confirmed);
       setWorkspaces(remaining);
       setRecentWorkspaces((current) =>
         current.map((recent) =>
@@ -226,7 +235,23 @@ export function App({ bridge = desktopBridge }: AppProps) {
       );
       setLoadState("ready");
       setMessage("Workspace server closed.");
-    } catch {
+      setPendingWorkspaceClose(undefined);
+    } catch (error) {
+      if (
+        ["workspace_active_runs", "workspace_run_state_unavailable"].includes(
+          errorCode(error) ?? "",
+        ) && !confirmed
+      ) {
+        const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+        setPendingWorkspaceClose({
+          id: workspaceId,
+          displayName: workspace?.displayName ?? "workspace",
+          message: errorMessage(error) ?? "An active run still belongs to this workspace.",
+        });
+        setLoadState("ready");
+        setMessage("Workspace close needs confirmation because a run is active.");
+        return;
+      }
       setLoadState("error");
       setMessage("The workspace server could not be closed cleanly.");
     }
@@ -433,6 +458,45 @@ export function App({ bridge = desktopBridge }: AppProps) {
         <span className={`status-dot status-${loadState === "error" ? "crashed" : "ready"}`} aria-hidden="true" />
         {message}
       </footer>
+
+      {pendingWorkspaceClose !== undefined ? (
+        <div className="modal-backdrop">
+          <section
+            className="confirmation-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="close-workspace-title"
+            aria-describedby="close-workspace-description"
+          >
+            <p className="eyebrow">Active work</p>
+            <h2 id="close-workspace-title">Close {pendingWorkspaceClose.displayName}?</h2>
+            <p id="close-workspace-description">{pendingWorkspaceClose.message}</p>
+            <p>
+              Closing stops the local runtime and interrupts its active runs. File, shell, and remote side effects that already happened are not undone.
+            </p>
+            <div className="confirmation-actions">
+              <button
+                className="quiet-button"
+                type="button"
+                autoFocus
+                onClick={() => {
+                  setPendingWorkspaceClose(undefined);
+                  setMessage(`${pendingWorkspaceClose.displayName} remains open.`);
+                }}
+              >
+                Keep running
+              </button>
+              <button
+                className="primary-button danger-button"
+                type="button"
+                onClick={() => void closeWorkspace(pendingWorkspaceClose.id, true)}
+              >
+                Close workspace and interrupt runs
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -440,4 +504,9 @@ export function App({ bridge = desktopBridge }: AppProps) {
 function errorCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
   return typeof error.code === "string" ? error.code : undefined;
+}
+
+function errorMessage(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
+  return typeof error.message === "string" ? error.message : undefined;
 }

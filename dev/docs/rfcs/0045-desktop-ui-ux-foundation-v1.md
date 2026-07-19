@@ -1,6 +1,6 @@
 # RFC-0045 Desktop UI/UX Foundation V1
 
-状态：active / R45.0-R45.1 complete，R45.2 ready
+状态：active / R45.0-R45.2 complete，R45.3 ready
 
 创建日期：2026-07-19
 
@@ -156,12 +156,19 @@ order 与滚动锚点。
 
 - 打开 session 后，如果 server snapshot 有 `foreground_run_id`，native bridge 必须安装/复用该 run 的 follower，
   再向 renderer 返回 bounded attachment snapshot。
-- native owner 保存 bounded active-run projection；新 listener 先获得 snapshot，再接收 live event，避免导航期间的 event gap。
+- native owner 保存 bounded active-run projection；renderer 先安装 live listener 再请求 attachment snapshot，竞态期间的
+  snapshot/live event 按 sequence + kind 去重合并，避免导航期间出现无声明的 event gap。
 - cache 超限时返回 `has_gap=true`；UI 显示“部分实时细节未保留”，并继续从 durable transcript/terminal 恢复，不能展示
   拼接后的假完整输出。
 - reattach 后 cancel、approval 与 verification 使用同一 expected session/run guard。
 - session filter、navigation pane、inspector 和 responsive pane 切换不得停止 follower。
 - workspace close 若存在 active run，显示 run 数量和副作用边界；确认后才关闭 runtime。
+
+R45.2 已完成：native owner 按 workspace/run 保留最多 512 条、2 MiB 正文的 live projection，并另行保留最多 8 个
+pending approval guard；缓存淘汰、stream reconnect 或无法证明完整性时返回 `hasGap`。重新打开 foreground run 时，renderer
+先挂载 event/status listener，再取得 typed attachment 并恢复 cancel/approval；history filter 不再卸载已打开的 conversation。
+workspace close 从 server session snapshot 计算 active-run 数量，或在状态不可证明时要求同一显式确认，并说明关闭 runtime
+不会撤销已经发生的 file、shell 或 remote side effect。
 
 ## 9. Desktop domain components
 

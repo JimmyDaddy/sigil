@@ -62,6 +62,17 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       status: "running",
       streamSequence: 0,
     }),
+    attachRun: async (_workspaceId, sessionId, runId) => ({
+      run: {
+        id: runId,
+        sessionId,
+        status: "running",
+        streamSequence: 0,
+      },
+      events: [],
+      streamState: "live",
+      hasGap: false,
+    }),
     cancelRun: async (_workspaceId, sessionId, runId) => ({
       id: runId,
       sessionId,
@@ -311,6 +322,169 @@ describe("desktop workspace and history shell", () => {
     const latest = screen.getByText("The change is complete.");
     expect(older.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(transcriptQueries).toEqual([undefined, 3]);
+  });
+
+  it("reattaches an active run after listeners and restores bounded controls with honest gaps", async () => {
+    const user = userEvent.setup();
+    const order: string[] = [];
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let cancelledRun = "";
+    const activeEvent: TimelineEvent = {
+      workspaceId: workspace.id,
+      sessionId: "http-session-active",
+      runId: "run-active",
+      sequence: 1,
+      replayable: true,
+      kind: "run_started",
+      text: "Resume this work",
+    };
+    const approvalEvent: TimelineEvent = {
+      ...activeEvent,
+      sequence: 2,
+      kind: "approval_requested",
+      itemId: "call-active",
+      toolName: "write_file",
+      approval: {
+        callId: "call-active",
+        toolName: "write_file",
+        approvalRequestId: "approval-active",
+        toolCallHash: "hash-active",
+        policyVersion: "policy-active",
+        expiresAtMs: 1_784_419_200_000,
+        snapshotRequired: true,
+        previewTitle: "Review the resumed edit",
+      },
+    };
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "active.jsonl",
+          sessionId: "durable-active",
+          sourceState: "ready",
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Active session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({
+        id: "http-session-active",
+        label: "Active session",
+        runCount: 1,
+        foregroundRunId: "run-active",
+      }),
+      subscribeRunEvents: async (listener) => {
+        order.push("events");
+        eventListener = listener;
+        return () => undefined;
+      },
+      subscribeRunStreamStatus: async () => {
+        order.push("status");
+        return () => undefined;
+      },
+      attachRun: async () => {
+        order.push("attach");
+        return {
+          run: {
+            id: "run-active",
+            sessionId: "http-session-active",
+            status: "waiting_for_approval",
+            streamSequence: 2,
+          },
+          events: [activeEvent, approvalEvent],
+          streamState: "live",
+          hasGap: true,
+        };
+      },
+      cancelRun: async (_workspaceId, sessionId, runId) => {
+        cancelledRun = runId;
+        return { id: runId, sessionId, status: "cancel_requested", streamSequence: 3 };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("Active session")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(await screen.findByText("Resume this work")).toBeTruthy();
+    expect(screen.getByText(/Some live details were not retained/)).toBeTruthy();
+    expect(screen.getByText("Review the resumed edit")).toBeTruthy();
+    expect(order).toEqual(["events", "status", "attach"]);
+
+    act(() => eventListener?.(activeEvent));
+    expect(screen.getAllByText("Resume this work")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(cancelledRun).toBe("run-active");
+  });
+
+  it("keeps the opened conversation mounted while history filters refresh", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "keep.jsonl",
+          sessionId: "durable-keep",
+          sourceState: "ready",
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Keep this conversation",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("Keep this conversation")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(await screen.findByText("Conversation ready")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Filter by provider" }), "deepseek");
+    expect(screen.getByText("Conversation ready")).toBeTruthy();
+  });
+
+  it("requires explicit confirmation before closing a workspace with active runs", async () => {
+    const user = userEvent.setup();
+    const confirmations: boolean[] = [];
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      closeWorkspace: async (_workspaceId, confirmActiveRuns = false) => {
+        confirmations.push(confirmActiveRuns);
+        if (!confirmActiveRuns) {
+          throw {
+            code: "workspace_active_runs",
+            message: "1 active run(s) still belong to this workspace.",
+          };
+        }
+        return [];
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("Conversation history");
+    await user.click(screen.getByRole("button", { name: "Close sigil" }));
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    expect(screen.getByText(/side effects that already happened are not undone/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Close workspace and interrupt runs" }));
+    expect(await screen.findByText("Workspace server closed.")).toBeTruthy();
+    expect(confirmations).toEqual([false, true]);
   });
 
   it("shows a stale pagination recovery instead of mixing generations", async () => {

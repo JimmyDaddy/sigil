@@ -3,12 +3,13 @@ use sigil_desktop::{
     DesktopApprovalDecisionRecord, DesktopRunSnapshot, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
-    DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
-    DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
+    DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationRerunRequest,
+    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
+    DesktopWorkspaceSummary,
 };
 
-use crate::recent::RecentWorkspaceSummary;
+use crate::{recent::RecentWorkspaceSummary, run_streams::DesktopRunStreamState};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +148,13 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) prompt: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopRunAttachInput {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunSummary {
@@ -154,6 +162,17 @@ pub(crate) struct DesktopRunSummary {
     pub(crate) session_id: String,
     pub(crate) status: &'static str,
     pub(crate) stream_sequence: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRunAttachment {
+    pub(crate) run: DesktopRunSummary,
+    pub(crate) events: Vec<DesktopTimelineEvent>,
+    pub(crate) stream_state: DesktopRunStreamState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stream_message: Option<&'static str>,
+    pub(crate) has_gap: bool,
 }
 
 #[derive(Debug, Deserialize)]
