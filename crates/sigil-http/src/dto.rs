@@ -9,7 +9,7 @@ use sigil_kernel::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 2;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 3;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub struct HttpServerCapabilities {
     pub session_catalog: bool,
     /// A catalog candidate can be revalidated and opened as a live adapter session.
     pub durable_session_reopen: bool,
+    /// A bound durable session exposes a scope-checked, bounded transcript page.
+    pub bounded_transcript_replay: bool,
     /// Durable run events support cursor-bound replay.
     pub durable_event_replay: bool,
     /// Transient and durable run events can be followed while the server is active.
@@ -46,6 +48,7 @@ impl HttpServerCapabilities {
         Self {
             session_catalog: true,
             durable_session_reopen: true,
+            bounded_transcript_replay: true,
             durable_event_replay: true,
             live_events: true,
             approval: true,
@@ -139,6 +142,74 @@ pub struct HttpSessionSnapshot {
     /// Current foreground run, when this session is leased for execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_run_id: Option<String>,
+}
+
+/// User-visible role returned by the bounded transcript endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTranscriptRole {
+    /// User-authored conversation input.
+    User,
+    /// Assistant-authored output.
+    Assistant,
+    /// Result of one tool invocation.
+    Tool,
+}
+
+/// Assistant phase retained for correct transcript presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTranscriptAssistantKind {
+    /// Short assistant lead-in before a tool call.
+    ToolPreamble,
+    /// Durable progress update.
+    Progress,
+    /// Durable reasoning trace explicitly classified for UI presentation.
+    ReasoningTrace,
+    /// Final user-visible answer.
+    FinalAnswer,
+}
+
+/// One safe message in a bounded transcript page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionTranscriptMessage {
+    /// Stable one-based append-only display ordinal.
+    pub ordinal: u64,
+    /// Stable hashed identity used by clients for reconciliation only.
+    pub message_id: String,
+    /// Provider-neutral display role.
+    pub role: HttpTranscriptRole,
+    /// Sanitized, bounded text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Assistant phase when `role=assistant`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_kind: Option<HttpTranscriptAssistantKind>,
+    /// Safe tool name resolved without exposing arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Number of omitted safe attachment descriptors.
+    pub image_attachment_count: u64,
+    /// Whether content was shortened to the per-message bound.
+    pub truncated: bool,
+    /// Sanitized text size before truncation.
+    pub original_content_bytes: u64,
+}
+
+/// One chronological page from the server-owned durable transcript projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionTranscriptPage {
+    /// Durable session scope revalidated during this read.
+    pub session_scope_id: String,
+    /// Total user-visible messages observed during this read.
+    pub total_messages: u64,
+    /// Chronologically ordered page messages.
+    pub messages: Vec<HttpSessionTranscriptMessage>,
+    /// Exclusive ordinal for the next older page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u64>,
 }
 
 /// Runtime-owned durable binding for one process-local HTTP adapter session.

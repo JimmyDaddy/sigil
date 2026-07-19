@@ -544,6 +544,9 @@
           "approval": {
             "type": "boolean"
           },
+          "bounded_transcript_replay": {
+            "type": "boolean"
+          },
           "cancellation": {
             "type": "boolean"
           },
@@ -566,6 +569,7 @@
         "required": [
           "session_catalog",
           "durable_session_reopen",
+          "bounded_transcript_replay",
           "durable_event_replay",
           "live_events",
           "approval",
@@ -594,7 +598,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
           },
           "server_version": {
@@ -843,6 +847,107 @@
           "run_ids",
           "durable_session_scope_id",
           "session_log_path"
+        ],
+        "type": "object"
+      },
+      "SessionTranscriptMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "assistant_kind": {
+            "enum": [
+              "tool_preamble",
+              "progress",
+              "reasoning_trace",
+              "final_answer",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "maxLength": 65536,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image_attachment_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "ordinal": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "original_content_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant",
+              "tool"
+            ],
+            "type": "string"
+          },
+          "tool_name": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ordinal",
+          "message_id",
+          "role",
+          "image_attachment_count",
+          "truncated",
+          "original_content_bytes"
+        ],
+        "type": "object"
+      },
+      "SessionTranscriptPage": {
+        "additionalProperties": false,
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/SessionTranscriptMessage"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "next_before": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_scope_id": {
+            "type": "string"
+          },
+          "total_messages": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_scope_id",
+          "total_messages",
+          "messages"
         ],
         "type": "object"
       },
@@ -1687,6 +1792,63 @@
           }
         },
         "summary": "Start a run in a session"
+      }
+    },
+    "/sessions/{session_id}/transcript": {
+      "get": {
+        "description": "Projects user, assistant and tool-result text from scope-checked append-only session truth. System/control entries, tool arguments, resolved image bytes and server-private paths are excluded.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Exclusive one-based message ordinal for the next older page",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTranscriptPage"
+                }
+              }
+            },
+            "description": "Bounded transcript page in chronological order"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Read one bounded chronological page of durable conversation messages"
       }
     },
     "/sessions/{session_id}/verification": {

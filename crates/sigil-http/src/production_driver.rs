@@ -15,8 +15,9 @@ use sigil_kernel::{
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, PreparedApplicationRun, application_verification_view,
-    bind_application_session, bind_existing_application_session, prepare_application_run,
+    ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
+    application_session_transcript_page, application_verification_view, bind_application_session,
+    bind_existing_application_session, prepare_application_run,
     record_application_preparation_cancellation, rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
@@ -28,7 +29,8 @@ use crate::{
     HttpPendingApproval, HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval,
     HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
     HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -376,6 +378,58 @@ impl HttpRunDriver for HttpProductionRunDriver {
     ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
         application_verification_view(Path::new(&session.session_log_path)).map_err(|error| {
             HttpRunDriverError::new(format!("failed to project verification state: {error}"))
+        })
+    }
+
+    fn transcript_page(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
+        let page = application_session_transcript_page(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            before,
+            limit,
+        )
+        .map_err(|_| HttpRunDriverError::new("durable transcript projection failed"))?;
+        Ok(HttpSessionTranscriptPage {
+            session_scope_id: page.session_scope_id,
+            total_messages: page.total_messages,
+            messages: page
+                .messages
+                .into_iter()
+                .map(|message| HttpSessionTranscriptMessage {
+                    ordinal: message.ordinal,
+                    message_id: message.message_id,
+                    role: match message.role {
+                        ApplicationTranscriptRole::User => HttpTranscriptRole::User,
+                        ApplicationTranscriptRole::Assistant => HttpTranscriptRole::Assistant,
+                        ApplicationTranscriptRole::Tool => HttpTranscriptRole::Tool,
+                    },
+                    content: message.content,
+                    assistant_kind: message.assistant_kind.map(|kind| match kind {
+                        sigil_kernel::AssistantMessageKind::ToolPreamble => {
+                            HttpTranscriptAssistantKind::ToolPreamble
+                        }
+                        sigil_kernel::AssistantMessageKind::Progress => {
+                            HttpTranscriptAssistantKind::Progress
+                        }
+                        sigil_kernel::AssistantMessageKind::ReasoningTrace => {
+                            HttpTranscriptAssistantKind::ReasoningTrace
+                        }
+                        sigil_kernel::AssistantMessageKind::FinalAnswer => {
+                            HttpTranscriptAssistantKind::FinalAnswer
+                        }
+                    }),
+                    tool_name: message.tool_name,
+                    image_attachment_count: message.image_attachment_count,
+                    truncated: message.truncated,
+                    original_content_bytes: message.original_content_bytes,
+                })
+                .collect(),
+            next_before: page.next_before,
         })
     }
 

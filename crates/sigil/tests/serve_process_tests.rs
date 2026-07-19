@@ -373,12 +373,16 @@ fn desktop_owner_channel_json_bootstrap_and_pipe_close_are_secret_free() {
 
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
-    assert_eq!(server.server_info["schema_version"], 2);
+    assert_eq!(server.server_info["schema_version"], 3);
     assert_eq!(server.server_info["protocol_version"], 1);
     assert_eq!(server.server_info["authentication"], "bearer");
     assert_eq!(server.server_info["shutdown_on_stdin_close"], true);
     assert_eq!(
         server.server_info["capabilities"]["durable_session_reopen"],
+        true
+    );
+    assert_eq!(
+        server.server_info["capabilities"]["bounded_transcript_replay"],
         true
     );
     let startup = fs::read_to_string(&server.stdout_path).expect("startup output should read");
@@ -416,9 +420,10 @@ async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
         .await
         .expect("desktop launcher should authenticate the real server");
 
-    assert_eq!(process.server_info().schema_version, 2);
+    assert_eq!(process.server_info().schema_version, 3);
     assert_eq!(process.server_info().protocol_version, 1);
     assert!(process.server_info().capabilities.durable_session_reopen);
+    assert!(process.server_info().capabilities.bounded_transcript_replay);
     assert!(process.address().ip().is_loopback());
     assert_eq!(
         http_request(process.address(), "GET", "/server-info", None, None).0,
@@ -913,6 +918,29 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     );
     assert_ne!(reopened_session_id, session_id);
     assert_eq!(reopened["durable_session_scope_id"], durable_session_id);
+    let (transcript_status, transcript_body) = http_request(
+        restarted.address,
+        "GET",
+        &format!("/sessions/{reopened_session_id}/transcript?limit=1"),
+        Some(token),
+        None,
+    );
+    assert_eq!(
+        transcript_status, 200,
+        "transcript response: {transcript_body}"
+    );
+    let transcript: serde_json::Value =
+        serde_json::from_str(&transcript_body).expect("transcript body should be JSON");
+    assert!(
+        transcript["total_messages"]
+            .as_u64()
+            .is_some_and(|count| count >= 2)
+    );
+    assert_eq!(transcript["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(transcript["messages"][0]["role"], "assistant");
+    assert_eq!(transcript["messages"][0]["content"], "serve process answer");
+    assert!(transcript["messages"][0].get("args_json").is_none());
+    assert!(transcript.get("session_log_path").is_none());
     let resumed_command = serde_json::json!({
         "protocol_version": 1,
         "command_id": "start-process-reopened",

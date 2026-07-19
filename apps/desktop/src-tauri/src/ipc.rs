@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopApprovalDecisionRecord, DesktopRunSnapshot, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
-    DesktopSessionSnapshot, DesktopVerificationAction, DesktopVerificationCheckStatus,
-    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
-    DesktopVerificationView, DesktopWorkspaceSummary,
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
+    DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
+    DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::recent::RecentWorkspaceSummary;
@@ -104,6 +105,39 @@ pub(crate) struct DesktopSessionSummary {
     pub(crate) run_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) foreground_run_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTranscriptRequest {
+    pub(crate) before: Option<u64>,
+    pub(crate) limit: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTranscriptPage {
+    pub(crate) total_messages: u64,
+    pub(crate) messages: Vec<DesktopTranscriptMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_before: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTranscriptMessage {
+    pub(crate) ordinal: u64,
+    pub(crate) message_id: String,
+    pub(crate) role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) assistant_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_name: Option<String>,
+    pub(crate) image_attachment_count: u64,
+    pub(crate) truncated: bool,
+    pub(crate) original_content_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +314,41 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
             label: value.label,
             run_count: value.run_ids.len(),
             foreground_run_id: value.foreground_run_id,
+        }
+    }
+}
+
+impl From<DesktopSessionTranscriptPage> for DesktopTranscriptPage {
+    fn from(value: DesktopSessionTranscriptPage) -> Self {
+        Self {
+            total_messages: value.total_messages,
+            messages: value.messages.into_iter().map(Into::into).collect(),
+            next_before: value.next_before,
+        }
+    }
+}
+
+impl From<DesktopSessionTranscriptMessage> for DesktopTranscriptMessage {
+    fn from(value: DesktopSessionTranscriptMessage) -> Self {
+        Self {
+            ordinal: value.ordinal,
+            message_id: value.message_id,
+            role: match value.role {
+                DesktopTranscriptRole::User => "user",
+                DesktopTranscriptRole::Assistant => "assistant",
+                DesktopTranscriptRole::Tool => "tool",
+            },
+            content: value.content,
+            assistant_kind: value.assistant_kind.map(|kind| match kind {
+                DesktopTranscriptAssistantKind::ToolPreamble => "tool_preamble",
+                DesktopTranscriptAssistantKind::Progress => "progress",
+                DesktopTranscriptAssistantKind::ReasoningTrace => "reasoning_trace",
+                DesktopTranscriptAssistantKind::FinalAnswer => "final_answer",
+            }),
+            tool_name: value.tool_name,
+            image_attachment_count: value.image_attachment_count,
+            truncated: value.truncated,
+            original_content_bytes: value.original_content_bytes,
         }
     }
 }

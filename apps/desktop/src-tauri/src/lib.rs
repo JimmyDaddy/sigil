@@ -19,7 +19,7 @@ use crate::{
         desktop_bootstrap, desktop_cancel_run, desktop_catalog, desktop_close_workspace,
         desktop_create_session, desktop_open_recent_workspace, desktop_open_session,
         desktop_pick_workspace, desktop_rerun_verification, desktop_resolve_approval,
-        desktop_start_run, desktop_verification, resolve_sigil_binary,
+        desktop_start_run, desktop_transcript, desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
 };
@@ -61,6 +61,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_catalog,
             desktop_create_session,
             desktop_open_session,
+            desktop_transcript,
             desktop_start_run,
             desktop_cancel_run,
             desktop_resolve_approval,

@@ -22,10 +22,12 @@ pub use dto::{
     DesktopRunStartCommandReceipt, DesktopRunStartRequest, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionCreateRequest, DesktopSessionListResponse, DesktopSessionOpenRequest,
-    DesktopSessionSnapshot, DesktopVerificationAction, DesktopVerificationCheckStatus,
-    DesktopVerificationEvidence, DesktopVerificationRecommendationKind,
-    DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
-    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopTranscriptAssistantKind, DesktopTranscriptQuery, DesktopTranscriptRole,
+    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationEvidence,
+    DesktopVerificationRecommendationKind, DesktopVerificationRerunCommandReceipt,
+    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
+    DesktopVerificationView,
 };
 pub use events::{
     DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION, DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,

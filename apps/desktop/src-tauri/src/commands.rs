@@ -8,8 +8,8 @@ use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
     DesktopClientError, DesktopLaunchRequest, DesktopRunApprovalMode, DesktopRunCancelRequest,
     DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionOpenRequest, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopSessionOpenRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
+    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -21,8 +21,9 @@ use crate::{
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopRunCancelInput,
         DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
-        DesktopSessionOpenInput, DesktopSessionSummary, DesktopVerificationRerunInput,
-        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopSessionOpenInput, DesktopSessionSummary, DesktopTranscriptPage,
+        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -449,6 +450,44 @@ pub(crate) async fn desktop_open_session(
             session_id: input.session_id,
             label: input.label,
         })
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_transcript(
+    workspace_id: String,
+    session_id: String,
+    request: DesktopTranscriptRequest,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopTranscriptPage, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    if request.before == Some(0)
+        || request
+            .limit
+            .is_some_and(|limit| !(1..=100).contains(&limit))
+    {
+        return Err(DesktopCommandError::new(
+            "transcript_query_invalid",
+            "The conversation history query is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .transcript(
+            &session_id,
+            &DesktopTranscriptQuery {
+                before: request.before,
+                limit: request.limit,
+            },
+        )
         .await
         .map(Into::into)
         .map_err(project_client_error)

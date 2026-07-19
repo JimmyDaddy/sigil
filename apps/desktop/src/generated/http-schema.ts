@@ -584,6 +584,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one bounded chronological page of durable conversation messages
+         * @description Projects user, assistant and tool-result text from scope-checked append-only session truth. System/control entries, tool arguments, resolved image bytes and server-private paths are excluded.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Exclusive one-based message ordinal for the next older page */
+                    before?: number;
+                };
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bounded transcript page in chronological order */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionTranscriptPage"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/verification": {
         parameters: {
             query?: never;
@@ -787,6 +836,7 @@ export interface components {
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";
         ServerCapabilities: {
             approval: boolean;
+            bounded_transcript_replay: boolean;
             cancellation: boolean;
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
@@ -802,7 +852,7 @@ export interface components {
             /** @constant */
             protocol_version: 1;
             /** @constant */
-            schema_version: 2;
+            schema_version: 3;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -866,6 +916,30 @@ export interface components {
             label?: string | null;
             run_ids: string[];
             session_log_path: string;
+        };
+        SessionTranscriptMessage: {
+            /** @enum {string|null} */
+            assistant_kind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer" | null;
+            content?: string | null;
+            /** Format: uint64 */
+            image_attachment_count: number;
+            message_id: string;
+            /** Format: uint64 */
+            ordinal: number;
+            /** Format: uint64 */
+            original_content_bytes: number;
+            /** @enum {string} */
+            role: "user" | "assistant" | "tool";
+            tool_name?: string | null;
+            truncated: boolean;
+        };
+        SessionTranscriptPage: {
+            messages: components["schemas"]["SessionTranscriptMessage"][];
+            /** Format: uint64 */
+            next_before?: number | null;
+            session_scope_id: string;
+            /** Format: uint64 */
+            total_messages: number;
         };
         VerificationEvidence: {
             changeset_apply_event_id: string | null;

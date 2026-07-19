@@ -12,7 +12,8 @@ use crate::{
         DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionListResponse,
-        DesktopSessionOpenRequest, DesktopSessionSnapshot, DesktopVerificationRerunCommandReceipt,
+        DesktopSessionOpenRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
+        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
         DesktopVerificationRerunRequest, DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
@@ -123,6 +124,29 @@ impl DesktopHttpClient {
     ) -> Result<DesktopSessionSnapshot, DesktopClientError> {
         self.get_json(self.route(["sessions", session_id])?, StatusCode::OK)
             .await
+    }
+
+    /// Reads one bounded chronological durable transcript page.
+    pub async fn transcript(
+        &self,
+        session_id: &str,
+        query: &DesktopTranscriptQuery,
+    ) -> Result<DesktopSessionTranscriptPage, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        if query.before == Some(0) || query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let mut url = self.route(["sessions", session_id, "transcript"])?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(before) = query.before {
+                pairs.append_pair("before", &before.to_string());
+            }
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+        }
+        self.get_json(url, StatusCode::OK).await
     }
 
     /// Starts a run with an idempotent command identity.

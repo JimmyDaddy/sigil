@@ -1,5 +1,8 @@
 use super::*;
-use sigil_desktop::DesktopSessionSnapshot;
+use sigil_desktop::{
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+};
 
 #[test]
 fn workspace_identity_validation_is_strict_and_path_free() {
@@ -75,6 +78,32 @@ fn session_projection_drops_server_private_durable_fields() {
     assert!(!projection.contains(private_path));
     assert!(!projection.contains("durable-secret-scope"));
     assert_eq!(summary.run_count, 1);
+}
+
+#[test]
+fn transcript_projection_drops_scope_and_preserves_safe_pagination_fields() {
+    let projected = crate::ipc::DesktopTranscriptPage::from(DesktopSessionTranscriptPage {
+        session_scope_id: "durable-secret-scope".to_owned(),
+        total_messages: 2,
+        messages: vec![DesktopSessionTranscriptMessage {
+            ordinal: 2,
+            message_id: "message-2".to_owned(),
+            role: DesktopTranscriptRole::Assistant,
+            content: Some("done".to_owned()),
+            assistant_kind: Some(DesktopTranscriptAssistantKind::FinalAnswer),
+            tool_name: None,
+            image_attachment_count: 0,
+            truncated: false,
+            original_content_bytes: 4,
+        }],
+        next_before: Some(2),
+    });
+    let json = serde_json::to_value(projected).expect("transcript should serialize");
+
+    assert_eq!(json["totalMessages"], 2);
+    assert_eq!(json["messages"][0]["assistantKind"], "final_answer");
+    assert_eq!(json["nextBefore"], 2);
+    assert!(!json.to_string().contains("durable-secret-scope"));
 }
 
 #[test]

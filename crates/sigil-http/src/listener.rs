@@ -6,6 +6,9 @@ use sigil_kernel::PublicRunEventKind;
 use sigil_runtime::{
     LocalSessionCatalogState, SessionCatalogProjectionEntry, SessionCatalogProjectionError,
     SessionCatalogProjectionPage, SessionCatalogProjectionQuery, SessionCatalogProjectionService,
+    application_run::{
+        DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE, MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE,
+    },
 };
 use thiserror::Error as ThisError;
 use tokio::{
@@ -512,6 +515,23 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/transcript"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let (before, limit) = match parse_transcript_query(request.query.as_deref()) {
+            Ok(query) => query,
+            Err(message) => return http_error_response(400, "invalid_query", message),
+        };
+        return match registry.transcript_page(session_id, before, limit) {
+            Ok(page) => json_response(200, json!(page)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/verification"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
@@ -853,6 +873,49 @@ fn parse_session_catalog_query(
         }
     }
     Ok(query)
+}
+
+fn parse_transcript_query(raw_query: Option<&str>) -> Result<(Option<u64>, usize), String> {
+    let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
+        return Ok((None, DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE));
+    };
+    validate_percent_encoding(raw_query)?;
+    let mut before = None;
+    let mut limit = DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE;
+    let mut seen = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
+            return Err("query must use valid UTF-8".to_owned());
+        }
+        let name = name.into_owned();
+        if seen.insert(name.clone(), ()).is_some() {
+            return Err(format!("query parameter '{name}' must appear at most once"));
+        }
+        let value = value.into_owned();
+        match name.as_str() {
+            "limit" => {
+                limit = value
+                    .parse::<usize>()
+                    .map_err(|_| "limit must be a positive integer".to_owned())?;
+                if !(1..=MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE).contains(&limit) {
+                    return Err(format!(
+                        "limit must be between 1 and {MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE}"
+                    ));
+                }
+            }
+            "before" => {
+                let ordinal = value
+                    .parse::<u64>()
+                    .map_err(|_| "before must be a positive integer".to_owned())?;
+                if ordinal == 0 {
+                    return Err("before must be a positive integer".to_owned());
+                }
+                before = Some(ordinal);
+            }
+            _ => return Err(format!("unsupported query parameter '{name}'")),
+        }
+    }
+    Ok((before, limit))
 }
 
 fn validate_percent_encoding(value: &str) -> Result<(), String> {

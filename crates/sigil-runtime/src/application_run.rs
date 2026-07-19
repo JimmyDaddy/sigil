@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -7,16 +7,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
-    EgressDisclosurePresenter, EventHandler, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MutationEventRecorder, NoopEventHandler, PublicRunEvent, PublicRunEventKind, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
-    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
-    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
-    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
-    verification_product_view, workspace_trust_from_entries,
+    AssistantMessageKind, EgressDisclosurePresenter, EventHandler, InteractionMode,
+    JsonlSessionStore, McpServerStartup, MessageRole, MutationEventRecorder, NoopEventHandler,
+    PublicRunEvent, PublicRunEventKind, RootConfig, RunCancellationFinalizedEntry,
+    RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
+    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
+    RunQuiescenceOutcome, RunTaskGuard, Session, SessionLogEntry, TaskVerificationRerunRequest,
+    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
+    resolve_workspace_root, safe_persistence_text, verification_product_view,
+    workspace_trust_from_entries,
 };
 
 use crate::{
@@ -29,6 +31,61 @@ use crate::{
 };
 
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default number of user-visible messages returned by one transcript page.
+pub const DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE: usize = 50;
+/// Maximum number of user-visible messages returned by one transcript page.
+pub const MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE: usize = 100;
+/// Maximum safe text bytes retained for one transcript message.
+pub const MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES: usize = 64 * 1024;
+/// Maximum safe text bytes retained across one transcript page.
+pub const MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES: usize = 512 * 1024;
+
+/// Provider-neutral role exposed by the bounded application transcript projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationTranscriptRole {
+    /// User-authored conversation input.
+    User,
+    /// Assistant-authored output, including explicitly classified progress/reasoning messages.
+    Assistant,
+    /// Result of one tool invocation.
+    Tool,
+}
+
+/// One safe user-visible transcript message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationTranscriptMessage {
+    /// Stable one-based position among user-visible messages in the append-only session.
+    pub ordinal: u64,
+    /// Stable hashed message identity used only for reconciliation, not primary UI copy.
+    pub message_id: String,
+    /// Provider-neutral display role.
+    pub role: ApplicationTranscriptRole,
+    /// Sanitized and bounded text, when the durable message carried text.
+    pub content: Option<String>,
+    /// Assistant phase retained for correct final/progress/reasoning presentation.
+    pub assistant_kind: Option<AssistantMessageKind>,
+    /// Tool name resolved from the preceding assistant call without exposing tool arguments.
+    pub tool_name: Option<String>,
+    /// Number of safe attachment descriptors omitted from this text-only projection.
+    pub image_attachment_count: u64,
+    /// Whether text was shortened to the per-message bound.
+    pub truncated: bool,
+    /// Sanitized text size before truncation.
+    pub original_content_bytes: u64,
+}
+
+/// One chronological, backwards-pageable transcript page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationTranscriptPage {
+    /// Durable session scope proven while reading the stream.
+    pub session_scope_id: String,
+    /// Total user-visible message count observed for this read.
+    pub total_messages: u64,
+    /// Chronologically ordered bounded page.
+    pub messages: Vec<ApplicationTranscriptMessage>,
+    /// Exclusive ordinal for the next older page.
+    pub next_before: Option<u64>,
+}
 
 /// Stable preparation failure class used by machine adapters without parsing error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -937,6 +994,172 @@ pub fn application_verification_view(
 ) -> Result<Option<VerificationProductView>> {
     let entries = JsonlSessionStore::read_entries(session_path)?;
     Ok(verification_product_view(&entries))
+}
+
+/// Reads one safe, bounded and backwards-pageable user transcript from durable session truth.
+///
+/// The projection deliberately excludes system/control data, tool arguments, resolved image bytes
+/// and the source path. `before` is an exclusive one-based message ordinal so pagination remains
+/// stable while the append-only stream grows.
+///
+/// # Errors
+///
+/// Returns an error when bounds are invalid, the durable scope differs from the expected binding,
+/// or the V2 stream cannot be decoded safely.
+pub fn application_session_transcript_page(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    before: Option<u64>,
+    limit: usize,
+) -> Result<ApplicationTranscriptPage> {
+    if expected_session_scope_id.is_empty() {
+        bail!("expected transcript session scope must not be empty");
+    }
+    if !(1..=MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE).contains(&limit) {
+        bail!("transcript page size must be between 1 and {MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE}");
+    }
+    if before == Some(0) {
+        bail!("transcript before ordinal must be positive");
+    }
+
+    let records = JsonlSessionStore::read_event_records(session_path)?;
+    let actual_session_scope_id = records
+        .first()
+        .map(|record| record.session_id().to_owned())
+        .ok_or_else(|| anyhow!("durable transcript has no session identity"))?;
+    if actual_session_scope_id != expected_session_scope_id
+        || records
+            .iter()
+            .any(|record| record.session_id() != expected_session_scope_id)
+    {
+        bail!("durable transcript session scope does not match the bound session");
+    }
+
+    let entries = records
+        .iter()
+        .filter_map(|record| {
+            record
+                .stored_event()
+                .payload
+                .get("session_log_entry")
+                .cloned()
+        })
+        .map(|value| {
+            serde_json::from_value::<SessionLogEntry>(value)
+                .context("failed to decode durable transcript session entry")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut tool_names = BTreeMap::new();
+    let mut projected = Vec::new();
+    for entry in entries {
+        let (message, role, expected_role) = match entry {
+            SessionLogEntry::User(message) => {
+                (message, ApplicationTranscriptRole::User, MessageRole::User)
+            }
+            SessionLogEntry::Assistant(message) => {
+                for call in &message.tool_calls {
+                    tool_names.insert(
+                        call.id.clone(),
+                        truncate_application_transcript_text(
+                            &safe_persistence_text(&call.name),
+                            128,
+                        ),
+                    );
+                }
+                (
+                    message,
+                    ApplicationTranscriptRole::Assistant,
+                    MessageRole::Assistant,
+                )
+            }
+            SessionLogEntry::ToolResult(message) => {
+                (message, ApplicationTranscriptRole::Tool, MessageRole::Tool)
+            }
+            SessionLogEntry::Control(_) => continue,
+        };
+        if message.role != expected_role {
+            bail!("durable transcript entry role does not match its entry class");
+        }
+        let ordinal = u64::try_from(projected.len())
+            .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
+            .saturating_add(1);
+        let safe_content = message.content.as_deref().map(safe_persistence_text);
+        let original_content_bytes = safe_content.as_ref().map_or(0, String::len);
+        let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
+        let content = safe_content.map(|content| {
+            truncate_application_transcript_text(&content, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES)
+        });
+        let tool_name = message
+            .tool_call_id
+            .as_ref()
+            .and_then(|call_id| tool_names.get(call_id))
+            .cloned();
+        projected.push(ApplicationTranscriptMessage {
+            ordinal,
+            message_id: safe_application_transcript_message_id(&message.id),
+            role,
+            content,
+            assistant_kind: if role == ApplicationTranscriptRole::Assistant {
+                message.assistant_kind
+            } else {
+                None
+            },
+            tool_name,
+            image_attachment_count: u64::try_from(message.image_attachments.len())
+                .map_err(|_| anyhow!("transcript attachment count exceeds supported range"))?,
+            truncated,
+            original_content_bytes: u64::try_from(original_content_bytes)
+                .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+        });
+    }
+
+    let total_messages = u64::try_from(projected.len())
+        .map_err(|_| anyhow!("transcript message count exceeds supported range"))?;
+    let eligible_end = before.map_or(projected.len(), |before| {
+        projected.partition_point(|message| message.ordinal < before)
+    });
+    let mut page_bytes = 0_usize;
+    let mut messages = Vec::with_capacity(limit.min(eligible_end));
+    for message in projected[..eligible_end].iter().rev() {
+        if messages.len() == limit {
+            break;
+        }
+        let message_bytes = message.content.as_ref().map_or(0, String::len);
+        if !messages.is_empty()
+            && page_bytes.saturating_add(message_bytes) > MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES
+        {
+            break;
+        }
+        page_bytes = page_bytes.saturating_add(message_bytes);
+        messages.push(message.clone());
+    }
+    messages.reverse();
+    let next_before = messages
+        .first()
+        .filter(|message| message.ordinal > 1)
+        .map(|message| message.ordinal);
+
+    Ok(ApplicationTranscriptPage {
+        session_scope_id: actual_session_scope_id,
+        total_messages,
+        messages,
+        next_before,
+    })
+}
+
+fn truncate_application_transcript_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn safe_application_transcript_message_id(value: &str) -> String {
+    format!("message-sha256:{:x}", Sha256::digest(value.as_bytes()))
 }
 
 /// Reruns one exact verification recommendation through the shared execution backend and lease.

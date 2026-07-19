@@ -78,6 +78,37 @@ export interface SessionOpenInput {
   label?: string;
 }
 
+export type TranscriptRole = "user" | "assistant" | "tool";
+
+export type TranscriptAssistantKind =
+  | "tool_preamble"
+  | "progress"
+  | "reasoning_trace"
+  | "final_answer";
+
+export interface TranscriptMessage {
+  ordinal: number;
+  messageId: string;
+  role: TranscriptRole;
+  content?: string;
+  assistantKind?: TranscriptAssistantKind;
+  toolName?: string;
+  imageAttachmentCount: number;
+  truncated: boolean;
+  originalContentBytes: number;
+}
+
+export interface TranscriptPage {
+  totalMessages: number;
+  messages: TranscriptMessage[];
+  nextBefore?: number;
+}
+
+export interface TranscriptRequest {
+  before?: number;
+  limit?: number;
+}
+
 export type RunStatus =
   | "starting"
   | "running"

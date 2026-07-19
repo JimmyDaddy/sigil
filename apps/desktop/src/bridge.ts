@@ -14,6 +14,8 @@ import type {
   WorkspaceSummary,
   ApprovalDecisionSummary,
   TimelineApproval,
+  TranscriptPage,
+  TranscriptRequest,
   VerificationRerunBinding,
   VerificationSummary,
 } from "./types";
@@ -29,6 +31,11 @@ export interface DesktopBridge {
     workspaceId: string,
     input: SessionOpenInput,
   ): Promise<SessionSummary>;
+  transcript(
+    workspaceId: string,
+    sessionId: string,
+    request: TranscriptRequest,
+  ): Promise<TranscriptPage>;
   startRun(workspaceId: string, sessionId: string, prompt: string): Promise<RunSummary>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
   resolveApproval(
@@ -65,6 +72,12 @@ export const desktopBridge: DesktopBridge = {
     }),
   openSession: (workspaceId, input) =>
     invoke<SessionSummary>("desktop_open_session", { workspaceId, input }),
+  transcript: (workspaceId, sessionId, request) =>
+    invoke<TranscriptPage>("desktop_transcript", {
+      workspaceId,
+      sessionId,
+      request,
+    }),
   startRun: (workspaceId, sessionId, prompt) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,

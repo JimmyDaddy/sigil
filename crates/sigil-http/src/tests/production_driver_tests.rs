@@ -2,12 +2,12 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use sigil_kernel::{
-    AgentRole, CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion,
-    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope, NetworkEffect,
-    ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus, SessionRef, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolEffect, ToolPreviewCapability, ToolSpec, VerificationPolicy,
+    AgentRole, AssistantMessageKind, CandidateCheck, CheckCommand, CheckDiscoverySource,
+    CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope,
+    NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus,
+    SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolEffect, ToolPreviewCapability, ToolSpec, VerificationPolicy,
     VerificationPolicyChangedEntry, VerificationProductAction, VerificationVerdict,
     VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
@@ -203,6 +203,13 @@ model = "deepseek-v4-flash"
     session
         .append_user_message(sigil_kernel::ModelMessage::user("history"))
         .expect("durable message should append");
+    session
+        .append_assistant_message(sigil_kernel::ModelMessage::assistant_with_kind(
+            Some("durable answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ))
+        .expect("durable assistant should append");
     let durable_session_id = session.session_scope_id().to_owned();
     drop(session);
 
@@ -249,6 +256,19 @@ model = "deepseek-v4-flash"
         .expect("current durable source should reopen");
 
     assert_eq!(opened.durable_session_scope_id, durable_session_id);
+    let transcript = registry
+        .transcript_page(&opened.id, None, 50)
+        .expect("production transcript should project");
+    assert_eq!(transcript.session_scope_id, durable_session_id);
+    assert_eq!(transcript.total_messages, 2);
+    assert_eq!(
+        transcript.messages[1].content.as_deref(),
+        Some("durable answer")
+    );
+    assert_eq!(
+        transcript.messages[1].assistant_kind,
+        Some(crate::HttpTranscriptAssistantKind::FinalAnswer)
+    );
     assert_eq!(
         std::path::Path::new(&opened.session_log_path),
         session_path

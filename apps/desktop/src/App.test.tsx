@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
+import { mergeTimelineEvent, reduceTimeline } from "./ConversationPanel";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
@@ -51,6 +52,10 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       label: "Durable session",
       runCount: 2,
     }),
+    transcript: async () => ({
+      totalMessages: 0,
+      messages: [],
+    }),
     startRun: async (_workspaceId, sessionId) => ({
       id: "run-1",
       sessionId,
@@ -81,6 +86,33 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
 }
 
 describe("desktop workspace and history shell", () => {
+  it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      replayable: true,
+    };
+    const first: TimelineEvent = {
+      ...base,
+      runId: "run-z",
+      sequence: 1,
+      kind: "run_started",
+      text: "First run",
+    };
+    const second: TimelineEvent = {
+      ...base,
+      runId: "run-a",
+      sequence: 1,
+      kind: "run_started",
+      text: "Second run",
+    };
+
+    const rows = reduceTimeline(
+      mergeTimelineEvent(mergeTimelineEvent([], first), second),
+    );
+    expect(rows.map((row) => row.text)).toEqual(["First run", "Second run"]);
+  });
+
   it("renders the honest empty and recent-workspace states after native bootstrap", async () => {
     const bridge = bridgeWith({
       bootstrap: async () => ({
@@ -186,6 +218,99 @@ describe("desktop workspace and history shell", () => {
 
     await user.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() => expect(screen.getByText("2 existing runs")).toBeTruthy());
+  });
+
+  it("opens bounded transcript text and pages older messages in chronological order", async () => {
+    const user = userEvent.setup();
+    const transcriptQueries: Array<number | undefined> = [];
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [
+          {
+            sessionRef: "history.jsonl",
+            sessionId: "durable-history",
+            sourceState: "ready",
+            sourceModifiedAtUnixMs: 1_784_419_200_000,
+            title: "History with messages",
+            userMessageCount: 2,
+            assistantMessageCount: 1,
+            toolResultCount: 1,
+            pinned: false,
+          },
+        ],
+      }),
+      transcript: async (_workspaceId, _sessionId, request) => {
+        transcriptQueries.push(request.before);
+        return request.before === undefined
+          ? {
+              totalMessages: 4,
+              messages: [
+                {
+                  ordinal: 3,
+                  messageId: "message-tool",
+                  role: "tool",
+                  content: "cargo test passed",
+                  toolName: "shell",
+                  imageAttachmentCount: 0,
+                  truncated: false,
+                  originalContentBytes: 17,
+                },
+                {
+                  ordinal: 4,
+                  messageId: "message-final",
+                  role: "assistant",
+                  content: "The change is complete.",
+                  assistantKind: "final_answer",
+                  imageAttachmentCount: 0,
+                  truncated: false,
+                  originalContentBytes: 23,
+                },
+              ],
+              nextBefore: 3,
+            }
+          : {
+              totalMessages: 4,
+              messages: [
+                {
+                  ordinal: 1,
+                  messageId: "message-user",
+                  role: "user",
+                  content: "Fix the parser",
+                  imageAttachmentCount: 0,
+                  truncated: false,
+                  originalContentBytes: 14,
+                },
+                {
+                  ordinal: 2,
+                  messageId: "message-preamble",
+                  role: "assistant",
+                  content: "I will inspect it.",
+                  assistantKind: "tool_preamble",
+                  imageAttachmentCount: 0,
+                  truncated: false,
+                  originalContentBytes: 18,
+                },
+              ],
+            };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("History with messages")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(await screen.findByText("cargo test passed")).toBeTruthy();
+    expect(screen.getByText("The change is complete.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /Load earlier messages/ }));
+    const older = await screen.findByText("Fix the parser");
+    const latest = screen.getByText("The change is complete.");
+    expect(older.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(transcriptQueries).toEqual([undefined, 3]);
   });
 
   it("shows a stale pagination recovery instead of mixing generations", async () => {

@@ -807,6 +807,7 @@ fn serve_startup_json_is_one_line_secret_free_server_metadata() -> Result<()> {
     assert_eq!(decoded, info);
     assert_eq!(decoded.bind_addr, "127.0.0.1:43123");
     assert!(decoded.capabilities.durable_session_reopen);
+    assert!(decoded.capabilities.bounded_transcript_replay);
     assert!(!rendered.contains(DEFAULT_HTTP_TOKEN_ENV));
     assert!(!rendered.contains("secret-token"));
     assert!(!rendered.contains("session_log_path"));

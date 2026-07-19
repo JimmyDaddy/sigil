@@ -6,6 +6,7 @@ import type {
   RunSummary,
   SessionSummary,
   TimelineEvent,
+  TranscriptMessage,
   VerificationSummary,
 } from "./types";
 
@@ -38,15 +39,49 @@ export function ConversationPanel({
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
+  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  const [transcriptTotal, setTranscriptTotal] = useState(0);
+  const [nextBefore, setNextBefore] = useState<number>();
+  const [transcriptBusy, setTranscriptBusy] = useState(false);
+  const [transcriptError, setTranscriptError] = useState(false);
+  const [transcriptReload, setTranscriptReload] = useState(0);
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
+  const prependScrollHeight = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     setRun(undefined);
     setEvents([]);
     setStreamStatus(undefined);
     setVerification(undefined);
+    setTranscript([]);
+    setTranscriptTotal(0);
+    setNextBefore(undefined);
+    setTranscriptError(false);
   }, [session.id, workspaceId]);
+
+  useEffect(() => {
+    let disposed = false;
+    setTranscriptBusy(true);
+    void bridge
+      .transcript(workspaceId, session.id, { limit: 50 })
+      .then((page) => {
+        if (disposed) return;
+        setTranscript(page.messages);
+        setTranscriptTotal(page.totalMessages);
+        setNextBefore(page.nextBefore);
+        setTranscriptError(false);
+      })
+      .catch(() => {
+        if (!disposed) setTranscriptError(true);
+      })
+      .finally(() => {
+        if (!disposed) setTranscriptBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, session.id, transcriptReload, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -99,16 +134,49 @@ export function ConversationPanel({
     };
   }, [bridge, onNotice, session.id, workspaceId]);
 
-  const rows = useMemo(() => reduceTimeline(events), [events]);
+  const rows = useMemo(
+    () => [...reduceTranscript(transcript), ...reduceTimeline(events)],
+    [events, transcript],
+  );
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    if (timeline !== null && timelinePinnedToEnd.current) {
+    if (timeline === null) return;
+    if (prependScrollHeight.current !== undefined) {
+      timeline.scrollTop += timeline.scrollHeight - prependScrollHeight.current;
+      prependScrollHeight.current = undefined;
+    } else if (timelinePinnedToEnd.current) {
       timeline.scrollTop = timeline.scrollHeight;
     }
   }, [rows.length]);
+
+  const loadEarlier = async () => {
+    if (nextBefore === undefined || transcriptBusy) return;
+    const timeline = timelineRef.current;
+    if (timeline !== null) prependScrollHeight.current = timeline.scrollHeight;
+    setTranscriptBusy(true);
+    try {
+      const page = await bridge.transcript(workspaceId, session.id, {
+        before: nextBefore,
+        limit: 50,
+      });
+      setTranscript((current) => {
+        const merged = mergeTranscriptPage(page.messages, current);
+        if (merged.length === current.length) prependScrollHeight.current = undefined;
+        return merged;
+      });
+      setTranscriptTotal(page.totalMessages);
+      setNextBefore(page.nextBefore);
+      setTranscriptError(false);
+    } catch {
+      prependScrollHeight.current = undefined;
+      setTranscriptError(true);
+    } finally {
+      setTranscriptBusy(false);
+    }
+  };
 
   const submit = async () => {
     const nextPrompt = prompt.trim();
@@ -210,10 +278,35 @@ export function ConversationPanel({
             timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
         }}
       >
+        {nextBefore !== undefined ? (
+          <div className="transcript-pagination">
+            <button
+              className="quiet-button"
+              type="button"
+              disabled={transcriptBusy}
+              onClick={() => void loadEarlier()}
+            >
+              {transcriptBusy ? "Loading earlier messages…" : `Load earlier messages (${Math.max(0, transcriptTotal - transcript.length)} remaining)`}
+            </button>
+          </div>
+        ) : null}
+        {transcriptError ? (
+          <div className="timeline-history-error" role="status">
+            <span>Conversation history could not be loaded. Live run controls remain available.</span>
+            <button
+              className="quiet-button"
+              type="button"
+              disabled={transcriptBusy}
+              onClick={() => setTranscriptReload((value) => value + 1)}
+            >
+              Retry history
+            </button>
+          </div>
+        ) : null}
         {rows.length === 0 ? (
           <div className="timeline-empty">
-            <strong>Ready for a prompt.</strong>
-            <span>New run events appear here. Earlier message bodies remain in durable storage and are not copied into the desktop catalog.</span>
+            <strong>{transcriptBusy ? "Loading conversation history…" : "Ready for a prompt."}</strong>
+            <span>{transcriptBusy ? "Reading a bounded page from durable session history." : "New run events appear here."}</span>
           </div>
         ) : (
           rows.map((row) => (
@@ -352,17 +445,89 @@ function latestPendingApproval(events: TimelineEvent[]): TimelineEvent | undefin
   return [...pending.values()].at(-1);
 }
 
+export function mergeTranscriptPage(
+  older: TranscriptMessage[],
+  current: TranscriptMessage[],
+): TranscriptMessage[] {
+  const messages = new Map<string, TranscriptMessage>();
+  for (const message of [...older, ...current]) {
+    messages.set(message.messageId, message);
+  }
+  return [...messages.values()].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
+  return messages.map((message) => {
+    const attachmentText = message.imageAttachmentCount > 0
+      ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
+      : "";
+    const text = (message.content ?? attachmentText) || "No text payload.";
+    const status = message.truncated
+      ? `preview · ${message.originalContentBytes} bytes`
+      : message.imageAttachmentCount > 0
+        ? `${message.imageAttachmentCount} attachment${message.imageAttachmentCount === 1 ? "" : "s"}`
+        : undefined;
+    if (message.role === "user") {
+      return {
+        key: `history:${message.messageId}`,
+        kind: "user",
+        label: "You",
+        text,
+        status,
+      };
+    }
+    if (message.role === "tool") {
+      return {
+        key: `history:${message.messageId}`,
+        kind: "tool",
+        label: message.toolName ?? "Tool result",
+        text,
+        status,
+      };
+    }
+    if (message.assistantKind === "reasoning_trace") {
+      return {
+        key: `history:${message.messageId}`,
+        kind: "reasoning",
+        label: "Reasoning",
+        text,
+        status,
+      };
+    }
+    if (message.assistantKind === "progress") {
+      return {
+        key: `history:${message.messageId}`,
+        kind: "notice",
+        label: "Progress",
+        text,
+        status,
+      };
+    }
+    return {
+      key: `history:${message.messageId}`,
+      kind: "assistant",
+      label: "Sigil",
+      text,
+      status: status ?? (message.assistantKind === "tool_preamble" ? "tool preamble" : undefined),
+    };
+  });
+}
+
 export function mergeTimelineEvent(
   current: TimelineEvent[],
   incoming: TimelineEvent,
 ): TimelineEvent[] {
   const key = eventKey(incoming);
   if (current.some((event) => eventKey(event) === key)) return current;
-  return [...current, incoming].sort((left, right) =>
-    left.runId === right.runId
-      ? left.sequence - right.sequence
-      : left.runId.localeCompare(right.runId),
+  const laterInSameRun = current.findIndex(
+    (event) => event.runId === incoming.runId && event.sequence > incoming.sequence,
   );
+  if (laterInSameRun === -1) return [...current, incoming];
+  return [
+    ...current.slice(0, laterInSameRun),
+    incoming,
+    ...current.slice(laterInSameRun),
+  ];
 }
 
 export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {

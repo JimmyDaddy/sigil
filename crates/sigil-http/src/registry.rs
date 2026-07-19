@@ -29,8 +29,8 @@ use crate::{
         HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt,
         HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
         HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionSnapshot, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -367,6 +367,33 @@ impl HttpSessionRunRegistry {
             .ok_or_else(|| HttpRegistryError::SessionNotFound {
                 session_id: session_id.to_owned(),
             })
+    }
+
+    /// Projects one bounded chronological transcript page for an existing adapter session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown, the durable scope drifted, or safe projection
+    /// cannot complete.
+    pub fn transcript_page(
+        &self,
+        session_id: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<HttpSessionTranscriptPage, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.transcript_page(&session, before, limit)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "transcript view",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "transcript view",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        })
     }
 
     /// Starts one run inside an existing HTTP adapter session.

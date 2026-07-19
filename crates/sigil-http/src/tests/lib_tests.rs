@@ -37,8 +37,9 @@ use super::{
     HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
     HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
     HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSseError, HttpSseEvent,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
     public_run_event_to_sse,
 };
 
@@ -444,6 +445,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(server_info.workspace_id, "workspace-http-catalog");
     assert_eq!(server_info.bind_addr, address.to_string());
     assert!(server_info.capabilities.durable_session_reopen);
+    assert!(server_info.capabilities.bounded_transcript_replay);
     assert!(server_info.capabilities.verification);
     assert!(!server_info.shutdown_on_stdin_close);
 
@@ -626,6 +628,66 @@ async fn local_server_projects_and_idempotently_reruns_exact_verification() {
     assert_eq!(status, 200);
     assert_eq!(replay["replayed"], true);
     assert_eq!(driver.verification_reruns(), vec![request]);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "transcript"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    driver.set_transcript_page(HttpSessionTranscriptPage {
+        session_scope_id: format!("scope-{session_id}"),
+        total_messages: 2,
+        messages: vec![HttpSessionTranscriptMessage {
+            ordinal: 2,
+            message_id: "message-2".to_owned(),
+            role: HttpTranscriptRole::Assistant,
+            content: Some("done".to_owned()),
+            assistant_kind: Some(HttpTranscriptAssistantKind::FinalAnswer),
+            tool_name: None,
+            image_attachment_count: 0,
+            truncated: false,
+            original_content_bytes: 4,
+        }],
+        next_before: Some(2),
+    });
+
+    let path = format!("/sessions/{session_id}/transcript?limit=1&before=3");
+    let (status, body) = http_raw_request(address, http_get(&path, None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total_messages"], 2);
+    assert_eq!(body["messages"][0]["role"], "assistant");
+    assert_eq!(body["messages"][0]["assistant_kind"], "final_answer");
+    assert_eq!(body["messages"][0]["content"], "done");
+    assert!(body["messages"][0].get("args_json").is_none());
+    assert_eq!(driver.transcript_queries(), vec![(Some(3), 1)]);
+
+    for invalid in [
+        format!("/sessions/{session_id}/transcript?limit=0"),
+        format!("/sessions/{session_id}/transcript?before=0"),
+        format!("/sessions/{session_id}/transcript?limit=1&limit=2"),
+        format!("/sessions/{session_id}/transcript?unknown=1"),
+    ] {
+        let (status, body) =
+            http_raw_request(address, http_get(&invalid, Some("secret-token"), None)).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_query");
+    }
     let _ = shutdown.send(());
 }
 
@@ -1291,6 +1353,19 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
+    assert!(
+        document["paths"]["/sessions/{session_id}/transcript"]["get"]["responses"]["200"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerInfo"]["properties"]["schema_version"]["const"],
+        3
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["bounded_transcript_replay"]
+            ["type"],
+        "boolean"
+    );
     assert!(
         document["paths"]["/sessions/{session_id}/runs"]["post"]["responses"]["409"].is_object()
     );
@@ -3372,6 +3447,8 @@ struct RecordingRunDriver {
     approval_observer: Mutex<Option<ApprovalObserver>>,
     verification_view: Mutex<Option<HttpVerificationView>>,
     verification_reruns: Mutex<Vec<HttpVerificationRerunRequest>>,
+    transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
+    transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
 }
 
 impl RecordingRunDriver {
@@ -3425,6 +3502,14 @@ impl RecordingRunDriver {
 
     fn verification_reruns(&self) -> Vec<HttpVerificationRerunRequest> {
         lock(&self.verification_reruns).clone()
+    }
+
+    fn set_transcript_page(&self, page: HttpSessionTranscriptPage) {
+        *lock(&self.transcript_page) = Some(page);
+    }
+
+    fn transcript_queries(&self) -> Vec<(Option<u64>, usize)> {
+        lock(&self.transcript_queries).clone()
     }
 }
 
@@ -3495,6 +3580,18 @@ impl HttpRunDriver for RecordingRunDriver {
         _session: &super::HttpSessionSnapshot,
     ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
         Ok(lock(&self.verification_view).clone())
+    }
+
+    fn transcript_page(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
+        lock(&self.transcript_queries).push((before, limit));
+        lock(&self.transcript_page)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("test transcript page is missing"))
     }
 
     fn rerun_verification(

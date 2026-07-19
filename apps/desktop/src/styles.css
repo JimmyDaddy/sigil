@@ -237,6 +237,19 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   background: #0c120f;
   overscroll-behavior: contain;
 }
+.transcript-pagination { display: flex; justify-content: center; padding: 2px 0 5px; }
+.timeline-history-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid #633d3a;
+  border-radius: 9px;
+  color: #e0a19b;
+  background: #211514;
+  font-size: 12px;
+}
 .timeline-empty { display: grid; place-content: center; gap: 7px; min-height: 150px; color: #829188; text-align: center; }
 .timeline-empty span { max-width: 600px; font-size: 12px; line-height: 1.5; }
 .timeline-row { max-width: min(82%, 720px); padding: 11px 13px; border: 1px solid #2f4037; border-radius: 11px; background: #141d18; }

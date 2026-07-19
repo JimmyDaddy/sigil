@@ -24,6 +24,41 @@ fn typed_client_debug_never_projects_transport_or_bearer_material() {
     assert!(!debug.contains("3210"));
 }
 
+#[tokio::test]
+async fn transcript_query_rejects_unbounded_renderer_values_before_transport() {
+    let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        "127.0.0.1:3210".parse().expect("address should parse"),
+        bearer,
+    );
+
+    assert!(matches!(
+        client
+            .transcript(
+                "session-1",
+                &DesktopTranscriptQuery {
+                    before: None,
+                    limit: Some(101),
+                },
+            )
+            .await,
+        Err(DesktopClientError::InvalidRoute)
+    ));
+    assert!(matches!(
+        client
+            .transcript(
+                "session-1",
+                &DesktopTranscriptQuery {
+                    before: Some(0),
+                    limit: Some(50),
+                },
+            )
+            .await,
+        Err(DesktopClientError::InvalidRoute)
+    ));
+}
+
 #[test]
 fn sse_decoder_accepts_durable_and_transient_frames_and_rejects_gaps() {
     let durable = br#"id: sigil-http-run-v1:session-1:run-1:1

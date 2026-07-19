@@ -70,6 +70,61 @@ pub struct DesktopSessionListResponse {
     pub sessions: Vec<DesktopSessionSnapshot>,
 }
 
+/// Provider-neutral role in the server-owned transcript projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTranscriptRole {
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Assistant phase retained for correct transcript presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTranscriptAssistantKind {
+    ToolPreamble,
+    Progress,
+    ReasoningTrace,
+    FinalAnswer,
+}
+
+/// One safe message from a bounded durable transcript page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionTranscriptMessage {
+    pub ordinal: u64,
+    pub message_id: String,
+    pub role: DesktopTranscriptRole,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub assistant_kind: Option<DesktopTranscriptAssistantKind>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    pub image_attachment_count: u64,
+    pub truncated: bool,
+    pub original_content_bytes: u64,
+}
+
+/// One chronological, backwards-pageable durable transcript page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionTranscriptPage {
+    pub session_scope_id: String,
+    pub total_messages: u64,
+    pub messages: Vec<DesktopSessionTranscriptMessage>,
+    #[serde(default)]
+    pub next_before: Option<u64>,
+}
+
+/// Bounded query for one durable transcript page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesktopTranscriptQuery {
+    pub before: Option<u64>,
+    pub limit: Option<u16>,
+}
+
 /// Historical catalog source classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]

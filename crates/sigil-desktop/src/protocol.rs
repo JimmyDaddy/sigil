@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-const SERVER_INFO_SCHEMA_VERSION: u16 = 2;
+const SERVER_INFO_SCHEMA_VERSION: u16 = 3;
 const HTTP_PROTOCOL_VERSION: u16 = 1;
 
 /// Authentication mode required by the desktop runtime bridge.
@@ -21,6 +21,8 @@ pub struct DesktopServerCapabilities {
     pub session_catalog: bool,
     /// Historical candidates can be truth-validated and reopened.
     pub durable_session_reopen: bool,
+    /// Bound durable sessions expose safe bounded transcript pages.
+    pub bounded_transcript_replay: bool,
     /// Durable events can be replayed with a bound cursor.
     pub durable_event_replay: bool,
     /// Live events can be followed while the child is active.
@@ -37,6 +39,7 @@ impl DesktopServerCapabilities {
     fn supports_desktop_v1(&self) -> bool {
         self.session_catalog
             && self.durable_session_reopen
+            && self.bounded_transcript_replay
             && self.durable_event_replay
             && self.live_events
             && self.approval

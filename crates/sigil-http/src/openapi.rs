@@ -233,6 +233,38 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/transcript": {
+                "get": {
+                    "summary": "Read one bounded chronological page of durable conversation messages",
+                    "description": "Projects user, assistant and tool-result text from scope-checked append-only session truth. System/control entries, tool arguments, resolved image bytes and server-private paths are excluded.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+                        },
+                        {
+                            "name": "before",
+                            "in": "query",
+                            "required": false,
+                            "description": "Exclusive one-based message ordinal for the next older page",
+                            "schema": { "type": "integer", "format": "uint64", "minimum": 1 }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Bounded transcript page in chronological order",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionTranscriptPage" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
             "/sessions/{session_id}/runs": {
                 "post": {
                     "summary": "Start a run in a session",
@@ -455,7 +487,7 @@ pub fn http_openapi_document() -> Value {
                     "additionalProperties": false,
                     "required": ["schema_version", "protocol_version", "server_version", "workspace_id", "bind_addr", "authentication", "shutdown_on_stdin_close", "capabilities"],
                     "properties": {
-                        "schema_version": { "type": "integer", "const": 2 },
+                        "schema_version": { "type": "integer", "const": 3 },
                         "protocol_version": { "type": "integer", "const": HTTP_PROTOCOL_VERSION },
                         "server_version": { "type": "string" },
                         "workspace_id": { "type": "string" },
@@ -468,10 +500,11 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "durable_event_replay", "live_events", "approval", "cancellation", "verification"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
+                        "bounded_transcript_replay": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
@@ -515,6 +548,40 @@ pub fn http_openapi_document() -> Value {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/SessionSnapshot" }
                         }
+                    }
+                },
+                "SessionTranscriptPage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_scope_id", "total_messages", "messages"],
+                    "properties": {
+                        "session_scope_id": { "type": "string" },
+                        "total_messages": { "type": "integer", "format": "uint64" },
+                        "messages": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "items": { "$ref": "#/components/schemas/SessionTranscriptMessage" }
+                        },
+                        "next_before": { "type": ["integer", "null"], "format": "uint64", "minimum": 1 }
+                    }
+                },
+                "SessionTranscriptMessage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ordinal", "message_id", "role", "image_attachment_count", "truncated", "original_content_bytes"],
+                    "properties": {
+                        "ordinal": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "message_id": { "type": "string" },
+                        "role": { "type": "string", "enum": ["user", "assistant", "tool"] },
+                        "content": { "type": ["string", "null"], "maxLength": 65536 },
+                        "assistant_kind": {
+                            "type": ["string", "null"],
+                            "enum": ["tool_preamble", "progress", "reasoning_trace", "final_answer", null]
+                        },
+                        "tool_name": { "type": ["string", "null"], "maxLength": 128 },
+                        "image_attachment_count": { "type": "integer", "format": "uint64" },
+                        "truncated": { "type": "boolean" },
+                        "original_content_bytes": { "type": "integer", "format": "uint64" }
                     }
                 },
                 "SessionCatalogPage": {

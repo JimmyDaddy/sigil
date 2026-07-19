@@ -7,11 +7,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
-    AutoApproveHandler, DisclosurePresentationError, DisclosurePresentationReceipt,
-    EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, PublicRunEvent,
-    PublicRunEventKind, RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session,
-    TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    AssistantMessageKind, AutoApproveHandler, DisclosurePresentationError,
+    DisclosurePresentationReceipt, EgressDisclosurePresenter, JsonlSessionStore, ModelMessage,
+    PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, RunCancellationOwner,
+    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, TaskId, TaskStepId,
+    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec,
 };
 
@@ -19,8 +20,10 @@ use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
-    PublicApplicationEventBridge, application_run_input, application_terminal_projection,
-    application_verification_view, attach_application_request_context, bind_application_session,
+    ApplicationTranscriptRole, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+    PublicApplicationEventBridge, application_run_input, application_session_transcript_page,
+    application_terminal_projection, application_verification_view,
+    attach_application_request_context, bind_application_session,
     bind_existing_application_session, constrain_application_tool_registry,
     default_application_session_path, optional_eager_mcp_warning,
     record_application_preparation_cancellation, rerun_application_verification,
@@ -283,6 +286,119 @@ model = "deepseek-v4-flash"
     let missing = temp.path().join("state/sessions/missing.jsonl");
     assert!(bind_existing_application_session(&config_path, &missing).is_err());
     assert!(!missing.exists());
+    Ok(())
+}
+
+#[test]
+fn transcript_page_is_scope_checked_chronological_bounded_and_argument_free() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/transcript.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("first")))?;
+    store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            Some("checking".to_owned()),
+            vec![ToolCall {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: "{\"token\":\"must-not-project\"}".to_owned(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
+    store.append(&SessionLogEntry::ToolResult(ModelMessage::tool(
+        "call-1",
+        "tool output",
+    )))?;
+    store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            Some("final".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+
+    let latest = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        2,
+    )?;
+    assert_eq!(latest.total_messages, 4);
+    assert_eq!(latest.messages.len(), 2);
+    assert_eq!(latest.messages[0].ordinal, 3);
+    assert_eq!(latest.messages[0].role, ApplicationTranscriptRole::Tool);
+    assert_eq!(latest.messages[0].tool_name.as_deref(), Some("read_file"));
+    assert_eq!(latest.messages[1].content.as_deref(), Some("final"));
+    assert_eq!(latest.next_before, Some(3));
+    assert!(!format!("{latest:?}").contains("must-not-project"));
+
+    let older = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        latest.next_before,
+        2,
+    )?;
+    assert_eq!(
+        older
+            .messages
+            .iter()
+            .map(|message| message.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(older.next_before, None);
+    assert!(
+        application_session_transcript_page(&binding.session_log_path, "wrong-scope", None, 10)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn transcript_page_truncates_utf8_content_without_breaking_character_boundaries() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/large-transcript.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let original = "界".repeat(MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES);
+    store.append(&SessionLogEntry::User(ModelMessage::user(&original)))?;
+
+    let page = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        1,
+    )?;
+    let message = &page.messages[0];
+    let content = message.content.as_deref().expect("text remains available");
+    assert!(message.truncated);
+    assert_eq!(message.original_content_bytes, original.len() as u64);
+    assert!(content.len() <= MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES);
+    assert!(content.is_char_boundary(content.len()));
     Ok(())
 }
 

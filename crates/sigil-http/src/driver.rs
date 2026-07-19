@@ -5,7 +5,7 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpApprovalDecisionRecord, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -102,6 +102,22 @@ pub trait HttpRunDriver: Send + Sync {
     ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
         Err(HttpRunDriverError::new(
             "verification projection is unavailable",
+        ))
+    }
+
+    /// Projects one bounded chronological transcript page for a bound durable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable scope validation or safe projection fails.
+    fn transcript_page(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _before: Option<u64>,
+        _limit: usize,
+    ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "transcript projection is unavailable",
         ))
     }
 
