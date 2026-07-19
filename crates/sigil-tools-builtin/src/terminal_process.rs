@@ -112,8 +112,9 @@ use io::{capture_pty_reader, capture_stream, is_pty_eof_error};
 use manager::{ManagedTerminalTask, TerminalTaskControl};
 #[cfg(test)]
 use worker::{
-    PtyWaitOutcome, cancel_child, finalize_terminal_task, send_terminate_signal,
-    status_from_pty_wait_result, status_from_wait_result, wait_for_terminal_summary,
+    PtyWaitOutcome, cancel_child, finalize_terminal_task, pty_status_after_cleanup_drain,
+    send_terminate_signal, status_from_pty_wait_result, status_from_wait_result,
+    wait_for_terminal_summary,
 };
 
 pub use config::{

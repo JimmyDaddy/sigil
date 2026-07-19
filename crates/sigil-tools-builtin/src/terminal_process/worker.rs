@@ -544,6 +544,7 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
         &mut worker.wait_task,
     )
     .await;
+    let drain_converged = drained.is_ok();
     let capture_error = match drained {
         Ok(outcome) => joined_pty_outcome(outcome).capture_error,
         Err(_) => {
@@ -553,14 +554,16 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
             )
         }
     };
-    let reason = format!(
-        "terminal pty output reader drain timed out after child status {}",
-        status.as_str()
+    let final_status = pty_status_after_cleanup_drain(
+        &status,
+        worker.cancel_requested.load(Ordering::SeqCst),
+        &cleanup,
+        drain_converged,
     );
     let _ = finalize_terminal_summary(
         &worker.summary,
         &worker.artifacts,
-        TerminalTaskStatus::Failed { reason },
+        final_status,
         capture_error,
         worker.preview_limit_bytes,
         Some(cleanup),
@@ -570,6 +573,28 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
         ),
     )
     .await;
+}
+
+pub(super) fn pty_status_after_cleanup_drain(
+    observed_status: &TerminalTaskStatus,
+    cancel_requested: bool,
+    cleanup: &ExecutionCleanupReceipt,
+    drain_converged: bool,
+) -> TerminalTaskStatus {
+    if drain_converged && cancel_requested {
+        return if cleanup.status == ExecutionCleanupStatus::Completed {
+            TerminalTaskStatus::Cancelled
+        } else {
+            TerminalTaskStatus::Interrupted
+        };
+    }
+
+    TerminalTaskStatus::Failed {
+        reason: format!(
+            "terminal pty output reader drain timed out after child status {}",
+            observed_status.as_str()
+        ),
+    }
 }
 
 fn joined_pty_outcome(

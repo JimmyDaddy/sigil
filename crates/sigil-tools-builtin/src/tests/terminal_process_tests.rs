@@ -15,11 +15,11 @@ use std::sync::{Mutex as StdMutex, atomic::AtomicBool};
 use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus, ExecutionConfig,
-    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
-    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
+    ExecutionCleanupStatus, ExecutionConfig, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxStrategyConfig, TerminalExecutionBackendCapabilities,
+    TerminalExecutionBackendKind, TerminalOutputTerminationReason, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
 };
 #[cfg(unix)]
 use tokio::process::Command;
@@ -34,6 +34,30 @@ use tokio::{
 use super::TerminalExecutionConfig;
 use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
 use serial_test::serial;
+
+#[test]
+fn pty_post_cleanup_drain_preserves_proven_cancellation() {
+    let observed = TerminalTaskStatus::Exited { exit_code: Some(1) };
+    let completed = ExecutionCleanupReceipt::completed("test cleanup completed");
+    let failed = ExecutionCleanupReceipt::failed("test cleanup failed");
+
+    assert!(matches!(
+        super::pty_status_after_cleanup_drain(&observed, true, &completed, true),
+        TerminalTaskStatus::Cancelled
+    ));
+    assert!(matches!(
+        super::pty_status_after_cleanup_drain(&observed, true, &failed, true),
+        TerminalTaskStatus::Interrupted
+    ));
+    assert!(matches!(
+        super::pty_status_after_cleanup_drain(&observed, false, &completed, true),
+        TerminalTaskStatus::Failed { .. }
+    ));
+    assert!(matches!(
+        super::pty_status_after_cleanup_drain(&observed, true, &completed, false),
+        TerminalTaskStatus::Failed { .. }
+    ));
+}
 
 #[cfg(unix)]
 fn sandbox_execution_config(
