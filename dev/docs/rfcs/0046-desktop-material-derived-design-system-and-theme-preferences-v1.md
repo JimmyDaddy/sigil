@@ -1,6 +1,6 @@
 # RFC-0046 Desktop Material-derived Design System and Theme Preferences V1
 
-状态：active / R46.0 complete，R46.1 ready
+状态：active / R46.0-R46.1 complete，R46.2 ready
 
 创建日期：2026-07-20
 
@@ -662,4 +662,24 @@ styled runtime/迁移成本不适合作为当前主路径。
 
 本 RFC 已明确区分 RFC-0045 的已完成 correctness foundation 与新的 consistency/usability 增量，冻结 native preference、
 renderer resolved theme、A/C hybrid workbench、internal primitive boundary、density/contrast/fixture gate 和 R46.1-R46.8
-commit dependency。R46.1 现在是唯一 ready 切片，其余切片按依赖保持 gated。
+commit dependency。R46.1 的 stop/go 结果记录于下一节。
+
+## 18. R46.1 result
+
+R46.1 于 2026-07-20 完成，decision 为 **Base UI 1.6.0 no-go**：
+
+| Evidence | Result |
+| --- | --- |
+| React and license | npm registry metadata confirms React 17/18/19 peer support and MIT license |
+| Upstream browser floor | Base UI v1.6.0 official browserslist starts at Safari/iOS Safari 16.4 |
+| Sigil product floor | Vite build target still includes `safari13`; Tauri macOS minimum remains 11.0 |
+| Available runtime evidence | local dogfood host is macOS 26.3; it cannot prove Safari 13-equivalent/macOS 11 behavior, and the required minimum Windows/Linux WebView matrix is not available in this slice |
+| CSP and dependency graph | no package was installed, no lockfile changed, and production CSP/capability/dependency graph remains unchanged |
+
+The stop/go contract requires missing or failed minimum-WebView evidence to resolve to no-go, not pending or inferred pass. Therefore the
+pilot stopped before package installation and product-surface migration. R46.2-R46.8 will use the frozen Sigil internal primitive API with a
+repo-owned APG/focus adapter. This decision does not weaken keyboard/focus/IME requirements and does not raise any platform floor.
+
+Because no direct dependency was added, `dev/governance/dependency-supply-chain.md` needs no new ledger row. A future attempt to adopt a
+third-party behavior source requires a new exact-version compatibility decision against the then-current product floor; it cannot silently
+reopen this result inside a feature migration.
