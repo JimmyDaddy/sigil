@@ -1,4 +1,5 @@
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
+import { ErrorCard } from "./ErrorCard";
 
 export type HistoryState =
   | "idle"
@@ -26,11 +27,12 @@ export function HistoryContent({
   }
   if (state === "error" || state === "stale") {
     return (
-      <div className="history-notice error" role="alert">
-        <strong>{state === "stale" ? "History changed while paging." : "History is unavailable."}</strong>
-        <span>{state === "stale" ? "The list changed while more items were loading. Refresh and continue." : "Your saved conversations are unchanged. Try loading the list again."}</span>
-        <button className="quiet-button" type="button" onClick={onRetry}>Refresh conversations</button>
-      </div>
+      <ErrorCard
+        title={state === "stale" ? "History changed while paging." : "History is unavailable."}
+        message={state === "stale" ? "The list changed while more items were loading. Refresh and continue." : "Your saved conversations are unchanged. Try loading the list again."}
+        actionLabel="Refresh conversations"
+        onAction={onRetry}
+      />
     );
   }
   if (state === "idle") return null;

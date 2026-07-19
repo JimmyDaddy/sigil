@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { ApprovalDock } from "./ApprovalDock";
 import type { DesktopBridge } from "./bridge";
+import { Composer, draftStorageKey } from "./Composer";
+import { ErrorCard } from "./ErrorCard";
+import { Message, type MessageView } from "./Message";
+import { ToolCard } from "./ToolCard";
 import type {
   RunStreamStatus,
   RunSummary,
@@ -9,6 +14,7 @@ import type {
   TranscriptMessage,
   VerificationSummary,
 } from "./types";
+import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
   bridge: DesktopBridge;
@@ -16,20 +22,22 @@ interface ConversationPanelProps {
   session: SessionSummary;
 }
 
-interface TimelineRow {
+interface TimelineRowBase {
   key: string;
-  kind: "user" | "assistant" | "reasoning" | "tool" | "notice" | "error";
   label: string;
   text: string;
   status?: string;
 }
+
+type TimelineRow =
+  | (TimelineRowBase & { kind: MessageView["kind"] })
+  | (TimelineRowBase & { kind: "tool" });
 
 export function ConversationPanel({
   bridge,
   workspaceId,
   session,
 }: ConversationPanelProps) {
-  const [prompt, setPrompt] = useState("");
   const [run, setRun] = useState<RunSummary>();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
@@ -49,6 +57,7 @@ export function ConversationPanel({
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
@@ -246,19 +255,19 @@ export function ConversationPanel({
     }
   };
 
-  const submit = async () => {
-    const nextPrompt = prompt.trim();
-    if (nextPrompt === "" || active || submitting) return;
+  const submit = async (nextPrompt: string): Promise<boolean> => {
+    if (nextPrompt === "" || active || submitting) return false;
     setSubmitting(true);
     onNotice("Starting the run…");
     try {
       const started = await bridge.startRun(workspaceId, session.id, nextPrompt);
       activeRunIdRef.current = started.id;
       setRun(started);
-      setPrompt("");
       onNotice("Run started. Live updates are connected.");
+      return true;
     } catch {
       onNotice("The run could not be started.", true);
+      return false;
     } finally {
       setSubmitting(false);
     }
@@ -336,9 +345,9 @@ export function ConversationPanel({
       </header>
 
       {runNotice !== undefined ? (
-        <div className={`run-notice ${runNotice.error ? "error" : ""}`} role={runNotice.error ? "alert" : "status"}>
-          {runNotice.message}
-        </div>
+        runNotice.error
+          ? <ErrorCard title="Run action needs attention" message={runNotice.message} actionLabel="Dismiss" onAction={() => setRunNotice(undefined)} />
+          : <div className="run-notice" role="status">{runNotice.message}</div>
       ) : null}
 
       <div
@@ -372,17 +381,13 @@ export function ConversationPanel({
           </div>
         ) : null}
         {transcriptError ? (
-          <div className="timeline-history-error" role="status">
-            <span>Conversation history could not be loaded. Live run controls remain available.</span>
-            <button
-              className="quiet-button"
-              type="button"
-              disabled={transcriptBusy}
-              onClick={() => setTranscriptReload((value) => value + 1)}
-            >
-              Retry history
-            </button>
-          </div>
+          <ErrorCard
+            title="Saved messages are unavailable"
+            message="Live run controls remain available. Retry without leaving this conversation."
+            actionLabel={transcriptBusy ? "Retrying…" : "Retry messages"}
+            actionDisabled={transcriptBusy}
+            onAction={() => setTranscriptReload((value) => value + 1)}
+          />
         ) : null}
         {rows.length === 0 ? (
           <div className="timeline-empty">
@@ -390,73 +395,31 @@ export function ConversationPanel({
             <span>{transcriptBusy ? "Loading saved messages." : "New run activity appears here."}</span>
           </div>
         ) : (
-          rows.map((row) => (
-            <article className={`timeline-row timeline-${row.kind}`} key={row.key}>
-              <header><span>{row.label}</span>{row.status ? <small>{row.status}</small> : null}</header>
-              <p>{row.text || "No text payload."}</p>
-            </article>
-          ))
+          rows.map((row) => row.kind === "tool"
+            ? <ToolCard key={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, status: row.status }} />
+            : <Message key={row.key} message={row} />)
         )}
       </div>
 
       {pendingApproval?.approval !== undefined ? (
-        <section className="approval-card" aria-labelledby="approval-title">
-          <header>
-            <div>
-              <p className="eyebrow">Explicit approval required</p>
-              <h3 id="approval-title">{pendingApproval.approval.previewTitle ?? pendingApproval.approval.toolName}</h3>
-            </div>
-            <span className={`risk-badge risk-${pendingApproval.approval.risk ?? "unknown"}`}>
-              {pendingApproval.approval.risk ?? "unclassified"}
-            </span>
-          </header>
-          <p>{pendingApproval.approval.previewSummary ?? "Review this tool request before it can continue."}</p>
-          {pendingApproval.approval.previewBody ? <pre>{pendingApproval.approval.previewBody}</pre> : null}
-          <dl>
-            <div><dt>Tool</dt><dd>{pendingApproval.approval.toolName}</dd></div>
-            <div><dt>Operation</dt><dd>{pendingApproval.approval.operation ?? "unknown"}</dd></div>
-            <div><dt>Snapshot</dt><dd>{pendingApproval.approval.snapshotRequired ? "required" : "not required"}</dd></div>
-          </dl>
-          <small>Approval applies only to this exact request. Shell and remote side effects cannot be undone by desktop history controls.</small>
-          <div className="approval-actions">
-            <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={() => void decideApproval(false)}>Deny</button>
-            <button className="primary-button" type="button" disabled={controlBusy} onClick={() => void decideApproval(true)}>Approve once</button>
-          </div>
-        </section>
+        <ApprovalDock
+          approval={pendingApproval.approval}
+          busy={controlBusy}
+          composerRef={composerRef}
+          onDecision={(approve) => void decideApproval(approve)}
+        />
       ) : null}
 
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <label htmlFor="desktop-prompt">Message Sigil</label>
-        <textarea
-          id="desktop-prompt"
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder="Describe the change or question…"
-          rows={4}
-          disabled={active || submitting}
-          onCompositionStart={(event) => {
-            event.currentTarget.dataset.composing = "true";
-          }}
-          onCompositionEnd={(event) => {
-            delete event.currentTarget.dataset.composing;
-          }}
-        />
-        <div className="composer-actions">
-          <small>{active ? "A run is active in this conversation." : "Tool actions ask before running."}</small>
-          <div>
-            {active ? <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={() => void cancel()}>Cancel run</button> : null}
-            <button className="primary-button" type="submit" disabled={prompt.trim() === "" || active || submitting}>
-              {submitting ? "Starting…" : "Run"}
-            </button>
-          </div>
-        </div>
-      </form>
+      <Composer
+        key={draftStorageKey(workspaceId, session.id)}
+        draftKey={draftStorageKey(workspaceId, session.id)}
+        active={active}
+        submitting={submitting}
+        controlBusy={controlBusy}
+        composerRef={composerRef}
+        onSubmit={submit}
+        onCancel={() => void cancel()}
+      />
       </section>
 
       <aside className="inspector-pane" aria-labelledby="inspector-title">
@@ -465,62 +428,7 @@ export function ConversationPanel({
           <h2 id="inspector-title">Verification</h2>
           <p>Evidence and recommended checks for this conversation.</p>
         </header>
-        {verification !== undefined ? (
-          <section className="verification-card" aria-labelledby="verification-title">
-            <header>
-              <div>
-                <p className="eyebrow">Current check</p>
-                <h3 id="verification-title">{verification.recommendedCheckSpecId ?? "Current evidence"}</h3>
-              </div>
-              <span className={`verification-badge verification-${verification.verdict}`}>
-                {verification.status}
-              </span>
-            </header>
-            {verification.recommendationReason ? <p>{verification.recommendationReason}</p> : null}
-            <dl>
-              <div><dt>Scope</dt><dd>{verification.scopeKind} · {verification.scopeId}</dd></div>
-              <div><dt>Receipt</dt><dd>{verification.evidence.receiptId ?? "not recorded"}</dd></div>
-              <div><dt>Snapshot</dt><dd>{verification.evidence.workspaceSnapshotId ?? "not linked"}</dd></div>
-              <div><dt>Changeset</dt><dd>{verification.evidence.changesetId ?? "not linked"}</dd></div>
-            </dl>
-            {verification.evidence.failureSummary ? (
-              <div className="verification-failure" role="status">
-                <strong>Failure location</strong>
-                <p>{verification.evidence.failureSummary}</p>
-                <small>
-                  Command {verification.evidence.commandEventId ?? "not linked"} · output {verification.evidence.outputArtifactId ?? "not linked"}
-                </small>
-              </div>
-            ) : null}
-            <div className="verification-actions">
-              {verification.action?.kind === "rerun" ? (
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={verificationBusy || active}
-                  onClick={() => void rerunVerification()}
-                >
-                  {verificationBusy
-                    ? "Running check…"
-                    : verification.recommendationKind === "retry"
-                      ? "Retry check"
-                      : verification.recommendationKind === "rerun_non_writing"
-                        ? "Rerun non-writing check"
-                        : "Run recommended check"}
-                </button>
-              ) : verification.action?.kind === "review_approval" ? (
-                <small>This check needs a separate trust review.</small>
-              ) : (
-                <small>No verification action is currently required.</small>
-              )}
-            </div>
-          </section>
-        ) : (
-          <div className="inspector-empty">
-            <strong>No verification evidence yet</strong>
-            <p>Run a task or select a recorded check when evidence becomes available.</p>
-          </div>
-        )}
+        <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
       </aside>
     </div>
   );
@@ -591,7 +499,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
     if (message.assistantKind === "progress") {
       return {
         key: `history:${message.messageId}`,
-        kind: "notice",
+        kind: "progress",
         label: "Progress",
         text,
         status,

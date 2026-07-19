@@ -1,9 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { mergeTimelineEvent, reduceTimeline } from "./ConversationPanel";
+import { DiffViewer } from "./DiffViewer";
+import { Message } from "./Message";
+import { MessageContent } from "./MessageContent";
+import { ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
@@ -12,7 +16,9 @@ import type {
   WorkspaceSummary,
 } from "./types";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+});
 
 const workspace: WorkspaceSummary = {
   id: "workspace-0123456789ab",
@@ -95,6 +101,53 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     ...overrides,
   };
 }
+
+describe("desktop coding-agent components", () => {
+  it("renders bounded markdown structure as text without raw HTML or navigation", async () => {
+    const user = userEvent.setup();
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <MessageContent text={"<script>alert(1)</script>\n\n- first `item`\n- second\n\n```rust\ncargo test\n```"} />,
+    );
+
+    expect(document.querySelector("script")).toBeNull();
+    expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
+    expect(screen.getByRole("list")).toBeTruthy();
+    expect(screen.getByText("item").tagName).toBe("CODE");
+    expect(screen.getByText("cargo test").tagName).toBe("CODE");
+    expect(screen.queryByRole("link")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("cargo test");
+
+    if (originalClipboard === undefined) delete (navigator as { clipboard?: Clipboard }).clipboard;
+    else Object.defineProperty(navigator, "clipboard", originalClipboard);
+  });
+
+  it("keeps reasoning collapsed and renders read-only bounded tool and diff surfaces", () => {
+    const { unmount } = render(
+      <Message message={{ key: "reasoning", kind: "reasoning", label: "Working", text: "private scratch", status: "details" }} />,
+    );
+    expect((screen.getByText("Working").closest("details") as HTMLDetailsElement).open).toBe(false);
+    unmount();
+
+    const diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
+    const diffRender = render(<DiffViewer diff={diff} />);
+    expect(screen.getByLabelText("Unified diff")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /apply|revert/i })).toBeNull();
+    diffRender.unmount();
+
+    const output = Array.from({ length: 245 }, (_, index) => `line ${index + 1}`).join("\n");
+    render(<ToolCard tool={{ key: "tool", toolName: "shell", text: output, status: "succeeded" }} />);
+    expect(screen.getByText("5 output lines omitted from this view.")).toBeTruthy();
+    expect(screen.getByText("duration not recorded")).toBeTruthy();
+    expect(screen.getByText("risk not classified")).toBeTruthy();
+  });
+});
 
 describe("desktop workspace and history shell", () => {
   it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
@@ -351,7 +404,7 @@ describe("desktop workspace and history shell", () => {
         approvalRequestId: "approval-active",
         toolCallHash: "hash-active",
         policyVersion: "policy-active",
-        expiresAtMs: 1_784_419_200_000,
+        expiresAtMs: 4_102_444_800_000,
         snapshotRequired: true,
         previewTitle: "Review the resumed edit",
       },
@@ -588,6 +641,52 @@ describe("desktop workspace and history shell", () => {
     expect(prompts).toEqual(["请检查 中文输入，包含粘贴"]);
   });
 
+  it("sends with Enter, keeps active-run input editable, and restores a session draft", async () => {
+    const user = userEvent.setup();
+    const prompts: string[] = [];
+    const draftValues = new Map<string, string>();
+    const originalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      get length() { return draftValues.size; },
+      clear: () => draftValues.clear(),
+      getItem: (key: string) => draftValues.get(key) ?? null,
+      key: (index: number) => [...draftValues.keys()][index] ?? null,
+      removeItem: (key: string) => { draftValues.delete(key); },
+      setItem: (key: string, value: string) => { draftValues.set(key, value); },
+    } satisfies Storage });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      startRun: async (_workspaceId, sessionId, prompt) => {
+        prompts.push(prompt);
+        return { id: "run-draft", sessionId, status: "running", streamSequence: 0 };
+      },
+    });
+    const first = render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    await user.type(composer, "Run this after Shift+Enter");
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
+    expect(prompts).toEqual([]);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(prompts).toEqual(["Run this after Shift+Enter"]));
+    expect(composer.disabled).toBe(false);
+    await user.type(composer, "Follow-up draft");
+    expect(draftValues.get(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Follow-up draft");
+
+    first.unmount();
+    render(<App bridge={bridge} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect((screen.getByLabelText("Message Sigil") as HTMLTextAreaElement).value).toBe("Follow-up draft");
+    if (originalStorage !== undefined) Object.defineProperty(window, "localStorage", originalStorage);
+  });
+
   it("follows new timeline rows only while the reader stays near the end", async () => {
     const user = userEvent.setup();
     let eventListener: ((event: TimelineEvent) => void) | undefined;
@@ -678,7 +777,7 @@ describe("desktop workspace and history shell", () => {
           approvalRequestId: "approval-1",
           toolCallHash: "hash-1",
           policyVersion: "policy-1",
-          expiresAtMs: 1_784_419_200_000,
+          expiresAtMs: 4_102_444_800_000,
           operation: "edit_file",
           risk: "medium",
           snapshotRequired: true,
@@ -689,9 +788,27 @@ describe("desktop workspace and history shell", () => {
       });
     });
 
-    expect(await screen.findByText("Edit one file")).toBeTruthy();
+    const approvalTitle = await screen.findByText("Edit one file");
+    const approvalDock = approvalTitle.closest("section") as HTMLElement;
+    expect(document.activeElement).toBe(approvalDock);
+    fireEvent.keyDown(approvalDock, { key: "Escape" });
+    expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Approve once" }));
     expect(approvedCall).toBe("run-1:approval-1:true");
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 4,
+        replayable: true,
+        kind: "approval_resolved",
+        itemId: "call-1",
+        status: "approved",
+      });
+    });
+    expect(screen.queryByText("Edit one file")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Cancel run" }));
     expect(cancelledRun).toBe("run-1");
     expect(await screen.findByText("Cancellation requested. Waiting for the run to stop safely.")).toBeTruthy();
@@ -746,6 +863,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("2 tests failed")).toBeTruthy();
+    expect((screen.getByText("Evidence details").closest("details") as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByText("receipt-1")).toBeTruthy();
     expect(screen.getByText("changeset-1")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Run recommended check" }));

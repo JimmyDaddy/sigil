@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
 import { ConversationPanel } from "./ConversationPanel";
+import { ErrorCard } from "./ErrorCard";
 import { HistoryContent, type HistoryState } from "./HistoryPanel";
 import type {
   CatalogEntry,
@@ -401,9 +402,9 @@ export function App({ bridge = desktopBridge }: AppProps) {
                 <button className="quiet-button" type="submit">Search</button>
               </form>
               {sessionMessage !== undefined ? (
-                <div className={`session-notice ${sessionActionState === "error" ? "error" : ""}`} role={sessionActionState === "error" ? "alert" : "status"}>
-                  {sessionMessage}
-                </div>
+                sessionActionState === "error"
+                  ? <ErrorCard title="Conversation unavailable" message={sessionMessage} actionLabel="Refresh conversations" onAction={() => void loadHistory(activeWorkspace.id)} />
+                  : <div className="session-notice" role="status">{sessionMessage}</div>
               ) : null}
               <div className="session-list-scroll">
                 <HistoryContent

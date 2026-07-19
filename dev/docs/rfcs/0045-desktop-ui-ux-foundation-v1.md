@@ -1,6 +1,6 @@
 # RFC-0045 Desktop UI/UX Foundation V1
 
-状态：active / R45.0-R45.3 complete，R45.4 ready
+状态：active / R45.0-R45.4 complete，R45.5 ready
 
 创建日期：2026-07-19
 
@@ -207,6 +207,11 @@ workspace close 从 server session snapshot 计算 active-run 数量，或在状
 - Enter 发送，Shift+Enter 换行，Cmd/Ctrl+Enter 也可发送；IME composition 期间不得误发。
 - draft 按 workspace/session 保存并在 reopen 恢复；active run 时不得把输入无说明地整体禁用。
 - `ErrorCard` 属于 workspace/session/run/domain scope，包含 retry/inspect；恢复成功后清除 stale error。
+
+R45.4 已完成：desktop 使用安全的 `MessageContent`、折叠的 reasoning/progress、bounded `ToolCard` 和只读
+`DiffViewer` 区分对话与执行证据；`ApprovalDock` 接管并恢复焦点，`VerificationInspector` 默认折叠 opaque evidence，
+`ErrorCard` 保持错误作用域。Composer 通过 Enter/Shift+Enter、IME 与按 workspace/session 恢复 draft 的自动化测试，
+active run 期间仍允许准备下一条输入；17 个 renderer interaction tests、类型检查和 production build 均通过。
 
 ## 10. Desktop UI system
 
