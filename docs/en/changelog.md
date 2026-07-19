@@ -14,6 +14,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 - Added a desktop runtime bridge for trusted local clients: durable catalog entries can be reopened after restart, startup and server metadata have one versioned JSON shape, and an opt-in stdin owner pipe triggers graceful shutdown without PID polling.
 - Added a source-built desktop dogfood shell with native workspace selection, durable history, conversation runs, exact approval and cancellation controls, and verification evidence over the same authenticated local server used by automation. CI builds short-lived unsigned macOS, Linux, and Windows dogfood artifacts; these are not a public install channel.
 
+### Changed
+
+- Reworked the desktop dogfood shell around workspace/session navigation, one conversation task surface, and a verification inspector. It replays bounded saved messages, retains control of runs across navigation while the workspace service stays open, separates final replies from progress and tool output, and provides focused approval, diff, evidence, and draft-aware composer behavior.
+- Added one consistent desktop visual system, adaptive wide/two-pane/compact layouts, system light and dark themes, high-contrast and reduced-motion handling, keyboard focus capture/restore, terminal-only streaming announcements, and usable reflow down to 320 CSS pixels.
+
 ### Fixed
 
 - Fixed the packaged desktop app reading Tauri-managed state before its setup lifecycle ran, which previously made the macOS app exit before creating a window.
