@@ -9,11 +9,12 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "ui:check": "../../scripts/check-desktop-ui-system.sh",
     "contract:generate": "../../scripts/generate-desktop-contract.sh --write",
     "contract:check": "../../scripts/generate-desktop-contract.sh --check",
     "sidecar:prepare": "node ../../scripts/prepare-desktop-sidecar.mjs",
     "sidecar:test": "node ../../scripts/test-prepare-desktop-sidecar.mjs",
-    "check": "pnpm contract:check && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm contract:check && pnpm ui:check && pnpm typecheck && pnpm test && pnpm build",
     "package": "tauri build --config src-tauri/tauri.bundle.conf.json",
     "tauri": "tauri"
   },

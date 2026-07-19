@@ -42,7 +42,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Sigil")
                 .inner_size(1120.0, 760.0)
-                .min_inner_size(720.0, 560.0)
+                .min_inner_size(320.0, 480.0)
                 .build()?;
             let recent_workspaces_path = app
                 .path()

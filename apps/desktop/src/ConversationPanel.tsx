@@ -14,6 +14,8 @@ import type {
   TranscriptMessage,
   VerificationSummary,
 } from "./types";
+import { useFocusBoundary } from "./useFocusBoundary";
+import { useMediaQuery } from "./useMediaQuery";
 import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
@@ -53,14 +55,31 @@ export function ConversationPanel({
   const [transcriptReload, setTranscriptReload] = useState(0);
   const [attachmentGap, setAttachmentGap] = useState(false);
   const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
+  const [runAnnouncement, setRunAnnouncement] = useState("");
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const compactInspector = useMediaQuery("(max-width: 1100px)");
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const inspectorRef = useRef<HTMLElement>(null);
+  const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
+  const dismissInspector = useCallback(() => setInspectorOpen(false), []);
+
+  useFocusBoundary({
+    active: compactInspector && inspectorOpen,
+    containerRef: inspectorRef,
+    returnFocusRef: inspectorTriggerRef,
+    onDismiss: dismissInspector,
+  });
+
+  useEffect(() => {
+    if (!compactInspector) setInspectorOpen(false);
+  }, [compactInspector]);
 
   useEffect(() => {
     setRun(undefined);
@@ -73,6 +92,7 @@ export function ConversationPanel({
     setTranscriptError(false);
     setAttachmentGap(false);
     setRunNotice(undefined);
+    setRunAnnouncement("");
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
@@ -152,6 +172,7 @@ export function ConversationPanel({
         setStreamStatus(status);
         if (status.message !== undefined) onNotice(status.message, status.state === "error");
         if (status.state === "terminal") {
+          setRunAnnouncement(status.message ?? "Run finished. Review the final response and verification status.");
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
@@ -339,10 +360,24 @@ export function ConversationPanel({
           <p className="eyebrow">Active conversation</p>
           <h2 id="conversation-title">{session.label ?? "Untitled conversation"}</h2>
         </div>
-        <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
-          {streamStatus?.state ?? "ready"}
-        </span>
+        <div className="conversation-header-actions">
+          <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
+            {streamStatus?.state ?? "ready"}
+          </span>
+          <button
+            className="pane-toggle inspector-toggle"
+            ref={inspectorTriggerRef}
+            type="button"
+            aria-controls="verification-inspector"
+            aria-expanded={inspectorOpen}
+            onClick={() => setInspectorOpen((open) => !open)}
+          >
+            Review
+          </button>
+        </div>
       </header>
+
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{runAnnouncement}</div>
 
       {runNotice !== undefined ? (
         runNotice.error
@@ -354,8 +389,7 @@ export function ConversationPanel({
         className="timeline"
         ref={timelineRef}
         role="log"
-        aria-live="polite"
-        aria-relevant="additions text"
+        aria-live="off"
         aria-label="Conversation timeline"
         onScroll={(event) => {
           const timeline = event.currentTarget;
@@ -422,7 +456,19 @@ export function ConversationPanel({
       />
       </section>
 
-      <aside className="inspector-pane" aria-labelledby="inspector-title">
+      {compactInspector && inspectorOpen ? (
+        <button className="pane-backdrop inspector-backdrop" type="button" aria-label="Close verification inspector" onClick={dismissInspector} />
+      ) : null}
+      <aside
+        id="verification-inspector"
+        className={`inspector-pane ${inspectorOpen ? "pane-open" : ""}`}
+        ref={inspectorRef}
+        aria-labelledby="inspector-title"
+        aria-hidden={compactInspector && !inspectorOpen ? true : undefined}
+        inert={compactInspector && !inspectorOpen ? true : undefined}
+        tabIndex={-1}
+      >
+        <button className="drawer-close" type="button" onClick={dismissInspector} data-initial-focus>Close review</button>
         <header className="inspector-header">
           <p className="eyebrow">Review</p>
           <h2 id="inspector-title">Verification</h2>

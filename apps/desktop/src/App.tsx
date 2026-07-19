@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
 import { ConversationPanel } from "./ConversationPanel";
@@ -14,6 +14,8 @@ import type {
   SessionSummary,
   WorkspaceSummary,
 } from "./types";
+import { useFocusBoundary } from "./useFocusBoundary";
+import { useMediaQuery } from "./useMediaQuery";
 
 interface AppProps {
   bridge?: DesktopBridge;
@@ -54,6 +56,35 @@ export function App({ bridge = desktopBridge }: AppProps) {
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [sessionMessage, setSessionMessage] = useState<string>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const compactNavigation = useMediaQuery("(max-width: 760px)");
+  const navigationRef = useRef<HTMLElement>(null);
+  const navigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmationRef = useRef<HTMLElement>(null);
+
+  const dismissNavigation = useCallback(() => setNavigationOpen(false), []);
+  const dismissWorkspaceClose = useCallback(() => {
+    setPendingWorkspaceClose((pending) => {
+      if (pending !== undefined) setMessage(`${pending.displayName} remains open.`);
+      return undefined;
+    });
+  }, []);
+
+  useFocusBoundary({
+    active: compactNavigation && navigationOpen,
+    containerRef: navigationRef,
+    returnFocusRef: navigationTriggerRef,
+    onDismiss: dismissNavigation,
+  });
+  useFocusBoundary({
+    active: pendingWorkspaceClose !== undefined,
+    containerRef: confirmationRef,
+    onDismiss: dismissWorkspaceClose,
+  });
+
+  useEffect(() => {
+    if (!compactNavigation) setNavigationOpen(false);
+  }, [compactNavigation]);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
@@ -191,6 +222,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
         return;
       }
       rememberOpenWorkspace(selection.workspace);
+      setNavigationOpen(false);
       setLoadState("ready");
       setMessage(`${selection.workspace.displayName} is ready.`);
     } catch {
@@ -204,6 +236,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
   const openRecentWorkspace = async (recent: RecentWorkspaceSummary) => {
     if (recent.isOpen) {
       setActiveWorkspaceId(recent.id);
+      setNavigationOpen(false);
       return;
     }
     setLoadState("working");
@@ -211,6 +244,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
     try {
       const workspace = await bridge.openRecentWorkspace(recent.id);
       rememberOpenWorkspace(workspace);
+      setNavigationOpen(false);
       setLoadState("ready");
       setMessage(`${workspace.displayName} is ready.`);
     } catch {
@@ -269,6 +303,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
         "New conversation",
       );
       setSelectedSession(session);
+      setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage("New conversation ready.");
       await loadHistory(activeWorkspaceId);
@@ -289,6 +324,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
         label: entry.title,
       });
       setSelectedSession(session);
+      setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
     } catch {
@@ -300,6 +336,16 @@ export function App({ bridge = desktopBridge }: AppProps) {
   return (
     <div className="app-shell">
       <header className="topbar">
+        <button
+          className="pane-toggle navigation-toggle"
+          ref={navigationTriggerRef}
+          type="button"
+          aria-controls="desktop-navigation"
+          aria-expanded={navigationOpen}
+          onClick={() => setNavigationOpen((open) => !open)}
+        >
+          Browse
+        </button>
         <a className="brand" href="#main" aria-label="Sigil desktop home">
           <span className="brand-mark" aria-hidden="true">S</span>
           <span><strong>Sigil</strong><small>Coding workspace</small></span>
@@ -308,7 +354,19 @@ export function App({ bridge = desktopBridge }: AppProps) {
       </header>
 
       <main id="main" className="desktop-stage">
-        <aside className="navigation-pane" aria-label="Workspace and conversations">
+        {compactNavigation && navigationOpen ? (
+          <button className="pane-backdrop" type="button" aria-label="Close conversation navigation" onClick={dismissNavigation} />
+        ) : null}
+        <aside
+          id="desktop-navigation"
+          className={`navigation-pane ${navigationOpen ? "pane-open" : ""}`}
+          ref={navigationRef}
+          aria-label="Workspace and conversations"
+          aria-hidden={compactNavigation && !navigationOpen ? true : undefined}
+          inert={compactNavigation && !navigationOpen ? true : undefined}
+          tabIndex={-1}
+        >
+          <button className="drawer-close" type="button" onClick={dismissNavigation} data-initial-focus>Close navigation</button>
           <section className="workspace-navigation" aria-labelledby="workspace-title">
             <div className="sidebar-heading">
               <div><p className="eyebrow">Projects</p><h2 id="workspace-title">Workspaces</h2></div>
@@ -329,7 +387,10 @@ export function App({ bridge = desktopBridge }: AppProps) {
                     <button
                       className={`workspace-nav-button ${workspace.id === activeWorkspaceId ? "active" : ""}`}
                       type="button"
-                      onClick={() => setActiveWorkspaceId(workspace.id)}
+                      onClick={() => {
+                        setActiveWorkspaceId(workspace.id);
+                        setNavigationOpen(false);
+                      }}
                       aria-current={workspace.id === activeWorkspaceId ? "page" : undefined}
                     >
                       <span className={`status-dot status-${workspace.state}`} aria-hidden="true" />
@@ -459,6 +520,8 @@ export function App({ bridge = desktopBridge }: AppProps) {
         <div className="modal-backdrop">
           <section
             className="confirmation-dialog"
+            ref={confirmationRef}
+            tabIndex={-1}
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="close-workspace-title"
@@ -474,11 +537,8 @@ export function App({ bridge = desktopBridge }: AppProps) {
               <button
                 className="quiet-button"
                 type="button"
-                autoFocus
-                onClick={() => {
-                  setPendingWorkspaceClose(undefined);
-                  setMessage(`${pendingWorkspaceClose.displayName} remains open.`);
-                }}
+                data-initial-focus
+                onClick={dismissWorkspaceClose}
               >
                 Keep running
               </button>

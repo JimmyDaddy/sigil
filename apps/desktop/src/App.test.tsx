@@ -16,8 +16,12 @@ import type {
   WorkspaceSummary,
 } from "./types";
 
+const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+
 afterEach(() => {
   cleanup();
+  if (originalMatchMedia === undefined) delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
+  else Object.defineProperty(window, "matchMedia", originalMatchMedia);
 });
 
 const workspace: WorkspaceSummary = {
@@ -99,6 +103,27 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     ...overrides,
+  };
+}
+
+function installMediaQueries(matches: (query: string) => boolean): () => void {
+  const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (query: string): MediaQueryList => ({
+      matches: matches(query),
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+    }),
+  });
+  return () => {
+    if (original === undefined) delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
+    else Object.defineProperty(window, "matchMedia", original);
   };
 }
 
@@ -533,12 +558,63 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByText("Conversations");
-    await user.click(screen.getByRole("button", { name: "Close sigil" }));
+    const closeButton = screen.getByRole("button", { name: "Close sigil" });
+    await user.click(closeButton);
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
     expect(screen.getByText(/side effects that already happened are not undone/)).toBeTruthy();
+    const keepRunning = screen.getByRole("button", { name: "Keep running" });
+    const interruptRuns = screen.getByRole("button", { name: "Close workspace and interrupt runs" });
+    expect(document.activeElement).toBe(keepRunning);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(interruptRuns);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(keepRunning);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(document.activeElement).toBe(closeButton);
+
+    await user.click(closeButton);
     await user.click(screen.getByRole("button", { name: "Close workspace and interrupt runs" }));
     expect(await screen.findByText("Workspace closed.")).toBeTruthy();
-    expect(confirmations).toEqual([false, true]);
+    expect(confirmations).toEqual([false, false, true]);
+  });
+
+  it("uses focus-managed navigation and review drawers at compact widths", async () => {
+    const restoreMedia = installMediaQueries((query) => query.includes("max-width"));
+    const user = userEvent.setup();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    const navigation = document.querySelector("#desktop-navigation") as HTMLElement;
+    expect(navigation.getAttribute("aria-hidden")).toBe("true");
+    expect(navigation.hasAttribute("inert")).toBe(true);
+    const navigationTrigger = screen.getByRole("button", { name: "Browse" });
+    await user.click(navigationTrigger);
+    expect(navigation.getAttribute("aria-hidden")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close navigation" }));
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.activeElement).toBe(navigationTrigger);
+
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const inspector = document.querySelector("#verification-inspector") as HTMLElement;
+    expect(inspector.getAttribute("aria-hidden")).toBe("true");
+    const reviewTrigger = screen.getByRole("button", { name: "Review" });
+    await user.click(reviewTrigger);
+    expect(inspector.getAttribute("aria-hidden")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close review" }));
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.activeElement).toBe(reviewTrigger);
+    expect(screen.getByRole("log", { name: "Conversation timeline" }).getAttribute("aria-live")).toBe("off");
+
+    cleanup();
+    restoreMedia();
   });
 
   it("shows a stale pagination recovery instead of mixing generations", async () => {
@@ -608,6 +684,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     expect(screen.getByText("complete")).toBeTruthy();
     expect(screen.getByText("terminal")).toBeTruthy();
+    expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
   });
 
   it("preserves IME text, accepts clipboard input, and does not submit during composition", async () => {

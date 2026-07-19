@@ -1,6 +1,6 @@
 # RFC-0045 Desktop UI/UX Foundation V1
 
-状态：active / R45.0-R45.4 complete，R45.5 ready
+状态：active / R45.0-R45.5 complete，R45.6 ready
 
 创建日期：2026-07-19
 
@@ -230,6 +230,15 @@ active run 期间仍允许准备下一条输入；17 个 renderer interaction te
 - streaming container 不逐 token 触发 screen-reader announcement；terminal summary 才进入 polite live region。
 - 320 CSS px reflow、200% zoom、VoiceOver、键盘、IME、reduce motion、light/dark/high-contrast 纳入 gate。
 - primary text/controls 满足 WCAG 2.2 AA；信息不只依赖颜色。
+
+R45.5 已完成：desktop 的 color、surface、status、spacing、radius、motion、shadow 与 z-index 统一通过 semantic
+token 使用，并提供 system light/dark、`prefers-contrast` 与 forced-colors 适配；业务组件不再直接写 raw status color。
+宽屏保留 navigation/conversation/inspector 三域，中屏把 inspector 变为 focus-managed drawer，320px compact 把
+navigation 变为独立 drawer，原生窗口最小 inner width 同步降至 320px。modal/drawer 支持 focus capture、Tab trap、
+Escape 和 restore，streaming log 关闭逐 token announcement，只在 terminal 进入 polite live region；reduced-motion、
+theme、raw-color 和 320px contract 已加入 `check-desktop-ui-system.sh`。18 个 renderer tests、19 个 native tests、
+OpenAPI drift、production build、clippy 与真实 macOS bundle wide-layout/AX smoke 通过；三平台人工 system-WebView
+矩阵仍由 R45.6 最终审计记录，不伪装成已自动验证。
 
 ## 11. Execution slices and commit boundaries
 
