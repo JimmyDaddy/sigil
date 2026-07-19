@@ -27,3 +27,8 @@ commands.allow = ["desktop_catalog"]
 identifier = "allow-desktop-session"
 description = "Allows the main local window to create or reopen one server-owned conversation handle."
 commands.allow = ["desktop_create_session", "desktop_open_session"]
+
+[[permission]]
+identifier = "allow-desktop-run"
+description = "Allows the main local window to start one run through the authenticated local server."
+commands.allow = ["desktop_start_run"]

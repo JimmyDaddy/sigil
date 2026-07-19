@@ -4,11 +4,13 @@ use sigil_desktop::DesktopWorkspaceManager;
 use tokio::sync::Mutex;
 
 use crate::recent::RecentWorkspaceStore;
+use crate::run_streams::DesktopRunStreamOwner;
 
 #[derive(Clone)]
 pub(crate) struct DesktopAppState {
     pub(crate) manager: Arc<Mutex<DesktopWorkspaceManager>>,
     pub(crate) recent_workspaces: Arc<Mutex<RecentWorkspaceStore>>,
+    pub(crate) run_streams: DesktopRunStreamOwner,
     pub(crate) sigil_binary: PathBuf,
 }
 
@@ -19,6 +21,7 @@ impl DesktopAppState {
             recent_workspaces: Arc::new(Mutex::new(RecentWorkspaceStore::new(
                 recent_workspaces_path,
             ))),
+            run_streams: DesktopRunStreamOwner::default(),
             sigil_binary,
         }
     }

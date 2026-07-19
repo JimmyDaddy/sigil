@@ -10,6 +10,9 @@
     "allow-desktop-close-workspace",
     "allow-desktop-open-recent-workspace",
     "allow-desktop-catalog",
-    "allow-desktop-session"
+    "allow-desktop-session",
+    "allow-desktop-run",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

@@ -1,6 +1,7 @@
 mod commands;
 mod ipc;
 mod recent;
+mod run_streams;
 mod state;
 
 use std::sync::{
@@ -14,7 +15,7 @@ use crate::{
     commands::{
         desktop_bootstrap, desktop_catalog, desktop_close_workspace, desktop_create_session,
         desktop_open_recent_workspace, desktop_open_session, desktop_pick_workspace,
-        resolve_sigil_binary,
+        desktop_start_run, resolve_sigil_binary,
     },
     state::DesktopAppState,
 };
@@ -47,10 +48,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_close_workspace,
             desktop_catalog,
             desktop_create_session,
-            desktop_open_session
+            desktop_open_session,
+            desktop_start_run
         ])
         .build(tauri::generate_context!())?;
     let shutdown_manager = Arc::clone(&app.state::<DesktopAppState>().manager);
+    let shutdown_streams = app.state::<DesktopAppState>().run_streams.clone();
 
     app.run(move |app_handle, event| {
         let RunEvent::ExitRequested { api, .. } = event else {
@@ -64,8 +67,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 exit_state.store(EXIT_CLEANING, Ordering::Release);
                 let handle = app_handle.clone();
                 let manager = Arc::clone(&shutdown_manager);
+                let streams = shutdown_streams.clone();
                 let exit_state = Arc::clone(&exit_state);
                 tauri::async_runtime::spawn(async move {
+                    streams.stop_all().await;
                     manager.lock().await.close_all().await;
                     exit_state.store(EXIT_ALLOWED, Ordering::Release);
                     handle.exit(0);

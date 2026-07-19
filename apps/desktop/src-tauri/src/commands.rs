@@ -5,9 +5,10 @@ use std::{
 
 use serde::Serialize;
 use sigil_desktop::{
-    DesktopCatalogQuery, DesktopClientError, DesktopLaunchRequest, DesktopSessionCatalogState,
-    DesktopSessionCreateRequest, DesktopSessionOpenRequest, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopCatalogQuery, DesktopClientError, DesktopLaunchRequest, DesktopRunApprovalMode,
+    DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
+    DesktopSessionOpenRequest, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -17,8 +18,8 @@ use tokio::sync::oneshot;
 use crate::{
     ipc::{
         DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopSessionCreateInput, DesktopSessionOpenInput, DesktopSessionSummary,
-        DesktopWorkspaceSelection,
+        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
+        DesktopSessionOpenInput, DesktopSessionSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -182,12 +183,58 @@ pub(crate) async fn desktop_close_workspace(
             "The workspace identifier is invalid.",
         ));
     }
+    state.run_streams.stop_workspace(&workspace_id).await;
     let mut manager = state.manager.lock().await;
     manager
         .close(&workspace_id)
         .await
         .map_err(project_manager_error)?;
     manager.list().map_err(project_manager_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_start_run(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    input: DesktopRunStartInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_prompt(&input.prompt)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let session = client
+        .session(&input.session_id)
+        .await
+        .map_err(project_client_error)?;
+    let receipt = client
+        .start_run(
+            &input.session_id,
+            DesktopRunStartRequest {
+                prompt: input.prompt,
+                approval_mode: DesktopRunApprovalMode::Ask,
+            },
+        )
+        .await
+        .map_err(project_client_error)?;
+    let response = DesktopRunSummary::from(receipt.run.clone());
+    state
+        .run_streams
+        .start(
+            app,
+            client,
+            workspace_id,
+            input.session_id,
+            session.durable_session_scope_id,
+            receipt.run,
+        )
+        .await;
+    Ok(response)
 }
 
 #[tauri::command]
@@ -332,6 +379,29 @@ fn validate_session_reference(
     Ok(())
 }
 
+fn validate_session_id(value: &str) -> Result<(), DesktopCommandError> {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(DesktopCommandError::new(
+            "session_id_invalid",
+            "The conversation identifier is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prompt(value: &str) -> Result<(), DesktopCommandError> {
+    if value.trim().is_empty()
+        || value.len() > 256 * 1024
+        || value.chars().any(|character| character == '\0')
+    {
+        return Err(DesktopCommandError::new(
+            "run_prompt_invalid",
+            "The prompt is empty or exceeds the desktop input limit.",
+        ));
+    }
+    Ok(())
+}
+
 fn workspace_display_name(path: &Path) -> Result<String, DesktopCommandError> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -428,18 +498,19 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
             "workspace_request_rejected",
             "The workspace server rejected the request.",
         ),
-        DesktopClientError::InvalidRoute | DesktopClientError::InvalidResponse => {
-            DesktopCommandError::new(
-                "workspace_protocol_invalid",
-                "The workspace server returned an incompatible response.",
-            )
-        }
-        DesktopClientError::RequestFailed | DesktopClientError::ResponseTooLarge => {
-            DesktopCommandError::new(
-                "workspace_request_failed",
-                "The workspace server request failed.",
-            )
-        }
+        DesktopClientError::InvalidRoute
+        | DesktopClientError::InvalidResponse
+        | DesktopClientError::InvalidEventStream
+        | DesktopClientError::ProtocolEvent(_) => DesktopCommandError::new(
+            "workspace_protocol_invalid",
+            "The workspace server returned an incompatible response.",
+        ),
+        DesktopClientError::RequestFailed
+        | DesktopClientError::ResponseTooLarge
+        | DesktopClientError::EventStreamGap => DesktopCommandError::new(
+            "workspace_request_failed",
+            "The workspace server request failed.",
+        ),
     }
 }
 

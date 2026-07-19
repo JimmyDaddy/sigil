@@ -7,12 +7,13 @@
 
 mod client;
 mod dto;
+mod events;
 mod launcher;
 mod manager;
 mod protocol;
 mod secret;
 
-pub use client::{DesktopClientError, DesktopHttpClient};
+pub use client::{DesktopClientError, DesktopHttpClient, DesktopRunEventStream};
 pub use dto::{
     DesktopApprovalCommandReceipt, DesktopApprovalDecision, DesktopApprovalDecisionRecord,
     DesktopApprovalDecisionRequest, DesktopApprovalRecordedDecision, DesktopCatalogQuery,
@@ -22,6 +23,11 @@ pub use dto::{
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionCreateRequest, DesktopSessionListResponse, DesktopSessionOpenRequest,
     DesktopSessionSnapshot,
+};
+pub use events::{
+    DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION, DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+    DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError,
+    DesktopPublicRunEvent, DesktopTimelineApproval, DesktopTimelineEvent, DesktopTimelineEventKind,
 };
 pub use launcher::{
     DesktopLaunchError, DesktopLaunchRequest, DesktopLauncher, DesktopServerProcess,

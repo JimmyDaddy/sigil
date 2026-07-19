@@ -1,6 +1,6 @@
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
-use reqwest::{Client, RequestBuilder, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
@@ -14,11 +14,14 @@ use crate::{
         DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionListResponse,
         DesktopSessionOpenRequest, DesktopSessionSnapshot,
     },
+    events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
 };
 
 const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const RUN_EVENT_NAME: &str = "run_event";
 
 /// Authenticated typed client for one desktop-owned loopback server.
 ///
@@ -140,6 +143,55 @@ impl DesktopHttpClient {
     pub async fn run(&self, run_id: &str) -> Result<DesktopRunSnapshot, DesktopClientError> {
         self.get_json(self.route(["runs", run_id])?, StatusCode::OK)
             .await
+    }
+
+    /// Connects to the server-owned replay-plus-live SSE stream for one run.
+    pub async fn run_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<DesktopRunEventStream, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(run_id)?;
+        if let Some(cursor) = last_event_id {
+            validate_replay_cursor(cursor)?;
+        }
+        let mut request = self
+            .client
+            .get(self.route(["runs", run_id, "events"])?)
+            .bearer_auth(self.bearer.expose())
+            .header(header::ACCEPT, "text/event-stream");
+        if let Some(cursor) = last_event_id {
+            request = request.header("Last-Event-ID", cursor);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| DesktopClientError::RequestFailed)?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(rejected_response(response).await);
+        }
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type
+            .split(';')
+            .next()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+        {
+            return Err(DesktopClientError::InvalidEventStream);
+        }
+        Ok(DesktopRunEventStream {
+            response,
+            buffer: Vec::new(),
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            ended: false,
+        })
     }
 
     /// Requests cooperative cancellation with an optimistic sequence guard.
@@ -277,6 +329,169 @@ impl DesktopHttpClient {
     }
 }
 
+/// Bounded incremental decoder for one authenticated run SSE response.
+pub struct DesktopRunEventStream {
+    response: Response,
+    buffer: Vec<u8>,
+    session_id: String,
+    run_id: String,
+    ended: bool,
+}
+
+impl DesktopRunEventStream {
+    /// Returns the next protocol event, ignoring SSE comments and keep-alives.
+    pub async fn next_event(&mut self) -> Result<Option<DesktopProtocolEvent>, DesktopClientError> {
+        loop {
+            if let Some(frame_end) = sse_frame_end(&self.buffer) {
+                let frame = self.buffer.drain(..frame_end).collect::<Vec<_>>();
+                let delimiter = if self.buffer.starts_with(b"\r\n\r\n") {
+                    4
+                } else {
+                    2
+                };
+                self.buffer.drain(..delimiter);
+                if let Some(event) = decode_sse_frame(&frame, &self.session_id, &self.run_id)? {
+                    return Ok(Some(event));
+                }
+                continue;
+            }
+            if self.ended {
+                return if self.buffer.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(DesktopClientError::InvalidEventStream)
+                };
+            }
+            let next = self
+                .response
+                .chunk()
+                .await
+                .map_err(|_| DesktopClientError::RequestFailed)?;
+            match next {
+                Some(chunk) => {
+                    if self.buffer.len().saturating_add(chunk.len()) > MAX_SSE_FRAME_BYTES {
+                        return Err(DesktopClientError::ResponseTooLarge);
+                    }
+                    self.buffer.extend_from_slice(&chunk);
+                }
+                None => self.ended = true,
+            }
+        }
+    }
+}
+
+impl fmt::Debug for DesktopRunEventStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopRunEventStream")
+            .field("transport", &"authenticated loopback SSE")
+            .field("buffered_bytes", &self.buffer.len())
+            .field("ended", &self.ended)
+            .finish_non_exhaustive()
+    }
+}
+
+fn sse_frame_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .or_else(|| buffer.windows(4).position(|window| window == b"\r\n\r\n"))
+}
+
+fn decode_sse_frame(
+    frame: &[u8],
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<DesktopProtocolEvent>, DesktopClientError> {
+    let text = std::str::from_utf8(frame).map_err(|_| DesktopClientError::InvalidEventStream)?;
+    let mut event_name = None;
+    let mut event_id = None;
+    let mut data = String::new();
+    for raw_line in text.lines() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" if event_name.replace(value).is_some() => {
+                return Err(DesktopClientError::InvalidEventStream);
+            }
+            "id" if event_id.replace(value).is_some() => {
+                return Err(DesktopClientError::InvalidEventStream);
+            }
+            "data" => {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value);
+            }
+            "retry" => {}
+            _ => {}
+        }
+    }
+    if event_name.is_none() && event_id.is_none() && data.is_empty() {
+        return Ok(None);
+    }
+    if event_name == Some("stream_gap") {
+        return Err(DesktopClientError::EventStreamGap);
+    }
+    if event_name != Some(RUN_EVENT_NAME) || data.is_empty() {
+        return Err(DesktopClientError::InvalidEventStream);
+    }
+    let event = serde_json::from_str::<DesktopProtocolEvent>(&data)
+        .map_err(|_| DesktopClientError::InvalidEventStream)?;
+    event
+        .validate(session_id, run_id)
+        .map_err(DesktopClientError::ProtocolEvent)?;
+    match event.event_class {
+        DesktopProtocolEventClass::Durable if event_id != event.replay_id.as_deref() => {
+            Err(DesktopClientError::InvalidEventStream)
+        }
+        DesktopProtocolEventClass::Transient if event_id.is_some() => {
+            Err(DesktopClientError::InvalidEventStream)
+        }
+        _ => Ok(Some(event)),
+    }
+}
+
+fn validate_stream_identity(value: &str) -> Result<(), DesktopClientError> {
+    if value.is_empty()
+        || value.len() > 512
+        || value.contains('/')
+        || value.chars().any(char::is_control)
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_replay_cursor(value: &str) -> Result<(), DesktopClientError> {
+    if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+async fn rejected_response(mut response: Response) -> DesktopClientError {
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len().saturating_add(chunk.len()) > MAX_JSON_RESPONSE_BYTES {
+            return DesktopClientError::ResponseTooLarge;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let code = serde_json::from_slice::<DesktopErrorResponse>(&body)
+        .ok()
+        .and_then(|error| safe_error_code(error.error.code));
+    DesktopClientError::Rejected {
+        status: status.as_u16(),
+        code,
+    }
+}
+
 impl fmt::Debug for DesktopHttpClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -309,6 +524,12 @@ pub enum DesktopClientError {
     Rejected { status: u16, code: Option<String> },
     #[error("desktop server response is invalid")]
     InvalidResponse,
+    #[error("desktop server event stream is invalid")]
+    InvalidEventStream,
+    #[error("desktop server event stream reported a live gap")]
+    EventStreamGap,
+    #[error(transparent)]
+    ProtocolEvent(#[from] DesktopProtocolEventError),
 }
 
 #[cfg(test)]

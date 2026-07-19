@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
+import { ConversationPanel } from "./ConversationPanel";
 import { HistoryContent, type HistoryState } from "./HistoryPanel";
 import type {
   CatalogEntry,
@@ -47,6 +48,11 @@ export function App({ bridge = desktopBridge }: AppProps) {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
     [activeWorkspaceId, workspaces],
   );
+
+  const handleConversationNotice = useCallback((notice: string, error = false) => {
+    setLoadState(error ? "error" : "ready");
+    setMessage(notice);
+  }, []);
 
   const applyBootstrap = useCallback((bootstrap: DesktopBootstrap) => {
     setWorkspaces(bootstrap.workspaces);
@@ -353,11 +359,19 @@ export function App({ bridge = desktopBridge }: AppProps) {
               </div>
 
               {selectedSession !== undefined ? (
-                <div className="selected-session" role="status">
-                  <span>Conversation ready</span>
-                  <strong>{selectedSession.label ?? selectedSession.id}</strong>
-                  <small>{selectedSession.runCount} existing runs</small>
-                </div>
+                <>
+                  <div className="selected-session" role="status">
+                    <span>Conversation ready</span>
+                    <strong>{selectedSession.label ?? selectedSession.id}</strong>
+                    <small>{selectedSession.runCount} existing runs</small>
+                  </div>
+                  <ConversationPanel
+                    bridge={bridge}
+                    workspaceId={activeWorkspace.id}
+                    session={selectedSession}
+                    onNotice={handleConversationNotice}
+                  />
+                </>
               ) : null}
 
               <form

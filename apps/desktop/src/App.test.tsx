@@ -1,10 +1,15 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import type { DesktopBridge } from "./bridge";
-import type { CatalogPage, WorkspaceSummary } from "./types";
+import type {
+  CatalogPage,
+  RunStreamStatus,
+  TimelineEvent,
+  WorkspaceSummary,
+} from "./types";
 
 afterEach(cleanup);
 
@@ -46,6 +51,14 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       label: "Durable session",
       runCount: 2,
     }),
+    startRun: async (_workspaceId, sessionId) => ({
+      id: "run-1",
+      sessionId,
+      status: "running",
+      streamSequence: 0,
+    }),
+    subscribeRunEvents: async () => () => undefined,
+    subscribeRunStreamStatus: async () => () => undefined,
     ...overrides,
   };
 }
@@ -177,5 +190,51 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("History changed while paging.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Refresh history" })).toBeTruthy();
+  });
+
+  it("runs a prompt and merges streamed and durable completion into one assistant reply", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let statusListener: ((status: RunStreamStatus) => void) | undefined;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      subscribeRunStreamStatus: async (listener) => {
+        statusListener = listener;
+        return () => undefined;
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-1",
+      replayable: false,
+    };
+    act(() => {
+      eventListener?.({ ...base, sequence: 1, kind: "run_started", text: "Say hello" });
+      eventListener?.({ ...base, sequence: 2, kind: "assistant_delta", text: "Hel" });
+      eventListener?.({ ...base, sequence: 3, kind: "assistant_message", text: "Hello" });
+      eventListener?.({ ...base, sequence: 4, kind: "run_finished", text: "Hello", replayable: true });
+      statusListener?.({ ...base, state: "terminal" });
+    });
+
+    expect(screen.getAllByText("Hello")).toHaveLength(1);
+    expect(screen.getByText("complete")).toBeTruthy();
+    expect(screen.getByText("terminal")).toBeTruthy();
   });
 });

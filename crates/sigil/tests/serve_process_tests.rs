@@ -592,6 +592,118 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_typed_client_streams_and_replays_real_run_events() {
+    let workspace = test_workspace("desktop-run-events");
+    let config_path = workspace.join("sigil.toml");
+    let (base_url, provider) = spawn_provider_fixture("desktop streamed answer");
+    write_config(&config_path, &base_url);
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let opened = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(
+                env!("CARGO_BIN_EXE_sigil"),
+                &config_path,
+                &workspace,
+            ),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch production sigil serve");
+    let client = manager
+        .client(&opened.id)
+        .expect("ready workspace should expose a client");
+    let session = client
+        .create_session(sigil_desktop::DesktopSessionCreateRequest {
+            label: Some("desktop run".to_owned()),
+        })
+        .await
+        .expect("session should create");
+    let receipt = client
+        .start_run(
+            &session.id,
+            sigil_desktop::DesktopRunStartRequest {
+                prompt: "answer from the fixture".to_owned(),
+                approval_mode: sigil_desktop::DesktopRunApprovalMode::AllowReadonly,
+            },
+        )
+        .await
+        .expect("run should start");
+    let mut stream = client
+        .run_events(&session.durable_session_scope_id, &receipt.run.id, None)
+        .await
+        .expect("authenticated SSE should connect");
+    let mut kinds = Vec::new();
+    let mut first_cursor = None;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(15), stream.next_event())
+            .await
+            .expect("real run event should arrive before timeout")
+            .expect("real run event should decode");
+        let Some(event) = event else {
+            break;
+        };
+        if first_cursor.is_none() {
+            first_cursor = event.replay_id.clone();
+        }
+        kinds.push(
+            event
+                .into_timeline(
+                    &opened.id,
+                    &session.durable_session_scope_id,
+                    &receipt.run.id,
+                    &session.id,
+                )
+                .expect("real event should narrow for renderer")
+                .kind,
+        );
+    }
+    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted));
+    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
+    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantMessage));
+    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
+
+    let first_cursor = first_cursor.expect("run start should provide a durable cursor");
+    let mut replay = client
+        .run_events(
+            &session.durable_session_scope_id,
+            &receipt.run.id,
+            Some(&first_cursor),
+        )
+        .await
+        .expect("durable suffix replay should connect");
+    let mut replay_kinds = Vec::new();
+    while let Some(event) = replay
+        .next_event()
+        .await
+        .expect("durable suffix should decode")
+    {
+        replay_kinds.push(
+            event
+                .into_timeline(
+                    &opened.id,
+                    &session.durable_session_scope_id,
+                    &receipt.run.id,
+                    &session.id,
+                )
+                .expect("replayed event should narrow")
+                .kind,
+        );
+    }
+    assert!(!replay_kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
+    assert!(replay_kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
+
+    provider.join().expect("provider fixture should stop");
+    assert!(
+        manager
+            .close(&opened.id)
+            .await
+            .expect("desktop server should close")
+            .success
+    );
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
 #[cfg(unix)]
 fn stop_serve(mut process: ServeProcess) -> Output {
     let signal_result = unsafe { libc::kill(process.child.id() as i32, libc::SIGINT) };

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type {
   CatalogPage,
@@ -6,6 +7,9 @@ import type {
   DesktopBootstrap,
   SessionOpenInput,
   SessionSummary,
+  RunStreamStatus,
+  RunSummary,
+  TimelineEvent,
   WorkspaceSelection,
   WorkspaceSummary,
 } from "./types";
@@ -21,6 +25,9 @@ export interface DesktopBridge {
     workspaceId: string,
     input: SessionOpenInput,
   ): Promise<SessionSummary>;
+  startRun(workspaceId: string, sessionId: string, prompt: string): Promise<RunSummary>;
+  subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
+  subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
 }
 
 export const desktopBridge: DesktopBridge = {
@@ -40,4 +47,13 @@ export const desktopBridge: DesktopBridge = {
     }),
   openSession: (workspaceId, input) =>
     invoke<SessionSummary>("desktop_open_session", { workspaceId, input }),
+  startRun: (workspaceId, sessionId, prompt) =>
+    invoke<RunSummary>("desktop_start_run", {
+      workspaceId,
+      input: { sessionId, prompt },
+    }),
+  subscribeRunEvents: async (listener) =>
+    listen<TimelineEvent>("sigil-run-event", (event) => listener(event.payload)),
+  subscribeRunStreamStatus: async (listener) =>
+    listen<RunStreamStatus>("sigil-run-stream-status", (event) => listener(event.payload)),
 };

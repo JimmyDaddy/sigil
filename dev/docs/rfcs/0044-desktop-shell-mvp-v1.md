@@ -1,6 +1,6 @@
 # RFC-0044 Desktop Shell MVP V1
 
-状态：active / R44.0-R44.3 complete；R44.4 ready
+状态：active / R44.0-R44.4 complete；R44.5 ready
 
 创建日期：2026-07-19
 
@@ -254,3 +254,25 @@ tests覆盖空/recent、new/close、分页/open和stale恢复；8个native tests
 
 该结果只建立conversation选择与process-local session handle；尚未展示message timeline、发送prompt或消费SSE。
 R44.4现在可以在同一session handle上实现start run、durable/live event merge和terminal reconciliation。
+
+## 13. R44.4 result
+
+R44.4已交付conversation/run surface。`sigil-desktop`新增bounded SSE decoder和独立HTTP protocol envelope，校验
+content type、schema、stream identity、durable cursor与SSE `id:`一致性，并把public run event收窄成不含bearer、
+raw tool args或server-private path的renderer timeline DTO。桌面仍只消费`sigil serve`既有durable replay和transient
+live fan-out，不复制agent loop或把UI状态写回session truth。
+
+native backend现在拥有每个active run的background follower；45秒keepalive deadline触发reconnect，`Last-Event-ID`
+只在durable event成功投递后推进，stream gap、EOF和transport failure都会从最后durable cursor重连。terminal event正常
+关闭follower；若terminal frame丢失，则以`GET /runs/{run_id}` server snapshot收敛。workspace close与app exit会先abort
+所有owned follower，再关闭对应server，避免detached task。
+
+React surface新增message timeline、composer、run start和明确的live/reconnecting/terminal状态。timeline reducer以
+assistant message为单一完成行：transient delta先增量显示，durable assistant message覆盖草稿，`run_finished`只校准
+terminal而不再生成第二份reply。真实production `sigil serve`+provider fixture测试已证明run start、live delta、durable
+assistant/terminal、terminal close和`Last-Event-ID` suffix replay；UI interaction test证明delta/message/finish只显示一份
+assistant reply。
+
+历史catalog仍只包含body-free metadata；R44.4没有通过直接读取JSONL/SQLite伪造旧message replay。打开旧session后可继续
+新run，但历史正文浏览需要未来独立、bounded、server-owned transcript contract，不能从catalog越权推断。R44.5现可在
+同一event/command边界上实现approval、cancel和verification/evidence control loop。

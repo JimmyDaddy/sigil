@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
-    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
-    DesktopSessionSnapshot, DesktopWorkspaceSummary,
+    DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
+    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopWorkspaceSummary,
 };
 
 use crate::recent::RecentWorkspaceSummary;
@@ -103,6 +103,22 @@ pub(crate) struct DesktopSessionSummary {
     pub(crate) foreground_run_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopRunStartInput {
+    pub(crate) session_id: String,
+    pub(crate) prompt: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRunSummary {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) status: &'static str,
+    pub(crate) stream_sequence: u64,
+}
+
 impl From<DesktopSessionCatalogState> for DesktopCatalogState {
     fn from(value: DesktopSessionCatalogState) -> Self {
         match value {
@@ -155,6 +171,27 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
             label: value.label,
             run_count: value.run_ids.len(),
             foreground_run_id: value.foreground_run_id,
+        }
+    }
+}
+
+impl From<DesktopRunSnapshot> for DesktopRunSummary {
+    fn from(value: DesktopRunSnapshot) -> Self {
+        Self {
+            id: value.id,
+            session_id: value.session_id,
+            status: match value.status {
+                DesktopRunStatus::Starting => "starting",
+                DesktopRunStatus::Running => "running",
+                DesktopRunStatus::WaitingForApproval => "waiting_for_approval",
+                DesktopRunStatus::CancelRequested => "cancel_requested",
+                DesktopRunStatus::ExecutionUncertain => "execution_uncertain",
+                DesktopRunStatus::Finished => "finished",
+                DesktopRunStatus::Failed => "failed",
+                DesktopRunStatus::Cancelled => "cancelled",
+                DesktopRunStatus::Interrupted => "interrupted",
+            },
+            stream_sequence: value.stream_sequence,
         }
     }
 }

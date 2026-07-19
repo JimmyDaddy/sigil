@@ -77,3 +77,85 @@ export interface SessionOpenInput {
   sessionId: string;
   label?: string;
 }
+
+export type RunStatus =
+  | "starting"
+  | "running"
+  | "waiting_for_approval"
+  | "cancel_requested"
+  | "execution_uncertain"
+  | "finished"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface RunSummary {
+  id: string;
+  sessionId: string;
+  status: RunStatus;
+  streamSequence: number;
+}
+
+export type TimelineEventKind =
+  | "run_started"
+  | "assistant_delta"
+  | "reasoning_delta"
+  | "assistant_message"
+  | "tool_started"
+  | "tool_completed"
+  | "tool_progress"
+  | "tool_result"
+  | "approval_requested"
+  | "approval_resolved"
+  | "notice"
+  | "usage"
+  | "control"
+  | "run_finished"
+  | "run_failed"
+  | "run_cancelled"
+  | "other";
+
+export interface TimelineApproval {
+  callId: string;
+  toolName: string;
+  approvalRequestId: string;
+  toolCallHash: string;
+  policyVersion: string;
+  expiresAtMs: number;
+  operation?: string;
+  risk?: string;
+  snapshotRequired: boolean;
+  previewTitle?: string;
+  previewSummary?: string;
+  previewBody?: string;
+}
+
+export interface TimelineEvent {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  sequence: number;
+  replayable: boolean;
+  replayId?: string;
+  kind: TimelineEventKind;
+  text?: string;
+  itemId?: string;
+  toolName?: string;
+  status?: string;
+  approval?: TimelineApproval;
+}
+
+export type RunStreamState =
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "terminal"
+  | "error";
+
+export interface RunStreamStatus {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  state: RunStreamState;
+  message?: string;
+}
