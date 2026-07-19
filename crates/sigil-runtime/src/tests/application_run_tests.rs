@@ -7,22 +7,37 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
-    AutoApproveHandler, JsonlSessionStore, PublicRunEvent, PublicRunEventKind,
-    RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, Tool, ToolAccess,
-    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    AutoApproveHandler, DisclosurePresentationError, DisclosurePresentationReceipt,
+    EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, PublicRunEvent,
+    PublicRunEventKind, RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session,
+    TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec,
 };
 
 use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
-    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
-    application_run_input, application_terminal_projection, attach_application_request_context,
-    bind_application_session, bind_existing_application_session,
-    constrain_application_tool_registry, default_application_session_path,
-    optional_eager_mcp_warning, record_application_preparation_cancellation,
+    ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
+    PublicApplicationEventBridge, application_run_input, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
+    bind_existing_application_session, constrain_application_tool_registry,
+    default_application_session_path, optional_eager_mcp_warning,
+    record_application_preparation_cancellation, rerun_application_verification,
     validate_execution_contract,
 };
+
+struct RejectingDisclosurePresenter;
+
+#[async_trait]
+impl EgressDisclosurePresenter for RejectingDisclosurePresenter {
+    async fn present(
+        &self,
+        _disclosure: PreEgressDisclosure,
+    ) -> std::result::Result<DisclosurePresentationReceipt, DisclosurePresentationError> {
+        Err(DisclosurePresentationError::SinkClosed)
+    }
+}
 
 struct NamedTool(&'static str);
 
@@ -91,6 +106,56 @@ fn session_lease_rejects_overlapping_foreground_runs_and_releases_on_drop() -> R
     drop(first);
     let reacquired = manager.acquire(&path)?;
     drop(reacquired);
+    Ok(())
+}
+
+#[tokio::test]
+async fn verification_view_uses_durable_truth_and_rerun_shares_the_foreground_lease() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/verification.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    assert!(application_verification_view(&binding.session_log_path)?.is_none());
+
+    let lease_manager = Arc::new(ApplicationSessionLeaseManager::new());
+    let foreground = lease_manager.acquire(&binding.session_log_path)?;
+    let services = ApplicationRunServices::with_session_leases(
+        Arc::new(RejectingDisclosurePresenter),
+        Arc::clone(&lease_manager),
+    );
+    let request = TaskVerificationRerunRequest {
+        task_id: TaskId::new("task_1")?,
+        step_id: TaskStepId::new("verify_1")?,
+        check_spec_id: "cargo-test".to_owned(),
+        check_spec_hash: "check-hash".to_owned(),
+        policy_hash: "policy-hash".to_owned(),
+        workspace_snapshot_id: "snapshot-1".to_owned(),
+    };
+
+    let error = rerun_application_verification(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        &services,
+        &request,
+    )
+    .await
+    .expect_err("verification must not overlap another foreground operation");
+
+    assert!(error.to_string().contains("active foreground run"));
+    drop(foreground);
     Ok(())
 }
 

@@ -314,6 +314,121 @@ pub struct DesktopApprovalCommandReceipt {
     pub replayed: bool,
 }
 
+/// Exact stale-safe binding for one recommended task verification check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopVerificationRerunRequest {
+    pub task_id: String,
+    pub step_id: String,
+    pub check_spec_id: String,
+    pub check_spec_hash: String,
+    pub policy_hash: String,
+    pub workspace_snapshot_id: String,
+}
+
+/// Verification evidence scope returned by the local server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
+pub enum DesktopVerificationScope {
+    Run(String),
+    Workspace(String),
+    Task(String),
+    Step(String),
+    Agent(String),
+    Changeset(String),
+}
+
+/// Shared verification readiness verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopVerificationVerdict {
+    NotEvaluated,
+    NotApplicable,
+    Pending,
+    Passed,
+    Failed,
+    Missing,
+    Inconclusive,
+    Stale,
+    Skipped,
+}
+
+/// Latest durable check lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopVerificationCheckStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Inconclusive,
+    Errored,
+}
+
+/// One exact product action; approval remains a review-only direction in this surface.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "request")]
+pub enum DesktopVerificationAction {
+    Rerun(DesktopVerificationRerunRequest),
+    ReviewApproval { check_spec_id: String },
+}
+
+/// Stable reason category for one server-selected verification recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopVerificationRecommendationKind {
+    Run,
+    RerunNonWriting,
+    Retry,
+    ReviewApproval,
+}
+
+/// Renderer-safe evidence links for verification inspection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopVerificationEvidence {
+    pub check_run_id: Option<String>,
+    pub check_spec_id: Option<String>,
+    pub check_status: Option<DesktopVerificationCheckStatus>,
+    pub receipt_id: Option<String>,
+    pub workspace_snapshot_id: Option<String>,
+    pub changeset_id: Option<String>,
+    pub changeset_apply_event_id: Option<String>,
+    pub command_event_id: Option<String>,
+    pub output_artifact_id: Option<String>,
+    pub failure_summary: Option<String>,
+}
+
+/// Shared verification recommendation and evidence view.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopVerificationView {
+    pub task_id: String,
+    pub step_id: String,
+    pub scope: DesktopVerificationScope,
+    pub verdict: DesktopVerificationVerdict,
+    pub status: String,
+    pub recommended_check_spec_id: Option<String>,
+    pub recommendation_kind: Option<DesktopVerificationRecommendationKind>,
+    pub recommendation_reason: Option<String>,
+    pub action: Option<DesktopVerificationAction>,
+    pub evidence: DesktopVerificationEvidence,
+}
+
+/// Receipt from one envelope-protected verification rerun.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopVerificationRerunCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub verification: DesktopVerificationView,
+    pub replayed: bool,
+}
+
 /// Stable server error envelope. The native shell only projects the bounded code to the renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

@@ -29,7 +29,8 @@ use crate::{
         HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt,
         HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
         HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionSnapshot,
+        HttpSessionOpenRequest, HttpSessionSnapshot, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -78,6 +79,9 @@ pub enum HttpRegistryError {
     /// Another foreground run still owns this adapter session.
     #[error("http session {session_id} already has foreground run {run_id}")]
     SessionForegroundRunActive { session_id: String, run_id: String },
+    /// A verification rerun already owns the session's foreground mutation lease.
+    #[error("http session {session_id} already has an active verification rerun")]
+    SessionVerificationActive { session_id: String },
     /// The run cannot accept this operation in its current state.
     #[error("http run {run_id} is not active")]
     RunNotActive { run_id: String },
@@ -270,6 +274,7 @@ impl HttpSessionRunRegistry {
             run_ids: Vec::new(),
             binding,
             foreground_run_id: None,
+            verification_in_progress: false,
         };
         let snapshot = session.snapshot();
         state.sessions.insert(id, session);
@@ -330,6 +335,7 @@ impl HttpSessionRunRegistry {
             run_ids: Vec::new(),
             binding,
             foreground_run_id: None,
+            verification_in_progress: false,
         };
         let snapshot = session.snapshot();
         state.sessions.insert(id, session);
@@ -394,6 +400,11 @@ impl HttpSessionRunRegistry {
                 return Err(HttpRegistryError::SessionForegroundRunActive {
                     session_id: session_id.to_owned(),
                     run_id: run_id.clone(),
+                });
+            }
+            if session.verification_in_progress {
+                return Err(HttpRegistryError::SessionVerificationActive {
+                    session_id: session_id.to_owned(),
                 });
             }
             let run = HttpRunState::new(
@@ -612,6 +623,120 @@ impl HttpSessionRunRegistry {
             .ok_or_else(|| HttpRegistryError::RunNotFound {
                 run_id: run_id.to_owned(),
             })
+    }
+
+    /// Projects the current shared verification view for one adapter session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or durable projection fails.
+    pub fn verification_view(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<HttpVerificationView>, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| self.driver.verification_view(&session)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "verification view",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "verification view",
+                run_id: session_id.to_owned(),
+                message: error.message,
+            })
+    }
+
+    /// Executes one exact verification rerun from an idempotent command envelope.
+    ///
+    /// The session cannot admit an agent run or another verification rerun until the driver
+    /// returns a durable terminal projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for protocol/key conflicts, active foreground work, stale verification
+    /// bindings, or driver failure.
+    pub fn rerun_verification_command(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpVerificationRerunRequest>,
+    ) -> Result<HttpVerificationRerunCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        let request = HttpReservedCommand::verification(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_verification(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| {
+            let session = {
+                let mut state = self.lock_state();
+                state.ensure_accepting_commands()?;
+                let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+                    HttpRegistryError::SessionNotFound {
+                        session_id: session_id.to_owned(),
+                    }
+                })?;
+                if let Some(run_id) = session.foreground_run_id.as_ref() {
+                    return Err(HttpRegistryError::SessionForegroundRunActive {
+                        session_id: session_id.to_owned(),
+                        run_id: run_id.clone(),
+                    });
+                }
+                if session.verification_in_progress {
+                    return Err(HttpRegistryError::SessionVerificationActive {
+                        session_id: session_id.to_owned(),
+                    });
+                }
+                session.verification_in_progress = true;
+                session.snapshot()
+            };
+            let driver_result = catch_unwind(AssertUnwindSafe(|| {
+                self.driver.rerun_verification(&session, &command.payload)
+            }));
+            if let Some(session) = self.lock_state().sessions.get_mut(session_id) {
+                session.verification_in_progress = false;
+            }
+            let verification = match driver_result {
+                Ok(Ok(view)) => view,
+                Ok(Err(error)) => {
+                    return Err(HttpRegistryError::DriverRejected {
+                        operation: "verification rerun",
+                        run_id: session_id.to_owned(),
+                        message: error.message,
+                    });
+                }
+                Err(_) => {
+                    return Err(HttpRegistryError::DriverPanicked {
+                        operation: "verification rerun",
+                        run_id: session_id.to_owned(),
+                    });
+                }
+            };
+            Ok(HttpVerificationRerunCommandReceipt {
+                command_id: command.command_id,
+                client_id: command.client_id,
+                session_id: command.session_id,
+                correlation_id: command.correlation_id,
+                verification,
+                replayed: false,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::Verification(Box::new(
+            result.clone(),
+        )))?;
+        result
     }
 
     /// Requests cancellation for a running HTTP adapter run.
@@ -1107,6 +1232,7 @@ enum HttpCommandKind {
     Start,
     Cancel,
     Approval,
+    Verification,
 }
 
 impl HttpCommandKind {
@@ -1115,6 +1241,7 @@ impl HttpCommandKind {
             Self::Start => b"start",
             Self::Cancel => b"cancel",
             Self::Approval => b"approval",
+            Self::Verification => b"verification",
         }
     }
 
@@ -1123,6 +1250,7 @@ impl HttpCommandKind {
             Self::Start => "start",
             Self::Cancel => "cancel",
             Self::Approval => "approval",
+            Self::Verification => "verification",
         }
     }
 }
@@ -1154,6 +1282,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpApprovalDecisionRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Approval, &[run_id, call_id], command)
+    }
+
+    fn verification(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpVerificationRerunRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::Verification, &[path_session_id], command)
     }
 
     fn new<T>(
@@ -1196,6 +1331,7 @@ enum HttpCommandCompletion {
     Start(Result<HttpRunStartCommandReceipt, HttpRegistryError>),
     Cancel(Result<HttpRunCancelCommandReceipt, HttpRegistryError>),
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
+    Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Aborted,
 }
 
@@ -1229,9 +1365,22 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Approval(receipt)
             }
-            Self::Start(Err(_)) | Self::Cancel(Err(_)) | Self::Approval(Err(_)) | Self::Aborted => {
-                HttpStoredCommandCompletion::Aborted
+            Self::Verification(result) if result.is_ok() => {
+                let mut receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful verification completion should contain a receipt")
+                    .clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Verification(Box::new(receipt))
             }
+            Self::Start(Err(_))
+            | Self::Cancel(Err(_))
+            | Self::Approval(Err(_))
+            | Self::Verification(_)
+            | Self::Aborted => HttpStoredCommandCompletion::Aborted,
         }
     }
 
@@ -1240,6 +1389,9 @@ impl HttpCommandCompletion {
             HttpStoredCommandCompletion::Start(receipt) => Self::Start(Ok(receipt)),
             HttpStoredCommandCompletion::Cancel(receipt) => Self::Cancel(Ok(receipt)),
             HttpStoredCommandCompletion::Approval(receipt) => Self::Approval(Ok(receipt)),
+            HttpStoredCommandCompletion::Verification(receipt) => {
+                Self::Verification(Box::new(Ok(*receipt)))
+            }
             HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => {
                 Self::Aborted
             }
@@ -1412,6 +1564,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1423,6 +1576,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1434,6 +1588,21 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_verification(
+        &self,
+    ) -> Result<HttpVerificationRerunCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::Verification(result) => {
+                (*result).map(HttpVerificationRerunCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1595,6 +1764,7 @@ struct HttpSessionState {
     run_ids: Vec<String>,
     binding: HttpSessionBinding,
     foreground_run_id: Option<String>,
+    verification_in_progress: bool,
 }
 
 impl HttpSessionState {

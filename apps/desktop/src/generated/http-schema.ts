@@ -584,6 +584,95 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project the current task verification recommendation and evidence */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Shared verification product projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VerificationView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/verification/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rerun one exact stale-safe recommended verification check */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VerificationRerunCommand"];
+                };
+            };
+            responses: {
+                /** @description Durable verification rerun receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["VerificationRerunCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -639,6 +728,11 @@ export interface components {
                 code: string;
                 message: string;
             };
+        };
+        EvidenceScope: {
+            id: string;
+            /** @enum {string} */
+            kind: "run" | "workspace" | "task" | "step" | "agent" | "changeset";
         };
         HealthResponse: {
             /** @constant */
@@ -698,6 +792,7 @@ export interface components {
             durable_session_reopen: boolean;
             live_events: boolean;
             session_catalog: boolean;
+            verification: boolean;
         };
         ServerInfo: {
             /** @enum {string} */
@@ -707,7 +802,7 @@ export interface components {
             /** @constant */
             protocol_version: 1;
             /** @constant */
-            schema_version: 1;
+            schema_version: 2;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -771,6 +866,66 @@ export interface components {
             label?: string | null;
             run_ids: string[];
             session_log_path: string;
+        };
+        VerificationEvidence: {
+            changeset_apply_event_id: string | null;
+            changeset_id: string | null;
+            check_run_id: string | null;
+            check_spec_id: string | null;
+            /** @enum {string|null} */
+            check_status: "queued" | "running" | "succeeded" | "failed" | "skipped" | "inconclusive" | "errored" | null;
+            command_event_id: string | null;
+            failure_summary: string | null;
+            output_artifact_id: string | null;
+            receipt_id: string | null;
+            workspace_snapshot_id: string | null;
+        };
+        /** @enum {string} */
+        VerificationRecommendationKind: "run" | "rerun_non_writing" | "retry" | "review_approval";
+        VerificationRerunAction: {
+            /** @constant */
+            kind: "rerun";
+            request: components["schemas"]["VerificationRerunRequest"];
+        };
+        VerificationRerunCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["VerificationRerunRequest"];
+        };
+        VerificationRerunCommandReceipt: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            replayed: boolean;
+            session_id: string;
+            verification: components["schemas"]["VerificationView"];
+        };
+        VerificationRerunRequest: {
+            check_spec_hash: string;
+            check_spec_id: string;
+            policy_hash: string;
+            step_id: string;
+            task_id: string;
+            workspace_snapshot_id: string;
+        };
+        VerificationReviewApprovalAction: {
+            /** @constant */
+            kind: "review_approval";
+            request: {
+                check_spec_id: string;
+            };
+        };
+        /** @enum {string} */
+        VerificationVerdict: "not_evaluated" | "not_applicable" | "pending" | "passed" | "failed" | "missing" | "inconclusive" | "stale" | "skipped";
+        VerificationView: {
+            action: components["schemas"]["VerificationRerunAction"] | components["schemas"]["VerificationReviewApprovalAction"] | null;
+            evidence: components["schemas"]["VerificationEvidence"];
+            recommendation_kind: components["schemas"]["VerificationRecommendationKind"] | null;
+            recommendation_reason: string | null;
+            recommended_check_spec_id: string | null;
+            scope: components["schemas"]["EvidenceScope"];
+            status: string;
+            step_id: string;
+            task_id: string;
+            verdict: components["schemas"]["VerificationVerdict"];
         };
     };
     responses: {

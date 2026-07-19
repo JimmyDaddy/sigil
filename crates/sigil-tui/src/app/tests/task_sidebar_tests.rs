@@ -878,6 +878,14 @@ fn task_sidebar_recommends_non_writing_rerun_before_other_actions() {
             .iter()
             .any(|line| line == "recommended: rerun non-writing check docs-check")
     );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("recommended: "))
+            .count(),
+        1,
+        "shared product projection must expose one recommended action"
+    );
     assert!(lines.iter().any(|line| {
         line == "recommended why: a writing check needs fresh non-writing evidence"
     }));

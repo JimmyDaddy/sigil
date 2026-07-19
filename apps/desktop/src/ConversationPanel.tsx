@@ -6,6 +6,7 @@ import type {
   RunSummary,
   SessionSummary,
   TimelineEvent,
+  VerificationSummary,
 } from "./types";
 
 interface ConversationPanelProps {
@@ -34,12 +35,28 @@ export function ConversationPanel({
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [verification, setVerification] = useState<VerificationSummary>();
+  const [verificationBusy, setVerificationBusy] = useState(false);
 
   useEffect(() => {
     setRun(undefined);
     setEvents([]);
     setStreamStatus(undefined);
+    setVerification(undefined);
   }, [session.id, workspaceId]);
+
+  useEffect(() => {
+    let disposed = false;
+    void bridge.verification(workspaceId, session.id).then((view) => {
+      if (!disposed) setVerification(view);
+    }).catch(() => {
+      if (!disposed) setVerification(undefined);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -64,6 +81,11 @@ export function ConversationPanel({
       ) {
         setStreamStatus(status);
         if (status.message !== undefined) onNotice(status.message, status.state === "error");
+        if (status.state === "terminal") {
+          void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
+            setVerification(undefined);
+          });
+        }
       }
     }).then((unsubscribe) => {
       if (disposed) unsubscribe();
@@ -76,6 +98,7 @@ export function ConversationPanel({
   }, [bridge, onNotice, session.id, workspaceId]);
 
   const rows = useMemo(() => reduceTimeline(events), [events]);
+  const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
 
   const submit = async () => {
@@ -92,6 +115,64 @@ export function ConversationPanel({
       onNotice("The run could not be started.", true);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (run === undefined || !active || controlBusy) return;
+    setControlBusy(true);
+    onNotice("Requesting cooperative cancellation…");
+    try {
+      setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
+      onNotice("Cancellation requested. Waiting for durable cleanup evidence.");
+    } catch {
+      onNotice("Cancellation could not be requested.", true);
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
+  const decideApproval = async (approve: boolean) => {
+    if (pendingApproval?.approval === undefined || controlBusy) return;
+    setControlBusy(true);
+    onNotice(approve ? "Submitting approval…" : "Submitting denial…");
+    try {
+      const decision = await bridge.resolveApproval(
+        workspaceId,
+        session.id,
+        pendingApproval.runId,
+        pendingApproval.approval,
+        approve,
+      );
+      onNotice(`Tool request ${decision.decision}.`);
+    } catch {
+      onNotice("The approval decision was stale or could not be recorded.", true);
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
+  const rerunVerification = async () => {
+    if (verification?.action?.kind !== "rerun" || verificationBusy || active) return;
+    setVerificationBusy(true);
+    onNotice(`Running recommended check ${verification.recommendedCheckSpecId ?? ""}…`);
+    try {
+      const next = await bridge.rerunVerification(
+        workspaceId,
+        session.id,
+        verification.action.request,
+      );
+      setVerification(next);
+      onNotice(`Verification finished: ${next.status}.`);
+    } catch {
+      onNotice("The verification binding was stale or the check could not run.", true);
+      try {
+        setVerification(await bridge.verification(workspaceId, session.id));
+      } catch {
+        setVerification(undefined);
+      }
+    } finally {
+      setVerificationBusy(false);
     }
   };
 
@@ -123,6 +204,84 @@ export function ConversationPanel({
         )}
       </div>
 
+      {pendingApproval?.approval !== undefined ? (
+        <section className="approval-card" aria-labelledby="approval-title">
+          <header>
+            <div>
+              <p className="eyebrow">Explicit approval required</p>
+              <h3 id="approval-title">{pendingApproval.approval.previewTitle ?? pendingApproval.approval.toolName}</h3>
+            </div>
+            <span className={`risk-badge risk-${pendingApproval.approval.risk ?? "unknown"}`}>
+              {pendingApproval.approval.risk ?? "unclassified"}
+            </span>
+          </header>
+          <p>{pendingApproval.approval.previewSummary ?? "Review this tool request before it can continue."}</p>
+          {pendingApproval.approval.previewBody ? <pre>{pendingApproval.approval.previewBody}</pre> : null}
+          <dl>
+            <div><dt>Tool</dt><dd>{pendingApproval.approval.toolName}</dd></div>
+            <div><dt>Operation</dt><dd>{pendingApproval.approval.operation ?? "unknown"}</dd></div>
+            <div><dt>Snapshot</dt><dd>{pendingApproval.approval.snapshotRequired ? "required" : "not required"}</dd></div>
+          </dl>
+          <small>Approval applies only to this exact request. Shell and remote side effects cannot be undone by desktop history controls.</small>
+          <div className="approval-actions">
+            <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={() => void decideApproval(false)}>Deny</button>
+            <button className="primary-button" type="button" disabled={controlBusy} onClick={() => void decideApproval(true)}>Approve once</button>
+          </div>
+        </section>
+      ) : null}
+
+      {verification !== undefined ? (
+        <section className="verification-card" aria-labelledby="verification-title">
+          <header>
+            <div>
+              <p className="eyebrow">Verification</p>
+              <h3 id="verification-title">{verification.recommendedCheckSpecId ?? "Current evidence"}</h3>
+            </div>
+            <span className={`verification-badge verification-${verification.verdict}`}>
+              {verification.status}
+            </span>
+          </header>
+          {verification.recommendationReason ? <p>{verification.recommendationReason}</p> : null}
+          <dl>
+            <div><dt>Scope</dt><dd>{verification.scopeKind} · {verification.scopeId}</dd></div>
+            <div><dt>Receipt</dt><dd>{verification.evidence.receiptId ?? "not recorded"}</dd></div>
+            <div><dt>Snapshot</dt><dd>{verification.evidence.workspaceSnapshotId ?? "not linked"}</dd></div>
+            <div><dt>Changeset</dt><dd>{verification.evidence.changesetId ?? "not linked"}</dd></div>
+          </dl>
+          {verification.evidence.failureSummary ? (
+            <div className="verification-failure" role="status">
+              <strong>Failure location</strong>
+              <p>{verification.evidence.failureSummary}</p>
+              <small>
+                Command {verification.evidence.commandEventId ?? "not linked"} · output {verification.evidence.outputArtifactId ?? "not linked"}
+              </small>
+            </div>
+          ) : null}
+          <div className="verification-actions">
+            {verification.action?.kind === "rerun" ? (
+              <button
+                className="primary-button"
+                type="button"
+                disabled={verificationBusy || active}
+                onClick={() => void rerunVerification()}
+              >
+                {verificationBusy
+                  ? "Running check…"
+                  : verification.recommendationKind === "retry"
+                    ? "Retry check"
+                    : verification.recommendationKind === "rerun_non_writing"
+                      ? "Rerun non-writing check"
+                      : "Run recommended check"}
+              </button>
+            ) : verification.action?.kind === "review_approval" ? (
+              <small>This check needs a separate trust review. Desktop does not silently promote repository commands.</small>
+            ) : (
+              <small>No verification action is currently required.</small>
+            )}
+          </div>
+        </section>
+      ) : null}
+
       <form
         className="composer"
         onSubmit={(event) => {
@@ -138,16 +297,38 @@ export function ConversationPanel({
           placeholder="Describe the change or question…"
           rows={4}
           disabled={active || submitting}
+          onCompositionStart={(event) => {
+            event.currentTarget.dataset.composing = "true";
+          }}
+          onCompositionEnd={(event) => {
+            delete event.currentTarget.dataset.composing;
+          }}
         />
         <div className="composer-actions">
           <small>{active ? "One foreground run is active." : "Approval mode: ask"}</small>
-          <button className="primary-button" type="submit" disabled={prompt.trim() === "" || active || submitting}>
-            {submitting ? "Starting…" : "Run"}
-          </button>
+          <div>
+            {active ? <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={() => void cancel()}>Cancel run</button> : null}
+            <button className="primary-button" type="submit" disabled={prompt.trim() === "" || active || submitting}>
+              {submitting ? "Starting…" : "Run"}
+            </button>
+          </div>
         </div>
       </form>
     </section>
   );
+}
+
+function latestPendingApproval(events: TimelineEvent[]): TimelineEvent | undefined {
+  const pending = new Map<string, TimelineEvent>();
+  for (const event of events) {
+    if (event.kind === "approval_requested" && event.itemId !== undefined) {
+      pending.set(`${event.runId}:${event.itemId}`, event);
+    }
+    if (event.kind === "approval_resolved" && event.itemId !== undefined) {
+      pending.delete(`${event.runId}:${event.itemId}`);
+    }
+  }
+  return [...pending.values()].at(-1);
 }
 
 export function mergeTimelineEvent(

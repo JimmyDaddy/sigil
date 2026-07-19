@@ -300,6 +300,29 @@
         ],
         "type": "object"
       },
+      "EvidenceScope": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "run",
+              "workspace",
+              "task",
+              "step",
+              "agent",
+              "changeset"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -535,6 +558,9 @@
           },
           "session_catalog": {
             "type": "boolean"
+          },
+          "verification": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -543,7 +569,8 @@
           "durable_event_replay",
           "live_events",
           "approval",
-          "cancellation"
+          "cancellation",
+          "verification"
         ],
         "type": "object"
       },
@@ -567,7 +594,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "server_version": {
@@ -816,6 +843,309 @@
           "run_ids",
           "durable_session_scope_id",
           "session_log_path"
+        ],
+        "type": "object"
+      },
+      "VerificationEvidence": {
+        "properties": {
+          "changeset_apply_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changeset_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "check_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "check_spec_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "check_status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "inconclusive",
+              "errored",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "command_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_artifact_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receipt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "check_run_id",
+          "check_spec_id",
+          "check_status",
+          "receipt_id",
+          "workspace_snapshot_id",
+          "changeset_id",
+          "changeset_apply_event_id",
+          "command_event_id",
+          "output_artifact_id",
+          "failure_summary"
+        ],
+        "type": "object"
+      },
+      "VerificationRecommendationKind": {
+        "enum": [
+          "run",
+          "rerun_non_writing",
+          "retry",
+          "review_approval"
+        ],
+        "type": "string"
+      },
+      "VerificationRerunAction": {
+        "properties": {
+          "kind": {
+            "const": "rerun",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/VerificationRerunRequest"
+          }
+        },
+        "required": [
+          "kind",
+          "request"
+        ],
+        "type": "object"
+      },
+      "VerificationRerunCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/VerificationRerunRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VerificationRerunCommandReceipt": {
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/VerificationView"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "verification",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "VerificationRerunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "check_spec_hash": {
+            "type": "string"
+          },
+          "check_spec_id": {
+            "type": "string"
+          },
+          "policy_hash": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "workspace_snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "step_id",
+          "check_spec_id",
+          "check_spec_hash",
+          "policy_hash",
+          "workspace_snapshot_id"
+        ],
+        "type": "object"
+      },
+      "VerificationReviewApprovalAction": {
+        "properties": {
+          "kind": {
+            "const": "review_approval",
+            "type": "string"
+          },
+          "request": {
+            "properties": {
+              "check_spec_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "check_spec_id"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "kind",
+          "request"
+        ],
+        "type": "object"
+      },
+      "VerificationVerdict": {
+        "enum": [
+          "not_evaluated",
+          "not_applicable",
+          "pending",
+          "passed",
+          "failed",
+          "missing",
+          "inconclusive",
+          "stale",
+          "skipped"
+        ],
+        "type": "string"
+      },
+      "VerificationView": {
+        "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VerificationRerunAction"
+              },
+              {
+                "$ref": "#/components/schemas/VerificationReviewApprovalAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/VerificationEvidence"
+          },
+          "recommendation_kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VerificationRecommendationKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recommendation_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_check_spec_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/EvidenceScope"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/VerificationVerdict"
+          }
+        },
+        "required": [
+          "task_id",
+          "step_id",
+          "scope",
+          "verdict",
+          "status",
+          "recommended_check_spec_id",
+          "recommendation_kind",
+          "recommendation_reason",
+          "action",
+          "evidence"
         ],
         "type": "object"
       }
@@ -1357,6 +1687,87 @@
           }
         },
         "summary": "Start a run in a session"
+      }
+    },
+    "/sessions/{session_id}/verification": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationView"
+                }
+              }
+            },
+            "description": "Shared verification product projection"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Project the current task verification recommendation and evidence"
+      }
+    },
+    "/sessions/{session_id}/verification/rerun": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerificationRerunCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationRerunCommandReceipt"
+                }
+              }
+            },
+            "description": "Durable verification rerun receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Rerun one exact stale-safe recommended verification check"
       }
     }
   },

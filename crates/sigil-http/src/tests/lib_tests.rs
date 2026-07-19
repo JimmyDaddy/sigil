@@ -11,8 +11,11 @@ use std::{
 use serde_json::{Value, json};
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
-    EgressNetworkRoute, JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent,
-    PublicRunEventKind, Session, ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent,
+    EgressNetworkRoute, EvidenceScope, JsonlSessionStore, ModelMessage, PreEgressDisclosure,
+    PublicRunEvent, PublicRunEventKind, Session, TaskId, TaskStepId, TaskVerificationRerunRequest,
+    ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent, VerificationProductAction,
+    VerificationProductEvidence, VerificationProductView, VerificationRecommendationKind,
+    VerificationVerdict,
 };
 use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService};
 use tokio::{
@@ -35,7 +38,8 @@ use super::{
     HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
     HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
     HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSseError, HttpSseEvent,
-    http_openapi_document, public_run_event_to_sse,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[test]
@@ -440,6 +444,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(server_info.workspace_id, "workspace-http-catalog");
     assert_eq!(server_info.bind_addr, address.to_string());
     assert!(server_info.capabilities.durable_session_reopen);
+    assert!(server_info.capabilities.verification);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -564,6 +569,95 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
     assert_eq!(retry_receipt["replayed"], true);
     assert_eq!(driver.starts().len(), 1);
     let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_projects_and_idempotently_reruns_exact_verification() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "verification"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let request = verification_rerun_request();
+    driver.set_verification_view(verification_test_view(&request, "missing"));
+
+    let (status, projected) = http_raw_request(
+        address,
+        http_get(
+            &format!("/sessions/{session_id}/verification"),
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(projected["status"], "missing");
+    assert_eq!(
+        projected["action"]["request"]["workspace_snapshot_id"],
+        "snapshot-1"
+    );
+
+    driver.set_verification_view(verification_test_view(&request, "passed"));
+    let command = HttpCommandEnvelope::new(
+        "verification-command-1",
+        "desktop-client",
+        session_id,
+        request.clone(),
+    );
+    let body = serde_json::to_string(&command).expect("command should serialize");
+    let rerun = http_post(
+        &format!("/sessions/{session_id}/verification/rerun"),
+        Some("secret-token"),
+        &body,
+    );
+    let (status, receipt) = http_raw_request(address, rerun.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["verification"]["status"], "passed");
+    assert_eq!(receipt["replayed"], false);
+
+    let (status, replay) = http_raw_request(address, rerun).await;
+    assert_eq!(status, 200);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(driver.verification_reruns(), vec![request]);
+    let _ = shutdown.send(());
+}
+
+#[test]
+fn verification_rerun_never_overlaps_a_foreground_agent_run() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    driver.set_verification_view(verification_test_view(
+        &verification_rerun_request(),
+        "missing",
+    ));
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpRunApprovalMode::Ask),
+        )
+        .expect("foreground run should start");
+    let command = HttpCommandEnvelope::new(
+        "verification-busy-1",
+        "desktop-client",
+        &session.id,
+        verification_rerun_request(),
+    );
+
+    assert_eq!(
+        registry.rerun_verification_command(&session.id, command),
+        Err(HttpRegistryError::SessionForegroundRunActive {
+            session_id: session.id.clone(),
+            run_id: run.id,
+        })
+    );
+    assert!(driver.verification_reruns().is_empty());
 }
 
 #[tokio::test]
@@ -1202,6 +1296,7 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     for path in [
         "/sessions/{session_id}/runs",
+        "/sessions/{session_id}/verification/rerun",
         "/runs/{run_id}/cancel",
         "/runs/{run_id}/approvals/{call_id}",
     ] {
@@ -3275,6 +3370,8 @@ struct RecordingRunDriver {
     start_observer: Mutex<Option<StartObserver>>,
     cancel_observer: Mutex<Option<CancelObserver>>,
     approval_observer: Mutex<Option<ApprovalObserver>>,
+    verification_view: Mutex<Option<HttpVerificationView>>,
+    verification_reruns: Mutex<Vec<HttpVerificationRerunRequest>>,
 }
 
 impl RecordingRunDriver {
@@ -3320,6 +3417,14 @@ impl RecordingRunDriver {
 
     fn observe_cancel(&self, observer: CancelObserver) {
         *lock(&self.cancel_observer) = Some(observer);
+    }
+
+    fn set_verification_view(&self, view: HttpVerificationView) {
+        *lock(&self.verification_view) = Some(view);
+    }
+
+    fn verification_reruns(&self) -> Vec<HttpVerificationRerunRequest> {
+        lock(&self.verification_reruns).clone()
     }
 }
 
@@ -3383,6 +3488,63 @@ impl HttpRunDriver for RecordingRunDriver {
         }
         lock(&self.approvals).push(approval);
         Ok(())
+    }
+
+    fn verification_view(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
+        Ok(lock(&self.verification_view).clone())
+    }
+
+    fn rerun_verification(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        request: &HttpVerificationRerunRequest,
+    ) -> Result<HttpVerificationView, HttpRunDriverError> {
+        lock(&self.verification_reruns).push(request.clone());
+        lock(&self.verification_view)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("test verification view is missing"))
+    }
+}
+
+fn verification_rerun_request() -> TaskVerificationRerunRequest {
+    TaskVerificationRerunRequest {
+        task_id: TaskId::new("task_1").expect("task id"),
+        step_id: TaskStepId::new("verify_1").expect("step id"),
+        check_spec_id: "cargo-test".to_owned(),
+        check_spec_hash: "check-hash".to_owned(),
+        policy_hash: "policy-hash".to_owned(),
+        workspace_snapshot_id: "snapshot-1".to_owned(),
+    }
+}
+
+fn verification_test_view(
+    request: &TaskVerificationRerunRequest,
+    status: &str,
+) -> VerificationProductView {
+    VerificationProductView {
+        task_id: request.task_id.as_str().to_owned(),
+        step_id: request.step_id.as_str().to_owned(),
+        scope: EvidenceScope::Step(format!(
+            "{}:{}",
+            request.task_id.as_str(),
+            request.step_id.as_str()
+        )),
+        verdict: if status == "passed" {
+            VerificationVerdict::Passed
+        } else {
+            VerificationVerdict::Missing
+        },
+        status: status.to_owned(),
+        recommended_check_spec_id: Some(request.check_spec_id.clone()),
+        recommendation_kind: Some(VerificationRecommendationKind::Run),
+        recommendation_reason: Some(
+            "this trusted check is required by the current task".to_owned(),
+        ),
+        action: Some(VerificationProductAction::Rerun(request.clone())),
+        evidence: VerificationProductEvidence::default(),
     }
 }
 

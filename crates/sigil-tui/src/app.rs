@@ -42,7 +42,6 @@ mod timeline_render_store;
 mod tool_card_interaction;
 mod usage_sidebar_flow;
 mod verification_flow;
-mod verification_recommendation;
 mod worker_bridge;
 mod workspace_trust_flow;
 

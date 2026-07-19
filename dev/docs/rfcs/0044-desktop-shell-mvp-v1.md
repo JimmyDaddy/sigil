@@ -1,6 +1,6 @@
 # RFC-0044 Desktop Shell MVP V1
 
-状态：active / R44.0-R44.4 complete；R44.5 ready
+状态：active / R44.0-R44.5 complete；R44.6 ready
 
 创建日期：2026-07-19
 
@@ -276,3 +276,22 @@ assistant reply。
 历史catalog仍只包含body-free metadata；R44.4没有通过直接读取JSONL/SQLite伪造旧message replay。打开旧session后可继续
 新run，但历史正文浏览需要未来独立、bounded、server-owned transcript contract，不能从catalog越权推断。R44.5现可在
 同一event/command边界上实现approval、cancel和verification/evidence control loop。
+
+## 14. R44.5 result
+
+R44.5已交付approval、cancel与verification control loop。approval card只显示server投影后的subject、preview、风险与
+exact guard；决策仍必须携带session、run、call、policy digest和expiry guard。cancel必须由当前active run触发并等待
+server supervisor确认，不把按钮点击提前显示为已终止，也不声称撤销已经发生的shell或remote side effect。
+
+verification现在由`sigil-kernel`提供共享product reducer，TUI、HTTP和desktop消费同一套recommendation、exact rerun
+binding、receipt、snapshot、changeset与failure locator语义；原TUI重复实现已删除。authenticated HTTP新增只读view和
+command-envelope rerun端点，rerun复用同一session foreground lease、durable session truth与配置中的execution backend，
+因此不会与前台agent run重叠，也不能由renderer构造任意命令。verification command receipt可持久化并幂等replay。
+
+desktop renderer只接收bounded verification projection，并且只能执行server推荐的单项检查。需要人工approval的动作只
+显示review指引，不会静默提升为verified。React交互测试覆盖approval、cancel、verification evidence与rerun；真实
+production driver测试使用配置中的execution backend完成实际命令重跑，并证明结果重新进入durable receipt/evidence链。
+
+由于desktop exact capability集合增加`verification`，server-info schema升级为2；HTTP protocol仍保持V1，旧schema会在
+launcher readiness阶段fail closed。kernel/TUI/HTTP/native/frontend测试、contract drift与Clippy均通过。R44.6现可开始
+sidecar packaging、system-WebView dogfood、三平台CI和完成度审计。

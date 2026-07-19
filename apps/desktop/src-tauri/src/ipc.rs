@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
-    DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
-    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopWorkspaceSummary,
+    DesktopApprovalDecisionRecord, DesktopRunSnapshot, DesktopRunStatus,
+    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
+    DesktopSessionSnapshot, DesktopVerificationAction, DesktopVerificationCheckStatus,
+    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
+    DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::recent::RecentWorkspaceSummary;
@@ -119,6 +122,112 @@ pub(crate) struct DesktopRunSummary {
     pub(crate) stream_sequence: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopRunCancelInput {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopApprovalDecisionInput {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) call_id: String,
+    pub(crate) approval_request_id: String,
+    pub(crate) tool_call_hash: String,
+    pub(crate) policy_version: String,
+    pub(crate) expires_at_ms: u64,
+    pub(crate) approve: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopApprovalDecisionSummary {
+    pub(crate) run_id: String,
+    pub(crate) call_id: String,
+    pub(crate) decision: &'static str,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopVerificationRerunBinding {
+    pub(crate) task_id: String,
+    pub(crate) step_id: String,
+    pub(crate) check_spec_id: String,
+    pub(crate) check_spec_hash: String,
+    pub(crate) policy_hash: String,
+    pub(crate) workspace_snapshot_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopVerificationRerunInput {
+    pub(crate) session_id: String,
+    pub(crate) request: DesktopVerificationRerunBinding,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopVerificationSummary {
+    pub(crate) task_id: String,
+    pub(crate) step_id: String,
+    pub(crate) scope_kind: &'static str,
+    pub(crate) scope_id: String,
+    pub(crate) verdict: &'static str,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recommended_check_spec_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recommendation_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recommendation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) action: Option<DesktopVerificationActionSummary>,
+    pub(crate) evidence: DesktopVerificationEvidenceSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub(crate) enum DesktopVerificationActionSummary {
+    Rerun {
+        request: DesktopVerificationRerunBinding,
+    },
+    ReviewApproval {
+        check_spec_id: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopVerificationEvidenceSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) check_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) check_spec_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) check_status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) receipt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) changeset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) changeset_apply_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) command_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_summary: Option<String>,
+}
+
 impl From<DesktopSessionCatalogState> for DesktopCatalogState {
     fn from(value: DesktopSessionCatalogState) -> Self {
         match value {
@@ -193,5 +302,133 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
             },
             stream_sequence: value.stream_sequence,
         }
+    }
+}
+
+impl From<DesktopApprovalDecisionRecord> for DesktopApprovalDecisionSummary {
+    fn from(value: DesktopApprovalDecisionRecord) -> Self {
+        Self {
+            run_id: value.run_id,
+            call_id: value.call_id,
+            decision: match value.decision {
+                sigil_desktop::DesktopApprovalRecordedDecision::Approved => "approved",
+                sigil_desktop::DesktopApprovalRecordedDecision::Denied => "denied",
+            },
+        }
+    }
+}
+
+impl From<DesktopVerificationRerunBinding> for DesktopVerificationRerunRequest {
+    fn from(value: DesktopVerificationRerunBinding) -> Self {
+        Self {
+            task_id: value.task_id,
+            step_id: value.step_id,
+            check_spec_id: value.check_spec_id,
+            check_spec_hash: value.check_spec_hash,
+            policy_hash: value.policy_hash,
+            workspace_snapshot_id: value.workspace_snapshot_id,
+        }
+    }
+}
+
+impl From<DesktopVerificationRerunRequest> for DesktopVerificationRerunBinding {
+    fn from(value: DesktopVerificationRerunRequest) -> Self {
+        Self {
+            task_id: value.task_id,
+            step_id: value.step_id,
+            check_spec_id: value.check_spec_id,
+            check_spec_hash: value.check_spec_hash,
+            policy_hash: value.policy_hash,
+            workspace_snapshot_id: value.workspace_snapshot_id,
+        }
+    }
+}
+
+impl From<DesktopVerificationView> for DesktopVerificationSummary {
+    fn from(value: DesktopVerificationView) -> Self {
+        let (scope_kind, scope_id) = match value.scope {
+            DesktopVerificationScope::Run(id) => ("run", id),
+            DesktopVerificationScope::Workspace(id) => ("workspace", id),
+            DesktopVerificationScope::Task(id) => ("task", id),
+            DesktopVerificationScope::Step(id) => ("step", id),
+            DesktopVerificationScope::Agent(id) => ("agent", id),
+            DesktopVerificationScope::Changeset(id) => ("changeset", id),
+        };
+        let action = value.action.map(|action| match action {
+            DesktopVerificationAction::Rerun(request) => DesktopVerificationActionSummary::Rerun {
+                request: request.into(),
+            },
+            DesktopVerificationAction::ReviewApproval { check_spec_id } => {
+                DesktopVerificationActionSummary::ReviewApproval { check_spec_id }
+            }
+        });
+        Self {
+            task_id: value.task_id,
+            step_id: value.step_id,
+            scope_kind,
+            scope_id,
+            verdict: verification_verdict_label(value.verdict),
+            status: value.status,
+            recommended_check_spec_id: value.recommended_check_spec_id,
+            recommendation_kind: value
+                .recommendation_kind
+                .map(verification_recommendation_kind_label),
+            recommendation_reason: value.recommendation_reason,
+            action,
+            evidence: DesktopVerificationEvidenceSummary {
+                check_run_id: value.evidence.check_run_id,
+                check_spec_id: value.evidence.check_spec_id,
+                check_status: value
+                    .evidence
+                    .check_status
+                    .map(verification_check_status_label),
+                receipt_id: value.evidence.receipt_id,
+                workspace_snapshot_id: value.evidence.workspace_snapshot_id,
+                changeset_id: value.evidence.changeset_id,
+                changeset_apply_event_id: value.evidence.changeset_apply_event_id,
+                command_event_id: value.evidence.command_event_id,
+                output_artifact_id: value.evidence.output_artifact_id,
+                failure_summary: value.evidence.failure_summary,
+            },
+        }
+    }
+}
+
+fn verification_recommendation_kind_label(
+    value: sigil_desktop::DesktopVerificationRecommendationKind,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopVerificationRecommendationKind::Run => "run",
+        sigil_desktop::DesktopVerificationRecommendationKind::RerunNonWriting => {
+            "rerun_non_writing"
+        }
+        sigil_desktop::DesktopVerificationRecommendationKind::Retry => "retry",
+        sigil_desktop::DesktopVerificationRecommendationKind::ReviewApproval => "review_approval",
+    }
+}
+
+fn verification_verdict_label(value: DesktopVerificationVerdict) -> &'static str {
+    match value {
+        DesktopVerificationVerdict::NotEvaluated => "not_evaluated",
+        DesktopVerificationVerdict::NotApplicable => "not_applicable",
+        DesktopVerificationVerdict::Pending => "pending",
+        DesktopVerificationVerdict::Passed => "passed",
+        DesktopVerificationVerdict::Failed => "failed",
+        DesktopVerificationVerdict::Missing => "missing",
+        DesktopVerificationVerdict::Inconclusive => "inconclusive",
+        DesktopVerificationVerdict::Stale => "stale",
+        DesktopVerificationVerdict::Skipped => "skipped",
+    }
+}
+
+fn verification_check_status_label(value: DesktopVerificationCheckStatus) -> &'static str {
+    match value {
+        DesktopVerificationCheckStatus::Queued => "queued",
+        DesktopVerificationCheckStatus::Running => "running",
+        DesktopVerificationCheckStatus::Succeeded => "succeeded",
+        DesktopVerificationCheckStatus::Failed => "failed",
+        DesktopVerificationCheckStatus::Skipped => "skipped",
+        DesktopVerificationCheckStatus::Inconclusive => "inconclusive",
+        DesktopVerificationCheckStatus::Errored => "errored",
     }
 }

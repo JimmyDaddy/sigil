@@ -10,12 +10,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
     EgressDisclosurePresenter, EventHandler, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MutationEventRecorder, PublicRunEvent, PublicRunEventKind, RootConfig,
+    MutationEventRecorder, NoopEventHandler, PublicRunEvent, PublicRunEventKind, RootConfig,
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
-    ToolRegistryScope, WorkspaceTrust, resolve_workspace_root, safe_persistence_text,
-    workspace_trust_from_entries,
+    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -921,6 +922,81 @@ pub fn bind_existing_application_session(
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
     })
+}
+
+/// Reads the current shared verification product projection for one bound durable session.
+///
+/// This query decodes append-only session truth without creating adapter-owned verification
+/// state or exposing the session path to a renderer.
+///
+/// # Errors
+///
+/// Returns an error when the durable stream cannot be decoded.
+pub fn application_verification_view(
+    session_path: &Path,
+) -> Result<Option<VerificationProductView>> {
+    let entries = JsonlSessionStore::read_entries(session_path)?;
+    Ok(verification_product_view(&entries))
+}
+
+/// Reruns one exact verification recommendation through the shared execution backend and lease.
+///
+/// # Errors
+///
+/// Returns an error when the bound session identity drifted, another foreground operation owns the
+/// session, the rendered verification binding is stale, or execution cannot reach a durable
+/// terminal receipt.
+pub async fn rerun_application_verification(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    services: &ApplicationRunServices,
+    request: &TaskVerificationRerunRequest,
+) -> Result<VerificationProductView> {
+    let config_path = config_path.to_owned();
+    let launch_cwd = launch_cwd.to_owned();
+    let session_path = session_path.to_owned();
+    let expected_session_scope_id = expected_session_scope_id.to_owned();
+    let session_leases = Arc::clone(&services.session_leases);
+    let request = request.clone();
+    let preparation = tokio::task::spawn_blocking(move || {
+        let root_config = RootConfig::load(&config_path)?;
+        let workspace_root =
+            resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
+        let store = JsonlSessionStore::new(&session_path)?;
+        let session_lease = session_leases.acquire(store.path())?;
+        let session = Session::load_from_store(
+            root_config.agent.provider.clone(),
+            root_config.agent.model.clone(),
+            store,
+        )?;
+        if session.session_scope_id() != expected_session_scope_id {
+            bail!("durable session identity changed before verification rerun");
+        }
+        let execution_backend = crate::build_configured_execution_backend(&root_config)?;
+        Ok::<_, anyhow::Error>((
+            session,
+            session_lease,
+            workspace_root,
+            execution_backend,
+            request,
+        ))
+    })
+    .await
+    .map_err(|_| anyhow!("verification rerun preparation worker failed"))??;
+    let (mut session, _session_lease, workspace_root, execution_backend, request) = preparation;
+    let mut handler = NoopEventHandler;
+    rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        execution_backend.as_ref(),
+        &workspace_root,
+        &request,
+    )
+    .await?;
+    verification_product_view(session.entries())
+        .ok_or_else(|| anyhow!("verification rerun completed without a product projection"))
 }
 
 /// Durably records a cancellation that won the race with application-run preparation.

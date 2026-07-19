@@ -12,7 +12,8 @@ use crate::{
         DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionListResponse,
-        DesktopSessionOpenRequest, DesktopSessionSnapshot,
+        DesktopSessionOpenRequest, DesktopSessionSnapshot, DesktopVerificationRerunCommandReceipt,
+        DesktopVerificationRerunRequest, DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -223,6 +224,33 @@ impl DesktopHttpClient {
         let command = self.command(session_id, Some(expected_stream_sequence), payload);
         self.post_json(
             self.route(["runs", run_id, "approvals", call_id])?,
+            &command,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Projects the current server-owned verification card for one session.
+    pub async fn verification(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopVerificationView, DesktopClientError> {
+        self.get_json(
+            self.route(["sessions", session_id, "verification"])?,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Reruns one exact stale-safe verification recommendation.
+    pub async fn rerun_verification(
+        &self,
+        session_id: &str,
+        payload: DesktopVerificationRerunRequest,
+    ) -> Result<DesktopVerificationRerunCommandReceipt, DesktopClientError> {
+        let command = self.command(session_id, None, payload);
+        self.post_json(
+            self.route(["sessions", session_id, "verification", "rerun"])?,
             &command,
             StatusCode::OK,
         )

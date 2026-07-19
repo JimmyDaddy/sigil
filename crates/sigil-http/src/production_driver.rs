@@ -15,9 +15,9 @@ use sigil_kernel::{
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, PreparedApplicationRun, bind_application_session,
-    bind_existing_application_session, prepare_application_run,
-    record_application_preparation_cancellation,
+    ApplicationRunTerminalStatus, PreparedApplicationRun, application_verification_view,
+    bind_application_session, bind_existing_application_session, prepare_application_run,
+    record_application_preparation_cancellation, rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
@@ -28,6 +28,7 @@ use crate::{
     HttpPendingApproval, HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval,
     HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
     HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -367,6 +368,32 @@ impl HttpRunDriver for HttpProductionRunDriver {
             ));
         }
         run.broker.resolve(&approval.call_id, approval.decision)
+    }
+
+    fn verification_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
+        application_verification_view(Path::new(&session.session_log_path)).map_err(|error| {
+            HttpRunDriverError::new(format!("failed to project verification state: {error}"))
+        })
+    }
+
+    fn rerun_verification(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpVerificationRerunRequest,
+    ) -> Result<HttpVerificationView, HttpRunDriverError> {
+        self.runtime
+            .block_on(rerun_application_verification(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &self.services,
+                request,
+            ))
+            .map_err(|error| HttpRunDriverError::new(format!("verification rerun failed: {error}")))
     }
 
     fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {

@@ -4,7 +4,7 @@ use super::*;
 
 fn valid_server_info() -> DesktopServerInfo {
     serde_json::from_value(serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol_version": 1,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -17,7 +17,8 @@ fn valid_server_info() -> DesktopServerInfo {
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,
-            "cancellation": true
+            "cancellation": true,
+            "verification": true
         }
     }))
     .expect("fixture should decode")
@@ -51,7 +52,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
 #[test]
 fn exact_server_info_rejects_unknown_fields() {
     let result = serde_json::from_value::<DesktopServerInfo>(serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol_version": 1,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -64,7 +65,8 @@ fn exact_server_info_rejects_unknown_fields() {
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,
-            "cancellation": true
+            "cancellation": true,
+            "verification": true
         },
         "unexpected": "drift"
     }));

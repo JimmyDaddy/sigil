@@ -38,6 +38,7 @@ mod config;
 mod discovery;
 mod evidence;
 mod links;
+mod product;
 mod readiness;
 mod runner;
 mod shared;
@@ -49,6 +50,7 @@ pub use evidence::*;
 pub(crate) use links::{
     verification_failure_locator_from_records, verification_receipt_link_from_records,
 };
+pub use product::*;
 pub use readiness::*;
 pub(crate) use runner::run_verification_check_with_evidence;
 pub use runner::*;

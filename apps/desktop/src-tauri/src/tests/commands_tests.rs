@@ -77,3 +77,23 @@ fn session_open_reference_rejects_path_shaped_input() {
     assert!(validate_session_reference("nested/session.jsonl", "session-1").is_err());
     assert!(validate_session_reference("nested\\session.jsonl", "session-1").is_err());
 }
+
+#[test]
+fn verification_rerun_requires_one_bounded_exact_binding() {
+    let valid = DesktopVerificationRerunInput {
+        session_id: "http-session-1".to_owned(),
+        request: crate::ipc::DesktopVerificationRerunBinding {
+            task_id: "task_1".to_owned(),
+            step_id: "verify_1".to_owned(),
+            check_spec_id: "cargo-test".to_owned(),
+            check_spec_hash: "check-hash".to_owned(),
+            policy_hash: "policy-hash".to_owned(),
+            workspace_snapshot_id: "snapshot-1".to_owned(),
+        },
+    };
+    assert!(validate_verification_rerun(&valid).is_ok());
+
+    let mut invalid = valid;
+    invalid.request.policy_hash.clear();
+    assert!(validate_verification_rerun(&invalid).is_err());
+}

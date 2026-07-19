@@ -5,7 +5,8 @@ use std::{
 
 use serde::Serialize;
 use sigil_desktop::{
-    DesktopCatalogQuery, DesktopClientError, DesktopLaunchRequest, DesktopRunApprovalMode,
+    DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
+    DesktopClientError, DesktopLaunchRequest, DesktopRunApprovalMode, DesktopRunCancelRequest,
     DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
     DesktopSessionOpenRequest, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
     DesktopWorkspaceSummary,
@@ -17,9 +18,11 @@ use tokio::sync::oneshot;
 
 use crate::{
     ipc::{
-        DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
+        DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
+        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopRunCancelInput,
         DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
-        DesktopSessionOpenInput, DesktopSessionSummary, DesktopWorkspaceSelection,
+        DesktopSessionOpenInput, DesktopSessionSummary, DesktopVerificationRerunInput,
+        DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -238,6 +241,152 @@ pub(crate) async fn desktop_start_run(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_cancel_run(
+    workspace_id: String,
+    input: DesktopRunCancelInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.run_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let snapshot = client
+        .run(&input.run_id)
+        .await
+        .map_err(project_client_error)?;
+    if snapshot.session_id != input.session_id {
+        return Err(DesktopCommandError::new(
+            "run_session_mismatch",
+            "The run does not belong to this conversation.",
+        ));
+    }
+    client
+        .cancel_run(
+            &input.session_id,
+            &input.run_id,
+            snapshot.stream_sequence,
+            DesktopRunCancelRequest {
+                reason: Some("Desktop user requested cancellation".to_owned()),
+            },
+        )
+        .await
+        .map(|receipt| receipt.run.into())
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_resolve_approval(
+    workspace_id: String,
+    input: DesktopApprovalDecisionInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopApprovalDecisionSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    for value in [
+        input.session_id.as_str(),
+        input.run_id.as_str(),
+        input.call_id.as_str(),
+        input.approval_request_id.as_str(),
+        input.tool_call_hash.as_str(),
+        input.policy_version.as_str(),
+    ] {
+        validate_session_id(value)?;
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let snapshot = client
+        .run(&input.run_id)
+        .await
+        .map_err(project_client_error)?;
+    if snapshot.session_id != input.session_id {
+        return Err(DesktopCommandError::new(
+            "approval_session_mismatch",
+            "The approval does not belong to this conversation.",
+        ));
+    }
+    client
+        .resolve_approval(
+            &input.session_id,
+            &input.run_id,
+            &input.call_id,
+            snapshot.stream_sequence,
+            DesktopApprovalDecisionRequest {
+                approval_request_id: input.approval_request_id,
+                tool_call_hash: input.tool_call_hash,
+                policy_version: input.policy_version,
+                expires_at_ms: input.expires_at_ms,
+                decision: if input.approve {
+                    DesktopApprovalDecision::Approve
+                } else {
+                    DesktopApprovalDecision::Deny
+                },
+                reason: Some(
+                    if input.approve {
+                        "Approved in Sigil Desktop"
+                    } else {
+                        "Denied in Sigil Desktop"
+                    }
+                    .to_owned(),
+                ),
+            },
+        )
+        .await
+        .map(|receipt| receipt.decision.into())
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_verification(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopVerificationSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .verification(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_rerun_verification(
+    workspace_id: String,
+    input: DesktopVerificationRerunInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopVerificationSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_verification_rerun(&input)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .rerun_verification(&input.session_id, input.request.into())
+        .await
+        .map(|receipt| receipt.verification.into())
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_catalog(
     workspace_id: String,
     request: DesktopCatalogRequest,
@@ -398,6 +547,27 @@ fn validate_prompt(value: &str) -> Result<(), DesktopCommandError> {
             "run_prompt_invalid",
             "The prompt is empty or exceeds the desktop input limit.",
         ));
+    }
+    Ok(())
+}
+
+fn validate_verification_rerun(
+    input: &DesktopVerificationRerunInput,
+) -> Result<(), DesktopCommandError> {
+    for value in [
+        input.request.task_id.as_str(),
+        input.request.step_id.as_str(),
+        input.request.check_spec_id.as_str(),
+        input.request.check_spec_hash.as_str(),
+        input.request.policy_hash.as_str(),
+        input.request.workspace_snapshot_id.as_str(),
+    ] {
+        if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(DesktopCommandError::new(
+                "verification_request_invalid",
+                "The verification recommendation is invalid or stale.",
+            ));
+        }
     }
     Ok(())
 }

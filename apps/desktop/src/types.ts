@@ -96,6 +96,52 @@ export interface RunSummary {
   streamSequence: number;
 }
 
+export interface ApprovalDecisionSummary {
+  runId: string;
+  callId: string;
+  decision: "approved" | "denied";
+}
+
+export interface VerificationRerunBinding {
+  taskId: string;
+  stepId: string;
+  checkSpecId: string;
+  checkSpecHash: string;
+  policyHash: string;
+  workspaceSnapshotId: string;
+}
+
+export type VerificationAction =
+  | { kind: "rerun"; request: VerificationRerunBinding }
+  | { kind: "review_approval"; checkSpecId: string };
+
+export interface VerificationEvidence {
+  checkRunId?: string;
+  checkSpecId?: string;
+  checkStatus?: "queued" | "running" | "succeeded" | "failed" | "skipped" | "inconclusive" | "errored";
+  receiptId?: string;
+  workspaceSnapshotId?: string;
+  changesetId?: string;
+  changesetApplyEventId?: string;
+  commandEventId?: string;
+  outputArtifactId?: string;
+  failureSummary?: string;
+}
+
+export interface VerificationSummary {
+  taskId: string;
+  stepId: string;
+  scopeKind: "run" | "workspace" | "task" | "step" | "agent" | "changeset";
+  scopeId: string;
+  verdict: "not_evaluated" | "not_applicable" | "pending" | "passed" | "failed" | "missing" | "inconclusive" | "stale" | "skipped";
+  status: string;
+  recommendedCheckSpecId?: string;
+  recommendationKind?: "run" | "rerun_non_writing" | "retry" | "review_approval";
+  recommendationReason?: string;
+  action?: VerificationAction;
+  evidence: VerificationEvidence;
+}
+
 export type TimelineEventKind =
   | "run_started"
   | "assistant_delta"

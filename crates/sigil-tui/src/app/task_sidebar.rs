@@ -3,16 +3,15 @@ use sigil_kernel::{
     ReadinessEvaluatedEntry, RequiredAction, RunStatus, SessionLogEntry, TaskChildSessionEntry,
     TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId,
     TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskProjection,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationStateProjection,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationProductAction,
+    VerificationProductEvidence, VerificationRecommendationKind, VerificationStateProjection,
     VerificationVerdict, VisibleCompletionState, WriteIsolationProjection, WriteIsolationRecordRef,
+    verification_product_view,
 };
 
 use crate::ui::{StatusKind, status_symbol};
 
 use super::formatting::truncate_session_view_text;
-use super::verification_recommendation::{
-    latest_check_run_for_check, trusted_check_for_task, verification_recommendation,
-};
 
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
 const TASK_STRIP_STEP_LIMIT: usize = 4;
@@ -156,14 +155,21 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
         if let Some(summary) = readiness_reason_summary(&readiness.evaluation.reasons, 48) {
             lines.push(format!("verification reason: {summary}"));
         }
-        if let Some(recommendation) =
-            verification_recommendation(entries, task, &scope, readiness, &verification_projection)
+        if let Some(product) = verification_product_view(entries)
+            && product.scope == scope
+            && let Some(check_spec_id) = product.recommended_check_spec_id.as_deref()
         {
-            lines.push(format!("recommended: {}", recommendation.action_label()));
             lines.push(format!(
-                "recommended why: {}",
-                recommendation.reason_label()
+                "recommended: {}",
+                verification_product_action_label(
+                    product.recommendation_kind,
+                    product.action.as_ref(),
+                    check_spec_id,
+                )
             ));
+            if let Some(reason) = product.recommendation_reason.as_deref() {
+                lines.push(format!("recommended why: {reason}"));
+            }
         }
         if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 48) {
             lines.push(format!("merge: {summary}"));
@@ -232,7 +238,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     let write_projection = WriteIsolationProjection::from_entries(entries);
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
     let task = projection.latest_task()?;
-    let verification = verification_card_view(entries, task, &verification_projection);
+    let verification = verification_card_view(entries);
     let mut rows = Vec::new();
     let mut detail = task_run_status_label(task.status).to_owned();
 
@@ -324,146 +330,88 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     })
 }
 
-fn verification_card_view(
-    entries: &[SessionLogEntry],
-    task: &TaskRunProjection,
-    projection: &VerificationStateProjection,
-) -> Option<VerificationCardView> {
-    let (_, step, _) = task_sidebar_focus_step(task)?;
-    let scope = task_step_scope(task, &step.step_id);
-    let readiness = projection.latest_readiness(&scope)?;
-    let recommendation = verification_recommendation(entries, task, &scope, readiness, projection);
-    let recommended = recommendation
-        .as_ref()
-        .map(|recommendation| recommendation.check_spec_id().to_owned());
-    let why = recommendation
-        .as_ref()
-        .map(|recommendation| recommendation.reason_label().to_owned());
-    let action = recommendation.as_ref().and_then(|recommendation| {
-        if recommendation.requires_approval() {
-            return Some(VerificationCardAction::ReviewApproval {
-                check_spec_id: recommendation.check_spec_id().to_owned(),
-            });
-        }
-        let trusted =
-            trusted_check_for_task(projection, task, &scope, recommendation.check_spec_id())?;
-        Some(VerificationCardAction::Rerun(
-            TaskVerificationRerunRequest {
-                task_id: task.task_id.clone(),
-                step_id: step.step_id.clone(),
-                check_spec_id: trusted.trusted_check.check_spec.check_spec_id.clone(),
-                check_spec_hash: trusted.trusted_check.check_spec.check_spec_hash.clone(),
-                policy_hash: readiness.policy_hash.clone()?,
-                workspace_snapshot_id: readiness.workspace_snapshot_id.clone()?,
-            },
-        ))
-    });
-
-    let run = recommended
-        .as_deref()
-        .and_then(|check_spec_id| latest_check_run_for_check(entries, &scope, check_spec_id))
-        .or_else(|| latest_check_run_for_scope(entries, &scope));
-    if recommendation.is_none()
-        && run.is_none()
+fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCardView> {
+    let product = verification_product_view(entries)?;
+    if product.action.is_none()
+        && product.evidence.check_run_id.is_none()
         && matches!(
-            readiness.evaluation.verification_verdict,
+            product.verdict,
             VerificationVerdict::NotApplicable | VerificationVerdict::NotEvaluated
         )
     {
         return None;
     }
-    let inspect_lines = verification_inspect_lines(run, projection);
-    Some(VerificationCardView {
-        scope: scope.clone(),
-        status: verification_card_status(task, &scope, readiness, run, projection),
-        recommended,
-        why,
-        action,
-        inspect_lines,
-    })
-}
-
-fn verification_card_status(
-    task: &TaskRunProjection,
-    scope: &EvidenceScope,
-    readiness: &ReadinessEvaluatedEntry,
-    run: Option<&VerificationCheckRunEntry>,
-    projection: &VerificationStateProjection,
-) -> String {
-    let Some(run) = run else {
-        return verification_verdict_label(readiness.evaluation.verification_verdict).to_owned();
-    };
-    let Some(trusted) = trusted_check_for_task(projection, task, scope, &run.check_spec_id) else {
-        return verification_verdict_label(readiness.evaluation.verification_verdict).to_owned();
-    };
-    if run.check_spec_hash != trusted.trusted_check.check_spec.check_spec_hash {
-        return verification_verdict_label(readiness.evaluation.verification_verdict).to_owned();
-    }
-    if run.status == VerificationCheckRunStatus::Succeeded {
-        let passed_for_current_snapshot = run.receipt_id.as_deref().is_some_and(|receipt_id| {
-            projection.receipt_link(receipt_id).is_some_and(|link| {
-                link.scope == *scope
-                    && readiness.workspace_snapshot_id.as_deref()
-                        == Some(link.workspace_snapshot_id.as_str())
-            })
-        });
-        if !passed_for_current_snapshot {
-            return verification_verdict_label(readiness.evaluation.verification_verdict)
-                .to_owned();
+    let action = product.action.map(|action| match action {
+        VerificationProductAction::Rerun(request) => VerificationCardAction::Rerun(request),
+        VerificationProductAction::ReviewApproval { check_spec_id } => {
+            VerificationCardAction::ReviewApproval { check_spec_id }
         }
-        return "passed".to_owned();
-    }
-    format!("check {}", check_run_status_label(run.status))
-}
-
-fn latest_check_run_for_scope<'a>(
-    entries: &'a [SessionLogEntry],
-    scope: &EvidenceScope,
-) -> Option<&'a VerificationCheckRunEntry> {
-    entries.iter().rev().find_map(|entry| {
-        let SessionLogEntry::Control(sigil_kernel::ControlEntry::VerificationCheckRun(run)) = entry
-        else {
-            return None;
-        };
-        (run.scope == *scope).then_some(run)
+    });
+    Some(VerificationCardView {
+        scope: product.scope,
+        status: product.status,
+        recommended: product.recommended_check_spec_id,
+        why: product.recommendation_reason,
+        action,
+        inspect_lines: verification_inspect_lines(&product.evidence),
     })
 }
 
-fn verification_inspect_lines(
-    run: Option<&VerificationCheckRunEntry>,
-    projection: &VerificationStateProjection,
-) -> Vec<String> {
-    let Some(run) = run else {
+fn verification_product_action_label(
+    kind: Option<VerificationRecommendationKind>,
+    action: Option<&VerificationProductAction>,
+    check_spec_id: &str,
+) -> String {
+    match (kind, action) {
+        (Some(VerificationRecommendationKind::RerunNonWriting), _) => {
+            format!("rerun non-writing check {check_spec_id}")
+        }
+        (Some(VerificationRecommendationKind::Retry), _) => {
+            format!("retry check {check_spec_id}")
+        }
+        (Some(VerificationRecommendationKind::ReviewApproval), _)
+        | (_, Some(VerificationProductAction::ReviewApproval { .. })) => {
+            format!("review check approval {check_spec_id}")
+        }
+        _ => format!("run check {check_spec_id}"),
+    }
+}
+
+fn verification_inspect_lines(evidence: &VerificationProductEvidence) -> Vec<String> {
+    let Some(check_spec_id) = evidence.check_spec_id.as_deref() else {
         return vec!["No check receipt recorded for this step.".to_owned()];
     };
     let mut lines = vec![format!(
         "Check {} · {}",
-        run.check_spec_id,
-        check_run_status_label(run.status)
+        check_spec_id,
+        evidence
+            .check_status
+            .map(check_run_status_label)
+            .unwrap_or("unknown")
     )];
-    if let Some(locator) = projection.failure_locator(&run.run_id) {
-        lines.push(format!("Failure: {}", locator.summary));
+    if let Some(summary) = evidence.failure_summary.as_deref() {
+        lines.push(format!("Failure: {summary}"));
         lines.push(format!(
             "Command evidence: {}",
-            locator.command_event_id.as_deref().unwrap_or("not linked")
+            evidence.command_event_id.as_deref().unwrap_or("not linked")
         ));
         lines.push(format!(
             "Output artifact: {}",
-            locator
+            evidence
                 .output_artifact_id
                 .as_deref()
                 .unwrap_or("not linked")
         ));
     }
-    let Some(receipt_id) = run.receipt_id.as_deref() else {
+    let Some(receipt_id) = evidence.receipt_id.as_deref() else {
         return lines;
     };
-    if let Some(link) = projection.receipt_link(receipt_id) {
-        lines.push(format!("Receipt: {}", link.receipt_id));
-        lines.push(format!("Snapshot: {}", link.workspace_snapshot_id));
+    if let Some(snapshot_id) = evidence.workspace_snapshot_id.as_deref() {
+        lines.push(format!("Receipt: {receipt_id}"));
+        lines.push(format!("Snapshot: {snapshot_id}"));
         lines.push(format!(
             "Changeset: {}",
-            link.changeset_id.as_deref().unwrap_or("not linked")
+            evidence.changeset_id.as_deref().unwrap_or("not linked")
         ));
     } else {
         lines.push(format!("Receipt: {receipt_id} · link not recorded"));
@@ -762,21 +710,6 @@ fn task_sidebar_focus_readiness_with_scope<'a>(
     let scope = task_step_scope(task, &step.step_id);
     task_step_readiness_by_id(task, plan_version, &step.step_id, verification_projection)
         .map(|readiness| (scope, readiness))
-}
-
-fn task_sidebar_focus_step(
-    task: &TaskRunProjection,
-) -> Option<(u32, &TaskStepSpec, TaskStepStatus)> {
-    if let Some((plan_version, step_id)) = &task.current_step {
-        let plan = task.plans.get(plan_version)?;
-        let step = plan.steps.iter().find(|step| step.step_id == *step_id)?;
-        return Some((
-            *plan_version,
-            step,
-            task_sidebar_step_status(task, *plan_version, step),
-        ));
-    }
-    task_sidebar_last_problem_step(task).or_else(|| task_sidebar_last_plan_step(task))
 }
 
 fn task_sidebar_last_plan_step(
@@ -1285,6 +1218,20 @@ fn latest_check_run_for_action<'a>(
 ) -> Option<&'a VerificationCheckRunEntry> {
     let check_spec_id = required_action_check_spec_id(action)?;
     latest_check_run_for_check(entries, scope, check_spec_id)
+}
+
+fn latest_check_run_for_check<'a>(
+    entries: &'a [SessionLogEntry],
+    scope: &EvidenceScope,
+    check_spec_id: &str,
+) -> Option<&'a VerificationCheckRunEntry> {
+    entries.iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(sigil_kernel::ControlEntry::VerificationCheckRun(run)) = entry
+        else {
+            return None;
+        };
+        (run.scope == *scope && run.check_spec_id == check_spec_id).then_some(run)
+    })
 }
 
 fn required_action_check_spec_id(action: &RequiredAction) -> Option<&str> {

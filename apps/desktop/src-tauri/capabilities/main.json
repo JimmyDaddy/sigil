@@ -12,6 +12,8 @@
     "allow-desktop-catalog",
     "allow-desktop-session",
     "allow-desktop-run",
+    "allow-desktop-approval",
+    "allow-desktop-verification",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

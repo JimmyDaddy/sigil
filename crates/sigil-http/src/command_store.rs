@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::{
     HttpApprovalCommandReceipt, HttpRunCancelCommandReceipt, HttpRunStartCommandReceipt,
+    HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
 };
 
@@ -278,6 +279,7 @@ pub(crate) enum HttpStoredCommandCompletion {
     Start(HttpRunStartCommandReceipt),
     Cancel(HttpRunCancelCommandReceipt),
     Approval(HttpApprovalCommandReceipt),
+    Verification(Box<HttpVerificationRerunCommandReceipt>),
     Aborted,
 }
 
@@ -403,6 +405,13 @@ fn validate_completion(
         }
         HttpStoredCommandCompletion::Approval(receipt) => {
             identity.kind == "approval"
+                && receipt.command_id == identity.key.command_id
+                && receipt.client_id == identity.key.client_id
+                && receipt.session_id == identity.key.session_id
+                && !receipt.replayed
+        }
+        HttpStoredCommandCompletion::Verification(receipt) => {
+            identity.kind == "verification"
                 && receipt.command_id == identity.key.command_id
                 && receipt.client_id == identity.key.client_id
                 && receipt.session_id == identity.key.session_id

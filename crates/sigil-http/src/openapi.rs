@@ -263,6 +263,43 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/verification": {
+                "get": {
+                    "summary": "Project the current task verification recommendation and evidence",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Shared verification product projection",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/verification/rerun": {
+                "post": {
+                    "summary": "Rerun one exact stale-safe recommended verification check",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationRerunCommand" } } }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Durable verification rerun receipt",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationRerunCommandReceipt" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}": {
                 "get": {
                     "summary": "Get a run snapshot",
@@ -418,7 +455,7 @@ pub fn http_openapi_document() -> Value {
                     "additionalProperties": false,
                     "required": ["schema_version", "protocol_version", "server_version", "workspace_id", "bind_addr", "authentication", "shutdown_on_stdin_close", "capabilities"],
                     "properties": {
-                        "schema_version": { "type": "integer", "const": 1 },
+                        "schema_version": { "type": "integer", "const": 2 },
                         "protocol_version": { "type": "integer", "const": HTTP_PROTOCOL_VERSION },
                         "server_version": { "type": "string" },
                         "workspace_id": { "type": "string" },
@@ -431,14 +468,15 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "durable_event_replay", "live_events", "approval", "cancellation"],
+                    "required": ["session_catalog", "durable_session_reopen", "durable_event_replay", "live_events", "approval", "cancellation", "verification"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
-                        "cancellation": { "type": "boolean" }
+                        "cancellation": { "type": "boolean" },
+                        "verification": { "type": "boolean" }
                     }
                 },
                 "SessionCreateRequest": {
@@ -681,6 +719,122 @@ pub fn http_openapi_document() -> Value {
                         "call_id": { "type": "string" },
                         "decision": { "type": "string", "enum": ["approved", "denied"] },
                         "reason": { "type": ["string", "null"] }
+                    }
+                },
+                "VerificationRerunCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/VerificationRerunRequest" }
+                            }
+                        }
+                    ]
+                },
+                "VerificationRerunRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_id", "step_id", "check_spec_id", "check_spec_hash", "policy_hash", "workspace_snapshot_id"],
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "step_id": { "type": "string" },
+                        "check_spec_id": { "type": "string" },
+                        "check_spec_hash": { "type": "string" },
+                        "policy_hash": { "type": "string" },
+                        "workspace_snapshot_id": { "type": "string" }
+                    }
+                },
+                "VerificationRerunCommandReceipt": {
+                    "type": "object",
+                    "required": ["command_id", "client_id", "session_id", "verification", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "verification": { "$ref": "#/components/schemas/VerificationView" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
+                "VerificationView": {
+                    "type": "object",
+                    "required": ["task_id", "step_id", "scope", "verdict", "status", "recommended_check_spec_id", "recommendation_kind", "recommendation_reason", "action", "evidence"],
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "step_id": { "type": "string" },
+                        "scope": { "$ref": "#/components/schemas/EvidenceScope" },
+                        "verdict": { "$ref": "#/components/schemas/VerificationVerdict" },
+                        "status": { "type": "string" },
+                        "recommended_check_spec_id": { "type": ["string", "null"] },
+                        "recommendation_kind": {
+                            "oneOf": [
+                                { "$ref": "#/components/schemas/VerificationRecommendationKind" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "recommendation_reason": { "type": ["string", "null"] },
+                        "action": {
+                            "oneOf": [
+                                { "$ref": "#/components/schemas/VerificationRerunAction" },
+                                { "$ref": "#/components/schemas/VerificationReviewApprovalAction" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "evidence": { "$ref": "#/components/schemas/VerificationEvidence" }
+                    }
+                },
+                "VerificationRecommendationKind": {
+                    "type": "string",
+                    "enum": ["run", "rerun_non_writing", "retry", "review_approval"]
+                },
+                "VerificationRerunAction": {
+                    "type": "object",
+                    "required": ["kind", "request"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "rerun" },
+                        "request": { "$ref": "#/components/schemas/VerificationRerunRequest" }
+                    }
+                },
+                "VerificationReviewApprovalAction": {
+                    "type": "object",
+                    "required": ["kind", "request"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "review_approval" },
+                        "request": {
+                            "type": "object",
+                            "required": ["check_spec_id"],
+                            "properties": { "check_spec_id": { "type": "string" } }
+                        }
+                    }
+                },
+                "EvidenceScope": {
+                    "type": "object",
+                    "required": ["kind", "id"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["run", "workspace", "task", "step", "agent", "changeset"] },
+                        "id": { "type": "string" }
+                    }
+                },
+                "VerificationVerdict": {
+                    "type": "string",
+                    "enum": ["not_evaluated", "not_applicable", "pending", "passed", "failed", "missing", "inconclusive", "stale", "skipped"]
+                },
+                "VerificationEvidence": {
+                    "type": "object",
+                    "required": ["check_run_id", "check_spec_id", "check_status", "receipt_id", "workspace_snapshot_id", "changeset_id", "changeset_apply_event_id", "command_event_id", "output_artifact_id", "failure_summary"],
+                    "properties": {
+                        "check_run_id": { "type": ["string", "null"] },
+                        "check_spec_id": { "type": ["string", "null"] },
+                        "check_status": { "type": ["string", "null"], "enum": ["queued", "running", "succeeded", "failed", "skipped", "inconclusive", "errored", null] },
+                        "receipt_id": { "type": ["string", "null"] },
+                        "workspace_snapshot_id": { "type": ["string", "null"] },
+                        "changeset_id": { "type": ["string", "null"] },
+                        "changeset_apply_event_id": { "type": ["string", "null"] },
+                        "command_event_id": { "type": ["string", "null"] },
+                        "output_artifact_id": { "type": ["string", "null"] },
+                        "failure_summary": { "type": ["string", "null"] }
                     }
                 },
                 "ErrorResponse": {

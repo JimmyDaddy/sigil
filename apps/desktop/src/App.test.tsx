@@ -57,6 +57,23 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
       status: "running",
       streamSequence: 0,
     }),
+    cancelRun: async (_workspaceId, sessionId, runId) => ({
+      id: runId,
+      sessionId,
+      status: "cancel_requested",
+      streamSequence: 1,
+    }),
+    resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => ({
+      runId,
+      callId: approval.callId,
+      decision: approve ? "approved" : "denied",
+    }),
+    verification: async () => {
+      throw new Error("no verification projection");
+    },
+    rerunVerification: async () => {
+      throw new Error("no verification projection");
+    },
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     ...overrides,
@@ -236,5 +253,127 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     expect(screen.getByText("complete")).toBeTruthy();
     expect(screen.getByText("terminal")).toBeTruthy();
+  });
+
+  it("submits the exact approval guard and requests cooperative cancellation", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let approvedCall = "";
+    let cancelledRun = "";
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => {
+        approvedCall = `${runId}:${approval.approvalRequestId}:${approve}`;
+        return { runId, callId: approval.callId, decision: approve ? "approved" : "denied" };
+      },
+      cancelRun: async (_workspaceId, sessionId, runId) => {
+        cancelledRun = runId;
+        return { id: runId, sessionId, status: "cancel_requested", streamSequence: 4 };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(screen.getByLabelText("Message Sigil"), "Edit a file");
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 3,
+        replayable: true,
+        kind: "approval_requested",
+        itemId: "call-1",
+        toolName: "write_file",
+        approval: {
+          callId: "call-1",
+          toolName: "write_file",
+          approvalRequestId: "approval-1",
+          toolCallHash: "hash-1",
+          policyVersion: "policy-1",
+          expiresAtMs: 1_784_419_200_000,
+          operation: "edit_file",
+          risk: "medium",
+          snapshotRequired: true,
+          previewTitle: "Edit one file",
+          previewSummary: "Review the proposed edit",
+          previewBody: "- old\n+ new",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Edit one file")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Approve once" }));
+    expect(approvedCall).toBe("run-1:approval-1:true");
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(cancelledRun).toBe("run-1");
+    expect(await screen.findByText("Cancellation requested. Waiting for durable cleanup evidence.")).toBeTruthy();
+  });
+
+  it("shows exact verification evidence and reruns only the rendered binding", async () => {
+    const user = userEvent.setup();
+    let rerunSnapshot = "";
+    const verification = {
+      taskId: "task_1",
+      stepId: "verify_1",
+      scopeKind: "step" as const,
+      scopeId: "task_1:verify_1",
+      verdict: "failed" as const,
+      status: "check failed",
+      recommendedCheckSpecId: "cargo-test",
+      recommendationReason: "the latest result failed for the current task scope",
+      action: {
+        kind: "rerun" as const,
+        request: {
+          taskId: "task_1",
+          stepId: "verify_1",
+          checkSpecId: "cargo-test",
+          checkSpecHash: "check-hash",
+          policyHash: "policy-hash",
+          workspaceSnapshotId: "snapshot-1",
+        },
+      },
+      evidence: {
+        receiptId: "receipt-1",
+        workspaceSnapshotId: "snapshot-1",
+        changesetId: "changeset-1",
+        failureSummary: "2 tests failed",
+        commandEventId: "event-command",
+        outputArtifactId: "artifact-output",
+      },
+    };
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      verification: async () => verification,
+      rerunVerification: async (_workspaceId, _sessionId, request) => {
+        rerunSnapshot = request.workspaceSnapshotId;
+        return { ...verification, verdict: "passed", status: "passed", action: undefined };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByText("2 tests failed")).toBeTruthy();
+    expect(screen.getByText("receipt-1")).toBeTruthy();
+    expect(screen.getByText("changeset-1")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Run recommended check" }));
+    expect(await screen.findByText("passed")).toBeTruthy();
+    expect(rerunSnapshot).toBe("snapshot-1");
   });
 });

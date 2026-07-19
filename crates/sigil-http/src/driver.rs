@@ -5,6 +5,7 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpApprovalDecisionRecord, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -89,6 +90,34 @@ pub trait HttpRunDriver: Send + Sync {
     ///
     /// Returns an error when the underlying runtime cannot route the approval decision.
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError>;
+
+    /// Projects verification truth for one bound durable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable stream cannot be read safely.
+    fn verification_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpVerificationView>, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "verification projection is unavailable",
+        ))
+    }
+
+    /// Executes one exact stale-safe verification rerun.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the binding drifted, the session is busy, or the check fails to
+    /// produce a durable terminal projection.
+    fn rerun_verification(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpVerificationRerunRequest,
+    ) -> Result<HttpVerificationView, HttpRunDriverError> {
+        Err(HttpRunDriverError::new("verification rerun is unavailable"))
+    }
 
     /// Waits until every driver-owned run supervisor has completed cleanup.
     ///

@@ -21,7 +21,7 @@ use crate::{
     disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
         HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCreateRequest, HttpSessionOpenRequest,
+        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -512,6 +512,46 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/verification"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.verification_view(session_id) {
+            Ok(Some(view)) => json_response(200, json!(view)),
+            Ok(None) => http_error_response(
+                404,
+                "verification_not_found",
+                "session has no task verification projection",
+            ),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/verification/rerun"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpVerificationRerunRequest>>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "bad_request",
+                "invalid verification rerun command body",
+            );
+        };
+        return match registry.rerun_verification_command(session_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
         return match registry.get_session(session_id) {
@@ -979,6 +1019,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalExpiryChanged { .. }
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
+        | HttpRegistryError::SessionVerificationActive { .. }
         | HttpRegistryError::CommandKeyConflict { .. }
         | HttpRegistryError::RunTerminalConflict { .. }
         | HttpRegistryError::DurableSessionNotReady

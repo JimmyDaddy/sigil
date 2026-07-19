@@ -263,6 +263,49 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .composer textarea:disabled { opacity: .6; }
 .composer-actions { justify-content: space-between; gap: 14px; }
 .composer-actions small { color: #7f8e85; }
+.composer-actions > div, .approval-actions, .verification-actions { display: flex; gap: 8px; align-items: center; }
+.danger-button { color: #e2a09a; border-color: #70443f; }
+.approval-card {
+  display: grid;
+  gap: 11px;
+  padding: 16px;
+  border: 1px solid #75663b;
+  border-radius: 12px;
+  background: #201e13;
+}
+.approval-card > header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.approval-card h3, .approval-card p { margin: 0; }
+.approval-card > p, .approval-card > small { color: #b9b49e; line-height: 1.5; }
+.approval-card pre { max-height: 220px; margin: 0; padding: 11px; overflow: auto; border-radius: 8px; color: #d9ded9; background: #0d120f; white-space: pre-wrap; }
+.approval-card dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.approval-card dl div { padding: 8px; border: 1px solid #49452f; border-radius: 8px; }
+.approval-card dt { color: #928e79; font-size: 10px; text-transform: uppercase; }
+.approval-card dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.approval-actions { justify-content: flex-end; }
+.risk-badge { padding: 4px 8px; border-radius: 999px; color: #d4c58b; background: #3a331d; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.risk-high, .risk-destructive, .risk-protected { color: #eda7a0; background: #482824; }
+.verification-card {
+  display: grid;
+  gap: 11px;
+  padding: 16px;
+  border: 1px solid #3d5b49;
+  border-radius: 12px;
+  background: #142219;
+}
+.verification-card > header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.verification-card h3, .verification-card p { margin: 0; }
+.verification-card > p { color: #a8b8ae; line-height: 1.5; }
+.verification-card dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.verification-card dl div { min-width: 0; padding: 8px; border: 1px solid #31463a; border-radius: 8px; }
+.verification-card dt { color: #829389; font-size: 10px; text-transform: uppercase; }
+.verification-card dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.verification-badge { padding: 4px 8px; border-radius: 999px; color: #d5c585; background: #39321d; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.verification-passed { color: #8ed6aa; background: #1b3827; }
+.verification-failed, .verification-inconclusive { color: #eda7a0; background: #482824; }
+.verification-failure { display: grid; gap: 5px; padding: 10px; border-left: 3px solid #9e5650; color: #d6b0ac; background: #221615; }
+.verification-failure small { color: #9d8582; overflow-wrap: anywhere; }
+.verification-actions { justify-content: flex-end; }
+.verification-actions small { color: #92a198; }
 
 .history-filters {
   display: grid;

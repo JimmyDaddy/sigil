@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
-use sigil_kernel::ToolApprovalUserDecision;
+use sigil_kernel::{
+    TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
+};
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 1;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 2;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +35,8 @@ pub struct HttpServerCapabilities {
     pub approval: bool,
     /// Active runs support cooperative cancellation and bounded drain.
     pub cancellation: bool,
+    /// Durable task verification can be inspected and one exact recommended check rerun.
+    pub verification: bool,
 }
 
 impl HttpServerCapabilities {
@@ -46,6 +50,7 @@ impl HttpServerCapabilities {
             live_events: true,
             approval: true,
             cancellation: true,
+            verification: true,
         }
     }
 }
@@ -435,6 +440,38 @@ pub struct HttpRunCancelCommandReceipt {
 }
 
 impl HttpRunCancelCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Exact stale-safe verification rerun request shared with TUI projection truth.
+pub type HttpVerificationRerunRequest = TaskVerificationRerunRequest;
+
+/// Renderer-safe verification recommendation and evidence projection.
+pub type HttpVerificationView = VerificationProductView;
+
+/// Receipt for an envelope-routed verification rerun command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpVerificationRerunCommandReceipt {
+    /// Command id used for retry de-duplication.
+    pub command_id: String,
+    /// Client that submitted the command.
+    pub client_id: String,
+    /// Session id from the command envelope.
+    pub session_id: String,
+    /// Optional durable correlation id supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Refreshed projection after the exact check reached a durable terminal.
+    pub verification: HttpVerificationView,
+    /// Whether this response was replayed from a prior command id.
+    pub replayed: bool,
+}
+
+impl HttpVerificationRerunCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

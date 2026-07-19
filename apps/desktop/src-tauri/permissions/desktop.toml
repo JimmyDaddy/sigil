@@ -30,5 +30,15 @@ commands.allow = ["desktop_create_session", "desktop_open_session"]
 
 [[permission]]
 identifier = "allow-desktop-run"
-description = "Allows the main local window to start one run through the authenticated local server."
-commands.allow = ["desktop_start_run"]
+description = "Allows the main local window to start or cooperatively cancel one run through the authenticated local server."
+commands.allow = ["desktop_start_run", "desktop_cancel_run"]
+
+[[permission]]
+identifier = "allow-desktop-approval"
+description = "Allows the main local window to resolve one exact server-guarded approval request."
+commands.allow = ["desktop_resolve_approval"]
+
+[[permission]]
+identifier = "allow-desktop-verification"
+description = "Allows the main local window to inspect and rerun one exact server-projected verification check."
+commands.allow = ["desktop_verification", "desktop_rerun_verification"]

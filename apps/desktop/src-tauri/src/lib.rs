@@ -13,9 +13,10 @@ use tauri::{Manager, RunEvent};
 
 use crate::{
     commands::{
-        desktop_bootstrap, desktop_catalog, desktop_close_workspace, desktop_create_session,
-        desktop_open_recent_workspace, desktop_open_session, desktop_pick_workspace,
-        desktop_start_run, resolve_sigil_binary,
+        desktop_bootstrap, desktop_cancel_run, desktop_catalog, desktop_close_workspace,
+        desktop_create_session, desktop_open_recent_workspace, desktop_open_session,
+        desktop_pick_workspace, desktop_rerun_verification, desktop_resolve_approval,
+        desktop_start_run, desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
 };
@@ -49,7 +50,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_catalog,
             desktop_create_session,
             desktop_open_session,
-            desktop_start_run
+            desktop_start_run,
+            desktop_cancel_run,
+            desktop_resolve_approval,
+            desktop_verification,
+            desktop_rerun_verification
         ])
         .build(tauri::generate_context!())?;
     let shutdown_manager = Arc::clone(&app.state::<DesktopAppState>().manager);

@@ -2,8 +2,14 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use sigil_kernel::{
-    NetworkEffect, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolPreviewCapability,
-    ToolSpec,
+    AgentRole, CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion,
+    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope, NetworkEffect,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus, SessionRef, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolEffect, ToolPreviewCapability, ToolSpec, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationProductAction, VerificationVerdict,
+    VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
 
 use super::*;
@@ -263,6 +269,207 @@ model = "deepseek-v4-flash"
             label: None,
         }),
         Err(crate::HttpRegistryError::DurableSessionIdentityChanged)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_driver_projects_and_executes_real_verification_rerun() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should create");
+    std::fs::write(workspace.join("note.txt"), "current\n").expect("fixture should write");
+    let workspace = workspace.canonicalize().expect("workspace should resolve");
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "workspace"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("test config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 16)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 8)
+            .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands.json"), 8)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let adapter_session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let store = sigil_kernel::JsonlSessionStore::new(&adapter_session.session_log_path)
+        .expect("session store should open");
+    let mut session =
+        sigil_kernel::Session::load_from_store("deepseek", "deepseek-v4-flash", store)
+            .expect("session should load");
+    let task_id = TaskId::new("task_1").expect("task id");
+    let step_id = TaskStepId::new("verify_1").expect("step id");
+    let scope = EvidenceScope::Step("task_1:verify_1".to_owned());
+    session
+        .append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "verify workspace".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }))
+        .expect("task run should append");
+    session
+        .append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "verify".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Verify),
+                isolation: None,
+            }],
+            reason: None,
+        }))
+        .expect("task plan should append");
+    session
+        .append_control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Blocked,
+            title: Some("verify".to_owned()),
+            summary: None,
+            reason: None,
+        }))
+        .expect("task step should append");
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )
+    .expect("configured check should promote");
+    let check_spec = trusted.check_spec.clone();
+    session
+        .append_control(ControlEntry::CheckSpecRecorded(
+            CheckSpecRecordedEntry::new(
+                EvidenceScope::Task(task_id.as_str().to_owned()),
+                trusted,
+                "event-config",
+            ),
+        ))
+        .expect("check spec should append");
+    let mut policy = VerificationPolicy::no_checks_required("task_step_default");
+    policy.required_checks = vec![check_spec.clone()];
+    policy.completion_criteria = CompletionCriteria::AllRequiredChecks;
+    policy.allow_unverified_completion = false;
+    policy.timeout_ms = Some(60_000);
+    let policy_entry = VerificationPolicyChangedEntry::new(
+        EvidenceScope::Task(task_id.as_str().to_owned()),
+        policy.clone(),
+        "event-policy",
+    )
+    .expect("policy should hash");
+    let policy_hash = policy_entry.policy_hash.clone();
+    session
+        .append_control(ControlEntry::VerificationPolicyChanged(policy_entry))
+        .expect("policy should append");
+    let workspace_id = stable_workspace_id(&workspace).expect("workspace id");
+    let snapshot =
+        build_workspace_snapshot(&workspace, workspace_id, &policy.verification_scope, 0)
+            .expect("workspace should snapshot");
+    let snapshot_id = snapshot
+        .workspace_snapshot_id
+        .expect("snapshot should have identity");
+    session
+        .append_control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+            scope,
+            evaluation: ReadinessEvaluation {
+                run_status: RunStatus::Completed,
+                verification_verdict: VerificationVerdict::Missing,
+                visible_state: VisibleCompletionState::CompletedUnverified,
+                reasons: Vec::new(),
+                required_actions: vec![RequiredAction::RunCheck {
+                    check_spec_id: check_spec.check_spec_id.clone(),
+                }],
+            },
+            policy_hash: Some(policy_hash),
+            workspace_snapshot_id: Some(snapshot_id),
+        }))
+        .expect("readiness should append");
+    drop(session);
+
+    let rendered = registry
+        .verification_view(&adapter_session.id)
+        .expect("verification should project")
+        .expect("verification should exist");
+    let VerificationProductAction::Rerun(request) = rendered.action.expect("rerun action") else {
+        panic!("expected exact rerun action");
+    };
+    let command = crate::HttpCommandEnvelope::new(
+        "verification-real-1",
+        "desktop-test",
+        &adapter_session.id,
+        request,
+    );
+    let registry_for_rerun = Arc::clone(&registry);
+    let session_id = adapter_session.id.clone();
+    let receipt = tokio::task::spawn_blocking(move || {
+        registry_for_rerun.rerun_verification_command(&session_id, command)
+    })
+    .await
+    .expect("rerun worker should join")
+    .expect("real verification should execute");
+
+    assert_eq!(receipt.verification.status, "passed");
+    assert!(receipt.verification.action.is_none());
+    assert_eq!(
+        receipt.verification.evidence.check_status,
+        Some(sigil_kernel::VerificationCheckRunStatus::Succeeded)
+    );
+    assert!(receipt.verification.evidence.receipt_id.is_some());
+    assert!(
+        receipt
+            .verification
+            .evidence
+            .workspace_snapshot_id
+            .is_some()
     );
 }
 

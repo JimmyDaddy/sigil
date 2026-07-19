@@ -1,4 +1,5 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 
 /// Request for one sequential planner/executor task run.
 #[derive(Debug, Clone)]
@@ -27,7 +28,8 @@ pub struct SequentialTaskStepOutput {
 }
 
 /// Exact projection binding required to rerun one trusted task verification check.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TaskVerificationRerunRequest {
     pub task_id: TaskId,
     pub step_id: TaskStepId,
@@ -38,7 +40,8 @@ pub struct TaskVerificationRerunRequest {
 }
 
 /// Durable terminal records produced by one exact task verification rerun.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskVerificationRerunOutput {
     pub check_run: VerificationCheckRunEntry,
     pub verification: VerificationRecordedEntry,
