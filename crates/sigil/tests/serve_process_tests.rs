@@ -493,6 +493,80 @@ async fn desktop_launcher_early_exit_error_does_not_disclose_paths() {
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http() {
+    let workspace = test_workspace("desktop-workspace-manager");
+    let config_path = workspace.join("sigil.toml");
+    write_config(&config_path, "http://127.0.0.1:1");
+    let launch = sigil_desktop::DesktopLaunchRequest::new(
+        env!("CARGO_BIN_EXE_sigil"),
+        &config_path,
+        &workspace,
+    );
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+
+    let first = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            launch.clone(),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch the real server");
+    let duplicate = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            launch,
+            "workspace",
+        ))
+        .await
+        .expect("manager should reuse the canonical workspace");
+
+    assert_eq!(duplicate, first);
+    assert_eq!(
+        manager.list().expect("list should succeed"),
+        vec![first.clone()]
+    );
+    let client = manager
+        .client(&first.id)
+        .expect("ready workspace should expose an opaque typed client");
+    assert!(
+        client
+            .list_sessions()
+            .await
+            .expect("typed list route should authenticate")
+            .sessions
+            .is_empty()
+    );
+    let session = client
+        .create_session(sigil_desktop::DesktopSessionCreateRequest {
+            label: Some("desktop smoke".to_owned()),
+        })
+        .await
+        .expect("typed create route should use the production runtime binding");
+    assert_eq!(session.label.as_deref(), Some("desktop smoke"));
+    assert_eq!(
+        client
+            .list_sessions()
+            .await
+            .expect("typed list route should remain available")
+            .sessions
+            .len(),
+        1
+    );
+
+    let report = manager
+        .close(&first.id)
+        .await
+        .expect("manager should gracefully close the real server");
+    assert!(report.success);
+    assert!(
+        manager
+            .list()
+            .expect("closed manager should list")
+            .is_empty()
+    );
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
 #[cfg(unix)]
 fn stop_serve(mut process: ServeProcess) -> Output {
     let signal_result = unsafe { libc::kill(process.child.id() as i32, libc::SIGINT) };

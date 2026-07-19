@@ -9,6 +9,9 @@ on:
       - ".github/dependabot.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "apps/desktop/package.json"
+      - "apps/desktop/pnpm-lock.yaml"
+      - "apps/desktop/src-tauri/Cargo.toml"
       - "crates/**/Cargo.toml"
       - "deny.toml"
       - "dev/governance/dependency-supply-chain.md"
@@ -20,6 +23,9 @@ on:
       - ".github/dependabot.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "apps/desktop/package.json"
+      - "apps/desktop/pnpm-lock.yaml"
+      - "apps/desktop/src-tauri/Cargo.toml"
       - "crates/**/Cargo.toml"
       - "deny.toml"
       - "dev/governance/dependency-supply-chain.md"
@@ -91,5 +97,49 @@ jobs:
       - name: Audit lockfile with reviewed exceptions
         run: >-
           cargo audit
-          --ignore RUSTSEC-2025-0141
+          --ignore RUSTSEC-2024-0370
+          --ignore RUSTSEC-2024-0411
+          --ignore RUSTSEC-2024-0412
+          --ignore RUSTSEC-2024-0413
+          --ignore RUSTSEC-2024-0414
+          --ignore RUSTSEC-2024-0415
+          --ignore RUSTSEC-2024-0416
+          --ignore RUSTSEC-2024-0417
+          --ignore RUSTSEC-2024-0418
+          --ignore RUSTSEC-2024-0419
+          --ignore RUSTSEC-2024-0420
+          --ignore RUSTSEC-2024-0429
           --ignore RUSTSEC-2024-0436
+          --ignore RUSTSEC-2025-0075
+          --ignore RUSTSEC-2025-0080
+          --ignore RUSTSEC-2025-0081
+          --ignore RUSTSEC-2025-0098
+          --ignore RUSTSEC-2025-0100
+          --ignore RUSTSEC-2025-0141
+
+  pnpm-audit:
+    name: Desktop npm audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install locked desktop dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+
+      - name: Audit desktop dependency graph
+        run: pnpm --dir apps/desktop audit --audit-level high

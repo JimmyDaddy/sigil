@@ -13,6 +13,8 @@ serde_json.workspace = true
 sigil-process = { path = "../sigil-process" }
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [lints]

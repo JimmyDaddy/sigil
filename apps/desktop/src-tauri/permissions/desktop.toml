@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-desktop-bootstrap"
+description = "Allows the main local window to read secret-free desktop connection state."
+commands.allow = ["desktop_bootstrap"]
+
+[[permission]]
+identifier = "allow-desktop-pick-workspace"
+description = "Allows the Rust backend to show a native folder picker and open one supervised workspace server."
+commands.allow = ["desktop_pick_workspace"]
+
+[[permission]]
+identifier = "allow-desktop-close-workspace"
+description = "Allows the main local window to gracefully close one owned workspace server."
+commands.allow = ["desktop_close_workspace"]

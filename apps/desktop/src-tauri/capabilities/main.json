@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop",
+  "description": "The main local Sigil window can invoke only the frozen desktop bridge commands.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "allow-desktop-bootstrap",
+    "allow-desktop-pick-workspace",
+    "allow-desktop-close-workspace"
+  ]
+}

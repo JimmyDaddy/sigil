@@ -40,6 +40,7 @@
 - `crates/sigil-tools-builtin`：内置工具与 preview/diff 预览
 - `crates/sigil-process`：跨 crate 的最小进程树 ownership 与平台 capability probe
 - `crates/sigil-desktop`：桌面 Rust 后端的 launcher、私有 bearer 与 typed local HTTP client；不承载 UI 或 agent loop
+- `apps/desktop`：Tauri 2 + React 桌面壳；renderer 只通过 allowlist command/event 消费收窄 DTO，不持有 bearer、路径、process 或 generic HTTP/filesystem 能力
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
 - `crates/sigil-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
 - `crates/sigil-cli`：薄 CLI、调试入口、自动化入口
@@ -55,6 +56,7 @@
 - 变更公共接口前，先确认是否会把 provider 私有语义泄漏进 `kernel`
 - 写工具相关代码时，优先考虑 preview、审批、可恢复性和结构化错误
 - 改 TUI 时，不要只改 UI；同时检查状态模型、事件流和键位提示是否同步
+- 改 desktop 时，同时检查 Rust IPC DTO、Tauri capability、generated OpenAPI drift、renderer 状态和真实 `sigil serve` contract test
 
 ### 工程要求
 

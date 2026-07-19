@@ -20,6 +20,7 @@
 
 - `crates/sigil-tui` 承载第一用户入口的 TUI 状态、渲染和 runner
 - `crates/sigil` 提供 `sigil` binary；无子命令启动 TUI，显式子命令承担自动化和调试入口
+- `apps/desktop` 提供独立 opt-in 的 Tauri 桌面 companion；它通过 `sigil-desktop` 和本地 HTTP/SSE 复用同一 runtime，不改变 TUI-first 定位
 
 ### 2.2 内核层
 
@@ -61,6 +62,7 @@
 - 更新必要文档
 - 在说明里明确哪些能力已完成，哪些只是扩展点
 - 新增直接依赖时同步维护 [`dependency-supply-chain.md`](dependency-supply-chain.md)，记录 owner、版本/feature、许可、安全理由和发布前剩余 gate
+- desktop 变更同时运行 `pnpm --dir apps/desktop check`；涉及 native shell 时至少编译 `sigil-desktop-app`，涉及 runtime route 时补真实 `sigil serve` contract test
 
 ## 4. 文档同步规范
 

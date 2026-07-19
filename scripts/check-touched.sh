@@ -102,9 +102,11 @@ changed_files() {
 }
 
 workspace_packages() {
-  find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -print \
-    | sed -E 's#^crates/([^/]+)/Cargo.toml$#\1#' \
-    | sort
+  {
+    find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -print \
+      | sed -E 's#^crates/([^/]+)/Cargo.toml$#\1#'
+    printf '%s\n' "sigil-desktop-app"
+  } | sort
 }
 
 tmp_dir="$(mktemp -d)"
@@ -123,6 +125,7 @@ rust_changed=0
 docs_changed=0
 workspace_manifest_changed=0
 high_risk_changed=0
+desktop_changed=0
 
 while IFS= read -r path; do
   case "${path}" in
@@ -131,10 +134,13 @@ while IFS= read -r path; do
       crate="${crate%%/*}"
       printf '%s\n' "${crate}" >>"${packages_file}"
       ;;
+    apps/desktop/src-tauri/*|apps/desktop/src-tauri/**/*)
+      printf '%s\n' "sigil-desktop-app" >>"${packages_file}"
+      ;;
   esac
 
   case "${path}" in
-    *.rs|Cargo.toml|Cargo.lock|rust-toolchain.toml)
+    *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml)
       rust_changed=1
       ;;
   esac
@@ -167,6 +173,12 @@ while IFS= read -r path; do
       high_risk_changed=1
       ;;
   esac
+
+  case "${path}" in
+    apps/desktop/*|apps/desktop/**/*|crates/sigil-http/src/openapi.rs|scripts/generate-desktop-contract.sh)
+      desktop_changed=1
+      ;;
+  esac
 done <"${files_file}"
 
 sort -u "${packages_file}" -o "${packages_file}"
@@ -190,6 +202,10 @@ if [[ "${high_risk_changed}" == "1" && "${tier}" == "quick" ]]; then
 fi
 
 run_cmd git diff --check --
+
+if [[ "${desktop_changed}" == "1" ]]; then
+  run_cmd pnpm --dir apps/desktop check
+fi
 
 if [[ "${docs_changed}" == "1" && "${rust_changed}" == "0" ]]; then
   if [[ "${tier}" == "standard" || "${tier}" == "full" ]]; then

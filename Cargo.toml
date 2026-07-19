@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/desktop/src-tauri",
     "crates/sigil-kernel",
     "crates/sigil-provider-deepseek",
     "crates/sigil-provider-openai-compat",

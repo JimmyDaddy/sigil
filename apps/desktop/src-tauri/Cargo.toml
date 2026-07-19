@@ -1,0 +1,24 @@
+[package]
+name = "sigil-desktop-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "sigil_desktop_app"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde.workspace = true
+sigil-desktop = { path = "../../../crates/sigil-desktop" }
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = "=2.7.2"
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

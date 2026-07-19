@@ -2,24 +2,44 @@
 all-features = true
 
 [advisories]
-# syntect 5.3 uses bincode only for its version-pinned embedded syntax/theme dumps. Sigil does not
-# deserialize user- or network-provided bincode. `tokenizers 0.23.1` also reaches the archived
-# `paste` macro through `macro_rules_attribute`; Cargo reports no safe compatible upgrade. It is
-# compile-time-only in Sigil's checksum-pinned DeepSeek tokenizer path. Both exceptions are owned
-# by the dependency ledger and must be removed when their upstream dependency paths migrate.
-ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2024-0436"]
+# Every exception is owned by dev/governance/dependency-supply-chain.md and mirrored by the
+# independent cargo-audit job. The Tauri exceptions are confined to the current upstream Linux
+# WebKitGTK/build-time graph and must be removed when Tauri migrates those paths.
+ignore = [
+  "RUSTSEC-2024-0370",
+  "RUSTSEC-2024-0411",
+  "RUSTSEC-2024-0412",
+  "RUSTSEC-2024-0413",
+  "RUSTSEC-2024-0414",
+  "RUSTSEC-2024-0415",
+  "RUSTSEC-2024-0416",
+  "RUSTSEC-2024-0417",
+  "RUSTSEC-2024-0418",
+  "RUSTSEC-2024-0419",
+  "RUSTSEC-2024-0420",
+  "RUSTSEC-2024-0429",
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2025-0075",
+  "RUSTSEC-2025-0080",
+  "RUSTSEC-2025-0081",
+  "RUSTSEC-2025-0098",
+  "RUSTSEC-2025-0100",
+  "RUSTSEC-2025-0141",
+]
 
 [licenses]
 confidence-threshold = 0.93
 allow = [
   "0BSD",
   "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
+  "MPL-2.0",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",

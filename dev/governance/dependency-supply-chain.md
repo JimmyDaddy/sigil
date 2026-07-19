@@ -2,6 +2,39 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## Desktop shell and checked frontend contract（RFC-0044 R44.2）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `tauri` / `tauri-build` | `2.11.5` / `2.6.3`；桌面默认 runtime | `apps/desktop/src-tauri` | 提供system-WebView native shell、local IPC和bundle build；capability仅向`main`window开放Sigil自有command，不启用generic HTTP、shell、filesystem、process、opener或remote URL permission | MIT OR Apache-2.0；tauri-apps/tauri | renderer不能取得bearer、child、loopback address或absolute state/session path；Linux CI安装官方WebKitGTK 4.1 prerequisites |
+| `tauri-plugin-dialog` | `2.7.2`；Rust backend API only | `apps/desktop/src-tauri/commands` | 由Rust backend发起native folder picker；选择结果直接进入native manager，不向renderer开放dialog plugin command或filesystem scope | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`dialog:*`；transitive fs helper没有renderer permission，不能被frontend调用 |
+| React / Vite / TypeScript | `19.2.7` / `8.1.5` / `5.9.3` | `apps/desktop` renderer | 构建stateful desktop view；production CSP禁止remote content、object/frame/base/form，renderer只调用窄Tauri IPC bridge | React MIT；Vite MIT；TypeScript Apache-2.0；各官方项目维护 | npm lockfile提交；Node 24 + pnpm 10.30.3在CI执行typecheck/test/build与high-severity audit |
+| `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
+| Vitest / Testing Library / jsdom | `4.1.10` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
+
+R44.2同时复用workspace既有`reqwest`、`serde`、`tokio`、`url`、`uuid`与`thiserror`。Rust typed client使用
+launcher私有bearer、no-proxy/no-redirect client、bounded JSON response和opaque command IDs；它不依赖`sigil-http`
+实现crate。`pnpm audit --audit-level high`在引入时无已知漏洞。
+
+Tauri当前Linux WebKitGTK graph新增`MPL-2.0`和`Apache-2.0 WITH LLVM-exception`许可。前者只施加文件级
+copyleft，Sigil不修改或再许可这些上游文件；后者是Apache-2.0的标准LLVM例外。两者均为OSI许可并已加入显式
+allowlist，不代表放宽未知许可或git source policy。
+
+RustSec复扫同时识别出Tauri 2.11.5当前上游图中的以下无安全升级路径项：
+
+- Linux GTK3绑定的unmaintained组`RUSTSEC-2024-0411`至`RUSTSEC-2024-0420`，以及该路径的
+  `proc-macro-error` `RUSTSEC-2024-0370`；这些crate只由Tauri/WebKitGTK Linux runtime/build graph引入，Sigil
+  不直接调用GTK API。
+- `glib 0.18.5`的`VariantStrIter` unsoundness `RUSTSEC-2024-0429`；Sigil与desktop adapter不构造或遍历
+  `glib::VariantStrIter`。这是当前Tauri Linux传递依赖的受限风险接受，不是漏洞已修复的声明。
+- `tauri-utils -> urlpattern`的unmaintained `rust-unic`组：`RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、
+  `RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100`；该路径用于Tauri构建/URL pattern contract，
+  不处理Sigil provider或tool网络数据。
+
+这些ID与既有`RUSTSEC-2024-0436`、`RUSTSEC-2025-0141`一起在`deny.toml`和独立`cargo audit` job中精确列出。
+升级Tauri、`tauri-utils`、`wry`或Linux WebKitGTK stack时必须先删除可消失的例外再复扫；不得把例外扩展到
+Sigil直接依赖或其他调用面。R44.6 Linux package/runtime audit仍是发布desktop artifact前的阻塞门禁。
+
 ## Desktop launcher supervisor（RFC-0044 R44.1）
 
 R44.1 没有引入新的第三方版本或来源。新增 `sigil-desktop` library 直接复用 workspace 已锁定的依赖：
@@ -85,7 +118,7 @@ K25.12B2 的 coordinator 强制 `stage ciphertext -> append+sync Committed -> at
 | `keyring` | 复用 `3.6.3` 与既有 native feature 集 | `sigil-mcp/streamable_http/oauth_credential` | 保存绑定 server/resource/issuer/client/scopes 的完整 versioned OAuth record；load/store/delete 在 `spawn_blocking` 中访问 native credential store，任何 unavailable/rejected/oversize 都 fail closed，没有 config/session/file fallback | `MIT OR Apache-2.0`；`hwchen/keyring-rs` | record cap 固定为 Windows Credential Manager 最窄的 2560 bytes；超限明确拒绝，不在其他平台形成不可跨平台验证的宽松路径。真实 Windows/Linux/macOS keyring 仍由 R40.5 hosted gate 验证 |
 | `zeroize` | 复用 `1.8.2`；默认 feature | `sigil-mcp/streamable_http/oauth,oauth_credential` | 包裹 serialized credential bytes、decoded secret fields、Basic client-auth 中间材料；公开 carrier 继续使用 kernel `SecretString`，无 serde contract 且 drop 清零 | `Apache-2.0 OR MIT`；RustCrypto | 只提供 best-effort memory clearing，不把它表述为内存取证防护；Debug/error/status 只输出 bounded 非 secret 投影 |
 
-R40.3 没有引入新版本或新来源。`cargo deny check` 的 advisories/bans/licenses/sources 均通过，仅保留仓库既有 duplicate warnings；`cargo audit` 在既有两项显式 ignore 下通过。
+R40.3 没有引入新版本或来源；该切片完成时的两项显式例外已在后续供应链变更中继续按同一精确台账机制演进。
 
 ## Context Compaction V2 portable tokenizer（K25.10/K25.13）
 
@@ -112,7 +145,7 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 - 将 `syntect 5.3.0` 改为关闭默认 feature，仅启用 `parsing,default-syntaxes,default-themes,regex-onig`，并将 `two-face 0.5.1` 对齐到 `syntect-onig`；这移除了不被 Sigil 使用的 plist/`quick-xml` 与 `yaml-rust` 依赖路径；
 - `deny.toml` 限制依赖来源为 crates.io registry，执行许可白名单检查，并将重复版本保留为 warning 供后续收敛。
 
-复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories、bans、licenses、sources 四项均通过。当前显式 advisory 例外有两项：`RUSTSEC-2025-0141`（`syntect` 只用 `bincode 1.3.3` 反序列化版本固定、编译进二进制的 syntax/theme dump）以及上文 K25.10/K25.13 记录的 `RUSTSEC-2024-0436`（tokenizers 的构建期 `paste` 路径）。两项都必须随上游迁移复核并删除，不得把例外误写成漏洞已经消失。
+复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories/bans/licenses/sources 四项均通过。当时建立的两项例外为`RUSTSEC-2025-0141`（`syntect`只用`bincode 1.3.3`读取版本固定、编译进二进制的dump）与上文记录的`RUSTSEC-2024-0436`。当前完整例外集合还包括R44.2在本文件开头逐项说明的Tauri传递路径；唯一事实源以`deny.toml`为准，所有例外都必须随上游迁移复核并删除。
 
 上述证据覆盖 E21.17 public WebFetch、stable websearch 与 user-root Streamable HTTP MCP cutover；最终发布结论仍以同一工作区的完整测试、Clippy、格式、文档和站点 gate 全绿为前提。
 
@@ -122,8 +155,7 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 
 - Cargo manifest、lockfile、`deny.toml` 或 workflow 变化时运行，此外每周执行一次；
 - `cargo-deny 0.20.2` 的官方 action release 按已提交的 `deny.toml` 检查 advisories、bans、licenses 和 sources；
-- `cargo-audit 0.22.2` 独立复扫 `Cargo.lock`，只携带本台账已说明的
-  `RUSTSEC-2025-0141` 与 `RUSTSEC-2024-0436` 两个精确例外；
+- `cargo-audit 0.22.2` 独立复扫 `Cargo.lock`，只携带`deny.toml`与本台账已说明的精确例外；
 - 两个 job 都是阻塞门禁，不使用 `continue-on-error`，且 workflow 权限仅为
   `contents: read`。
 - 扫描前先运行 `scripts/check-supply-chain-policy.py` 及其单测，确保 `deny.toml`、workflow
@@ -135,7 +167,26 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 
 ```bash
 cargo deny check
-cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
+cargo audit \
+  --ignore RUSTSEC-2024-0370 \
+  --ignore RUSTSEC-2024-0411 \
+  --ignore RUSTSEC-2024-0412 \
+  --ignore RUSTSEC-2024-0413 \
+  --ignore RUSTSEC-2024-0414 \
+  --ignore RUSTSEC-2024-0415 \
+  --ignore RUSTSEC-2024-0416 \
+  --ignore RUSTSEC-2024-0417 \
+  --ignore RUSTSEC-2024-0418 \
+  --ignore RUSTSEC-2024-0419 \
+  --ignore RUSTSEC-2024-0420 \
+  --ignore RUSTSEC-2024-0429 \
+  --ignore RUSTSEC-2024-0436 \
+  --ignore RUSTSEC-2025-0075 \
+  --ignore RUSTSEC-2025-0080 \
+  --ignore RUSTSEC-2025-0081 \
+  --ignore RUSTSEC-2025-0098 \
+  --ignore RUSTSEC-2025-0100 \
+  --ignore RUSTSEC-2025-0141
 ```
 
 workflow 定时运行只能证明默认分支的最新依赖状态；发布仍需按对应 release RFC 执行完整

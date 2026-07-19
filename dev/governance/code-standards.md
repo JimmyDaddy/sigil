@@ -147,6 +147,15 @@
 - agent-thread user action helper、session-control append helper 等跨入口运行时 glue 放在 runtime；入口层只做协议/消息转换和 UI 状态同步
 - runtime 只依赖 kernel、provider、tools、MCP 等下层 crate；kernel 不得反向依赖 runtime
 
+### 3.7 `sigil-desktop` 与 `apps/desktop`
+
+- `sigil-desktop` 只拥有 per-workspace child、私有 bearer、bootstrap、typed HTTP/SSE client 与 lifecycle manager；不得依赖 kernel/runtime/TUI/HTTP server internals
+- `apps/desktop/src-tauri` 是 native IPC adapter；绝对路径、bearer、loopback address、process handle、server raw error/body 不得序列化给 renderer
+- renderer 只调用 capability allowlist 中的业务 command/event；禁止开放 generic shell、process、filesystem、dialog path result 或 generic HTTP plugin
+- HTTP OpenAPI snapshot 与生成的 TypeScript schema 必须由 `scripts/generate-desktop-contract.sh --check` 验证；不要手写第二套 wire DTO
+- React 可见状态必须覆盖 loading、empty、stale/reconnect、error 和 terminal 分支；新增业务交互至少带一个 UI interaction test，并以真实 `sigil serve` contract test 证明跨层行为
+- SQLite/JSONL 只由 server/runtime 读取；desktop 不得把 projection 当 durable truth，也不得直接查询本地 session 数据文件
+
 ## 4. 数据与状态规则
 
 ### 4.1 Session / Control

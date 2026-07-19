@@ -1,4 +1,6 @@
-use std::{fmt, io, net::SocketAddr, path::PathBuf, process::ExitStatus, time::Duration};
+use std::{
+    fmt, io, net::SocketAddr, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration,
+};
 
 use reqwest::{Client, redirect::Policy};
 use thiserror::Error;
@@ -9,7 +11,7 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 
-use crate::{protocol::DesktopServerInfo, secret::DesktopBearerToken};
+use crate::{client::DesktopHttpClient, protocol::DesktopServerInfo, secret::DesktopBearerToken};
 
 const MAX_BOOTSTRAP_BYTES: usize = 16 * 1024;
 const MAX_SERVER_INFO_BYTES: usize = 16 * 1024;
@@ -167,7 +169,7 @@ impl DesktopLauncher {
             .no_proxy()
             .build()
             .map_err(|_| DesktopLaunchError::HttpClientUnavailable)?;
-        let bearer = DesktopBearerToken::generate()?;
+        let bearer = Arc::new(DesktopBearerToken::generate()?);
 
         let mut command = Command::new(&request.sigil_binary);
         command
@@ -340,12 +342,13 @@ impl DesktopLauncher {
         }
         let stdout_task = tokio::spawn(drain_pipe(stdout));
 
+        let desktop_client = DesktopHttpClient::new(client, address, Arc::clone(&bearer));
         Ok(DesktopServerProcess {
             child: Some(child),
             owner_stdin,
             process_id,
             process_owner,
-            _bearer: bearer,
+            client: desktop_client,
             server_info,
             address,
             shutdown_timeout: self.shutdown_timeout,
@@ -367,7 +370,7 @@ pub struct DesktopServerProcess {
     owner_stdin: Option<ChildStdin>,
     process_id: u32,
     process_owner: sigil_process::ProcessTreeOwnerGuard,
-    _bearer: DesktopBearerToken,
+    client: DesktopHttpClient,
     server_info: DesktopServerInfo,
     address: SocketAddr,
     shutdown_timeout: Duration,
@@ -386,6 +389,19 @@ impl DesktopServerProcess {
     #[must_use]
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Returns a cloneable typed client whose bearer remains opaque to callers.
+    #[must_use]
+    pub fn client(&self) -> DesktopHttpClient {
+        self.client.clone()
+    }
+
+    pub(crate) fn try_exit_status(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.as_mut().map_or_else(
+            || Err(io::Error::other("desktop server child is unavailable")),
+            Child::try_wait,
+        )
     }
 
     /// Closes the owner channel and waits for graceful drain before forcing process-tree cleanup.

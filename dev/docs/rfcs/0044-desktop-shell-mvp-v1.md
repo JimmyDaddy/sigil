@@ -1,6 +1,6 @@
 # RFC-0044 Desktop Shell MVP V1
 
-状态：active / R44.0-R44.1 complete；R44.2 ready
+状态：active / R44.0-R44.2 complete；R44.3 ready
 
 创建日期：2026-07-19
 
@@ -214,3 +214,23 @@ Windows GNU target check均通过。Linux cross-target本机验证在`ring` buil
 
 该结果只完成desktop process/security core；尚未创建可见窗口、frontend或可分发desktop artifact。R44.2现已
 解锁，下一步建立Tauri/React skeleton、checked contract drift gate和one-process-per-workspace manager。
+
+## 11. R44.2 result
+
+R44.2已建立真实`apps/desktop` Tauri 2 + React/TypeScript/Vite应用和`sigil-desktop-app` workspace member。
+主窗口capability只允许bootstrap、native workspace picker和close三个Sigil command；renderer没有dialog、filesystem、
+shell、process或generic HTTP permission，production CSP禁止remote content。workspace path只在Rust picker callback与
+manager中流转，IPC summary不包含path、bearer、loopback address或process handle。
+
+`sigil-desktop`现提供独立typed HTTP client与one-process-per-canonical-workspace manager。client复用launcher私有
+bearer和no-proxy/no-redirect transport，限制request timeout与2 MiB response；server-private session log path只可
+反序列化且Debug脱敏，不具备IPC serialization surface。真实production `sigil`测试已证明重复打开复用同一server，
+并通过typed client完成list/create/list后graceful close。
+
+`sigil-http` OpenAPI通过repository script导出为checked JSON snapshot，再由`openapi-typescript`生成frontend schema；
+CI和本地`pnpm check`会重新生成并byte-compare后执行typecheck、UI interaction tests和production build。macOS Tauri
+debug native build已通过。Cargo/npm供应链扫描均通过；当前Tauri Linux上游GTK3、glib与urlpattern/rust-unic传递
+风险已按精确RustSec ID记录并限制在desktop graph，R44.6 Linux runtime/package evidence仍是分发阻塞门禁。
+
+该结果只交付可启动的安全桌面骨架与连接状态，不宣称已有history、conversation、approval或可安装bundle。
+R44.3现可在不读取SQLite/JSONL的前提下实现recent workspace与HTTP catalog/new/open session surface。

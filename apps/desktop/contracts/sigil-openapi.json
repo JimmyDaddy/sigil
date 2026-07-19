@@ -1,0 +1,1368 @@
+{
+  "components": {
+    "parameters": {
+      "CallId": {
+        "in": "path",
+        "name": "call_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "RunId": {
+        "in": "path",
+        "name": "run_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SessionId": {
+        "in": "path",
+        "name": "session_id",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Invalid request body or command payload"
+      },
+      "Conflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Command is stale, mismatched, expired, or not pending"
+      },
+      "InternalError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Session binding, driver routing, or command completion failed"
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Session, run, or route was not found"
+      },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Bearer token is missing or invalid"
+      },
+      "Unavailable": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "The durable command identity store is unavailable or at capacity"
+      }
+    },
+    "schemas": {
+      "ApprovalCommandReceipt": {
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "$ref": "#/components/schemas/ApprovalDecisionRecord"
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "run_id",
+          "call_id",
+          "decision",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "ApprovalDecision": {
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecisionCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalDecisionRecord": {
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "approved",
+              "denied"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "call_id",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "ApprovalDecisionRequest": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/ApprovalDecision"
+          },
+          "expires_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_call_hash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_request_id",
+          "tool_call_hash",
+          "policy_version",
+          "expires_at_ms",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "CommandEnvelopeBase": {
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "client_id",
+          "session_id",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "DisclosureListResponse": {
+        "properties": {
+          "disclosures": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "disclosures"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "const": "ok",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "RunApprovalMode": {
+        "enum": [
+          "ask",
+          "allow_readonly",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "RunCancelCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/RunCancelRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RunCancelCommandReceipt": {
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSnapshot"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "run",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "RunCancelRequest": {
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RunSnapshot": {
+        "properties": {
+          "approval_mode": {
+            "$ref": "#/components/schemas/RunApprovalMode"
+          },
+          "id": {
+            "type": "string"
+          },
+          "pending_approval_call_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "prompt_preview": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "stream_sequence": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "status",
+          "approval_mode",
+          "prompt_preview",
+          "pending_approval_call_ids",
+          "stream_sequence"
+        ],
+        "type": "object"
+      },
+      "RunStartCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/RunStartRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RunStartCommandReceipt": {
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSnapshot"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "run",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "RunStartRequest": {
+        "properties": {
+          "approval_mode": {
+            "$ref": "#/components/schemas/RunApprovalMode"
+          },
+          "prompt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "approval_mode"
+        ],
+        "type": "object"
+      },
+      "RunStatus": {
+        "enum": [
+          "starting",
+          "running",
+          "waiting_for_approval",
+          "cancel_requested",
+          "execution_uncertain",
+          "finished",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "ServerCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "approval": {
+            "type": "boolean"
+          },
+          "cancellation": {
+            "type": "boolean"
+          },
+          "durable_event_replay": {
+            "type": "boolean"
+          },
+          "durable_session_reopen": {
+            "type": "boolean"
+          },
+          "live_events": {
+            "type": "boolean"
+          },
+          "session_catalog": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_catalog",
+          "durable_session_reopen",
+          "durable_event_replay",
+          "live_events",
+          "approval",
+          "cancellation"
+        ],
+        "type": "object"
+      },
+      "ServerInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "authentication": {
+            "enum": [
+              "bearer"
+            ],
+            "type": "string"
+          },
+          "bind_addr": {
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ServerCapabilities"
+          },
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "server_version": {
+            "type": "string"
+          },
+          "shutdown_on_stdin_close": {
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "protocol_version",
+          "server_version",
+          "workspace_id",
+          "bind_addr",
+          "authentication",
+          "shutdown_on_stdin_close",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogEntry": {
+        "additionalProperties": false,
+        "description": "Compact historical metadata only; message and tool bodies are absent.",
+        "properties": {
+          "assistant_message_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "control_entry_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "indexed_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "provider_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_ref": {
+            "type": "string"
+          },
+          "source_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "source_modified_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "source_state": {
+            "enum": [
+              "ready",
+              "oversized",
+              "scan_budget_exceeded",
+              "unsupported_legacy",
+              "invalid"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_result_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "user_message_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "session_ref",
+          "source_state",
+          "source_bytes",
+          "source_modified_at_unix_ms",
+          "user_message_count",
+          "assistant_message_count",
+          "tool_result_count",
+          "control_entry_count",
+          "pinned",
+          "indexed_at_unix_ms"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogPage": {
+        "additionalProperties": false,
+        "properties": {
+          "degraded_source_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCatalogEntry"
+            },
+            "type": "array"
+          },
+          "generation": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "identity_conflict_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reconciled_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "truncated_source_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "generation",
+          "reconciled_at_unix_ms",
+          "degraded_source_count",
+          "identity_conflict_count",
+          "truncated_source_count",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "SessionCreateRequest": {
+        "properties": {
+          "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionListResponse": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSnapshot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "SessionOpenRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 160,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "session_ref": {
+            "maxLength": 512,
+            "pattern": "^[^/\\\\]+\\.jsonl$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "SessionSnapshot": {
+        "properties": {
+          "durable_session_scope_id": {
+            "type": "string"
+          },
+          "foreground_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "session_log_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "run_ids",
+          "durable_session_scope_id",
+          "session_log_path"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Localhost-only adapter surface for desktop and future local clients.",
+    "title": "Sigil Local App Server API",
+    "version": "0.0.1-alpha.5"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/disclosures": {
+      "get": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisclosureListResponse"
+                }
+              }
+            },
+            "description": "Retained disclosure suffix"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Replay safe durable egress disclosures"
+      }
+    },
+    "/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Listener is running"
+          }
+        },
+        "security": [],
+        "summary": "Local listener health check"
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "summary": "Read this authenticated local API description"
+      }
+    },
+    "/runs/{run_id}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSnapshot"
+                }
+              }
+            },
+            "description": "Run snapshot"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Get a run snapshot"
+      }
+    },
+    "/runs/{run_id}/approvals/{call_id}": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "$ref": "#/components/parameters/CallId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalCommandReceipt"
+                }
+              }
+            },
+            "description": "Approval command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Submit an approval decision for a pending tool call"
+      }
+    },
+    "/runs/{run_id}/cancel": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCancelCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCancelCommandReceipt"
+                }
+              }
+            },
+            "description": "Run-cancel command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Request run cancellation"
+      }
+    },
+    "/runs/{run_id}/events": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Continuous text/event-stream until terminal, disconnect, lag, or shutdown"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Replay durable run events then follow live events"
+      }
+    },
+    "/server-info": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            },
+            "description": "Secret-free workspace/listener/protocol capabilities"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read immutable local server bootstrap metadata"
+      }
+    },
+    "/session-catalog": {
+      "get": {
+        "description": "Reconciles the rebuildable SQLite projection from durable JSONL sources, then returns a generation-consistent keyset page. Active run, approval, and progress state are not included.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Literal case-insensitive title search",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "maxLength": 160,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pinned",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ready",
+                "oversized",
+                "scan_budget_exceeded",
+                "unsupported_legacy",
+                "invalid"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCatalogPage"
+                }
+              }
+            },
+            "description": "Generation-consistent historical session page"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "List durable historical sessions for the current workspace"
+      }
+    },
+    "/sessions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            },
+            "description": "Session list"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "summary": "List local session handles"
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Session snapshot"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Create a local session handle"
+      }
+    },
+    "/sessions/open": {
+      "post": {
+        "description": "Revalidates the relative session reference and expected durable identity against current lifecycle and JSONL truth. SQLite catalog rows are candidates, not authorization.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionOpenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "New or existing idempotent local session snapshot"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Reopen a durable workspace session as a local handle"
+      }
+    },
+    "/sessions/{session_id}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Session snapshot"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Get a local session handle"
+      }
+    },
+    "/sessions/{session_id}/runs": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunStartCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStartCommandReceipt"
+                }
+              }
+            },
+            "description": "Run-start command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Start a run in a session"
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ]
+}
