@@ -19,6 +19,7 @@ interface AppProps {
 }
 
 type LoadState = "loading" | "ready" | "working" | "error";
+type SessionActionState = "idle" | "working" | "error";
 interface PendingWorkspaceClose {
   id: string;
   displayName: string;
@@ -39,7 +40,8 @@ export function App({ bridge = desktopBridge }: AppProps) {
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
   const [loadState, setLoadState] = useState<LoadState>("loading");
-  const [message, setMessage] = useState("Starting the local desktop bridge…");
+  const [message, setMessage] = useState("Starting Sigil…");
+  const [workspaceHealthError, setWorkspaceHealthError] = useState<string>();
   const [historyState, setHistoryState] = useState<HistoryState>("idle");
   const [catalog, setCatalog] = useState<CatalogPage>(EMPTY_CATALOG);
   const [searchDraft, setSearchDraft] = useState("");
@@ -48,17 +50,14 @@ export function App({ bridge = desktopBridge }: AppProps) {
   const [sourceFilter, setSourceFilter] = useState<CatalogSourceState | "all">("all");
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
+  const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
+  const [sessionMessage, setSessionMessage] = useState<string>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
     [activeWorkspaceId, workspaces],
   );
-
-  const handleConversationNotice = useCallback((notice: string, error = false) => {
-    setLoadState(error ? "error" : "ready");
-    setMessage(notice);
-  }, []);
 
   const applyBootstrap = useCallback((bootstrap: DesktopBootstrap) => {
     setWorkspaces(bootstrap.workspaces);
@@ -78,7 +77,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
 
   const refresh = useCallback(async () => {
     setLoadState("loading");
-    setMessage("Checking local workspace connections…");
+    setMessage("Checking open workspaces…");
     try {
       const bootstrap = await bridge.bootstrap();
       applyBootstrap(bootstrap);
@@ -86,11 +85,11 @@ export function App({ bridge = desktopBridge }: AppProps) {
       setMessage(
         bootstrap.workspaces.length === 0
           ? "Choose a workspace to begin."
-          : "Local workspace bridge ready.",
+          : "Sigil is ready.",
       );
     } catch {
       setLoadState("error");
-      setMessage("The local desktop bridge could not be started.");
+      setMessage("Sigil could not be started.");
     }
   }, [applyBootstrap, bridge]);
 
@@ -108,15 +107,15 @@ export function App({ bridge = desktopBridge }: AppProps) {
             (workspace) => workspace.state !== "ready",
           );
           if (unavailable !== undefined) {
-            setLoadState("error");
-            setMessage(
+            setWorkspaceHealthError(
               `${unavailable.displayName} stopped unexpectedly. Close it and reopen the workspace.`,
             );
+          } else {
+            setWorkspaceHealthError(undefined);
           }
         })
         .catch(() => {
-          setLoadState("error");
-          setMessage("The local desktop bridge is unavailable.");
+          setWorkspaceHealthError("Sigil cannot reach the workspace service.");
         });
     }, 2_000);
     return () => window.clearInterval(timer);
@@ -164,6 +163,8 @@ export function App({ bridge = desktopBridge }: AppProps) {
 
   useEffect(() => {
     setSelectedSession(undefined);
+    setSessionActionState("idle");
+    setSessionMessage(undefined);
   }, [activeWorkspaceId]);
 
   const rememberOpenWorkspace = (workspace: WorkspaceSummary) => {
@@ -219,7 +220,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
 
   const closeWorkspace = async (workspaceId: string, confirmed = false) => {
     setLoadState("working");
-    setMessage("Closing the workspace server…");
+    setMessage("Closing the workspace…");
     try {
       const remaining = await bridge.closeWorkspace(workspaceId, confirmed);
       setWorkspaces(remaining);
@@ -234,7 +235,7 @@ export function App({ bridge = desktopBridge }: AppProps) {
           : current,
       );
       setLoadState("ready");
-      setMessage("Workspace server closed.");
+      setMessage("Workspace closed.");
       setPendingWorkspaceClose(undefined);
     } catch (error) {
       if (
@@ -253,33 +254,33 @@ export function App({ bridge = desktopBridge }: AppProps) {
         return;
       }
       setLoadState("error");
-      setMessage("The workspace server could not be closed cleanly.");
+      setMessage("The workspace could not be closed cleanly.");
     }
   };
 
   const createSession = async () => {
     if (activeWorkspaceId === undefined) return;
-    setLoadState("working");
-    setMessage("Creating a new conversation…");
+    setSessionActionState("working");
+    setSessionMessage("Creating a new conversation…");
     try {
       const session = await bridge.createSession(
         activeWorkspaceId,
         "New conversation",
       );
       setSelectedSession(session);
-      setLoadState("ready");
-      setMessage("New conversation ready.");
+      setSessionActionState("idle");
+      setSessionMessage("New conversation ready.");
       await loadHistory(activeWorkspaceId);
     } catch {
-      setLoadState("error");
-      setMessage("The conversation could not be created.");
+      setSessionActionState("error");
+      setSessionMessage("The conversation could not be created. Try again.");
     }
   };
 
   const openSession = async (entry: CatalogEntry) => {
     if (activeWorkspaceId === undefined || entry.sessionId === undefined) return;
-    setLoadState("working");
-    setMessage("Opening conversation history…");
+    setSessionActionState("working");
+    setSessionMessage("Opening conversation…");
     try {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef: entry.sessionRef,
@@ -287,11 +288,11 @@ export function App({ bridge = desktopBridge }: AppProps) {
         label: entry.title,
       });
       setSelectedSession(session);
-      setLoadState("ready");
-      setMessage("Conversation opened from durable history.");
+      setSessionActionState("idle");
+      setSessionMessage(undefined);
     } catch {
-      setLoadState("error");
-      setMessage("The conversation could not be reopened from durable history.");
+      setSessionActionState("error");
+      setSessionMessage("This conversation could not be opened. Refresh the list and try again.");
     }
   };
 
@@ -300,105 +301,80 @@ export function App({ bridge = desktopBridge }: AppProps) {
       <header className="topbar">
         <a className="brand" href="#main" aria-label="Sigil desktop home">
           <span className="brand-mark" aria-hidden="true">S</span>
-          <span><strong>Sigil</strong><small>Desktop preview</small></span>
+          <span><strong>Sigil</strong><small>Coding workspace</small></span>
         </a>
-        <span className="security-chip">Local HTTP · private bearer</span>
+        <span className="workspace-chip">{activeWorkspace?.displayName ?? "No workspace open"}</span>
       </header>
 
       <main id="main" className="desktop-stage">
-        <aside className="workspace-sidebar" aria-label="Workspaces">
-          <div className="sidebar-heading">
-            <div><p className="eyebrow">Local runtime</p><h2>Workspaces</h2></div>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={() => void pickWorkspace()}
-              disabled={loadState === "working"}
-              aria-label="Choose workspace"
-            >+</button>
-          </div>
-
-          {workspaces.length === 0 ? (
-            <div className="sidebar-empty">No server is running.</div>
-          ) : (
-            <ul className="workspace-nav">
-              {workspaces.map((workspace) => (
-                <li key={workspace.id}>
-                  <button
-                    className={`workspace-nav-button ${workspace.id === activeWorkspaceId ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setActiveWorkspaceId(workspace.id)}
-                  >
-                    <span className={`status-dot status-${workspace.state}`} aria-hidden="true" />
-                    <span><strong>{workspace.displayName}</strong><small>{workspace.state}</small></span>
-                  </button>
-                  <button
-                    className="row-close"
-                    type="button"
-                    onClick={() => void closeWorkspace(workspace.id)}
-                    aria-label={`Close ${workspace.displayName}`}
-                  >×</button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div className="recent-heading"><span>Recent</span><small>Paths stay native</small></div>
-          {recentWorkspaces.length === 0 ? (
-            <div className="sidebar-empty">No recent workspace yet.</div>
-          ) : (
-            <ul className="recent-list">
-              {recentWorkspaces.map((recent) => (
-                <li key={recent.id}>
-                  <button type="button" onClick={() => void openRecentWorkspace(recent)}>
-                    <span>{recent.displayName}</span>
-                    <small>{recent.isOpen ? "Open" : "Reopen"}</small>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
-
-        <section className="history-shell" aria-labelledby="history-title">
-          {activeWorkspace === undefined ? (
-            <div className="welcome-state">
-              <p className="eyebrow">TUI-first · native companion</p>
-              <h1>Choose where you want to work.</h1>
-              <p>Each workspace gets its own supervised Sigil server. Local paths and credentials stay in Rust.</p>
-              <button className="primary-button" type="button" onClick={() => void pickWorkspace()}>
-                Choose workspace
-              </button>
+        <aside className="navigation-pane" aria-label="Workspace and conversations">
+          <section className="workspace-navigation" aria-labelledby="workspace-title">
+            <div className="sidebar-heading">
+              <div><p className="eyebrow">Projects</p><h2 id="workspace-title">Workspaces</h2></div>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => void pickWorkspace()}
+                disabled={loadState === "working"}
+                aria-label="Choose workspace"
+              >+</button>
             </div>
-          ) : (
-            <>
-              <div className="history-header">
-                <div>
-                  <p className="eyebrow">{activeWorkspace.displayName}</p>
-                  <h1 id="history-title">Conversation history</h1>
-                  <p>Rebuilt from durable session records through the local server.</p>
-                </div>
-                <button className="primary-button" type="button" onClick={() => void createSession()}>
-                  New conversation
-                </button>
+            {workspaces.length === 0 ? (
+              <div className="sidebar-empty">No workspace is open.</div>
+            ) : (
+              <ul className="workspace-nav">
+                {workspaces.map((workspace) => (
+                  <li key={workspace.id}>
+                    <button
+                      className={`workspace-nav-button ${workspace.id === activeWorkspaceId ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setActiveWorkspaceId(workspace.id)}
+                      aria-current={workspace.id === activeWorkspaceId ? "page" : undefined}
+                    >
+                      <span className={`status-dot status-${workspace.state}`} aria-hidden="true" />
+                      <span><strong>{workspace.displayName}</strong><small>{workspace.state}</small></span>
+                    </button>
+                    <button
+                      className="row-close"
+                      type="button"
+                      onClick={() => void closeWorkspace(workspace.id)}
+                      aria-label={`Close ${workspace.displayName}`}
+                    >×</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <details className="recent-workspaces">
+              <summary>Recent workspaces</summary>
+              {recentWorkspaces.length === 0 ? (
+                <div className="sidebar-empty">No recent workspace yet.</div>
+              ) : (
+                <ul className="recent-list">
+                  {recentWorkspaces.map((recent) => (
+                    <li key={recent.id}>
+                      <button type="button" onClick={() => void openRecentWorkspace(recent)}>
+                        <span>{recent.displayName}</span>
+                        <small>{recent.isOpen ? "Open" : "Reopen"}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
+          </section>
+
+          {activeWorkspace !== undefined ? (
+            <section className="session-navigation" aria-labelledby="history-title">
+              <div className="session-navigation-header">
+                <div><p className="eyebrow">{activeWorkspace.displayName}</p><h2 id="history-title">Conversations</h2></div>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={() => void createSession()}
+                  disabled={sessionActionState === "working"}
+                  aria-label="Create conversation"
+                >+</button>
               </div>
-
-              {selectedSession !== undefined ? (
-                <>
-                  <div className="selected-session" role="status">
-                    <span>Conversation ready</span>
-                    <strong>{selectedSession.label ?? selectedSession.id}</strong>
-                    <small>{selectedSession.runCount} existing runs</small>
-                  </div>
-                  <ConversationPanel
-                    bridge={bridge}
-                    workspaceId={activeWorkspace.id}
-                    session={selectedSession}
-                    onNotice={handleConversationNotice}
-                  />
-                </>
-              ) : null}
-
               <form
                 className="history-filters"
                 onSubmit={(event) => {
@@ -408,24 +384,10 @@ export function App({ bridge = desktopBridge }: AppProps) {
               >
                 <label className="search-field">
                   <span className="sr-only">Search conversation history</span>
-                  <input
-                    value={searchDraft}
-                    onChange={(event) => setSearchDraft(event.target.value)}
-                    placeholder="Search titles, providers, and models"
-                  />
+                  <input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="Search conversations" />
                 </label>
-                <input
-                  className="provider-field"
-                  value={providerFilter}
-                  onChange={(event) => setProviderFilter(event.target.value)}
-                  placeholder="Provider"
-                  aria-label="Filter by provider"
-                />
-                <select
-                  value={sourceFilter}
-                  onChange={(event) => setSourceFilter(event.target.value as CatalogSourceState | "all")}
-                  aria-label="Filter by source state"
-                >
+                <input className="provider-field" value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)} placeholder="Provider" aria-label="Filter by provider" />
+                <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as CatalogSourceState | "all")} aria-label="Filter by source state">
                   <option value="all">All states</option>
                   <option value="ready">Ready</option>
                   <option value="oversized">Oversized</option>
@@ -434,29 +396,62 @@ export function App({ bridge = desktopBridge }: AppProps) {
                   <option value="invalid">Invalid</option>
                 </select>
                 <label className="check-filter">
-                  <input type="checkbox" checked={pinnedOnly} onChange={(event) => setPinnedOnly(event.target.checked)} />
-                  Pinned
+                  <input type="checkbox" checked={pinnedOnly} onChange={(event) => setPinnedOnly(event.target.checked)} /> Pinned
                 </label>
                 <button className="quiet-button" type="submit">Search</button>
               </form>
+              {sessionMessage !== undefined ? (
+                <div className={`session-notice ${sessionActionState === "error" ? "error" : ""}`} role={sessionActionState === "error" ? "alert" : "status"}>
+                  {sessionMessage}
+                </div>
+              ) : null}
+              <div className="session-list-scroll">
+                <HistoryContent
+                  state={historyState}
+                  page={catalog}
+                  onRetry={() => void loadHistory(activeWorkspace.id)}
+                  onLoadMore={() => {
+                    if (catalog.nextCursor !== undefined) void loadHistory(activeWorkspace.id, catalog.nextCursor);
+                  }}
+                  onOpen={(entry) => void openSession(entry)}
+                />
+              </div>
+            </section>
+          ) : null}
+        </aside>
 
-              <HistoryContent
-                state={historyState}
-                page={catalog}
-                onRetry={() => void loadHistory(activeWorkspace.id)}
-                onLoadMore={() => {
-                  if (catalog.nextCursor !== undefined) void loadHistory(activeWorkspace.id, catalog.nextCursor);
-                }}
-                onOpen={(entry) => void openSession(entry)}
-              />
-            </>
+        <section className="conversation-stage" aria-label="Conversation workspace">
+          {activeWorkspace === undefined ? (
+            <div className="welcome-state">
+              <p className="eyebrow">Start a task</p>
+              <h1>Open a workspace to begin.</h1>
+              <p>Choose a project, continue a previous conversation, or start a focused coding task.</p>
+              <button className="primary-button" type="button" onClick={() => void pickWorkspace()}>Choose workspace</button>
+            </div>
+          ) : selectedSession === undefined ? (
+            <div className="conversation-empty">
+              <p className="eyebrow">{activeWorkspace.displayName}</p>
+              <h1>Select a conversation</h1>
+              <p>Continue from the list or start a new coding task in this workspace.</p>
+              <button className="primary-button" type="button" disabled={sessionActionState === "working"} onClick={() => void createSession()}>
+                New conversation
+              </button>
+            </div>
+          ) : (
+            <div className="conversation-surface">
+              <div className="selected-session">
+                <div><p className="eyebrow">{activeWorkspace.displayName}</p><strong>{selectedSession.label ?? "Untitled conversation"}</strong></div>
+                <small>{selectedSession.runCount} recorded run{selectedSession.runCount === 1 ? "" : "s"}</small>
+              </div>
+              <ConversationPanel bridge={bridge} workspaceId={activeWorkspace.id} session={selectedSession} />
+            </div>
           )}
         </section>
       </main>
 
       <footer className="statusbar" role="status" aria-live="polite">
-        <span className={`status-dot status-${loadState === "error" ? "crashed" : "ready"}`} aria-hidden="true" />
-        {message}
+        <span className={`status-dot status-${workspaceHealthError !== undefined || loadState === "error" ? "crashed" : "ready"}`} aria-hidden="true" />
+        {workspaceHealthError ?? message}
       </footer>
 
       {pendingWorkspaceClose !== undefined ? (

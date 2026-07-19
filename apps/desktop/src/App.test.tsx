@@ -136,7 +136,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByText("No server is running.")).toBeTruthy();
+    expect(await screen.findByText("No workspace is open.")).toBeTruthy();
     expect(screen.getByText("Reopen")).toBeTruthy();
     expect(screen.getByText("Choose a workspace to begin.")).toBeTruthy();
   });
@@ -152,17 +152,21 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No server is running.");
+    await screen.findByText("No workspace is open.");
     await user.click(screen.getAllByRole("button", { name: "Choose workspace" })[0]);
-    expect(await screen.findByText("Conversation history")).toBeTruthy();
+    expect(await screen.findByText("Conversations")).toBeTruthy();
     expect(await screen.findByText("No matching conversation.")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByText("Conversation ready")).toBeTruthy();
-    expect(screen.getByText("0 existing runs")).toBeTruthy();
+    expect(await screen.findByText("New conversation ready.")).toBeTruthy();
+    expect(screen.getByText("0 recorded runs")).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Workspace and conversations" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Conversation workspace" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Verification" })).toBeTruthy();
+    expect(screen.queryByText(/private bearer|TUI-first|stay in Rust/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Close sigil" }));
-    expect(await screen.findByText("Workspace server closed.")).toBeTruthy();
+    expect(await screen.findByText("Workspace closed.")).toBeTruthy();
     expect(closeRequest).toBe(workspace.id);
   });
 
@@ -222,13 +226,10 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("Legacy session")).toBeTruthy();
     expect(cursors).toEqual([undefined, "cursor-2"]);
-    expect(
-      (screen.getByRole("button", { name: "Inspect only" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    expect(screen.getAllByText("Unavailable")).toHaveLength(2);
 
     await user.click(screen.getByRole("button", { name: "Open" }));
-    await waitFor(() => expect(screen.getByText("2 existing runs")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
   });
 
   it("opens bounded transcript text and pages older messages in chronological order", async () => {
@@ -451,9 +452,9 @@ describe("desktop workspace and history shell", () => {
 
     expect(await screen.findByText("Keep this conversation")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Open" }));
-    expect(await screen.findByText("Conversation ready")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Durable session" })).toBeTruthy();
     await user.type(screen.getByRole("textbox", { name: "Filter by provider" }), "deepseek");
-    expect(screen.getByText("Conversation ready")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Durable session" })).toBeTruthy();
   });
 
   it("requires explicit confirmation before closing a workspace with active runs", async () => {
@@ -478,12 +479,12 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("Conversation history");
+    await screen.findByText("Conversations");
     await user.click(screen.getByRole("button", { name: "Close sigil" }));
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
     expect(screen.getByText(/side effects that already happened are not undone/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Close workspace and interrupt runs" }));
-    expect(await screen.findByText("Workspace server closed.")).toBeTruthy();
+    expect(await screen.findByText("Workspace closed.")).toBeTruthy();
     expect(confirmations).toEqual([false, true]);
   });
 
@@ -505,7 +506,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("History changed while paging.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Refresh history" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Refresh conversations" })).toBeTruthy();
   });
 
   it("runs a prompt and merges streamed and durable completion into one assistant reply", async () => {
@@ -533,6 +534,8 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
     await user.click(screen.getByRole("button", { name: "Run" }));
+    expect(await screen.findByText("Run started. Live updates are connected.")).toBeTruthy();
+    expect(document.querySelector(".statusbar")?.textContent).toContain("Sigil is ready.");
     await waitFor(() => expect(eventListener).toBeDefined());
 
     const base = {
@@ -691,7 +694,7 @@ describe("desktop workspace and history shell", () => {
     expect(approvedCall).toBe("run-1:approval-1:true");
     await user.click(screen.getByRole("button", { name: "Cancel run" }));
     expect(cancelledRun).toBe("run-1");
-    expect(await screen.findByText("Cancellation requested. Waiting for durable cleanup evidence.")).toBeTruthy();
+    expect(await screen.findByText("Cancellation requested. Waiting for the run to stop safely.")).toBeTruthy();
   });
 
   it("shows exact verification evidence and reruns only the rendered binding", async () => {

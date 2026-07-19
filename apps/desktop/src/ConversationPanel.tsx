@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { DesktopBridge } from "./bridge";
 import type {
@@ -14,7 +14,6 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
-  onNotice(message: string, error?: boolean): void;
 }
 
 interface TimelineRow {
@@ -29,7 +28,6 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
-  onNotice,
 }: ConversationPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [run, setRun] = useState<RunSummary>();
@@ -46,10 +44,14 @@ export function ConversationPanel({
   const [transcriptError, setTranscriptError] = useState(false);
   const [transcriptReload, setTranscriptReload] = useState(0);
   const [attachmentGap, setAttachmentGap] = useState(false);
+  const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
+  const onNotice = useCallback((message: string, error = false) => {
+    setRunNotice({ message, error });
+  }, []);
 
   useEffect(() => {
     setRun(undefined);
@@ -61,6 +63,7 @@ export function ConversationPanel({
     setNextBefore(undefined);
     setTranscriptError(false);
     setAttachmentGap(false);
+    setRunNotice(undefined);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
@@ -182,7 +185,7 @@ export function ConversationPanel({
         if (!disposed) {
           activeRunIdRef.current = undefined;
           onNotice(
-            "The active run changed while reopening this conversation. Refresh its durable history.",
+            "The active run changed while reopening this conversation. Refresh its saved messages.",
             true,
           );
         }
@@ -267,7 +270,7 @@ export function ConversationPanel({
     onNotice("Requesting cooperative cancellation…");
     try {
       setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
-      onNotice("Cancellation requested. Waiting for durable cleanup evidence.");
+      onNotice("Cancellation requested. Waiting for the run to stop safely.");
     } catch {
       onNotice("Cancellation could not be requested.", true);
     } finally {
@@ -308,7 +311,7 @@ export function ConversationPanel({
       setVerification(next);
       onNotice(`Verification finished: ${next.status}.`);
     } catch {
-      onNotice("The verification binding was stale or the check could not run.", true);
+      onNotice("The recommendation changed or the check could not run. Review the latest evidence.", true);
       try {
         setVerification(await bridge.verification(workspaceId, session.id));
       } catch {
@@ -320,7 +323,8 @@ export function ConversationPanel({
   };
 
   return (
-    <section className="conversation-panel" aria-labelledby="conversation-title">
+    <div className="conversation-layout">
+      <section className="conversation-panel" aria-labelledby="conversation-title">
       <header className="conversation-header">
         <div>
           <p className="eyebrow">Active conversation</p>
@@ -330,6 +334,12 @@ export function ConversationPanel({
           {streamStatus?.state ?? "ready"}
         </span>
       </header>
+
+      {runNotice !== undefined ? (
+        <div className={`run-notice ${runNotice.error ? "error" : ""}`} role={runNotice.error ? "alert" : "status"}>
+          {runNotice.message}
+        </div>
+      ) : null}
 
       <div
         className="timeline"
@@ -346,7 +356,7 @@ export function ConversationPanel({
       >
         {attachmentGap ? (
           <div className="timeline-gap" role="status">
-            Some live details were not retained while this conversation was away. Durable messages and terminal state remain authoritative.
+            Some live details were not retained while this conversation was away. Saved messages and the final run state remain available.
           </div>
         ) : null}
         {nextBefore !== undefined ? (
@@ -377,7 +387,7 @@ export function ConversationPanel({
         {rows.length === 0 ? (
           <div className="timeline-empty">
             <strong>{transcriptBusy ? "Loading conversation history…" : "Ready for a prompt."}</strong>
-            <span>{transcriptBusy ? "Reading a bounded page from durable session history." : "New run events appear here."}</span>
+            <span>{transcriptBusy ? "Loading saved messages." : "New run activity appears here."}</span>
           </div>
         ) : (
           rows.map((row) => (
@@ -415,58 +425,6 @@ export function ConversationPanel({
         </section>
       ) : null}
 
-      {verification !== undefined ? (
-        <section className="verification-card" aria-labelledby="verification-title">
-          <header>
-            <div>
-              <p className="eyebrow">Verification</p>
-              <h3 id="verification-title">{verification.recommendedCheckSpecId ?? "Current evidence"}</h3>
-            </div>
-            <span className={`verification-badge verification-${verification.verdict}`}>
-              {verification.status}
-            </span>
-          </header>
-          {verification.recommendationReason ? <p>{verification.recommendationReason}</p> : null}
-          <dl>
-            <div><dt>Scope</dt><dd>{verification.scopeKind} · {verification.scopeId}</dd></div>
-            <div><dt>Receipt</dt><dd>{verification.evidence.receiptId ?? "not recorded"}</dd></div>
-            <div><dt>Snapshot</dt><dd>{verification.evidence.workspaceSnapshotId ?? "not linked"}</dd></div>
-            <div><dt>Changeset</dt><dd>{verification.evidence.changesetId ?? "not linked"}</dd></div>
-          </dl>
-          {verification.evidence.failureSummary ? (
-            <div className="verification-failure" role="status">
-              <strong>Failure location</strong>
-              <p>{verification.evidence.failureSummary}</p>
-              <small>
-                Command {verification.evidence.commandEventId ?? "not linked"} · output {verification.evidence.outputArtifactId ?? "not linked"}
-              </small>
-            </div>
-          ) : null}
-          <div className="verification-actions">
-            {verification.action?.kind === "rerun" ? (
-              <button
-                className="primary-button"
-                type="button"
-                disabled={verificationBusy || active}
-                onClick={() => void rerunVerification()}
-              >
-                {verificationBusy
-                  ? "Running check…"
-                  : verification.recommendationKind === "retry"
-                    ? "Retry check"
-                    : verification.recommendationKind === "rerun_non_writing"
-                      ? "Rerun non-writing check"
-                      : "Run recommended check"}
-              </button>
-            ) : verification.action?.kind === "review_approval" ? (
-              <small>This check needs a separate trust review. Desktop does not silently promote repository commands.</small>
-            ) : (
-              <small>No verification action is currently required.</small>
-            )}
-          </div>
-        </section>
-      ) : null}
-
       <form
         className="composer"
         onSubmit={(event) => {
@@ -490,7 +448,7 @@ export function ConversationPanel({
           }}
         />
         <div className="composer-actions">
-          <small>{active ? "One foreground run is active." : "Approval mode: ask"}</small>
+          <small>{active ? "A run is active in this conversation." : "Tool actions ask before running."}</small>
           <div>
             {active ? <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={() => void cancel()}>Cancel run</button> : null}
             <button className="primary-button" type="submit" disabled={prompt.trim() === "" || active || submitting}>
@@ -499,7 +457,72 @@ export function ConversationPanel({
           </div>
         </div>
       </form>
-    </section>
+      </section>
+
+      <aside className="inspector-pane" aria-labelledby="inspector-title">
+        <header className="inspector-header">
+          <p className="eyebrow">Review</p>
+          <h2 id="inspector-title">Verification</h2>
+          <p>Evidence and recommended checks for this conversation.</p>
+        </header>
+        {verification !== undefined ? (
+          <section className="verification-card" aria-labelledby="verification-title">
+            <header>
+              <div>
+                <p className="eyebrow">Current check</p>
+                <h3 id="verification-title">{verification.recommendedCheckSpecId ?? "Current evidence"}</h3>
+              </div>
+              <span className={`verification-badge verification-${verification.verdict}`}>
+                {verification.status}
+              </span>
+            </header>
+            {verification.recommendationReason ? <p>{verification.recommendationReason}</p> : null}
+            <dl>
+              <div><dt>Scope</dt><dd>{verification.scopeKind} · {verification.scopeId}</dd></div>
+              <div><dt>Receipt</dt><dd>{verification.evidence.receiptId ?? "not recorded"}</dd></div>
+              <div><dt>Snapshot</dt><dd>{verification.evidence.workspaceSnapshotId ?? "not linked"}</dd></div>
+              <div><dt>Changeset</dt><dd>{verification.evidence.changesetId ?? "not linked"}</dd></div>
+            </dl>
+            {verification.evidence.failureSummary ? (
+              <div className="verification-failure" role="status">
+                <strong>Failure location</strong>
+                <p>{verification.evidence.failureSummary}</p>
+                <small>
+                  Command {verification.evidence.commandEventId ?? "not linked"} · output {verification.evidence.outputArtifactId ?? "not linked"}
+                </small>
+              </div>
+            ) : null}
+            <div className="verification-actions">
+              {verification.action?.kind === "rerun" ? (
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={verificationBusy || active}
+                  onClick={() => void rerunVerification()}
+                >
+                  {verificationBusy
+                    ? "Running check…"
+                    : verification.recommendationKind === "retry"
+                      ? "Retry check"
+                      : verification.recommendationKind === "rerun_non_writing"
+                        ? "Rerun non-writing check"
+                        : "Run recommended check"}
+                </button>
+              ) : verification.action?.kind === "review_approval" ? (
+                <small>This check needs a separate trust review.</small>
+              ) : (
+                <small>No verification action is currently required.</small>
+              )}
+            </div>
+          </section>
+        ) : (
+          <div className="inspector-empty">
+            <strong>No verification evidence yet</strong>
+            <p>Run a task or select a recorded check when evidence becomes available.</p>
+          </div>
+        )}
+      </aside>
+    </div>
   );
 }
 

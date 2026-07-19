@@ -22,14 +22,14 @@ export function HistoryContent({
   onOpen: (entry: CatalogEntry) => void;
 }) {
   if (state === "loading") {
-    return <div className="history-notice busy">Rebuilding local history index…</div>;
+    return <div className="history-notice busy">Loading conversations…</div>;
   }
   if (state === "error" || state === "stale") {
     return (
       <div className="history-notice error" role="alert">
         <strong>{state === "stale" ? "History changed while paging." : "History is unavailable."}</strong>
-        <span>{state === "stale" ? "Restart from the first page to use a consistent index generation." : "The durable records are unchanged. Retry the local projection."}</span>
-        <button className="quiet-button" type="button" onClick={onRetry}>Refresh history</button>
+        <span>{state === "stale" ? "The list changed while more items were loading. Refresh and continue." : "Your saved conversations are unchanged. Try loading the list again."}</span>
+        <button className="quiet-button" type="button" onClick={onRetry}>Refresh conversations</button>
       </div>
     );
   }
@@ -40,11 +40,11 @@ export function HistoryContent({
     <div className="history-results">
       <div className="history-meta">
         <span>{page.entries.length} conversations</span>
-        <small>Generation {page.generation} · refreshed {formatTime(page.reconciledAtUnixMs)}</small>
+        <small>Updated {formatTime(page.reconciledAtUnixMs)}</small>
       </div>
       {hasWarnings ? (
         <div className="history-warning" role="status">
-          Some sources need attention: {page.degradedSourceCount} degraded, {page.identityConflictCount} identity conflicts, {page.truncatedSourceCount} scan-limited.
+          Some conversations need attention: {page.degradedSourceCount} unavailable, {page.identityConflictCount} changed, {page.truncatedSourceCount} too large to inspect here.
         </div>
       ) : null}
       {page.entries.length === 0 ? (
@@ -68,9 +68,11 @@ export function HistoryContent({
                   <p>{entry.providerName ?? "Unknown provider"}{entry.modelName ? ` · ${entry.modelName}` : ""}</p>
                   <small>{entry.userMessageCount} prompts · {entry.assistantMessageCount} replies · {entry.toolResultCount} tool results · {formatTime(entry.sourceModifiedAtUnixMs)}</small>
                 </div>
-                <button className="quiet-button" type="button" disabled={!canOpen} onClick={() => onOpen(entry)}>
-                  {canOpen ? "Open" : "Inspect only"}
-                </button>
+                {canOpen ? (
+                  <button className="quiet-button" type="button" onClick={() => onOpen(entry)}>Open</button>
+                ) : (
+                  <span className="history-row-unavailable">Unavailable</span>
+                )}
               </li>
             );
           })}
@@ -90,7 +92,7 @@ function sourceLabel(state: CatalogSourceState): string {
     case "ready": return "Ready";
     case "oversized": return "Oversized";
     case "scan_budget_exceeded": return "Scan limited";
-    case "unsupported_legacy": return "Unsupported";
+    case "unsupported_legacy": return "Unavailable";
     case "invalid": return "Invalid";
   }
 }

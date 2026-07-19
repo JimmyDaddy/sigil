@@ -1,6 +1,6 @@
 # RFC-0045 Desktop UI/UX Foundation V1
 
-状态：active / R45.0-R45.2 complete，R45.3 ready
+状态：active / R45.0-R45.3 complete，R45.4 ready
 
 创建日期：2026-07-19
 
@@ -128,6 +128,12 @@ Workspace / Sessions | Conversation | Review / Verification
 | Transient action | copied, draft saved | local toast/status message |
 
 健康状态必须清除旧错误。切换筛选器只影响列表结果，不卸载已经打开的 conversation 或 active-run follower。
+
+R45.3 已完成：桌面 shell 现按 workspace/session navigation、conversation 和 verification inspector 分区；document
+固定为 app viewport，conversation timeline 是唯一主任务滚动区，navigation list 与 inspector 只有各自的 bounded scroll。
+history filter 已移入 navigation，selected conversation 不再与历史列表纵向竞争。workspace health、session action、run action、
+history 与 verification error 分属各自 surface，恢复后清除本 scope 的 stale state；主界面也不再展示 bearer、HTTP、Rust、
+TUI-first、projection generation 等实现文案。
 
 ## 7. Bounded transcript contract
 
