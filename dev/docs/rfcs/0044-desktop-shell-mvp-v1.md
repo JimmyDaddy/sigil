@@ -1,0 +1,216 @@
+# RFC-0044 Desktop Shell MVP V1
+
+状态：active / R44.0-R44.1 complete；R44.2 ready
+
+创建日期：2026-07-19
+
+基线：
+
+- Desktop/app server: [RFC-0016](0016-desktop-app-server-productization.md)
+- Stable local protocol and real serve: [RFC-0026](0026-stable-machine-protocol-and-real-serve.md)
+- SQLite desktop session catalog: [RFC-0042](0042-sqlite-projection-and-desktop-session-catalog-v1.md)
+- Desktop runtime bridge: [RFC-0043](0043-desktop-runtime-bridge-v1.md)
+
+## 1. Summary
+
+RFC-0043 已冻结 one `sigil serve` per workspace、机器可读 bootstrap、per-launch bearer、stdin owner pipe、
+durable reopen 和 HTTP-only desktop contract。继续停留在 adapter 层不会再产生新的产品证据：下一步应建立真正
+的桌面壳，但第一批必须先证明 launcher 能安全持有 child、token 和 shutdown ownership，而不是先搭一个不能运行
+任务的空界面。
+
+本 RFC 冻结 Tauri 2 + React/TypeScript/Vite 技术栈和桌面边界，并按 launcher supervisor、typed HTTP client、
+workspace/history shell、conversation/run、approval/cancel/verification、packaging/dogfood 六个可验收切片实施。
+桌面只是 TUI 之外的第二个 adapter，不复制 agent loop，不直接读取 SQLite/JSONL，也不改变 TUI-first 的产品定位。
+
+## 2. Research and trade-off decision
+
+### 2.1 Official framework evidence
+
+- [Tauri 2](https://v2.tauri.app/start/) 使用系统 WebView，可把 Rust command 和 WebView 权限限制在显式能力内；
+  [capability contract](https://v2.tauri.app/reference/acl/capability/) 能按 window/webview 绑定 command permission。
+- Tauri 的 [sidecar support](https://v2.tauri.app/develop/sidecar/) 可以打包外部 binary，但本项目不把 owner lifecycle
+  委托给 renderer shell plugin；child supervision 留在可测试的 Rust backend/library。
+- Tauri 不捆绑同一浏览器引擎；[WebView version](https://v2.tauri.app/reference/webview-versions/) 随平台而异，
+  因而 CSS、IME、clipboard、scroll 和 accessibility 必须做 macOS/Linux/Windows UI smoke，不能只以 Chromium
+  开发环境为准。
+- Electron 提供一致 Chromium 和成熟分发，但其官方 [process model](https://www.electronjs.org/docs/latest/tutorial/process-model)
+  引入 main/renderer/preload 边界；官方 [security guidance](https://www.electronjs.org/docs/latest/tutorial/security)
+  还要求持续维护 context isolation、sandbox、navigation、IPC sender 和 dependency/update surface。
+
+### 2.2 Competitor evidence
+
+- Goose `ui/desktop` 与 OpenCode `packages/desktop` 当前均使用 Electron + React/Vite；它们证明成熟 Chromium、
+  Playwright 和多平台 packaging 的工程价值，也展示了 Node/main/preload/renderer 与浏览器 runtime 的额外 footprint。
+- Goose 把 OpenAPI schema/client generation 纳入桌面构建，是 Sigil R44.2 应采用的 drift gate；Sigil 只借鉴
+  contract generation，不让 renderer 直接持有 HTTP credential。
+- DeepSeek Reasonix `desktop` 使用 Wails + React/Vite，并让 UI 直接绑定 Go kernel。Sigil 明确拒绝这种路线：
+  RFC-0043 已规定 HTTP 是桌面唯一运行契约，桌面不能绕过 runtime/approval/session truth。
+
+### 2.3 Frozen stack
+
+| Layer | V1 choice | Reason |
+| --- | --- | --- |
+| Native shell | Tauri 2 | Rust ownership 与现有 workspace 对齐；capability allowlist；不捆绑 Chromium |
+| Frontend | React + TypeScript + Vite | 适合状态密集的 conversation/history/approval UI，竞品已有充分工程证据 |
+| Runtime transport | loopback HTTP/SSE only | 复用 RFC-0026/RFC-0043，不复制 kernel/runtime 或 SQLite access |
+| Client contract | checked OpenAPI snapshot + Rust typed client + generated frontend DTO types | build/CI 检测 wire drift；HTTP/bearer 留在Rust，renderer只收窄化IPC DTO |
+| Process owner | Rust `sigil-desktop` library | token、child、stdin pipe、bootstrap 和 fallback kill 不进入 renderer |
+| Package layout | `crates/sigil-desktop` + `apps/desktop` | 前者可无 GUI 做真实 binary 测试；后者只拥有 Tauri/UI/packaging |
+
+R44.0 只冻结 stack，不立即引入 Tauri/npm 依赖。R44.1 先交付可独立审计的 Rust launcher；R44.2 建立
+`apps/desktop` 时才锁定具体 Tauri、React、Vite 和 codegen 版本并更新供应链台账。
+
+## 3. Architecture and trust boundary
+
+```text
+React renderer
+  -> narrow Tauri commands/events (no token, no raw filesystem/process API)
+Tauri Rust backend
+  -> sigil-desktop launcher + typed HTTP client
+  -> owns one child/token/stdin pipe per open workspace
+sigil serve
+  -> sigil-http -> sigil-runtime -> sigil-kernel
+  -> JSONL/lifecycle truth + rebuildable SQLite projection
+```
+
+Hard boundaries：
+
+1. Renderer 永远拿不到 bearer token、child handle、absolute state/cache/session path、直接HTTP client或任意shell API。
+2. Desktop 只通过鉴权 HTTP/SSE 操作 session/run/approval/cancel；不得依赖 `sigil-http` server internals、
+   `sigil-runtime`、`sigil-kernel` 或直接数据库绑定。
+3. 每个 workspace 有独立 child、token、HTTP epoch 和 lifecycle；V1 不建立 multi-workspace daemon。
+4. UI 状态不是 durable truth。重启、窗口恢复和 reconnect 必须重新 catalog/open/snapshot/replay。
+5. Tauri capability 默认 deny；只向主窗口暴露 frozen desktop commands。不开 remote content、Node integration、
+   arbitrary URL navigation、generic shell、generic filesystem 或 generic HTTP plugin。
+
+## 4. R44.1 launcher supervisor contract
+
+### 4.1 Ownership
+
+新增 library-only `sigil-desktop` crate。现有 crate 不适合承载该职责：
+
+- `sigil` 是被监管的 server binary，不能同时充当自己的 desktop parent；
+- `sigil-http` 只拥有 server framing/auth/registry，不能反向拥有 client process；
+- `sigil-process` 只拥有通用 process-tree primitive，不应知道 config、bootstrap、bearer 或 HTTP handshake；
+- `apps/desktop` 的 Tauri glue 后续应保持薄，不重复一套 supervisor。
+
+依赖方向固定为 `apps/desktop -> sigil-desktop -> sigil-process + generic transport/serde`。`sigil-desktop` 不依赖
+kernel、runtime、TUI 或 HTTP server crate。
+
+### 4.2 Launch and readiness
+
+1. 输入 exact `sigil` binary、config path、workspace root 与 bounded timeouts；启动前校验 binary/config/workspace
+   基本类型，不把路径写入 error/display。
+2. 用系统 CSPRNG 生成 256-bit per-launch token，只通过 `SIGIL_HTTP_TOKEN` environment 注入；argv、Debug、
+   bootstrap、error 与 frontend command result 均不可包含 token。
+3. 启动 `sigil --config <path> serve --startup-output json --shutdown-on-stdin-close`，stdin/stdout/stderr 使用 pipe；
+   child 进入平台 process-tree owner。
+4. 在总 startup deadline 内读取最多 16 KiB 的单行 bootstrap；拒绝 EOF、超限、非 JSON、unknown schema、
+   non-loopback bind、非 bearer、owner flag false 或缺失 V1 capability。
+5. 用同一 private token 对 `GET /server-info` 做一次 no-proxy/no-redirect/bounded HTTP 校验，要求与 bootstrap
+   完全一致后才返回 ready。
+
+### 4.3 Shutdown and failure
+
+- 正常关闭先 drop stdin owner pipe，再 bounded wait；deadline内成功退出报告`graceful`。
+- 超时后终止整个process tree并reap direct child；native non-success报告`forced`。如果owner shutdown恰好与
+  fallback竞争并在deadline后以0退出，报告`graceful_after_deadline`；不能把该竞态伪装成已执行SIGKILL。
+  整树终止失败且server也未证明successful drain时fail closed，不能只kill parent后报告成功。
+- launch 任一步失败都执行同一 cleanup；Drop 是最后一道 synchronous process-tree kill 防线，不替代显式 async
+  shutdown。
+- stderr/stdout 由 bounded drain 消费以避免 child 阻塞，但 R44.1 不把 raw diagnostic 暴露给 UI；后续支持包只能
+  经过既有 privacy/redaction contract。
+
+## 5. Product scope
+
+### Goals
+
+1. 建立真实可安装桌面应用的最小技术/安全基础，而不是第三套 agent runtime。
+2. 让用户选择 workspace、浏览历史、打开/新建 conversation、运行 prompt、处理 approval/cancel/verification。
+3. 桌面退出、workspace close、server crash/restart 都有清晰恢复路径和真实 lifecycle ownership。
+4. 保持 TUI 行为、快捷键和默认分发不变；desktop 是独立 opt-in artifact。
+
+### Non-goals
+
+- 不在 V1 实现 remote/multi-user server、cloud sync、mobile、IDE extension 或 browser-hosted UI。
+- 不直接撤销 shell/remote side effect，不扩大 checkpoint/rewind 承诺。
+- 不把 SQLite 变成 source of truth，不允许 renderer 查询 database/file paths。
+- 不在第一版复制 `/config` 的全部高级配置；优先完成 daily loop。
+- 不因 Tauri 存在就开放 generic shell/filesystem/network capability。
+
+## 6. Implementation slices
+
+1. **R44.0 Stack, topology and security freeze**：官方/竞品调研、framework decision、crate/app ownership、
+   capability/process/HTTP boundaries、acceptance ledger。
+2. **R44.1 Launcher supervisor**：`sigil-desktop`、CSPRNG secret carrier、bounded bootstrap、authenticated
+   server-info equality、cross-platform process-tree ownership、graceful/forced cleanup、真实 `sigil` process E2E。
+3. **R44.2 Desktop skeleton and generated contract**：Tauri/React/Vite app、deny-by-default capability、checked
+   OpenAPI snapshot/drift gate、Rust typed client、generated frontend DTO、workspace picker、one-process-per-workspace
+   manager、connection/crash state。renderer不直接调用loopback HTTP。
+4. **R44.3 Workspace and history shell**：recent workspace、catalog pagination/filter/search、new/open session、
+   loading/empty/stale/error/rebuild states；不直接读 SQLite。
+5. **R44.4 Conversation and run surface**：message timeline、composer、run start、durable/live SSE merge、reconnect、
+   terminal snapshot；不复制 event reduction。
+6. **R44.5 Control and verification loop**：approval detail/decision、cancel/drain、verification recommendation、单项重跑、
+   failure/receipt inspect；真实副作用边界与 TUI 一致。
+7. **R44.6 Packaging and dogfood audit**：macOS/Linux/Windows package、signing/notarization/updater decision、
+   accessibility/IME/clipboard/scroll smoke、crash/restart/upgrade、docs/site 和 full completion audit。
+
+每个 slice 是独立 commit boundary。R44.2 以后才增加 npm/Tauri dependencies；R44.3 以后每个可见 surface 都要有
+真实 server contract test 和至少一个 UI interaction test。
+
+## 7. R44.1 acceptance matrix
+
+- 真实 `sigil` binary 启动后 launcher 只在 `/server-info` 鉴权并与 bootstrap 一致时返回 ready。
+- token 由 32 random bytes 生成；argv、public Debug/error、stdout/bootstrap、server-info 无 token。
+- malformed/oversized/incompatible bootstrap、server-info mismatch、early exit、timeout 全部 fail closed并reap child tree。
+- owner pipe close 后真实server在deadline内0退出；零/极短deadline必须进入bounded fallback分支并返回
+  `forced`或竞态可证明的`graceful_after_deadline`，且不遗留direct child/process-group descendant。
+- bind 必须 loopback；proxy environment 不参与 localhost handshake；redirect 不跟随；response bounded。
+- launcher crate 不依赖 kernel/runtime/TUI/sigil-http，server crate也不依赖 launcher；`sigil` 只用 dev-dependency
+  完成 production-binary acceptance。
+- macOS/Linux/Windows 编译；平台 process-tree runtime evidence按 CI 能力执行。
+
+## 8. Validation plan
+
+```bash
+cargo test -p sigil-process
+cargo test -p sigil-desktop
+cargo test -p sigil --test serve_process_tests desktop_launcher
+cargo check -p sigil-desktop -p sigil
+cargo clippy -p sigil-desktop -p sigil-process -p sigil --all-targets -- -D warnings
+cargo fmt --all --check
+./scripts/check-touched.sh --tier standard
+git diff --check
+```
+
+R44.6 最终执行 full workspace、supply-chain、docs/site、三平台 package/runtime 与 security/code-quality/
+implementation-completeness audit。R44.1 完成不等于已有桌面 UI 或可发布桌面 artifact。
+
+## 9. R44.0 result
+
+官方和本地竞品对照确认：Electron 的一致 Chromium/成熟 packaging 有价值，但会新增 Node main/preload/renderer
+安全与更新面；Wails direct-kernel 路线违反现有 HTTP-only contract。Tauri 2 更适合把 process/token ownership 留在
+Rust 且通过 capability 限制 WebView，不过系统 WebView 差异必须成为 R44.6 的三平台验收项。
+
+仓库 inventory 同时确认首个 crate boundary 必须是 desktop-owned launcher，而不是修改 kernel/runtime 或让
+Tauri glue 直接 spawn。R44.1 因此先以真实 production binary 验证 launcher/server lifecycle，再进入 UI scaffold。
+
+## 10. R44.1 result
+
+R44.1 已新增 library-only `sigil-desktop` crate，并把 secret、strict bootstrap/server-info protocol 与 launcher
+supervisor 分离。launcher 使用 32-byte CSPRNG bearer、16 KiB 单行 bootstrap 上限、no-proxy/no-redirect HTTP
+client和总startup deadline；只有 authenticated `/server-info` 与bootstrap完全相等时才返回ready。public Debug、
+error与process arguments均不包含token或输入路径。
+
+`sigil-process` 现在提供平台无关的process-tree配置/终止边界：Unix child进入独立process group并以group为单位
+终止，Windows继续使用Job Object。显式shutdown优先关闭stdin owner pipe；超时后终止整树并reap direct child，
+同时区分`forced`和可证明的`graceful_after_deadline`竞态。launch失败和Drop fallback也复用同一fail-closed边界。
+
+真实production-binary验收覆盖authenticated ready、未鉴权401、正常owner-pipe退出、零deadline fallback和无效
+config early-exit cleanup；Unix额外证明descendant不会遗留。完整workspace test、Clippy、rustdoc、docs、供应链与
+Windows GNU target check均通过。Linux cross-target本机验证在`ring` build阶段因缺少`x86_64-linux-gnu-gcc`被环境
+阻塞，未发现Sigil source-level error；Linux runtime/packaging evidence继续保留为R44.6/CI gate。
+
+该结果只完成desktop process/security core；尚未创建可见窗口、frontend或可分发desktop artifact。R44.2现已
+解锁，下一步建立Tauri/React skeleton、checked contract drift gate和one-process-per-workspace manager。
