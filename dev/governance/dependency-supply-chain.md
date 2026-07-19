@@ -2,6 +2,20 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## Desktop launcher supervisor（RFC-0044 R44.1）
+
+R44.1 没有引入新的第三方版本或来源。新增 `sigil-desktop` library 直接复用 workspace 已锁定的依赖：
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `ring` + `base64` + `zeroize` | 复用 workspace `0.17.14` / `0.22.1` / `1.8.2` | `sigil-desktop/launcher` | 系统 CSPRNG 生成 32-byte per-launch bearer、URL-safe 编码与 drop-time best-effort clear；token 不进入 argv、Debug、error 或 renderer | `ring`: Apache-2.0 AND ISC；其余 MIT OR Apache-2.0；RustCrypto/社区维护 | 不新增 crypto/source；只在 Rust desktop backend 持有 secret |
+| `reqwest` | 复用 workspace `0.12.24`；`rustls-tls,json,stream` | `sigil-desktop/launcher` | 对真实 loopback child 做 no-proxy/no-redirect、deadline/response-bounded、bearer-authenticated `/server-info` equality handshake | MIT OR Apache-2.0；seanmonstar/reqwest | 不复用 server crate内部类型，不开放 generic renderer HTTP |
+| `tokio` + `serde` + `serde_json` + `thiserror` | 复用 workspace版本/feature | `sigil-desktop/launcher` | bounded pipe/readiness/process wait、独立 DTO strict decode 和 path/token-free typed errors | MIT 或 MIT OR Apache-2.0；Tokio/Serde/社区维护 | 不增加 runtime/serialization 实现 |
+| `nix` | 复用 workspace `0.28.0` `signal` feature | `sigil-process` | 将 desktop launcher 的 Unix child 配置为独立process group并在grace deadline后终止完整group | MIT；nix-rust/nix | 把通用process-tree primitive收敛到`sigil-process`；config/bootstrap仍留在desktop owner |
+
+`sigil-desktop` 不依赖 `sigil-kernel`、`sigil-runtime`、`sigil-tui` 或 `sigil-http`。后续 R44.2 引入
+Tauri/npm/codegen依赖时必须单独补充版本、feature、license、capability和updater/build-script审计，不能以本节覆盖。
+
 ## SQLite desktop session catalog（RFC-0042 R42.1）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

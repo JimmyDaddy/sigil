@@ -2,7 +2,27 @@
 //!
 //! This crate intentionally owns only process admission into an operating-system lifecycle group,
 //! group termination, and an offline capability probe. Shell selection, sandbox policy, terminal
-//! I/O, MCP framing, and product receipts remain in their caller crates.
+//! I/O, MCP framing, desktop bootstrap, and product receipts remain in their caller crates.
+
+use std::process::Command;
+
+/// Configures a child command to become the root of an owned process tree.
+///
+/// Unix uses a new process group. Windows attaches the concrete process to a Job Object after
+/// spawn through [`ProcessTreeOwnerGuard::assign`].
+pub fn configure_process_tree(command: &mut Command) {
+    configure_process_tree_platform(command);
+}
+
+#[cfg(unix)]
+fn configure_process_tree_platform(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_tree_platform(_command: &mut Command) {}
 
 #[cfg(windows)]
 mod windows {
@@ -143,6 +163,16 @@ mod windows {
             registry.insert(process_id, job);
             Ok(Self { process_id })
         }
+
+        /// Terminates the exact Job Object owned by this guard.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the owner registration is unavailable or Windows rejects Job
+        /// termination.
+        pub fn terminate(&self) -> Result<()> {
+            terminate_owned_process_tree(self.process_id)
+        }
     }
 
     impl Drop for ProcessTreeOwnerGuard {
@@ -186,9 +216,33 @@ pub use windows::{
     ProcessTreeOwnerGuard, terminate_owned_process_tree, validate_process_tree_owner,
 };
 
-/// No-op owner used when a caller's Unix process-group contract remains in its owning crate.
+/// Terminates the Unix process group rooted at `process_id`.
+///
+/// A missing group is already quiescent and is therefore accepted. Callers still own waiting for
+/// and reaping their direct child.
+///
+/// # Errors
+///
+/// Returns an error when the process id cannot be represented by the platform or the operating
+/// system rejects the group signal.
+#[cfg(unix)]
+pub fn terminate_owned_process_tree(process_id: u32) -> anyhow::Result<()> {
+    use anyhow::{Context, anyhow};
+    use nix::{errno::Errno, sys::signal, unistd::Pid};
+
+    let process_id = i32::try_from(process_id)
+        .map_err(|_| anyhow!("child process id is outside the Unix pid range"))?;
+    match signal::killpg(Pid::from_raw(process_id), signal::Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error).context("failed to terminate owned Unix process group"),
+    }
+}
+
+/// Process-group identity guard for non-Windows targets.
 #[cfg(not(windows))]
-pub struct ProcessTreeOwnerGuard;
+pub struct ProcessTreeOwnerGuard {
+    process_id: Option<u32>,
+}
 
 #[cfg(not(windows))]
 impl ProcessTreeOwnerGuard {
@@ -197,12 +251,26 @@ impl ProcessTreeOwnerGuard {
     /// # Errors
     ///
     /// The non-Windows implementation currently cannot fail.
-    pub fn assign(_process_id: Option<u32>) -> anyhow::Result<Self> {
-        Ok(Self)
+    pub fn assign(process_id: Option<u32>) -> anyhow::Result<Self> {
+        Ok(Self { process_id })
+    }
+
+    /// Terminates the exact process group bound to this guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child identity was unavailable or the platform rejects process-
+    /// tree termination.
+    pub fn terminate(&self) -> anyhow::Result<()> {
+        let process_id = self
+            .process_id
+            .ok_or_else(|| anyhow::anyhow!("owned child process id is unavailable"))?;
+        terminate_owned_process_tree(process_id)
     }
 }
 
-/// The non-Windows capability probe is a no-op because callers retain their existing group logic.
+/// The non-Windows capability probe is a no-op because process groups use standard Unix spawn and
+/// signal primitives.
 ///
 /// # Errors
 ///
@@ -210,6 +278,16 @@ impl ProcessTreeOwnerGuard {
 #[cfg(not(windows))]
 pub fn validate_process_tree_owner() -> anyhow::Result<()> {
     Ok(())
+}
+
+/// Reports that process-tree termination is unavailable on unsupported non-Unix targets.
+///
+/// # Errors
+///
+/// Always returns an error because no platform ownership primitive is implemented.
+#[cfg(not(any(unix, windows)))]
+pub fn terminate_owned_process_tree(_process_id: u32) -> anyhow::Result<()> {
+    anyhow::bail!("process-tree termination is unsupported on this platform")
 }
 
 #[cfg(test)]

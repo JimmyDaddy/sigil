@@ -39,6 +39,7 @@
 - `crates/sigil-provider-deepseek`：DeepSeek provider 与相关专项行为
 - `crates/sigil-tools-builtin`：内置工具与 preview/diff 预览
 - `crates/sigil-process`：跨 crate 的最小进程树 ownership 与平台 capability probe
+- `crates/sigil-desktop`：桌面 Rust 后端的 launcher、私有 bearer 与 typed local HTTP client；不承载 UI 或 agent loop
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
 - `crates/sigil-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
 - `crates/sigil-cli`：薄 CLI、调试入口、自动化入口

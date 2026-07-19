@@ -2974,6 +2974,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "serde_json",
+ "sigil-desktop",
  "sigil-http",
  "sigil-kernel",
  "sigil-runtime",
@@ -3006,6 +3007,21 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "sigil-desktop"
+version = "0.0.1-alpha.5"
+dependencies = [
+ "base64 0.22.1",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sigil-process",
+ "thiserror 2.0.18",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -3085,6 +3101,7 @@ name = "sigil-process"
 version = "0.0.1-alpha.5"
 dependencies = [
  "anyhow",
+ "nix 0.28.0",
  "windows-sys 0.61.2",
 ]
 

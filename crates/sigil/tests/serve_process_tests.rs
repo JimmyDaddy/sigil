@@ -400,6 +400,99 @@ fn desktop_owner_channel_json_bootstrap_and_pipe_close_are_secret_free() {
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
+    let workspace = test_workspace("desktop-launcher");
+    let config_path = workspace.join("sigil.toml");
+    write_config(&config_path, "http://127.0.0.1:1");
+    let request = sigil_desktop::DesktopLaunchRequest::new(
+        env!("CARGO_BIN_EXE_sigil"),
+        &config_path,
+        &workspace,
+    );
+
+    let process = sigil_desktop::DesktopLauncher::default()
+        .launch(request)
+        .await
+        .expect("desktop launcher should authenticate the real server");
+
+    assert_eq!(process.server_info().schema_version, 1);
+    assert_eq!(process.server_info().protocol_version, 1);
+    assert!(process.server_info().capabilities.durable_session_reopen);
+    assert!(process.address().ip().is_loopback());
+    assert_eq!(
+        http_request(process.address(), "GET", "/server-info", None, None).0,
+        401
+    );
+    let debug = format!("{process:?}");
+    assert!(debug.contains("bearer: \"<redacted>\""));
+    assert!(!debug.contains(workspace.to_string_lossy().as_ref()));
+    assert!(!debug.contains(config_path.to_string_lossy().as_ref()));
+
+    let report = process
+        .shutdown()
+        .await
+        .expect("owner pipe should gracefully stop the real server");
+    assert_eq!(report.kind, sigil_desktop::DesktopShutdownKind::Graceful);
+    assert_eq!(report.exit_code, Some(0));
+    assert!(report.success);
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_launcher_uses_bounded_fallback_after_zero_grace_deadline() {
+    let workspace = test_workspace("desktop-launcher-forced");
+    let config_path = workspace.join("sigil.toml");
+    write_config(&config_path, "http://127.0.0.1:1");
+    let launcher =
+        sigil_desktop::DesktopLauncher::with_timeouts(Duration::from_secs(15), Duration::ZERO);
+    let process = launcher
+        .launch(sigil_desktop::DesktopLaunchRequest::new(
+            env!("CARGO_BIN_EXE_sigil"),
+            &config_path,
+            &workspace,
+        ))
+        .await
+        .expect("desktop launcher should start the real server");
+
+    let report = process
+        .shutdown()
+        .await
+        .expect("fallback should terminate and reap the real server tree");
+
+    assert!(matches!(
+        report.kind,
+        sigil_desktop::DesktopShutdownKind::Forced
+            | sigil_desktop::DesktopShutdownKind::GracefulAfterDeadline
+    ));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_launcher_early_exit_error_does_not_disclose_paths() {
+    let workspace = test_workspace("desktop-launcher-invalid-config");
+    let config_path = workspace.join("sigil.toml");
+    fs::write(&config_path, "[invalid").expect("invalid config fixture should write");
+
+    let error = sigil_desktop::DesktopLauncher::default()
+        .launch(sigil_desktop::DesktopLaunchRequest::new(
+            env!("CARGO_BIN_EXE_sigil"),
+            &config_path,
+            &workspace,
+        ))
+        .await
+        .expect_err("invalid config should exit before readiness");
+    let projection = format!("{error:?} {error}");
+
+    assert!(matches!(
+        error,
+        sigil_desktop::DesktopLaunchError::ReadinessClosed
+    ));
+    assert!(!projection.contains(workspace.to_string_lossy().as_ref()));
+    assert!(!projection.contains(config_path.to_string_lossy().as_ref()));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
 #[cfg(unix)]
 fn stop_serve(mut process: ServeProcess) -> Output {
     let signal_result = unsafe { libc::kill(process.child.id() as i32, libc::SIGINT) };
