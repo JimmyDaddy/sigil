@@ -1,0 +1,12 @@
+:root {
+  --sg-sys-motion-fast: var(--sg-ref-motion-fast);
+  --motion-fast: var(--sg-sys-motion-fast);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}

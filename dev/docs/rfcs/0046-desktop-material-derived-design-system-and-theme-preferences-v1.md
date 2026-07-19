@@ -1,6 +1,6 @@
 # RFC-0046 Desktop Material-derived Design System and Theme Preferences V1
 
-状态：active / R46.0-R46.1 complete，R46.2 ready
+状态：active / R46.0-R46.2 complete，R46.3 ready，R46.4 planned
 
 创建日期：2026-07-20
 
@@ -683,3 +683,18 @@ repo-owned APG/focus adapter. This decision does not weaken keyboard/focus/IME r
 Because no direct dependency was added, `dev/governance/dependency-supply-chain.md` needs no new ledger row. A future attempt to adopt a
 third-party behavior source requires a new exact-version compatibility decision against the then-current product floor; it cannot silently
 reopen this result inside a feature migration.
+
+## 19. R46.2 result
+
+R46.2 于 2026-07-20 完成：desktop CSS 现在以 `reset → tokens → base → primitives → patterns → features → utilities`
+的固定 layer 顺序装配；reference values、light/dark Material-derived system roles、Sigil status roles、typography、compact density、
+shape、elevation、motion 和 forced-colors 已拆入 `src/ui/foundations`。现有 feature 暂时通过带 R46.6 截止点的 alias 消费新 role，
+因此本片没有重写真实 layout 或 interaction state。
+
+新增的 UI system gate 会验证 light/dark role parity、18 个 foreground/container 4.5:1 contrast pair、raw-color 边界、
+禁用未批准 UI runtime dependency，以及 development catalog 不可从 production entrypoint 到达。Dev-only fixture skeleton 已覆盖
+system/light/dark 和 1280/900/840/839/760/320 viewport；production build 不包含 catalog marker。
+
+验证通过：UI system gate、19 个 desktop frontend test、TypeScript typecheck 和 Vite production build。完整 `pnpm check` 的
+OpenAPI 子命令在本机启动现有 `export_openapi` debug binary 时卡在 macOS dyld；本片没有触碰 HTTP/OpenAPI/Rust DTO，相关孤立
+进程已清理，前端和 production bundle gate 已分别直接执行并通过。

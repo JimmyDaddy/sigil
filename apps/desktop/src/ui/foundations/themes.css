@@ -1,0 +1,115 @@
+/* @theme dark-start */
+:root {
+  color-scheme: dark;
+  --sg-sys-color-canvas: var(--sg-ref-color-dark-canvas);
+  --sg-sys-color-canvas-glow: var(--sg-ref-color-dark-canvas-glow);
+  --sg-sys-color-surface: var(--sg-ref-color-dark-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-dark-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-dark-surface-low);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-dark-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-dark-surface-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-dark-surface-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-dark-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-dark-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-dark-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-dark-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-dark-outline-strong);
+  --sg-sys-color-primary: var(--sg-ref-color-dark-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-dark-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-dark-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-dark-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-dark-on-primary-container);
+  --sg-sys-color-error: var(--sg-ref-color-dark-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-dark-error-container);
+  --sg-sys-color-error-container: var(--sg-ref-color-dark-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-dark-error);
+  --sg-domain-color-success: var(--sg-ref-color-dark-primary-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-dark-primary);
+  --sg-domain-color-warning: var(--sg-ref-color-dark-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-dark-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-dark-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-dark-error);
+  --sg-domain-color-info: var(--sg-ref-color-dark-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-dark-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-dark-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-dark-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-dark-focus);
+  --sg-sys-shadow-dock: var(--sg-ref-shadow-dark-dock);
+  --sg-sys-shadow-modal: var(--sg-ref-shadow-dark-modal);
+}
+/* @theme dark-end */
+
+/* @theme light-start */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --sg-sys-color-canvas: var(--sg-ref-color-light-canvas);
+    --sg-sys-color-canvas-glow: var(--sg-ref-color-light-canvas-glow);
+    --sg-sys-color-surface: var(--sg-ref-color-light-surface);
+    --sg-sys-color-surface-container-low: var(--sg-ref-color-light-surface-low);
+    --sg-sys-color-surface-container: var(--sg-ref-color-light-surface-low);
+    --sg-sys-color-surface-container-high: var(--sg-ref-color-light-surface-high);
+    --sg-sys-color-surface-input: var(--sg-ref-color-light-surface-input);
+    --sg-sys-color-surface-hover: var(--sg-ref-color-light-surface-hover);
+    --sg-sys-color-on-surface: var(--sg-ref-color-light-on-surface);
+    --sg-sys-color-on-surface-variant: var(--sg-ref-color-light-on-surface-variant);
+    --sg-sys-color-on-surface-subtle: var(--sg-ref-color-light-on-surface-subtle);
+    --sg-sys-color-outline: var(--sg-ref-color-light-outline);
+    --sg-sys-color-outline-variant: var(--sg-ref-color-light-outline-strong);
+    --sg-sys-color-primary: var(--sg-ref-color-light-primary);
+    --sg-sys-color-primary-strong: var(--sg-ref-color-light-primary-strong);
+    --sg-sys-color-on-primary: var(--sg-ref-color-light-on-primary);
+    --sg-sys-color-primary-container: var(--sg-ref-color-light-primary-container);
+    --sg-sys-color-on-primary-container: var(--sg-ref-color-light-on-primary-container);
+    --sg-sys-color-error: var(--sg-ref-color-light-error);
+    --sg-sys-color-on-error: var(--sg-ref-color-light-on-primary);
+    --sg-sys-color-error-container: var(--sg-ref-color-light-error-container);
+    --sg-sys-color-on-error-container: var(--sg-ref-color-light-error);
+    --sg-domain-color-success: var(--sg-ref-color-light-primary-container);
+    --sg-domain-color-on-success: var(--sg-ref-color-light-primary-strong);
+    --sg-domain-color-warning: var(--sg-ref-color-light-warning-container);
+    --sg-domain-color-on-warning: var(--sg-ref-color-light-warning);
+    --sg-domain-color-danger: var(--sg-ref-color-light-error-container);
+    --sg-domain-color-on-danger: var(--sg-ref-color-light-error);
+    --sg-domain-color-info: var(--sg-ref-color-light-info-container);
+    --sg-domain-color-on-info: var(--sg-ref-color-light-info);
+    --sg-sys-color-overlay: var(--sg-ref-color-light-overlay);
+    --sg-sys-color-backdrop: var(--sg-ref-color-light-backdrop);
+    --sg-sys-color-focus: var(--sg-ref-color-light-focus);
+    --sg-sys-shadow-dock: var(--sg-ref-shadow-light-dock);
+    --sg-sys-shadow-modal: var(--sg-ref-shadow-light-modal);
+  }
+}
+/* @theme light-end */
+
+:root {
+  /* R46.2 migration aliases. Remove after R46.6. */
+  --color-canvas: var(--sg-sys-color-canvas);
+  --color-canvas-glow: var(--sg-sys-color-canvas-glow);
+  --color-surface: var(--sg-sys-color-surface);
+  --color-surface-muted: var(--sg-sys-color-surface-container);
+  --color-surface-raised: var(--sg-sys-color-surface-container-high);
+  --color-surface-input: var(--sg-sys-color-surface-input);
+  --color-surface-hover: var(--sg-sys-color-surface-hover);
+  --color-border: var(--sg-sys-color-outline);
+  --color-border-strong: var(--sg-sys-color-outline-variant);
+  --color-text: var(--sg-sys-color-on-surface);
+  --color-text-muted: var(--sg-sys-color-on-surface-variant);
+  --color-text-subtle: var(--sg-sys-color-on-surface-subtle);
+  --color-accent: var(--sg-sys-color-primary);
+  --color-accent-strong: var(--sg-sys-color-primary-strong);
+  --color-accent-contrast: var(--sg-sys-color-on-primary);
+  --color-success: var(--sg-domain-color-on-success);
+  --color-success-surface: var(--sg-domain-color-success);
+  --color-warning: var(--sg-domain-color-on-warning);
+  --color-warning-surface: var(--sg-domain-color-warning);
+  --color-danger: var(--sg-domain-color-on-danger);
+  --color-danger-surface: var(--sg-domain-color-danger);
+  --color-info: var(--sg-domain-color-on-info);
+  --color-info-surface: var(--sg-domain-color-info);
+  --color-overlay: var(--sg-sys-color-overlay);
+  --color-backdrop: var(--sg-sys-color-backdrop);
+  --focus-ring: var(--sg-sys-color-focus);
+  --shadow-dock: var(--sg-sys-shadow-dock);
+  --shadow-modal: var(--sg-sys-shadow-modal);
+}

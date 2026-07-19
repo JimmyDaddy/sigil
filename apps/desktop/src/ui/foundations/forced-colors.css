@@ -1,0 +1,45 @@
+@media (prefers-contrast: more) {
+  :root {
+    --sg-sys-color-outline: currentColor;
+    --sg-sys-color-outline-variant: currentColor;
+    --sg-sys-color-focus: #ffbf47;
+  }
+}
+
+@media (forced-colors: active) {
+  :root {
+    --sg-sys-color-canvas: Canvas;
+    --sg-sys-color-surface: Canvas;
+    --sg-sys-color-surface-container-low: Canvas;
+    --sg-sys-color-surface-container: Canvas;
+    --sg-sys-color-surface-container-high: Canvas;
+    --sg-sys-color-surface-input: Canvas;
+    --sg-sys-color-surface-hover: Highlight;
+    --sg-sys-color-outline: CanvasText;
+    --sg-sys-color-outline-variant: CanvasText;
+    --sg-sys-color-on-surface: CanvasText;
+    --sg-sys-color-on-surface-variant: CanvasText;
+    --sg-sys-color-on-surface-subtle: GrayText;
+    --sg-sys-color-primary: LinkText;
+    --sg-sys-color-primary-strong: LinkText;
+    --sg-sys-color-on-primary: Canvas;
+    --sg-domain-color-success: Canvas;
+    --sg-domain-color-on-success: CanvasText;
+    --sg-domain-color-warning: Canvas;
+    --sg-domain-color-on-warning: CanvasText;
+    --sg-domain-color-danger: Canvas;
+    --sg-domain-color-on-danger: CanvasText;
+    --sg-domain-color-info: Canvas;
+    --sg-domain-color-on-info: CanvasText;
+    --sg-sys-color-focus: Highlight;
+  }
+
+  .status-dot,
+  .risk-badge,
+  .verification-badge,
+  .pin-badge,
+  .source-badge {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}

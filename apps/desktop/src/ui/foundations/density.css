@@ -1,0 +1,30 @@
+:root {
+  --sg-sys-space-1: var(--sg-ref-space-1);
+  --sg-sys-space-2: var(--sg-ref-space-2);
+  --sg-sys-space-3: var(--sg-ref-space-3);
+  --sg-sys-space-4: var(--sg-ref-space-4);
+  --sg-sys-space-5: var(--sg-ref-space-5);
+  --sg-sys-space-6: var(--sg-ref-space-6);
+  --sg-sys-radius-sm: var(--sg-ref-radius-sm);
+  --sg-sys-radius-md: var(--sg-ref-radius-md);
+  --sg-sys-radius-lg: var(--sg-ref-radius-lg);
+  --sg-sys-radius-full: var(--sg-ref-radius-full);
+  --sg-sys-control-height: 36px;
+  --sg-sys-control-hit-target: 32px;
+  --sg-sys-primary-control-height: 40px;
+  --sg-sys-session-row-height: 60px;
+  --sg-sys-navigation-width: 264px;
+  --sg-sys-review-width: 344px;
+
+  /* R46.2 migration aliases. Remove after R46.6. */
+  --space-1: var(--sg-sys-space-1);
+  --space-2: var(--sg-sys-space-2);
+  --space-3: var(--sg-sys-space-3);
+  --space-4: var(--sg-sys-space-4);
+  --space-5: var(--sg-sys-space-5);
+  --space-6: var(--sg-sys-space-6);
+  --radius-sm: var(--sg-sys-radius-sm);
+  --radius-md: var(--sg-sys-radius-md);
+  --radius-lg: var(--sg-sys-radius-lg);
+  --radius-pill: var(--sg-sys-radius-full);
+}

@@ -1,0 +1,5 @@
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; min-width: 320px; min-height: 0; overflow: hidden; }
+button, input, select, textarea, a { font: inherit; }
+button { color: inherit; }
