@@ -3079,7 +3079,7 @@ dependencies = [
  "futures",
  "hmac",
  "keyring",
- "nix 0.28.0",
+ "nix 0.29.0",
  "regex",
  "reqwest",
  "serde",
@@ -3101,7 +3101,7 @@ name = "sigil-process"
 version = "0.0.1-alpha.5"
 dependencies = [
  "anyhow",
- "nix 0.28.0",
+ "nix 0.29.0",
  "windows-sys 0.61.2",
 ]
 
@@ -3238,7 +3238,7 @@ dependencies = [
  "futures",
  "globset",
  "ignore",
- "nix 0.28.0",
+ "nix 0.29.0",
  "portable-pty",
  "regex",
  "reqwest",
