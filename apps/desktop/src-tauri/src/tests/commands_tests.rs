@@ -10,6 +10,13 @@ fn workspace_identity_validation_is_strict_and_path_free() {
 }
 
 #[test]
+fn bundled_runtime_name_cannot_collide_with_the_desktop_product_name() {
+    let name = bundled_sigil_binary_name();
+    assert!(name.starts_with("sigil-runtime"));
+    assert_ne!(name.to_ascii_lowercase(), "sigil");
+}
+
+#[test]
 fn workspace_display_name_never_returns_its_parent_path() {
     let name = workspace_display_name(Path::new("/private/canary/workspace"))
         .expect("basename should be accepted");

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { DesktopBridge } from "./bridge";
 import type {
@@ -38,6 +38,8 @@ export function ConversationPanel({
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const timelinePinnedToEnd = useRef(true);
 
   useEffect(() => {
     setRun(undefined);
@@ -100,6 +102,13 @@ export function ConversationPanel({
   const rows = useMemo(() => reduceTimeline(events), [events]);
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (timeline !== null && timelinePinnedToEnd.current) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }, [rows.length]);
 
   const submit = async () => {
     const nextPrompt = prompt.trim();
@@ -188,7 +197,19 @@ export function ConversationPanel({
         </span>
       </header>
 
-      <div className="timeline" aria-live="polite" aria-label="Conversation timeline">
+      <div
+        className="timeline"
+        ref={timelineRef}
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="Conversation timeline"
+        onScroll={(event) => {
+          const timeline = event.currentTarget;
+          timelinePinnedToEnd.current =
+            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
+        }}
+      >
         {rows.length === 0 ? (
           <div className="timeline-empty">
             <strong>Ready for a prompt.</strong>

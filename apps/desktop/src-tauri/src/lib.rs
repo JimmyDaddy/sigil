@@ -2,14 +2,17 @@ mod commands;
 mod ipc;
 mod recent;
 mod run_streams;
+mod startup;
 mod state;
+
+pub use startup::{clear_startup_failure, record_startup_failure, record_startup_panic};
 
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
 
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 use crate::{
     commands::{
@@ -32,6 +35,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            // Build the single native window here so development and package
+            // overlays cannot diverge on whether the capability-labelled
+            // `main` webview exists.
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("Sigil")
+                .inner_size(1120.0, 760.0)
+                .min_inner_size(720.0, 560.0)
+                .build()?;
             let recent_workspaces_path = app
                 .path()
                 .app_config_dir()?
@@ -57,8 +68,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_rerun_verification
         ])
         .build(tauri::generate_context!())?;
-    let shutdown_manager = Arc::clone(&app.state::<DesktopAppState>().manager);
-    let shutdown_streams = app.state::<DesktopAppState>().run_streams.clone();
 
     app.run(move |app_handle, event| {
         let RunEvent::ExitRequested { api, .. } = event else {
@@ -71,8 +80,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 api.prevent_exit();
                 exit_state.store(EXIT_CLEANING, Ordering::Release);
                 let handle = app_handle.clone();
-                let manager = Arc::clone(&shutdown_manager);
-                let streams = shutdown_streams.clone();
+                let state = app_handle.state::<DesktopAppState>();
+                let manager = Arc::clone(&state.manager);
+                let streams = state.run_streams.clone();
                 let exit_state = Arc::clone(&exit_state);
                 tauri::async_runtime::spawn(async move {
                     streams.stop_all().await;

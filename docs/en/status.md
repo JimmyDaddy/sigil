@@ -23,10 +23,11 @@ Sigil is an early preview. Core TUI work is usable, but config, plugins, advance
 - Deferred MCP servers must be activated before their tools are available.
 - Image input is limited to supported formats, sources, providers, and model capabilities.
 - Context compaction is offered only when Sigil can safely apply it for the selected model.
+- An opt-in desktop shell can be built from `main` for contributor dogfood. It uses the same local server, approval, session, and verification contracts as the TUI, but it is not a supported install channel.
 
 ## Not Supported Yet
 
-Self-update, a stable plugin API, a desktop application, uniform sandbox guarantees across platforms, and resuming an in-flight child process after restart are not promised today.
+Self-update, a stable plugin API, signed or notarized desktop installers, a desktop update channel, uniform sandbox guarantees across platforms, and resuming an in-flight child process after restart are not promised today.
 
 For exact commands and keys, use [Reference](reference.md). For configuration fields, use [Configuration Reference](configuration-reference.md). For problems, use [Troubleshooting](troubleshooting.md).
 

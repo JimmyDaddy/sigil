@@ -11,7 +11,10 @@
     "test": "vitest run",
     "contract:generate": "../../scripts/generate-desktop-contract.sh --write",
     "contract:check": "../../scripts/generate-desktop-contract.sh --check",
+    "sidecar:prepare": "node ../../scripts/prepare-desktop-sidecar.mjs",
+    "sidecar:test": "node ../../scripts/test-prepare-desktop-sidecar.mjs",
     "check": "pnpm contract:check && pnpm typecheck && pnpm test && pnpm build",
+    "package": "tauri build --config src-tauri/tauri.bundle.conf.json",
     "tauri": "tauri"
   },
   "dependencies": {

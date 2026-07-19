@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -253,6 +253,80 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     expect(screen.getByText("complete")).toBeTruthy();
     expect(screen.getByText("terminal")).toBeTruthy();
+  });
+
+  it("preserves IME text, accepts clipboard input, and does not submit during composition", async () => {
+    const user = userEvent.setup();
+    const prompts: string[] = [];
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      startRun: async (_workspaceId, sessionId, prompt) => {
+        prompts.push(prompt);
+        return { id: "run-ime", sessionId, status: "running", streamSequence: 0 };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    composer.focus();
+    fireEvent.compositionStart(composer);
+    fireEvent.change(composer, { target: { value: "请检查 中文输入" } });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter", isComposing: true });
+    expect(prompts).toEqual([]);
+    fireEvent.compositionEnd(composer);
+    await user.paste("，包含粘贴");
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    expect(prompts).toEqual(["请检查 中文输入，包含粘贴"]);
+  });
+
+  it("follows new timeline rows only while the reader stays near the end", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 600 },
+    });
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-scroll",
+      replayable: false,
+    };
+    act(() => {
+      eventListener?.({ ...base, sequence: 1, kind: "run_started", text: "First" });
+    });
+    expect(timeline.scrollTop).toBe(600);
+
+    timeline.scrollTop = 100;
+    fireEvent.scroll(timeline);
+    act(() => {
+      eventListener?.({ ...base, sequence: 2, kind: "assistant_message", text: "Second" });
+    });
+    expect(timeline.scrollTop).toBe(100);
   });
 
   it("submits the exact approval guard and requests cooperative cancellation", async () => {

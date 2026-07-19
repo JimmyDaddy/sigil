@@ -608,18 +608,35 @@ pub(crate) fn resolve_sigil_binary() -> Result<PathBuf, DesktopCommandError> {
             "The bundled Sigil runtime cannot be located.",
         )
     })?;
-    let binary_name = if cfg!(windows) { "sigil.exe" } else { "sigil" };
-    let sibling = executable
-        .parent()
-        .map(|parent| parent.join(binary_name))
-        .filter(|path| path.is_file())
-        .ok_or_else(|| {
-            DesktopCommandError::new(
-                "sigil_binary_unavailable",
-                "The bundled Sigil runtime cannot be located.",
-            )
-        })?;
-    Ok(sibling)
+    let parent = executable.parent().ok_or_else(|| {
+        DesktopCommandError::new(
+            "sigil_binary_unavailable",
+            "The bundled Sigil runtime cannot be located.",
+        )
+    })?;
+    let bundled = parent.join(bundled_sigil_binary_name());
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let developer = parent.join(if cfg!(windows) { "sigil.exe" } else { "sigil" });
+        if developer.is_file() {
+            return Ok(developer);
+        }
+    }
+    Err(DesktopCommandError::new(
+        "sigil_binary_unavailable",
+        "The bundled Sigil runtime cannot be located.",
+    ))
+}
+
+const fn bundled_sigil_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "sigil-runtime.exe"
+    } else {
+        "sigil-runtime"
+    }
 }
 
 fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandError {

@@ -1,0 +1,143 @@
+name: Desktop Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/desktop-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/desktop/**"
+      - "crates/sigil/**"
+      - "crates/sigil-desktop/**"
+      - "crates/sigil-http/**"
+      - "crates/sigil-runtime/**"
+      - "rust-toolchain.toml"
+      - "scripts/prepare-desktop-sidecar.mjs"
+      - "scripts/test-prepare-desktop-sidecar.mjs"
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/desktop/**"
+      - "crates/sigil/**"
+      - "crates/sigil-desktop/**"
+      - "crates/sigil-http/**"
+      - "crates/sigil-runtime/**"
+      - "rust-toolchain.toml"
+      - "scripts/prepare-desktop-sidecar.mjs"
+      - "scripts/test-prepare-desktop-sidecar.mjs"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_VERSION: 1.94.1
+
+jobs:
+  package:
+    name: Package (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux deb
+            os: ubuntu-latest
+            bundles: deb
+            artifact: target/release/bundle/deb/*.deb
+          - name: macOS app
+            os: macos-latest
+            bundles: app
+            artifact: target/release/bundle/macos/*.app
+          - name: Windows NSIS
+            os: windows-latest
+            bundles: nsis
+            artifact: target/release/bundle/nsis/*-setup.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux package prerequisites
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libwebkit2gtk-4.1-dev libxdo-dev libssl-dev
+          libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install locked frontend dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+
+      - name: Test sidecar staging contract
+        run: node scripts/test-prepare-desktop-sidecar.mjs
+
+      - name: Build native desktop package with bundled runtime
+        run: pnpm --dir apps/desktop package --bundles ${{ matrix.bundles }}
+
+      - name: Verify macOS bundle, sidecar, and ad-hoc signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test -x target/release/bundle/macos/Sigil.app/Contents/MacOS/sigil-desktop-app
+          test -x target/release/bundle/macos/Sigil.app/Contents/MacOS/sigil-runtime
+          target/release/bundle/macos/Sigil.app/Contents/MacOS/sigil-runtime --version
+          codesign --verify --deep --strict --verbose=4 target/release/bundle/macos/Sigil.app
+
+      - name: Verify Linux package contains the runtime sidecar
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          package="$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$package"
+          dpkg-deb --contents "$package" | grep -Eq '/usr/bin/sigil-runtime$'
+
+      - name: Verify Windows package and staged runtime sidecar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sidecar = Get-ChildItem apps/desktop/src-tauri/binaries/sigil-runtime-*.exe | Select-Object -First 1
+          if ($null -eq $sidecar) { throw "staged runtime sidecar is missing" }
+          & $sidecar.FullName --version
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if ($null -eq $installer) { throw "NSIS installer is missing" }
+          $listing = & 7z l $installer.FullName
+          if (-not ($listing -match 'sigil-runtime.exe')) { throw "NSIS installer omits sigil-runtime.exe" }
+
+      - name: Upload non-release dogfood artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sigil-desktop-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
