@@ -46,10 +46,14 @@ export function WorkspaceSwitcher({
       className="workspace-switcher"
       label={
         <span className="workspace-switcher-label">
-          <StatusIndicator
-            label={active?.displayName ?? "Open workspace"}
-            tone={active?.state === "ready" ? "success" : active === undefined ? "neutral" : "danger"}
-          />
+          {active === undefined ? (
+            <span className="workspace-switcher-placeholder">Workspaces</span>
+          ) : (
+            <StatusIndicator
+              label={active.displayName}
+              tone={active.state === "ready" ? "success" : "danger"}
+            />
+          )}
           <span aria-hidden="true">⌄</span>
         </span>
       }

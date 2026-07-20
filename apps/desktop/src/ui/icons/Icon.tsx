@@ -1,9 +1,10 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "check" | "close" | "copy" | "filter" | "lock" | "menu" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "system" | "warning";
+export type IconName = "add" | "appearance-auto" | "check" | "close" | "copy" | "filter" | "lock" | "menu" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
+  "appearance-auto": "M12 3a9 9 0 1 0 0 18V3Z",
   check: "m5 12 4 4L19 6",
   close: "m6 6 12 12M18 6 6 18",
   copy: "M9 8h10v11H9zM5 15V5h10",
@@ -18,7 +19,6 @@ const paths: Record<IconName, string> = {
   shield: "M12 3 20 6v5c0 5-3.4 8.3-8 10-4.6-1.7-8-5-8-10V6l8-3Z",
   stop: "M7 7h10v10H7z",
   sun: "M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
-  system: "M4 5.5h16v11H4zM9 20h6m-3-3.5V20",
   warning: "M12 4 21 20H3L12 4Zm0 5v5m0 3h.01",
 };
 
@@ -38,7 +38,12 @@ export function Icon({ name, ...props }: { readonly name: IconName } & SVGAttrib
       focusable="false"
       {...props}
     >
-      <path d={paths[name]} />
+      {name === "appearance-auto" ? (
+        <>
+          <circle cx="12" cy="12" r="9" />
+          <path d={paths[name]} fill="currentColor" stroke="none" />
+        </>
+      ) : <path d={paths[name]} />}
     </svg>
   );
 }

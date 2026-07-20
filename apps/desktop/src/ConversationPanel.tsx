@@ -405,7 +405,7 @@ export function ConversationPanel({
                 aria-controls="verification-inspector"
                 aria-expanded={inspectorOpen}
                 disabled={pendingApproval?.approval !== undefined}
-                icon={<Icon name="check" />}
+                icon={<Icon name={verification.verdict === "passed" ? "check" : "warning"} />}
                 onClick={() => setInspectorOpen(true)}
               />
             </Tooltip>

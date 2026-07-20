@@ -296,7 +296,9 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
-    expect(screen.getByRole("button", { name: "System theme. Switch to light theme" })).toBeTruthy();
+    const systemTheme = screen.getByRole("button", { name: "System theme. Switch to light theme" });
+    expect(systemTheme).toBeTruthy();
+    expect(systemTheme.querySelector("circle")).not.toBeNull();
     act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
     expect(document.documentElement.dataset.themePreference).toBe("system");
     expect(document.documentElement.dataset.theme).toBe("light");
@@ -366,6 +368,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
+    expect(screen.getByText("Workspaces")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Open workspace" })).toHaveLength(1);
     expect(screen.queryByRole("complementary", { name: "Conversation navigation" })).toBeNull();
     const user = userEvent.setup();

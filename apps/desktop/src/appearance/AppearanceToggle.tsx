@@ -10,7 +10,7 @@ const nextPreference: Record<ThemePreference, ThemePreference> = {
 };
 
 const preferenceIcon: Record<ThemePreference, IconName> = {
-  system: "system",
+  system: "appearance-auto",
   light: "sun",
   dark: "moon",
 };
