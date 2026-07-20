@@ -25,15 +25,17 @@ mod retention;
 
 pub use journal::{
     LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionDeleteJournalBinding,
-    LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
-    LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
+    LocalSessionDisplayNameJournalBinding, LocalSessionExportJournalBinding,
+    LocalSessionLifecycleEvent, LocalSessionLifecycleRecord, LocalSessionPinJournalBinding,
+    LocalSessionRetentionJournalBinding,
 };
 pub use projection::{
     DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE,
-    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogProjectionEntry,
-    SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
-    SessionCatalogProjectionRebuildReport, SessionCatalogProjectionReconcileReport,
-    SessionCatalogProjectionRecoveryReport, SessionCatalogProjectionService,
+    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogMutationReceipt,
+    SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
+    SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
+    SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,
+    SessionCatalogProjectionService,
 };
 
 use journal::LocalSessionLifecycleJournal;
@@ -133,6 +135,26 @@ pub enum LocalSessionReopenError {
     IdentityChanged,
     #[error("durable session catalog is unavailable")]
     CatalogUnavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+/// Stable failures for an exact local session rename or delete request.
+#[derive(Debug, ThisError)]
+pub enum LocalSessionMutationError {
+    #[error("local session mutation request is invalid")]
+    InvalidRequest,
+    #[error("local session was not found")]
+    NotFound,
+    #[error("local session is not ready for mutation")]
+    NotReady,
+    #[error("local session identity changed")]
+    IdentityChanged,
+    #[error("pinned local session cannot be deleted")]
+    Pinned,
+    #[error("local session mutation is unavailable")]
+    Unavailable {
         #[source]
         source: anyhow::Error,
     },
@@ -316,7 +338,11 @@ impl LocalSessionLifecycleService {
         let records = self.lifecycle_records()?;
         let mut operations = BTreeMap::<String, Vec<LocalSessionLifecycleEvent>>::new();
         for record in records {
-            if matches!(record.event, LocalSessionLifecycleEvent::PinChanged(_)) {
+            if matches!(
+                record.event,
+                LocalSessionLifecycleEvent::PinChanged(_)
+                    | LocalSessionLifecycleEvent::DisplayNameChanged(_)
+            ) {
                 continue;
             }
             operations
@@ -349,6 +375,9 @@ impl LocalSessionLifecycleService {
                     ),
                     LocalSessionLifecycleEvent::PinChanged(_) => {
                         return Err(anyhow!("pin event entered operation recovery"));
+                    }
+                    LocalSessionLifecycleEvent::DisplayNameChanged(_) => {
+                        return Err(anyhow!("display-name event entered operation recovery"));
                     }
                     LocalSessionLifecycleEvent::RetentionBatchCompleted(_) => (
                         LocalSessionLifecycleOperationKind::Retention,
@@ -412,6 +441,7 @@ impl LocalSessionLifecycleService {
 
         let mut validated_bytes = 0_u64;
         let pins = self.session_pin_projection()?;
+        let display_names = self.session_display_name_projection()?;
         let mut entries = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let state = if candidate.symlink_or_non_file {
@@ -433,6 +463,13 @@ impl LocalSessionLifecycleService {
                         pinned_session_id == session_id && *pinned
                     })
             });
+            if let Some(session_id) = entry.session_id.as_deref()
+                && let Some((named_session_id, display_name)) =
+                    display_names.get(&entry.session_ref)
+                && named_session_id == session_id
+            {
+                entry.title = Some(display_name.clone());
+            }
             entries.push(entry);
         }
         Ok(LocalSessionCatalog {
@@ -663,6 +700,76 @@ impl LocalSessionLifecycleService {
                 pinned,
             }),
         )
+    }
+
+    /// Appends a bounded display-name override for one exact durable session identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the name is empty/unsafe, the source is missing or changed, or
+    /// the lifecycle journal cannot durably append the decision.
+    pub fn rename_session(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        display_name: &str,
+        recorded_at_unix_ms: u64,
+    ) -> std::result::Result<LocalSessionLifecycleRecord, LocalSessionMutationError> {
+        if display_name.is_empty()
+            || display_name.trim() != display_name
+            || display_name.len() > SESSION_TITLE_MAX_BYTES
+            || safe_persistence_text(display_name) != display_name
+        {
+            return Err(LocalSessionMutationError::InvalidRequest);
+        }
+        let _maintenance = self
+            .acquire_maintenance_lease()
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        self.resolve_session_for_reopen(session_ref, expected_session_id)
+            .map_err(map_session_reopen_mutation_error)?;
+        let operation_id = format!("session-display-name:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal()
+            .append(
+                &operation_id,
+                recorded_at_unix_ms,
+                LocalSessionLifecycleEvent::DisplayNameChanged(
+                    LocalSessionDisplayNameJournalBinding {
+                        source_session_ref: session_ref.clone(),
+                        source_session_id: expected_session_id.to_owned(),
+                        display_name: display_name.to_owned(),
+                    },
+                ),
+            )
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })
+    }
+
+    /// Deletes one exact, unpinned durable session after rebuilding and revalidating its preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source is missing, changed, pinned, protected, or currently
+    /// unavailable for an audited delete.
+    pub fn delete_session(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        protected_paths: &[PathBuf],
+        applied_at_unix_ms: u64,
+    ) -> std::result::Result<SessionDeleteOutput, LocalSessionMutationError> {
+        let binding = self
+            .resolve_session_for_reopen(session_ref, expected_session_id)
+            .map_err(map_session_reopen_mutation_error)?;
+        if self
+            .is_session_pinned(session_ref, expected_session_id)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?
+        {
+            return Err(LocalSessionMutationError::Pinned);
+        }
+        let preview = self
+            .preview_delete(&binding.session_log_path, protected_paths)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        self.apply_delete(&preview, protected_paths, applied_at_unix_ms)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })
     }
 
     /// Builds a read-only, content-bound preview for deleting one inactive local session.
@@ -939,6 +1046,19 @@ impl LocalSessionLifecycleService {
         Ok(pins)
     }
 
+    fn session_display_name_projection(&self) -> Result<BTreeMap<SessionRef, (String, String)>> {
+        let mut display_names = BTreeMap::new();
+        for record in self.lifecycle_records()? {
+            if let LocalSessionLifecycleEvent::DisplayNameChanged(binding) = record.event {
+                display_names.insert(
+                    binding.source_session_ref,
+                    (binding.source_session_id, binding.display_name),
+                );
+            }
+        }
+        Ok(display_names)
+    }
+
     fn is_session_pinned(&self, session_ref: &SessionRef, session_id: &str) -> Result<bool> {
         Ok(self
             .session_pin_projection()?
@@ -1015,6 +1135,17 @@ impl LocalSessionLifecycleService {
                 LocalSessionLifecycleRecoveryStatus::NotApplied
             }
             Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
+        }
+    }
+}
+
+fn map_session_reopen_mutation_error(error: LocalSessionReopenError) -> LocalSessionMutationError {
+    match error {
+        LocalSessionReopenError::NotFound => LocalSessionMutationError::NotFound,
+        LocalSessionReopenError::NotReady { .. } => LocalSessionMutationError::NotReady,
+        LocalSessionReopenError::IdentityChanged => LocalSessionMutationError::IdentityChanged,
+        LocalSessionReopenError::CatalogUnavailable { source } => {
+            LocalSessionMutationError::Unavailable { source }
         }
     }
 }

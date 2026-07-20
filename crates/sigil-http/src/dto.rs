@@ -126,6 +126,45 @@ pub struct HttpSessionOpenRequest {
     pub label: Option<String>,
 }
 
+/// Exact durable catalog identity and new bounded display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionRenameRequest {
+    pub session_ref: String,
+    pub session_id: String,
+    pub display_name: String,
+}
+
+/// Exact durable catalog identity selected for confirmed deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionDeleteRequest {
+    pub session_ref: String,
+    pub session_id: String,
+}
+
+/// Bounded receipt for a committed durable catalog mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionMutationReceipt {
+    pub session_ref: String,
+    pub session_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
+impl From<sigil_runtime::SessionCatalogMutationReceipt> for HttpSessionMutationReceipt {
+    fn from(receipt: sigil_runtime::SessionCatalogMutationReceipt) -> Self {
+        Self {
+            session_ref: receipt.session_ref,
+            session_id: receipt.session_id,
+            operation_id: receipt.operation_id,
+            projection_generation: receipt.projection_generation,
+        }
+    }
+}
+
 /// Public snapshot returned by session create/get endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

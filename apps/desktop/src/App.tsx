@@ -18,7 +18,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import { useMediaQuery } from "./useMediaQuery";
-import { Button, Dialog, Drawer, IconButton, Tooltip } from "./ui/primitives";
+import { Button, Dialog, Drawer, IconButton, TextField, Tooltip } from "./ui/primitives";
 import { Icon } from "./ui/icons";
 import sigilMarkDark from "../../../assets/logo/sigil-mark-dark-mode.svg";
 import sigilMarkLight from "../../../assets/logo/sigil-mark.svg";
@@ -33,6 +33,10 @@ interface PendingWorkspaceClose {
   id: string;
   displayName: string;
   message: string;
+}
+interface PendingSessionRename {
+  entry: CatalogEntry;
+  displayName: string;
 }
 const EMPTY_CATALOG: CatalogPage = {
   workspaceId: "",
@@ -68,13 +72,18 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sourceFilter, setSourceFilter] = useState<CatalogSourceState | "all">("all");
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
+  const [selectedDurableSessionId, setSelectedDurableSessionId] = useState<string>();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [sessionMessage, setSessionMessage] = useState<string>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
+  const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
+  const [pendingSessionDelete, setPendingSessionDelete] = useState<CatalogEntry>();
+  const [sessionManagementError, setSessionManagementError] = useState<string>();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const compactNavigation = useMediaQuery("(max-width: 899px)");
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
+  const sessionRenameInputRef = useRef<HTMLInputElement>(null);
 
   const dismissWorkspaceClose = useCallback(() => {
     setPendingWorkspaceClose((pending) => {
@@ -200,6 +209,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   useEffect(() => {
     setSelectedSession(undefined);
+    setSelectedDurableSessionId(undefined);
     setSessionActionState("idle");
     setSessionMessage(undefined);
   }, [activeWorkspaceId]);
@@ -308,6 +318,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         "New conversation",
       );
       setSelectedSession(session);
+      setSelectedDurableSessionId(undefined);
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage("New conversation ready.");
@@ -329,6 +340,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         label: entry.title,
       });
       setSelectedSession(session);
+      setSelectedDurableSessionId(entry.sessionId);
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
@@ -338,11 +350,62 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
+  const renameSession = async () => {
+    if (activeWorkspaceId === undefined || pendingSessionRename === undefined) return;
+    const displayName = pendingSessionRename.displayName.trim();
+    if (displayName.length === 0 || displayName.length > 160) {
+      setSessionManagementError("Enter a conversation name between 1 and 160 characters.");
+      return;
+    }
+    setSessionActionState("working");
+    setSessionManagementError(undefined);
+    try {
+      await bridge.renameSession(activeWorkspaceId, {
+        sessionRef: pendingSessionRename.entry.sessionRef,
+        sessionId: pendingSessionRename.entry.sessionId ?? "",
+        displayName,
+      });
+      if (selectedDurableSessionId === pendingSessionRename.entry.sessionId) {
+        setSelectedSession((current) => current === undefined ? current : { ...current, label: displayName });
+      }
+      setPendingSessionRename(undefined);
+      setSessionActionState("idle");
+      setSessionMessage("Conversation renamed.");
+      await loadHistory(activeWorkspaceId);
+    } catch (error) {
+      setSessionActionState("error");
+      setSessionManagementError(errorMessage(error) ?? "The conversation could not be renamed safely.");
+    }
+  };
+
+  const deleteSession = async () => {
+    if (activeWorkspaceId === undefined || pendingSessionDelete?.sessionId === undefined) return;
+    setSessionActionState("working");
+    setSessionManagementError(undefined);
+    try {
+      await bridge.deleteSession(activeWorkspaceId, {
+        sessionRef: pendingSessionDelete.sessionRef,
+        sessionId: pendingSessionDelete.sessionId,
+      });
+      if (selectedDurableSessionId === pendingSessionDelete.sessionId) {
+        setSelectedSession(undefined);
+        setSelectedDurableSessionId(undefined);
+      }
+      setPendingSessionDelete(undefined);
+      setSessionActionState("idle");
+      setSessionMessage("Conversation deleted.");
+      await loadHistory(activeWorkspaceId);
+    } catch (error) {
+      setSessionActionState("error");
+      setSessionManagementError(errorMessage(error) ?? "The conversation could not be deleted safely.");
+    }
+  };
+
   const navigationContent = activeWorkspace === undefined ? null : (
     <SessionRail
       historyState={historyState}
       catalog={catalog}
-      selectedSessionId={selectedSession?.id}
+      selectedSessionId={selectedDurableSessionId}
       sessionMessage={sessionMessage}
       sessionError={sessionActionState === "error"}
       searchDraft={searchDraft}
@@ -364,6 +427,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         if (catalog.nextCursor !== undefined) void loadHistory(activeWorkspace.id, catalog.nextCursor);
       }}
       onOpen={(entry) => void openSession(entry)}
+      onRename={(entry) => {
+        setSessionActionState("idle");
+        setSessionManagementError(undefined);
+        setPendingSessionRename({ entry, displayName: entry.title ?? "Untitled conversation" });
+      }}
+      onDelete={(entry) => {
+        setSessionActionState("idle");
+        setSessionManagementError(undefined);
+        setPendingSessionDelete(entry);
+      }}
     />
   );
 
@@ -472,6 +545,72 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           {workspaceHealthError ?? message}
         </footer>
       ) : null}
+
+      <Dialog
+        open={pendingSessionRename !== undefined}
+        title="Rename conversation"
+        description="Use a short name that makes this conversation easy to find."
+        initialFocusRef={sessionRenameInputRef}
+        onOpenChange={(open) => {
+          if (!open && sessionActionState !== "working") {
+            setPendingSessionRename(undefined);
+            setSessionActionState("idle");
+            setSessionManagementError(undefined);
+          }
+        }}
+      >
+        {pendingSessionRename === undefined ? null : (
+          <form onSubmit={(event) => { event.preventDefault(); void renameSession(); }}>
+            <TextField
+              ref={sessionRenameInputRef}
+              label="Conversation name"
+              value={pendingSessionRename.displayName}
+              maxLength={160}
+              error={sessionManagementError}
+              onChange={(event) => setPendingSessionRename((current) => current === undefined ? current : { ...current, displayName: event.target.value })}
+            />
+            <div className="confirmation-actions">
+              <Button type="button" disabled={sessionActionState === "working"} onClick={() => {
+                setPendingSessionRename(undefined);
+                setSessionActionState("idle");
+                setSessionManagementError(undefined);
+              }}>Cancel</Button>
+              <Button type="submit" variant="primary" busy={sessionActionState === "working"}>Rename</Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
+
+      <Dialog
+        open={pendingSessionDelete !== undefined}
+        title="Delete conversation?"
+        description={pendingSessionDelete?.title ?? "Untitled conversation"}
+        destructive
+        onOpenChange={(open) => {
+          if (!open && sessionActionState !== "working") {
+            setPendingSessionDelete(undefined);
+            setSessionActionState("idle");
+            setSessionManagementError(undefined);
+          }
+        }}
+      >
+        {pendingSessionDelete === undefined ? null : (
+          <>
+            <p className="destructive-explanation">
+              This permanently removes the local conversation history. File, shell, and remote side effects are not undone.
+            </p>
+            {sessionManagementError === undefined ? null : <p role="alert">{sessionManagementError}</p>}
+            <div className="confirmation-actions">
+              <Button type="button" data-initial-focus disabled={sessionActionState === "working"} onClick={() => {
+                setPendingSessionDelete(undefined);
+                setSessionActionState("idle");
+                setSessionManagementError(undefined);
+              }}>Keep conversation</Button>
+              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void deleteSession()}>Delete permanently</Button>
+            </div>
+          </>
+        )}
+      </Dialog>
 
       <Dialog
         open={pendingWorkspaceClose !== undefined}

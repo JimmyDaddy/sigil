@@ -109,6 +109,30 @@ pub(crate) struct DesktopSessionOpenInput {
     pub(crate) label: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionRenameInput {
+    pub(crate) session_ref: String,
+    pub(crate) session_id: String,
+    pub(crate) display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionDeleteInput {
+    pub(crate) session_ref: String,
+    pub(crate) session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionMutationSummary {
+    pub(crate) session_ref: String,
+    pub(crate) session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_generation: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionSummary {

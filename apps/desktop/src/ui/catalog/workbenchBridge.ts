@@ -201,6 +201,16 @@ export function createCatalogWorkbenchBridge(
     catalog: async () => catalog,
     createSession: async () => session,
     openSession: async () => session,
+    renameSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }),
+    deleteSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }),
     transcript: async () => transcript,
     runContext: async () => runContext,
     startRun: async (_workspaceId, sessionId, _prompt, approvalMode) => ({

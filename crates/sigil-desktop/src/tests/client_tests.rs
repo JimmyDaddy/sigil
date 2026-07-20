@@ -46,6 +46,32 @@ fn run_context_decodes_exact_typed_server_contract() {
     );
 }
 
+#[test]
+fn session_management_contract_is_exact_and_path_free() {
+    let rename = DesktopSessionRenameRequest {
+        session_ref: "managed.jsonl".to_owned(),
+        session_id: "durable-managed".to_owned(),
+        display_name: "Readable name".to_owned(),
+    };
+    assert_eq!(
+        serde_json::to_value(rename).expect("rename should encode"),
+        serde_json::json!({
+            "session_ref": "managed.jsonl",
+            "session_id": "durable-managed",
+            "display_name": "Readable name"
+        })
+    );
+    let receipt = serde_json::from_value::<DesktopSessionMutationReceipt>(serde_json::json!({
+        "session_ref": "managed.jsonl",
+        "session_id": "durable-managed",
+        "operation_id": "session-display-name:1",
+        "projection_generation": 2
+    }))
+    .expect("receipt should decode");
+    assert_eq!(receipt.projection_generation, Some(2));
+    assert!(!format!("{receipt:?}").contains('/'));
+}
+
 #[tokio::test]
 async fn transcript_query_rejects_unbounded_renderer_values_before_transport() {
     let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));

@@ -1,7 +1,7 @@
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
 import { ErrorCard } from "./ErrorCard";
 import { Icon } from "./ui/icons";
-import { Button, Popover } from "./ui/primitives";
+import { Button, Menu, MenuItem, Popover } from "./ui/primitives";
 
 export type HistoryState =
   | "idle"
@@ -17,6 +17,8 @@ export function HistoryContent({
   onRetry,
   onLoadMore,
   onOpen,
+  onRename,
+  onDelete,
   selectedSessionId,
 }: {
   state: HistoryState;
@@ -24,6 +26,8 @@ export function HistoryContent({
   onRetry: () => void;
   onLoadMore: () => void;
   onOpen: (entry: CatalogEntry) => void;
+  onRename: (entry: CatalogEntry) => void;
+  onDelete: (entry: CatalogEntry) => void;
   selectedSessionId?: string;
 }) {
   if (state === "loading") {
@@ -98,16 +102,27 @@ export function HistoryContent({
                   return (
                     <li key={`${entry.sessionRef}:${entry.sessionId ?? entry.sourceState}`}>
                       {canOpen ? (
-                        <Button
-                          className="session-row"
-                          type="button"
-                          variant="quiet"
-                          aria-current={entry.sessionId === selectedSessionId ? "page" : undefined}
-                          title={providerContext || undefined}
-                          onClick={() => onOpen(entry)}
-                        >
-                          {content}
-                        </Button>
+                        <div className="session-row-shell">
+                          <Button
+                            className="session-row"
+                            type="button"
+                            variant="quiet"
+                            aria-current={entry.sessionId === selectedSessionId ? "page" : undefined}
+                            title={providerContext || undefined}
+                            onClick={() => onOpen(entry)}
+                          >
+                            {content}
+                          </Button>
+                          <Menu
+                            accessibleLabel={`Manage ${entry.title ?? "untitled conversation"}`}
+                            label={<Icon name="more" />}
+                          >
+                            <MenuItem onSelect={() => onRename(entry)}>Rename</MenuItem>
+                            <MenuItem disabled={entry.pinned} onSelect={() => onDelete(entry)}>
+                              {entry.pinned ? "Pinned — cannot delete" : "Delete"}
+                            </MenuItem>
+                          </Menu>
+                        </div>
                       ) : (
                         <div className="session-row session-row-unavailable" aria-disabled="true" title={providerContext || undefined}>{content}</div>
                       )}

@@ -835,6 +835,25 @@
         },
         "type": "object"
       },
+      "SessionDeleteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "session_ref": {
+            "maxLength": 128,
+            "pattern": "^[^/\\\\]+\\.jsonl$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id"
+        ],
+        "type": "object"
+      },
       "SessionListResponse": {
         "properties": {
           "sessions": {
@@ -846,6 +865,33 @@
         },
         "required": [
           "sessions"
+        ],
+        "type": "object"
+      },
+      "SessionMutationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "projection_generation": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id",
+          "operation_id"
         ],
         "type": "object"
       },
@@ -872,6 +918,31 @@
         "required": [
           "session_ref",
           "session_id"
+        ],
+        "type": "object"
+      },
+      "SessionRenameRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "session_ref": {
+            "maxLength": 128,
+            "pattern": "^[^/\\\\]+\\.jsonl$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id",
+          "display_name"
         ],
         "type": "object"
       },
@@ -1683,6 +1754,92 @@
           }
         },
         "summary": "List durable historical sessions for the current workspace"
+      }
+    },
+    "/session-catalog/delete": {
+      "post": {
+        "description": "Rejects pinned or active sessions, then applies the existing content-bound preview/delete lifecycle and evicts idle adapter handles.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationReceipt"
+                }
+              }
+            },
+            "description": "Committed delete receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Delete one exact durable conversation"
+      }
+    },
+    "/session-catalog/rename": {
+      "post": {
+        "description": "Appends a bounded display-name decision to workspace lifecycle truth, then refreshes the rebuildable catalog projection.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationReceipt"
+                }
+              }
+            },
+            "description": "Committed rename receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Rename one exact durable conversation"
       }
     },
     "/sessions": {

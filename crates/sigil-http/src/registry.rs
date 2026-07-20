@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     sync::{
@@ -76,6 +76,9 @@ pub enum HttpRegistryError {
     /// Current lifecycle or durable stream validation could not complete.
     #[error("durable session is unavailable")]
     DurableSessionUnavailable,
+    /// A durable catalog mutation already owns this session identity.
+    #[error("durable session is being changed")]
+    DurableSessionMutationActive,
     /// Another foreground run still owns this adapter session.
     #[error("http session {session_id} already has foreground run {run_id}")]
     SessionForegroundRunActive { session_id: String, run_id: String },
@@ -353,6 +356,42 @@ impl HttpSessionRunRegistry {
             .collect()
     }
 
+    pub(crate) fn reserve_durable_session_mutation(
+        &self,
+        durable_session_id: &str,
+    ) -> Result<HttpDurableSessionMutationGuard<'_>, HttpRegistryError> {
+        let mut state = self.lock_state();
+        state.ensure_accepting_commands()?;
+        if state.durable_session_mutations.contains(durable_session_id) {
+            return Err(HttpRegistryError::DurableSessionMutationActive);
+        }
+        for session in state
+            .sessions
+            .values()
+            .filter(|session| session.binding.session_scope_id == durable_session_id)
+        {
+            if let Some(run_id) = session.foreground_run_id.as_ref() {
+                return Err(HttpRegistryError::SessionForegroundRunActive {
+                    session_id: session.id.clone(),
+                    run_id: run_id.clone(),
+                });
+            }
+            if session.verification_in_progress {
+                return Err(HttpRegistryError::SessionVerificationActive {
+                    session_id: session.id.clone(),
+                });
+            }
+        }
+        state
+            .durable_session_mutations
+            .insert(durable_session_id.to_owned());
+        Ok(HttpDurableSessionMutationGuard {
+            registry: self,
+            durable_session_id: durable_session_id.to_owned(),
+            released: false,
+        })
+    }
+
     /// Returns one HTTP adapter session snapshot.
     ///
     /// # Errors
@@ -441,6 +480,21 @@ impl HttpSessionRunRegistry {
             let mut state = self.lock_state();
             state.ensure_accepting_commands()?;
             let run_id = state.next_run_id();
+            let durable_session_id = state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?
+                .binding
+                .session_scope_id
+                .clone();
+            if state
+                .durable_session_mutations
+                .contains(&durable_session_id)
+            {
+                return Err(HttpRegistryError::DurableSessionMutationActive);
+            }
             let session = state.sessions.get_mut(session_id).ok_or_else(|| {
                 HttpRegistryError::SessionNotFound {
                     session_id: session_id.to_owned(),
@@ -733,6 +787,21 @@ impl HttpSessionRunRegistry {
             let session = {
                 let mut state = self.lock_state();
                 state.ensure_accepting_commands()?;
+                let durable_session_id = state
+                    .sessions
+                    .get(session_id)
+                    .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                        session_id: session_id.to_owned(),
+                    })?
+                    .binding
+                    .session_scope_id
+                    .clone();
+                if state
+                    .durable_session_mutations
+                    .contains(&durable_session_id)
+                {
+                    return Err(HttpRegistryError::DurableSessionMutationActive);
+                }
                 let session = state.sessions.get_mut(session_id).ok_or_else(|| {
                     HttpRegistryError::SessionNotFound {
                         session_id: session_id.to_owned(),
@@ -1244,6 +1313,7 @@ struct HttpRegistryState {
     next_run_number: u64,
     accepting_commands: bool,
     id_namespace: Option<String>,
+    durable_session_mutations: BTreeSet<String>,
 }
 
 impl Default for HttpRegistryState {
@@ -1256,7 +1326,53 @@ impl Default for HttpRegistryState {
             next_run_number: 0,
             accepting_commands: true,
             id_namespace: None,
+            durable_session_mutations: BTreeSet::new(),
         }
+    }
+}
+
+pub(crate) struct HttpDurableSessionMutationGuard<'a> {
+    registry: &'a HttpSessionRunRegistry,
+    durable_session_id: String,
+    released: bool,
+}
+
+impl HttpDurableSessionMutationGuard<'_> {
+    pub(crate) fn finish(mut self, evict_adapter_sessions: bool) {
+        let mut state = self.registry.lock_state();
+        if evict_adapter_sessions {
+            let adapter_session_ids = state
+                .sessions
+                .values()
+                .filter(|session| session.binding.session_scope_id == self.durable_session_id)
+                .map(|session| session.id.clone())
+                .collect::<BTreeSet<_>>();
+            state
+                .sessions
+                .retain(|session_id, _| !adapter_session_ids.contains(session_id));
+            state
+                .runs
+                .retain(|_, run| !adapter_session_ids.contains(&run.session_id));
+            state
+                .command_reservations
+                .retain(|key, _| !adapter_session_ids.contains(&key.session_id));
+        }
+        state
+            .durable_session_mutations
+            .remove(&self.durable_session_id);
+        self.released = true;
+    }
+}
+
+impl Drop for HttpDurableSessionMutationGuard<'_> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.registry
+            .lock_state()
+            .durable_session_mutations
+            .remove(&self.durable_session_id);
     }
 }
 

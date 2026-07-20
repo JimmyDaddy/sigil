@@ -139,6 +139,8 @@ function FixtureSurface({
             onRetry={() => undefined}
             onLoadMore={() => undefined}
             onOpen={() => undefined}
+            onRename={() => undefined}
+            onDelete={() => undefined}
           />
         </section>
       ) : null}

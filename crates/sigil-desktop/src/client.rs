@@ -11,8 +11,9 @@ use crate::{
         DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCommandEnvelope,
         DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
-        DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionListResponse,
-        DesktopSessionOpenRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
+        DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+        DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
+        DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
         DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
         DesktopVerificationRerunRequest, DesktopVerificationView,
     },
@@ -115,6 +116,32 @@ impl DesktopHttpClient {
             }
         }
         self.get_json(url, StatusCode::OK).await
+    }
+
+    /// Persists a display name for one exact durable catalog identity.
+    pub async fn rename_session(
+        &self,
+        request: DesktopSessionRenameRequest,
+    ) -> Result<DesktopSessionMutationReceipt, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "rename"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Deletes one exact durable catalog identity after native-shell confirmation.
+    pub async fn delete_session(
+        &self,
+        request: DesktopSessionDeleteRequest,
+    ) -> Result<DesktopSessionMutationReceipt, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "delete"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
     }
 
     /// Reads one process-local session snapshot.

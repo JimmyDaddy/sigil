@@ -51,6 +51,23 @@ fn incompatible_runtime_projection_is_actionable_and_path_free() {
 }
 
 #[test]
+fn session_management_validation_and_errors_are_actionable() {
+    assert!(validate_display_name("Readable conversation").is_ok());
+    assert_eq!(
+        validate_display_name(" ")
+            .expect_err("blank display name must fail")
+            .code,
+        "session_display_name_invalid"
+    );
+    let pinned = project_session_mutation_client_error(DesktopClientError::Rejected {
+        status: 409,
+        code: Some("durable_session_pinned".to_owned()),
+    });
+    assert_eq!(pinned.code, "session_pinned");
+    assert!(pinned.message.contains("Unpin"));
+}
+
+#[test]
 fn workspace_display_name_never_returns_its_parent_path() {
     let name = workspace_display_name(Path::new("/private/canary/workspace"))
         .expect("basename should be accepted");

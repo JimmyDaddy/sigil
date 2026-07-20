@@ -385,6 +385,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session-catalog/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete one exact durable conversation
+         * @description Rejects pinned or active sessions, then applies the existing content-bound preview/delete lifecycle and evicts idle adapter handles.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionDeleteRequest"];
+                };
+            };
+            responses: {
+                /** @description Committed delete receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionMutationReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session-catalog/rename": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rename one exact durable conversation
+         * @description Appends a bounded display-name decision to workspace lifecycle truth, then refreshes the rebuildable catalog projection.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionRenameRequest"];
+                };
+            };
+            responses: {
+                /** @description Committed rename receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionMutationReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions": {
         parameters: {
             query?: never;
@@ -960,11 +1056,27 @@ export interface components {
         SessionCreateRequest: {
             label?: string;
         };
+        SessionDeleteRequest: {
+            session_id: string;
+            session_ref: string;
+        };
         SessionListResponse: {
             sessions: components["schemas"]["SessionSnapshot"][];
         };
+        SessionMutationReceipt: {
+            operation_id: string;
+            /** Format: uint64 */
+            projection_generation?: number | null;
+            session_id: string;
+            session_ref: string;
+        };
         SessionOpenRequest: {
             label?: string | null;
+            session_id: string;
+            session_ref: string;
+        };
+        SessionRenameRequest: {
+            display_name: string;
             session_id: string;
             session_ref: string;
         };

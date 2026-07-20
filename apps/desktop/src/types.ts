@@ -81,6 +81,23 @@ export interface SessionOpenInput {
   label?: string;
 }
 
+export interface SessionRenameInput {
+  sessionRef: string;
+  sessionId: string;
+  displayName: string;
+}
+
+export interface SessionDeleteInput {
+  sessionRef: string;
+  sessionId: string;
+}
+
+export interface SessionMutationSummary {
+  sessionRef: string;
+  sessionId: string;
+  projectionGeneration?: number;
+}
+
 export type TranscriptRole = "user" | "assistant" | "tool";
 
 export type TranscriptAssistantKind =

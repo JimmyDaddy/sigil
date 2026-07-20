@@ -8,6 +8,9 @@ import type {
   CatalogRequest,
   DesktopBootstrap,
   SessionOpenInput,
+  SessionDeleteInput,
+  SessionMutationSummary,
+  SessionRenameInput,
   SessionSummary,
   RunStreamStatus,
   RunAttachment,
@@ -37,6 +40,8 @@ export interface DesktopBridge {
     workspaceId: string,
     input: SessionOpenInput,
   ): Promise<SessionSummary>;
+  renameSession(workspaceId: string, input: SessionRenameInput): Promise<SessionMutationSummary>;
+  deleteSession(workspaceId: string, input: SessionDeleteInput): Promise<SessionMutationSummary>;
   transcript(
     workspaceId: string,
     sessionId: string,
@@ -91,6 +96,10 @@ export const desktopBridge: DesktopBridge = {
     }),
   openSession: (workspaceId, input) =>
     invoke<SessionSummary>("desktop_open_session", { workspaceId, input }),
+  renameSession: (workspaceId, input) =>
+    invoke<SessionMutationSummary>("desktop_rename_session", { workspaceId, input }),
+  deleteSession: (workspaceId, input) =>
+    invoke<SessionMutationSummary>("desktop_delete_session", { workspaceId, input }),
   transcript: (workspaceId, sessionId, request) =>
     invoke<TranscriptPage>("desktop_transcript", {
       workspaceId,

@@ -661,6 +661,46 @@ fn session_pin_projection_requires_the_recorded_stream_identity() -> Result<()> 
 }
 
 #[test]
+fn session_display_name_is_identity_bound_and_durably_projected() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "Original prompt")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let listed = service.catalog()?.entries.remove(0);
+    let session_id = listed.session_id.expect("durable identity");
+
+    let record = service.rename_session(
+        &listed.session_ref,
+        &session_id,
+        "Readable conversation name",
+        200,
+    )?;
+
+    assert!(matches!(
+        record.event,
+        LocalSessionLifecycleEvent::DisplayNameChanged(
+            LocalSessionDisplayNameJournalBinding { ref display_name, .. }
+        ) if display_name == "Readable conversation name"
+    ));
+    assert_eq!(
+        service.catalog()?.entries[0].title.as_deref(),
+        Some("Readable conversation name")
+    );
+    assert!(matches!(
+        service.rename_session(&listed.session_ref, "different", "Changed", 201),
+        Err(LocalSessionMutationError::IdentityChanged)
+    ));
+    assert!(matches!(
+        service.rename_session(&listed.session_ref, &session_id, "  ", 202),
+        Err(LocalSessionMutationError::InvalidRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn retention_preview_is_read_only_deterministic_and_respects_pin_and_protection() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");

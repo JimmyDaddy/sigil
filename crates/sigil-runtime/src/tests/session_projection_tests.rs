@@ -508,6 +508,35 @@ fn incremental_reconcile_reuses_unchanged_rows_and_tracks_pin_append_delete() ->
 }
 
 #[test]
+fn catalog_mutations_rename_and_delete_exact_durable_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("managed.jsonl");
+    let session_id = finalized_session(&source, "Original title", "deepseek", "chat")?;
+    projection.rebuild()?;
+
+    let renamed = projection.rename_session("managed.jsonl", &session_id, "Renamed session")?;
+    assert!(renamed.projection_generation.is_some());
+    assert_eq!(
+        projection.list_workspace_entries()?[0].title.as_deref(),
+        Some("Renamed session")
+    );
+
+    lifecycle.set_session_pin(&source, true, 300)?;
+    assert!(matches!(
+        projection.delete_session("managed.jsonl", &session_id),
+        Err(LocalSessionMutationError::Pinned)
+    ));
+    lifecycle.set_session_pin(&source, false, 301)?;
+    let deleted = projection.delete_session("managed.jsonl", &session_id)?;
+    assert!(deleted.projection_generation.is_some());
+    assert!(!source.exists());
+    assert!(projection.list_workspace_entries()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn projection_counts_duplicate_session_identity_without_overwriting_rows() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

@@ -4,8 +4,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sigil_kernel::PublicRunEventKind;
 use sigil_runtime::{
-    LocalSessionCatalogState, SessionCatalogProjectionEntry, SessionCatalogProjectionError,
-    SessionCatalogProjectionPage, SessionCatalogProjectionQuery, SessionCatalogProjectionService,
+    LocalSessionCatalogState, LocalSessionMutationError, SessionCatalogProjectionEntry,
+    SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
+    SessionCatalogProjectionService,
     application_run::{
         DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE, MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE,
     },
@@ -24,7 +25,8 @@ use crate::{
     disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
         HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpVerificationRerunRequest,
+        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionMutationReceipt,
+        HttpSessionOpenRequest, HttpSessionRenameRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -466,6 +468,66 @@ fn route_http_request(
                 "session_catalog_unavailable",
                 "durable historical session catalog is unavailable",
             ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/rename" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionRenameRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session rename body",
+            );
+        };
+        let guard = match registry.reserve_durable_session_mutation(&body.session_id) {
+            Ok(guard) => guard,
+            Err(error) => return registry_error_response(error),
+        };
+        return match session_catalog.rename_session(
+            &body.session_ref,
+            &body.session_id,
+            &body.display_name,
+        ) {
+            Ok(receipt) => {
+                guard.finish(false);
+                json_response(200, json!(HttpSessionMutationReceipt::from(receipt)))
+            }
+            Err(error) => session_mutation_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/delete" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionDeleteRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session delete body",
+            );
+        };
+        let guard = match registry.reserve_durable_session_mutation(&body.session_id) {
+            Ok(guard) => guard,
+            Err(error) => return registry_error_response(error),
+        };
+        return match session_catalog.delete_session(&body.session_ref, &body.session_id) {
+            Ok(receipt) => {
+                guard.finish(true);
+                json_response(200, json!(HttpSessionMutationReceipt::from(receipt)))
+            }
+            Err(error) => session_mutation_error_response(error),
         };
     }
 
@@ -1096,6 +1158,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }
+        | HttpRegistryError::DurableSessionMutationActive
         | HttpRegistryError::CommandKeyConflict { .. }
         | HttpRegistryError::RunTerminalConflict { .. }
         | HttpRegistryError::DurableSessionNotReady
@@ -1123,6 +1186,41 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())
+}
+
+fn session_mutation_error_response(error: LocalSessionMutationError) -> HttpResponse {
+    match error {
+        LocalSessionMutationError::InvalidRequest => http_error_response(
+            400,
+            "invalid_session_mutation_request",
+            "the conversation management request is invalid",
+        ),
+        LocalSessionMutationError::NotFound => http_error_response(
+            404,
+            "durable_session_not_found",
+            "the saved conversation no longer exists",
+        ),
+        LocalSessionMutationError::NotReady => http_error_response(
+            409,
+            "durable_session_not_ready",
+            "the saved conversation is not ready for this change",
+        ),
+        LocalSessionMutationError::IdentityChanged => http_error_response(
+            409,
+            "durable_session_identity_changed",
+            "the saved conversation changed; refresh the list and try again",
+        ),
+        LocalSessionMutationError::Pinned => http_error_response(
+            409,
+            "durable_session_pinned",
+            "unpin the saved conversation before deleting it",
+        ),
+        LocalSessionMutationError::Unavailable { .. } => http_error_response(
+            503,
+            "durable_session_mutation_unavailable",
+            "the saved conversation could not be changed safely",
+        ),
+    }
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {

@@ -6,6 +6,7 @@
 
 - TUI 仍是第一用户入口，npm、Homebrew、Cargo 与 GitHub release archive 仍只分发 `sigil` 终端程序。
 - `apps/desktop` 监管每个工作区独立的 `sigil serve` sidecar。renderer 不持有 bearer、进程句柄、工作区绝对路径，也不能直接访问通用 HTTP、Shell 或文件系统。
+- 会话重命名写入 workspace append-only lifecycle journal；删除复用 exact preview/apply，置顶、活动 run 或 verification 会 fail closed。SQLite 仍只是可重建目录投影。
 - CI artifact 只保留七天，用于 dogfood。macOS 使用 ad-hoc 签名；Linux `.deb` 和 Windows NSIS 未进入公开发布工作流。
 - V1 不接入 updater。公开分发必须另行完成平台证书、macOS notarization、Windows signing、Linux 依赖风险复核和升级/回滚设计。
 
@@ -67,10 +68,11 @@ pnpm --dir apps/desktop package --bundles nsis  # Windows
 6. 对精确 tool request 分别验证 deny/approve-once；cancel 只显示 cooperative request，不声称撤销已有副作用。
 7. 检查 verification receipt、snapshot、changeset 与 failure locator；只允许重跑 server 推荐的 exact check。
 8. 关闭工作区和应用，确认 owned stream 先停止、owner pipe 触发 server graceful drain，超时才终止完整进程树。
-9. 重新打开同一工作区，确认 recent 记录只用于重新认证启动；durable history 仍由 server catalog 重建。
-10. 在 **Appearance**（`Cmd/Ctrl+,`）中切换 Follow system、Light 和 Dark；重启后仍保留手动选择，System 模式会跟随 OS，切换过程不丢 draft、timeline scroll、approval 或 active-run attachment。
-11. 分别在 1280、840、839 和 320px 检查顶栏、紧凑对话列表与 review surface；320px 下 Browse、workspace、new conversation 和 Appearance 均必须保持可见可操作，不出现 document 横向滚动。
-12. 用键盘完成 workspace/session 选择、filter、navigation/review drawer、approval 和 theme 切换，确认 Esc、Tab trap、选择后焦点恢复与中文 IME；每个公开 installer candidate 还需在当前 Space 使用 VoiceOver 验证 WebView 内容导航，不得用 hidden-window AX probe 代替。
+9. 重新打开同一工作区，确认 recent 记录只用于重新认证启动；debug app 使用当前 `target/debug/sigil`，package 使用同 checkout 的 `sigil-runtime`，durable history 仍由 server catalog 重建。
+10. 打开会话行的操作菜单：重命名后重启仍保留名称；删除必须二次确认，置顶会话不可删除，活动 run/verification 结束前删除返回可操作提示。确认删除只移除本地 conversation truth，不声称撤销文件、Shell 或远程副作用。
+11. 在 **Appearance**（`Cmd/Ctrl+,`）中切换 Follow system、Light 和 Dark；重启后仍保留手动选择，System 模式会跟随 OS，切换过程不丢 draft、timeline scroll、approval 或 active-run attachment。
+12. 分别在 1280、840、839 和 320px 检查顶栏、紧凑对话列表、filter/action popover 与 review surface；所有弹层必须留在可见 viewport 内，320px 下 Browse、workspace、new conversation 和 Appearance 均必须保持可见可操作，不出现 document 横向滚动。
+13. 用键盘完成 workspace/session 选择、filter、navigation/review drawer、会话重命名/删除确认、approval 和 theme 切换，确认 Esc、Tab trap、选择后焦点恢复与中文 IME；每个公开 installer candidate 还需在当前 Space 使用 VoiceOver 验证 WebView 内容导航，不得用 hidden-window AX probe 代替。
 
 macOS package 还必须通过：
 

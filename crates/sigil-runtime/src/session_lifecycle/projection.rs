@@ -13,14 +13,15 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     JsonlSessionStore, SessionListProjectionEntry, SessionListReadinessSummary,
-    SessionListTaskSummary, SessionListUsageSummary, SessionStreamCompatibilityError,
+    SessionListTaskSummary, SessionListUsageSummary, SessionRef, SessionStreamCompatibilityError,
     safe_persistence_text, session_list_projection_from_records,
 };
 use thiserror::Error as ThisError;
 
 use super::{
     LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
-    SessionCandidate, direct_jsonl_candidates, hash_file_bounded, modified_at_unix_ms,
+    LocalSessionMutationError, SessionCandidate, direct_jsonl_candidates, hash_file_bounded,
+    modified_at_unix_ms,
 };
 
 mod query;
@@ -226,6 +227,18 @@ pub struct SessionCatalogProjectionRecoveryReport {
     pub recovered_at_unix_ms: u64,
 }
 
+/// Durable mutation receipt. Projection refresh is best-effort because the lifecycle decision is
+/// already committed when this value is returned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCatalogMutationReceipt {
+    pub session_ref: String,
+    pub session_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
 /// Workspace-bound owner of the rebuildable global SQLite session catalog.
 #[derive(Debug, Clone)]
 pub struct SessionCatalogProjectionService {
@@ -321,6 +334,60 @@ impl SessionCatalogProjectionService {
     ) -> Result<Vec<SessionCatalogProjectionEntry>, SessionCatalogProjectionError> {
         let connection = self.open_connection()?;
         list_workspace_entries(&connection, &self.lifecycle.workspace_id)
+    }
+
+    /// Persists a display-name override for one exact catalog identity and refreshes SQLite.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable mutation error when the reference/name is invalid or durable identity has
+    /// changed. A projection refresh failure does not erase or misreport the committed rename.
+    pub fn rename_session(
+        &self,
+        session_ref: &str,
+        session_id: &str,
+        display_name: &str,
+    ) -> Result<SessionCatalogMutationReceipt, LocalSessionMutationError> {
+        let session_ref = exact_session_ref(session_ref)?;
+        exact_session_id(session_id)?;
+        let record = self.lifecycle.rename_session(
+            &session_ref,
+            session_id,
+            display_name,
+            current_unix_ms(),
+        )?;
+        let projection_generation = self.reconcile().ok().map(|report| report.generation);
+        Ok(SessionCatalogMutationReceipt {
+            session_ref: session_ref.as_path().to_string_lossy().into_owned(),
+            session_id: session_id.to_owned(),
+            operation_id: record.operation_id,
+            projection_generation,
+        })
+    }
+
+    /// Applies an audited delete for one exact, unpinned catalog identity and refreshes SQLite.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable mutation error when the source is missing, changed, pinned, or otherwise
+    /// unavailable for deletion.
+    pub fn delete_session(
+        &self,
+        session_ref: &str,
+        session_id: &str,
+    ) -> Result<SessionCatalogMutationReceipt, LocalSessionMutationError> {
+        let session_ref = exact_session_ref(session_ref)?;
+        exact_session_id(session_id)?;
+        let output =
+            self.lifecycle
+                .delete_session(&session_ref, session_id, &[], current_unix_ms())?;
+        let projection_generation = self.reconcile().ok().map(|report| report.generation);
+        Ok(SessionCatalogMutationReceipt {
+            session_ref: session_ref.as_path().to_string_lossy().into_owned(),
+            session_id: session_id.to_owned(),
+            operation_id: output.operation_id,
+            projection_generation,
+        })
     }
 
     /// Quarantines the global SQLite files under an exclusive process lease and rebuilds the
@@ -617,6 +684,10 @@ impl SessionCatalogProjectionService {
             .lifecycle
             .session_pin_projection()
             .map_err(source_error)?;
+        let display_names = self
+            .lifecycle
+            .session_display_name_projection()
+            .map_err(source_error)?;
         let mut validated_bytes = 0_u64;
         let mut entries = Vec::with_capacity(candidates.len());
         let mut reused_source_count = 0;
@@ -638,11 +709,24 @@ impl SessionCatalogProjectionService {
                             pinned_session_id == session_id && *pinned
                         })
                 });
+                if let Some(session_id) = reused.session_id.as_deref()
+                    && let Some((named_session_id, display_name)) =
+                        display_names.get(&candidate.session_ref)
+                    && named_session_id == session_id
+                {
+                    reused.title = Some(display_name.clone());
+                }
                 entries.push(reused);
                 reused_source_count += 1;
                 continue;
             }
-            entries.push(self.project_candidate(candidate, state, &pins, indexed_at_unix_ms)?);
+            entries.push(self.project_candidate(
+                candidate,
+                state,
+                &pins,
+                &display_names,
+                indexed_at_unix_ms,
+            )?);
         }
         let scanned_source_count = entries.len();
         if truncated_source_count > 0 && !force_rebuild {
@@ -670,6 +754,7 @@ impl SessionCatalogProjectionService {
         candidate: SessionCandidate,
         initial_state: LocalSessionCatalogState,
         pins: &BTreeMap<sigil_kernel::SessionRef, (String, bool)>,
+        display_names: &BTreeMap<sigil_kernel::SessionRef, (String, String)>,
         indexed_at_unix_ms: u64,
     ) -> Result<SessionCatalogProjectionEntry, SessionCatalogProjectionError> {
         let session_ref = candidate
@@ -723,8 +808,47 @@ impl SessionCatalogProjectionService {
             .get(&candidate.session_ref)
             .is_some_and(|(session_id, pinned)| session_id == &projection.session_id && *pinned);
         apply_session_projection(&mut entry, projection, records.last());
+        if let Some(session_id) = entry.session_id.as_deref()
+            && let Some((named_session_id, display_name)) =
+                display_names.get(&candidate.session_ref)
+            && named_session_id == session_id
+        {
+            entry.title = Some(display_name.clone());
+        }
         Ok(entry)
     }
+}
+
+fn exact_session_ref(value: &str) -> Result<SessionRef, LocalSessionMutationError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > SESSION_CATALOG_IDENTITY_MAX_BYTES
+        || value.contains(['/', '\\'])
+    {
+        return Err(LocalSessionMutationError::InvalidRequest);
+    }
+    let session_ref =
+        SessionRef::new_relative(value).map_err(|_| LocalSessionMutationError::InvalidRequest)?;
+    if session_ref
+        .as_path()
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("jsonl")
+    {
+        return Err(LocalSessionMutationError::InvalidRequest);
+    }
+    Ok(session_ref)
+}
+
+fn exact_session_id(value: &str) -> Result<(), LocalSessionMutationError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || safe_persistence_text(value) != value
+    {
+        return Err(LocalSessionMutationError::InvalidRequest);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]

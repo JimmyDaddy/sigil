@@ -8,8 +8,9 @@ use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
     DesktopClientError, DesktopLaunchError, DesktopLaunchRequest, DesktopRunCancelRequest,
     DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionOpenRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopSessionDeleteRequest, DesktopSessionOpenRequest, DesktopSessionRenameRequest,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -23,7 +24,8 @@ use crate::{
         DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
         DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
         DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
-        DesktopSessionOpenInput, DesktopSessionSummary, DesktopTranscriptPage,
+        DesktopSessionDeleteInput, DesktopSessionMutationSummary, DesktopSessionOpenInput,
+        DesktopSessionRenameInput, DesktopSessionSummary, DesktopTranscriptPage,
         DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
         DesktopWorkspaceSelection,
     },
@@ -612,6 +614,64 @@ pub(crate) async fn desktop_open_session(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_rename_session(
+    workspace_id: String,
+    input: DesktopSessionRenameInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionMutationSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_reference(&input.session_ref, &input.session_id)?;
+    validate_display_name(&input.display_name)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .rename_session(DesktopSessionRenameRequest {
+            session_ref: input.session_ref,
+            session_id: input.session_id,
+            display_name: input.display_name,
+        })
+        .await
+        .map(|receipt| DesktopSessionMutationSummary {
+            session_ref: receipt.session_ref,
+            session_id: receipt.session_id,
+            projection_generation: receipt.projection_generation,
+        })
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_delete_session(
+    workspace_id: String,
+    input: DesktopSessionDeleteInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionMutationSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_reference(&input.session_ref, &input.session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .delete_session(DesktopSessionDeleteRequest {
+            session_ref: input.session_ref,
+            session_id: input.session_id,
+        })
+        .await
+        .map(|receipt| DesktopSessionMutationSummary {
+            session_ref: receipt.session_ref,
+            session_id: receipt.session_id,
+            projection_generation: receipt.projection_generation,
+        })
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_transcript(
     workspace_id: String,
     session_id: String,
@@ -698,6 +758,20 @@ fn validate_optional_label(value: Option<&str>) -> Result<(), DesktopCommandErro
         return Err(DesktopCommandError::new(
             "session_label_invalid",
             "The conversation label is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_display_name(value: &str) -> Result<(), DesktopCommandError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 160
+        || value.chars().any(char::is_control)
+    {
+        return Err(DesktopCommandError::new(
+            "session_display_name_invalid",
+            "Enter a conversation name between 1 and 160 characters.",
         ));
     }
     Ok(())
@@ -901,6 +975,42 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
             "The workspace server request failed.",
         ),
     }
+}
+
+fn project_session_mutation_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
+    {
+        return match code.as_str() {
+            "invalid_session_mutation_request" => DesktopCommandError::new(
+                "session_mutation_invalid",
+                "The conversation change is invalid.",
+            ),
+            "durable_session_not_found" => DesktopCommandError::new(
+                "session_not_found",
+                "This conversation no longer exists. Refresh the list.",
+            ),
+            "durable_session_identity_changed" => DesktopCommandError::new(
+                "session_changed",
+                "This conversation changed. Refresh the list and try again.",
+            ),
+            "durable_session_not_ready" => DesktopCommandError::new(
+                "session_not_ready",
+                "This conversation is not ready for that change.",
+            ),
+            "durable_session_pinned" => DesktopCommandError::new(
+                "session_pinned",
+                "Unpin this conversation before deleting it.",
+            ),
+            "registry_error" => DesktopCommandError::new(
+                "session_busy",
+                "Wait for the active run or verification to finish, then try again.",
+            ),
+            _ => project_client_error(error),
+        };
+    }
+    project_client_error(error)
 }
 
 fn project_recent_error(error: RecentWorkspaceStoreError) -> DesktopCommandError {

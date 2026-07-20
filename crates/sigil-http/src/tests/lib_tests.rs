@@ -483,6 +483,14 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         .as_str()
         .expect("first page should have a cursor")
         .to_owned();
+    let managed_session_ref = first_page["entries"][0]["session_ref"]
+        .as_str()
+        .expect("catalog entry should expose a reference")
+        .to_owned();
+    let managed_session_id = first_page["entries"][0]["session_id"]
+        .as_str()
+        .expect("ready catalog entry should expose an identity")
+        .to_owned();
 
     for path in [
         "/session-catalog?unknown=value",
@@ -523,6 +531,72 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             .to_string()
             .contains(&temp.path().display().to_string())
     );
+
+    let rename_body = json!({
+        "session_ref": managed_session_ref,
+        "session_id": managed_session_id,
+        "display_name": "Renamed from desktop"
+    })
+    .to_string();
+    let (status, renamed) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/rename",
+            Some("secret-token"),
+            &rename_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(renamed["session_ref"], managed_session_ref);
+    assert!(
+        renamed["operation_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session-display-name:"))
+    );
+    let (status, renamed_page) = http_raw_request(
+        address,
+        http_get(
+            "/session-catalog?q=Renamed%20from%20desktop",
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(renamed_page["entries"][0]["title"], "Renamed from desktop");
+
+    let delete_body = json!({
+        "session_ref": managed_session_ref,
+        "session_id": managed_session_id
+    })
+    .to_string();
+    let (status, deleted) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/delete",
+            Some("secret-token"),
+            &delete_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        deleted["operation_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session-delete:"))
+    );
+    let (status, deleted_page) = http_raw_request(
+        address,
+        http_get(
+            "/session-catalog?q=Renamed%20from%20desktop",
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(deleted_page["entries"].as_array().map(Vec::len), Some(0));
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
@@ -1398,6 +1472,12 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(document["paths"]["/session-catalog"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/session-catalog"]["get"]["responses"]["409"].is_object());
+    assert!(document["paths"]["/session-catalog/rename"]["post"]["responses"]["200"].is_object());
+    assert!(document["paths"]["/session-catalog/delete"]["post"]["responses"]["409"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["SessionRenameRequest"]["additionalProperties"],
+        false
+    );
     assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
@@ -2446,6 +2526,30 @@ fn command_key_conflict_is_global_and_does_not_reuse_receipt() {
         })
     );
     assert!(driver.cancels().is_empty());
+}
+
+#[test]
+fn durable_session_mutation_guard_blocks_new_runs_and_evicts_idle_handle() {
+    let registry = HttpSessionRunRegistry::new(Arc::new(RecordingRunDriver::default()));
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should create");
+    let guard = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("idle durable session should reserve");
+
+    assert_eq!(
+        registry.start_run(
+            &session.id,
+            run_start("must wait", HttpRunApprovalMode::Ask)
+        ),
+        Err(HttpRegistryError::DurableSessionMutationActive)
+    );
+    guard.finish(true);
+    assert!(matches!(
+        registry.get_session(&session.id),
+        Err(HttpRegistryError::SessionNotFound { .. })
+    ));
 }
 
 #[test]

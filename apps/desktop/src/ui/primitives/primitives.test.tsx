@@ -99,6 +99,25 @@ describe("Sigil UI primitives", () => {
     bounds.mockRestore();
   });
 
+  it("gives a nested popover first ownership of Escape", async () => {
+    const user = userEvent.setup();
+    function Fixture() {
+      const [drawer, setDrawer] = useState(true);
+      return (
+        <Drawer open={drawer} title="Navigation" onOpenChange={setDrawer}>
+          <Popover label="Filters"><button type="button">Apply filters</button></Popover>
+        </Drawer>
+      );
+    }
+    render(<Fixture />);
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "Filters" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Navigation" })).toBeTruthy();
+  });
+
   it("implements menu arrow navigation, disabled skipping, and typeahead", async () => {
     const selected = vi.fn();
     render(

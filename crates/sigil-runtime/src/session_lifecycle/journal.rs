@@ -48,6 +48,14 @@ pub struct LocalSessionPinJournalBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct LocalSessionDisplayNameJournalBinding {
+    pub source_session_ref: sigil_kernel::SessionRef,
+    pub source_session_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct LocalSessionRetentionJournalBinding {
     pub preview_digest: String,
     pub candidate_count: usize,
@@ -64,6 +72,7 @@ pub enum LocalSessionLifecycleEvent {
     DeletePlanned(LocalSessionDeleteJournalBinding),
     DeleteCompleted(LocalSessionDeleteJournalBinding),
     PinChanged(LocalSessionPinJournalBinding),
+    DisplayNameChanged(LocalSessionDisplayNameJournalBinding),
     RetentionBatchPlanned(LocalSessionRetentionJournalBinding),
     RetentionBatchCompleted(LocalSessionRetentionJournalBinding),
 }
@@ -304,6 +313,7 @@ fn validate_operation_transition(
         LocalSessionLifecycleEvent::ExportPlanned(_)
         | LocalSessionLifecycleEvent::DeletePlanned(_)
         | LocalSessionLifecycleEvent::PinChanged(_)
+        | LocalSessionLifecycleEvent::DisplayNameChanged(_)
         | LocalSessionLifecycleEvent::RetentionBatchPlanned(_) => {
             if !prior.is_empty() {
                 bail!("local session lifecycle operation is already recorded");

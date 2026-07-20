@@ -61,10 +61,13 @@ describe("desktop UI catalog contract", () => {
         onRetry: vi.fn(),
         onLoadMore: vi.fn(),
         onOpen: vi.fn(),
+        onRename: vi.fn(),
+        onDelete: vi.fn(),
       }),
     );
 
-    expect(screen.getAllByRole("button")).toHaveLength(30);
+    expect(screen.getAllByRole("button", { name: /^Manage / })).toHaveLength(30);
+    expect(document.querySelectorAll(".session-row")).toHaveLength(30);
     expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
     expect(screen.queryByText("deepseek-chat")).toBeNull();
@@ -102,6 +105,8 @@ describe("desktop UI catalog contract", () => {
         onRetry: vi.fn(),
         onLoadMore: vi.fn(),
         onOpen: vi.fn(),
+        onRename: vi.fn(),
+        onDelete: vi.fn(),
       }),
     );
 
@@ -156,8 +161,8 @@ describe("desktop UI catalog contract", () => {
     const user = userEvent.setup();
     render(createElement(App, { bridge: createCatalogWorkbenchBridge("dark") }));
 
-    expect(await screen.findByRole("button", { name: /Review parser recovery and verification/ })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /Review parser recovery and verification/ }));
+    expect(await screen.findByRole("button", { name: /^Review parser recovery and verification/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /^Review parser recovery and verification/ }));
 
     expect(await screen.findByRole("heading", { name: "Review parser recovery and verification" })).toBeTruthy();
     expect(screen.getByText("deepseek-v4-flash")).toBeTruthy();

@@ -27,6 +27,34 @@ pub struct DesktopSessionOpenRequest {
     pub label: Option<String>,
 }
 
+/// Exact durable catalog identity and new display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionRenameRequest {
+    pub session_ref: String,
+    pub session_id: String,
+    pub display_name: String,
+}
+
+/// Exact durable catalog identity selected for confirmed deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionDeleteRequest {
+    pub session_ref: String,
+    pub session_id: String,
+}
+
+/// Bounded receipt for a committed durable catalog mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionMutationReceipt {
+    pub session_ref: String,
+    pub session_id: String,
+    pub operation_id: String,
+    #[serde(default)]
+    pub projection_generation: Option<u64>,
+}
+
 /// Process-local session snapshot returned by the authenticated server.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

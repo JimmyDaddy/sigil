@@ -25,6 +25,8 @@ interface SessionRailProps {
   readonly onRetry: () => void;
   readonly onLoadMore: () => void;
   readonly onOpen: (entry: CatalogEntry) => void;
+  readonly onRename: (entry: CatalogEntry) => void;
+  readonly onDelete: (entry: CatalogEntry) => void;
 }
 
 export function SessionRail({
@@ -46,6 +48,8 @@ export function SessionRail({
   onRetry,
   onLoadMore,
   onOpen,
+  onRename,
+  onDelete,
 }: SessionRailProps) {
   const activeFilterCount = Number(providerFilter.trim() !== "") + Number(sourceFilter !== "all") + Number(pinnedOnly);
   const submit = (event: FormEvent) => {
@@ -105,6 +109,8 @@ export function SessionRail({
           onRetry={onRetry}
           onLoadMore={onLoadMore}
           onOpen={onOpen}
+          onRename={onRename}
+          onDelete={onDelete}
         />
       </div>
     </section>

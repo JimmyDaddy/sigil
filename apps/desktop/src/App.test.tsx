@@ -82,6 +82,16 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       label: "Durable session",
       runCount: 2,
     }),
+    renameSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }),
+    deleteSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }),
     transcript: async () => ({
       totalMessages: 0,
       messages: [],
@@ -497,7 +507,7 @@ describe("desktop workspace and history shell", () => {
     expect(cursors).toEqual([undefined, "cursor-2"]);
     expect(screen.getAllByText("Unavailable")).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: /First session/ }));
+    await user.click(screen.getByRole("button", { name: /^First session/ }));
     await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
   });
 
@@ -584,7 +594,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("History with messages")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /History with messages/ }));
+    await user.click(screen.getByRole("button", { name: /^History with messages/ }));
     expect(await screen.findByText("cargo test passed")).toBeTruthy();
     expect(screen.getByText("The change is complete.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /Load earlier messages/ }));
@@ -683,7 +693,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("Active session")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /Active session/ }));
+    await user.click(screen.getByRole("button", { name: /^Active session/ }));
     expect(await screen.findByText("Resume this work")).toBeTruthy();
     expect(screen.getByText(/Some live details were not retained/)).toBeTruthy();
     expect(screen.getByText("Review the resumed edit")).toBeTruthy();
@@ -721,12 +731,73 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("Keep this conversation")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /Keep this conversation/ }));
+    await user.click(screen.getByRole("button", { name: /^Keep this conversation/ }));
     expect(await screen.findByRole("heading", { name: "Durable session" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Filters" }));
     await user.type(screen.getByRole("textbox", { name: "Provider" }), "deepseek");
     expect(screen.getByText("1 active filter")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Durable session" })).toBeTruthy();
+  });
+
+  it("renames and explicitly confirms deletion from the conversation action menu", async () => {
+    const renameSession = vi.fn(async (_workspaceId, input: { sessionRef: string; sessionId: string; displayName: string }) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }));
+    const deleteSession = vi.fn(async (_workspaceId, input: { sessionRef: string; sessionId: string }) => ({
+      sessionRef: input.sessionRef,
+      sessionId: input.sessionId,
+      projectionGeneration: 3,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "managed.jsonl",
+          sessionId: "durable-managed",
+          sourceState: "ready",
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Managed conversation",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      renameSession,
+      deleteSession,
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("Managed conversation");
+    await user.click(screen.getByRole("button", { name: "Manage Managed conversation" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const name = screen.getByRole("textbox", { name: "Conversation name" });
+    await user.clear(name);
+    await user.type(name, "Readable name");
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(renameSession).toHaveBeenCalledWith(workspace.id, {
+      sessionRef: "managed.jsonl",
+      sessionId: "durable-managed",
+      displayName: "Readable name",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Manage Managed conversation" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "Delete conversation?" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(workspace.id, {
+      sessionRef: "managed.jsonl",
+      sessionId: "durable-managed",
+    }));
   });
 
   it("requires explicit confirmation before closing a workspace with active runs", async () => {

@@ -123,3 +123,8 @@ rerun affordance。
 39 个 frontend tests、production build、全 workspace Rust tests、Rustfmt 与 strict Clippy。macOS `.app` 重新打包，
 bundled runtime 版本/架构与当前 commit 一致，`codesign --verify --deep --strict` 通过；当前 dev 原生 WebView 的
 1280×820 no-workspace/popover 状态也完成截图走查。completion audit 未发现剩余 P1/P2。
+
+2026-07-20 follow-up：通用 popover 增加 viewport collision correction，窄 session rail 的 filter panel 不再越过窗口边界；
+conversation row 增加渐进披露的 rename/delete 菜单。rename 进入 append-only lifecycle truth，delete 使用 exact durable identity、
+显式确认与活动 run/verification reservation，SQLite 仅在 committed mutation 后刷新。debug recent reopen 同时改为优先当前
+`target/debug/sigil`，避免旧 package sidecar 造成 schema mismatch。

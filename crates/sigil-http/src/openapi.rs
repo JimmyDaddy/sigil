@@ -215,6 +215,42 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/session-catalog/rename": {
+                "post": {
+                    "summary": "Rename one exact durable conversation",
+                    "description": "Appends a bounded display-name decision to workspace lifecycle truth, then refreshes the rebuildable catalog projection.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionRenameRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Committed rename receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionMutationReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/session-catalog/delete": {
+                "post": {
+                    "summary": "Delete one exact durable conversation",
+                    "description": "Rejects pinned or active sessions, then applies the existing content-bound preview/delete lifecycle and evicts idle adapter handles.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionDeleteRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Committed delete receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionMutationReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}": {
                 "get": {
                     "summary": "Get a local session handle",
@@ -543,6 +579,36 @@ pub fn http_openapi_document() -> Value {
                         "session_ref": { "type": "string", "maxLength": 512, "pattern": "^[^/\\\\]+\\.jsonl$" },
                         "session_id": { "type": "string", "maxLength": 512 },
                         "label": { "type": ["string", "null"], "maxLength": 160 }
+                    }
+                },
+                "SessionRenameRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "session_id", "display_name"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
+                        "session_id": { "type": "string", "maxLength": 512 },
+                        "display_name": { "type": "string", "minLength": 1, "maxLength": 160 }
+                    }
+                },
+                "SessionDeleteRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "session_id"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
+                        "session_id": { "type": "string", "maxLength": 512 }
+                    }
+                },
+                "SessionMutationReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "session_id", "operation_id"],
+                    "properties": {
+                        "session_ref": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "operation_id": { "type": "string" },
+                        "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
                     }
                 },
                 "SessionSnapshot": {

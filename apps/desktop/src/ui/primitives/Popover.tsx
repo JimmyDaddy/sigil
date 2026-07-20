@@ -59,14 +59,15 @@ export function Popover({
     const handleKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
+      event.stopImmediatePropagation();
       updateOpen(false);
       triggerRef.current?.focus();
     };
     document.addEventListener("pointerdown", handlePointer);
-    document.addEventListener("keydown", handleKey);
+    document.addEventListener("keydown", handleKey, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointer);
-      document.removeEventListener("keydown", handleKey);
+      document.removeEventListener("keydown", handleKey, true);
     };
   });
 
@@ -129,7 +130,7 @@ export function Popover({
   );
 }
 
-export function Menu({ label, children }: { readonly label: ReactNode; readonly children: ReactNode }) {
+export function Menu({ label, accessibleLabel, children }: { readonly label: ReactNode; readonly accessibleLabel?: string; readonly children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dismiss = () => {
@@ -139,6 +140,7 @@ export function Menu({ label, children }: { readonly label: ReactNode; readonly 
   return (
     <Popover
       label={label}
+      accessibleLabel={accessibleLabel}
       className="sg-menu"
       open={open}
       onOpenChange={setOpen}
