@@ -14,7 +14,7 @@ use sigil_kernel::{
 
 use super::*;
 use crate::{
-    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpRunApprovalMode,
+    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpPermissionMode,
     HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest, HttpSessionOpenRequest,
 };
 
@@ -130,10 +130,28 @@ fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
 }
 
 #[test]
-fn adapter_policy_only_auto_approves_local_read_only_tools() {
+fn approval_handler_only_resolves_explicit_broker_decisions() {
     let broker = Arc::new(HttpApprovalBroker::default());
+    broker
+        .register(
+            "run-1",
+            &call(),
+            &spec(ToolAccess::Write, None),
+            Duration::from_secs(1),
+        )
+        .expect("approval should register");
+    broker
+        .resolve(
+            "call-1",
+            HttpApprovalDecisionRecord {
+                run_id: "run-1".to_owned(),
+                call_id: "call-1".to_owned(),
+                decision: ToolApprovalUserDecision::Approved,
+                reason: None,
+            },
+        )
+        .expect("decision should resolve");
     let mut handler = HttpProductionApprovalHandler {
-        mode: HttpRunApprovalMode::AllowReadonly,
         run_id: "run-1".to_owned(),
         registry: Weak::new(),
         broker,
@@ -141,23 +159,11 @@ fn adapter_policy_only_auto_approves_local_read_only_tools() {
 
     assert!(matches!(
         handler
-            .approve_tool_call(&call(), &spec(ToolAccess::Read, None))
-            .expect("local read should resolve"),
+            .approve_tool_call(&call(), &spec(ToolAccess::Write, None))
+            .expect("explicit decision should resolve"),
         ToolApproval::Approve
     ));
-    assert!(matches!(
-        handler
-            .approve_tool_call(&call(), &spec(ToolAccess::Read, Some(NetworkEffect::Read)),)
-            .expect("network read should resolve as denied"),
-        ToolApproval::Deny { .. }
-    ));
-    assert!(matches!(
-        handler
-            .approve_tool_call(&call(), &spec(ToolAccess::Write, None))
-            .expect("write should resolve as denied"),
-        ToolApproval::Deny { .. }
-    ));
-    assert!(!handler.approval_is_explicit_user_action());
+    assert!(handler.approval_is_explicit_user_action());
 }
 
 #[tokio::test]
@@ -549,7 +555,7 @@ model = "deepseek-v4-flash"
             &session.id,
             HttpRunStartRequest {
                 prompt: "wait in preparation".to_owned(),
-                approval_mode: Some(HttpRunApprovalMode::Ask),
+                permission_mode: Some(HttpPermissionMode::Manual),
             },
         )
         .expect("run should start");
@@ -740,7 +746,7 @@ model = "deepseek-v4-flash"
             &session.id,
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
-                approval_mode: Some(HttpRunApprovalMode::Ask),
+                permission_mode: Some(HttpPermissionMode::Manual),
             },
         )
         .expect("owned production supervisor should accept the run");

@@ -247,7 +247,7 @@
             ]
           },
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "session_id": {
@@ -335,11 +335,12 @@
         ],
         "type": "object"
       },
-      "RunApprovalMode": {
+      "PermissionMode": {
         "enum": [
-          "ask",
-          "allow_readonly",
-          "deny"
+          "read-only",
+          "manual",
+          "auto-edit",
+          "danger-full-access"
         ],
         "type": "string"
       },
@@ -415,9 +416,17 @@
       "RunContextView": {
         "additionalProperties": false,
         "properties": {
-          "available_approval_modes": {
+          "available_models": {
             "items": {
-              "$ref": "#/components/schemas/RunApprovalMode"
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "available_permission_modes": {
+            "items": {
+              "$ref": "#/components/schemas/PermissionMode"
             },
             "minItems": 1,
             "type": "array",
@@ -438,8 +447,8 @@
               "null"
             ]
           },
-          "default_approval_mode": {
-            "$ref": "#/components/schemas/RunApprovalMode"
+          "default_permission_mode": {
+            "$ref": "#/components/schemas/PermissionMode"
           },
           "last_prompt_tokens": {
             "format": "uint64",
@@ -464,18 +473,16 @@
         "required": [
           "provider_name",
           "model_name",
+          "available_models",
           "model_selection",
-          "default_approval_mode",
-          "available_approval_modes",
+          "default_permission_mode",
+          "available_permission_modes",
           "context_window_source"
         ],
         "type": "object"
       },
       "RunSnapshot": {
         "properties": {
-          "approval_mode": {
-            "$ref": "#/components/schemas/RunApprovalMode"
-          },
           "id": {
             "type": "string"
           },
@@ -484,6 +491,9 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "permission_mode": {
+            "$ref": "#/components/schemas/PermissionMode"
           },
           "prompt_preview": {
             "type": "string"
@@ -503,7 +513,7 @@
           "id",
           "session_id",
           "status",
-          "approval_mode",
+          "permission_mode",
           "prompt_preview",
           "pending_approval_call_ids",
           "stream_sequence"
@@ -570,8 +580,8 @@
       },
       "RunStartRequest": {
         "properties": {
-          "approval_mode": {
-            "$ref": "#/components/schemas/RunApprovalMode"
+          "permission_mode": {
+            "$ref": "#/components/schemas/PermissionMode"
           },
           "prompt": {
             "type": "string"
@@ -579,7 +589,7 @@
         },
         "required": [
           "prompt",
-          "approval_mode"
+          "permission_mode"
         ],
         "type": "object"
       },
@@ -657,7 +667,7 @@
             "$ref": "#/components/schemas/ServerCapabilities"
           },
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "schema_version": {
@@ -830,6 +840,9 @@
       "SessionCreateRequest": {
         "properties": {
           "label": {
+            "type": "string"
+          },
+          "model_name": {
             "type": "string"
           }
         },
@@ -2087,7 +2100,7 @@
             "$ref": "#/components/responses/InternalError"
           }
         },
-        "summary": "Read typed model, approval-mode, and context usage facts"
+        "summary": "Read typed model, permission-mode, and context usage facts"
       }
     },
     "/sessions/{session_id}/runs": {

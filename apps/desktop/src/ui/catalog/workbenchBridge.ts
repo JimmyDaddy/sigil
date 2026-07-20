@@ -99,7 +99,7 @@ const attachment: RunAttachment = {
     id: "catalog-run-active",
     sessionId: session.id,
     status: "running",
-    approvalMode: "ask",
+    permissionMode: "manual",
     streamSequence: 3,
   },
   events: [
@@ -141,9 +141,10 @@ const attachment: RunAttachment = {
 const runContext: RunContext = {
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
+  availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
   modelSelection: "fixed_for_session",
-  defaultApprovalMode: "ask",
-  availableApprovalModes: ["ask", "allow_readonly", "deny"],
+  defaultPermissionMode: "manual",
+  availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
   contextWindowTokens: 1_000_000,
   lastPromptTokens: 42_000,
   contextWindowSource: "provider",
@@ -190,7 +191,7 @@ export function createCatalogWorkbenchBridge(
 ): DesktopBridge {
   return {
     bootstrap: async () => ({
-      protocolVersion: 1,
+      protocolVersion: 2,
       workspaces: [workspace],
       recentWorkspaces: [],
       appearance: appearance(preference),
@@ -219,11 +220,11 @@ export function createCatalogWorkbenchBridge(
     }),
     transcript: async () => transcript,
     runContext: async () => runContext,
-    startRun: async (_workspaceId, sessionId, _prompt, approvalMode) => ({
+    startRun: async (_workspaceId, sessionId, _prompt, permissionMode) => ({
       id: "catalog-run-new",
       sessionId,
       status: "running",
-      approvalMode,
+      permissionMode,
       streamSequence: 0,
     }),
     attachRun: async () => attachment,
@@ -231,7 +232,7 @@ export function createCatalogWorkbenchBridge(
       id: runId,
       sessionId,
       status: "cancel_requested",
-      approvalMode: "ask",
+      permissionMode: "manual",
       streamSequence: 4,
     }),
     resolveApproval: async (_workspaceId, _sessionId, runId, request, approve) => ({

@@ -26,11 +26,11 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, RunOutput, ServeOptions,
-    ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan, StdoutEventHandler,
-    build_serve_startup_plan, build_session_catalog_service, drain_provider_stream,
-    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_json, render_serve_startup_plan, render_version,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
+    RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
+    StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
+    drain_provider_stream, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
+    render_run_event, render_serve_startup_json, render_serve_startup_plan, render_version,
     run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
@@ -70,6 +70,7 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
     let service = build_session_catalog_service(&paths);
 
     assert_eq!(service.database_path(), paths.session_catalog_db);
+    assert_eq!(HTTP_SERVER_STATE_DIR, "http-server-v2");
     assert_eq!(
         paths.session_catalog_db.parent(),
         Some(paths.projections_root.as_path())

@@ -51,6 +51,8 @@ use sigil_runtime::{
 };
 use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService, SigilPaths};
 
+const HTTP_SERVER_STATE_DIR: &str = "http-server-v2";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BuildInfo {
     version: &'static str,
@@ -652,7 +654,10 @@ async fn serve_command(
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let server_root = paths.workspace_state_root.join("http-server-v1");
+    // The durable HTTP journals encode the exact machine protocol. A breaking
+    // protocol revision must use a fresh state root so an unreleased older
+    // command envelope cannot make the new server fail closed at startup.
+    let server_root = paths.workspace_state_root.join(HTTP_SERVER_STATE_DIR);
     let protocol_journal = std::sync::Arc::new(HttpDurableProtocolJournal::open(
         server_root.join("protocol-events.json"),
         4_096,

@@ -1,6 +1,6 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "appearance-auto" | "check" | "close" | "copy" | "filter" | "lock" | "menu" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "warning";
+export type IconName = "add" | "appearance-auto" | "check" | "close" | "copy" | "filter" | "language" | "lock" | "menu" | "model" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
@@ -9,8 +9,10 @@ const paths: Record<IconName, string> = {
   close: "m6 6 12 12M18 6 6 18",
   copy: "M9 8h10v11H9zM5 15V5h10",
   filter: "M4 6h16M7 12h10m-7 6h4",
+  language: "M4 5h10M9 3v2m-3 4c1.6 3.2 4.4 5.5 8 6.5M13 8c-1.2 4-4.1 7.2-8 9m10-5 4 9m-6 0 4-9 4 9m-6-3h6",
   lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z",
   menu: "M4 7h16M4 12h16M4 17h16",
+  model: "M12 3 4 7v10l8 4 8-4V7l-8-4Zm-8 4 8 4 8-4M12 11v10",
   moon: "M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z",
   more: "M5 12h.01M12 12h.01M19 12h.01",
   pin: "m15 4 5 5-3 1.5-3.5 3.5 1 3-1.5 1.5-3.5-3.5L5 19l1.5-5.5L3 10l3.5-3.5 3 1Z",

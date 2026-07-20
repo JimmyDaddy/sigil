@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Current command-envelope protocol accepted by `sigil serve`.
-pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 1;
+pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 2;
 
 /// Request body for creating one process-local session handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -12,6 +12,9 @@ pub struct DesktopSessionCreateRequest {
     /// Optional user-visible label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional model for the new durable session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 /// Request body for reopening one durable catalog entry.
@@ -240,13 +243,14 @@ pub struct DesktopCatalogQuery {
     pub state: Option<DesktopSessionCatalogState>,
 }
 
-/// Approval policy accepted by a run-start command.
+/// Permission mode accepted by a run-start command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesktopRunApprovalMode {
-    Deny,
-    AllowReadonly,
-    Ask,
+#[serde(rename_all = "kebab-case")]
+pub enum DesktopPermissionMode {
+    ReadOnly,
+    Manual,
+    AutoEdit,
+    DangerFullAccess,
 }
 
 /// Model-selection policy projected by the server for one durable session.
@@ -265,15 +269,16 @@ pub enum DesktopContextWindowSource {
     Unavailable,
 }
 
-/// Typed model, approval-mode, and context usage facts for one bound session.
+/// Typed model, permission-mode, and context usage facts for one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopRunContextView {
     pub provider_name: String,
     pub model_name: String,
+    pub available_models: Vec<String>,
     pub model_selection: DesktopModelSelectionPolicy,
-    pub default_approval_mode: DesktopRunApprovalMode,
-    pub available_approval_modes: Vec<DesktopRunApprovalMode>,
+    pub default_permission_mode: DesktopPermissionMode,
+    pub available_permission_modes: Vec<DesktopPermissionMode>,
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
     #[serde(default)]
@@ -286,7 +291,7 @@ pub struct DesktopRunContextView {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopRunStartRequest {
     pub prompt: String,
-    pub approval_mode: DesktopRunApprovalMode,
+    pub permission_mode: DesktopPermissionMode,
 }
 
 /// Request payload for cooperative cancellation.
@@ -330,7 +335,7 @@ pub struct DesktopRunSnapshot {
     pub id: String,
     pub session_id: String,
     pub status: DesktopRunStatus,
-    pub approval_mode: DesktopRunApprovalMode,
+    pub permission_mode: DesktopPermissionMode,
     pub prompt_preview: String,
     #[serde(default)]
     pub pending_approval_call_ids: Vec<String>,

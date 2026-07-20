@@ -109,19 +109,18 @@
 .composer-surface { overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: 16px; background: var(--sg-sys-color-surface-container); box-shadow: var(--sg-sys-elevation-dock); transition: border-color var(--sg-sys-motion-fast), box-shadow var(--sg-sys-motion-fast); }
 .composer-surface:focus-within { border-color: var(--sg-sys-color-primary); box-shadow: 0 0 0 1px var(--sg-sys-color-primary), var(--sg-sys-elevation-dock); }
 .composer-input { display: block; width: 100%; min-height: 48px; max-height: 176px; padding: 13px 14px 8px; overflow-y: hidden; resize: none; border: 0; outline: 0; color: var(--sg-sys-color-on-surface); background: transparent; line-height: 1.5; }
-.composer-input-field, .composer-mode-field { gap: 0; }
+.composer-input-field, .composer-model-field, .composer-mode-field { gap: 0; }
 .composer-input::placeholder { color: var(--sg-sys-color-on-surface-subtle); }
 .composer-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); padding: 6px 7px 7px 9px; }
 .composer-options { display: flex; min-width: 0; align-items: center; gap: 6px; }
-.composer-chip, .composer-mode { display: inline-flex; min-width: 0; height: 30px; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: transparent; font-size: 11px; }
-.composer-chip { max-width: min(220px, 28vw); padding: 0 8px; }
-.composer-chip:disabled { opacity: 1; }
-.composer-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-chip .sg-icon, .composer-mode .sg-icon { width: 14px; height: 14px; color: var(--sg-sys-color-on-surface-subtle); }
-.composer-mode { padding-left: 8px; border-color: var(--sg-sys-color-outline); background: var(--sg-sys-color-surface-container-low); }
-.composer-mode select { max-width: 98px; height: 28px; padding: 0 24px 0 0; border: 0; outline: 0; color: var(--sg-sys-color-on-surface-variant); background: transparent; cursor: pointer; font-size: 11px; font-weight: 650; }
-.composer-mode:focus-within { border-color: var(--sg-sys-color-primary); }
-.composer-mode select:disabled { cursor: not-allowed; opacity: .65; }
+.composer-model, .composer-mode { display: inline-flex; min-width: 0; height: 30px; align-items: center; gap: 6px; padding-left: 8px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-low); font-size: 11px; }
+.composer-model { max-width: min(230px, 30vw); }
+.composer-model .sg-icon, .composer-mode .sg-icon { width: 14px; height: 14px; flex: 0 0 auto; color: var(--sg-sys-color-on-surface-subtle); }
+.composer-model select, .composer-mode select { height: 28px; padding: 0 24px 0 0; border: 0; outline: 0; color: var(--sg-sys-color-on-surface-variant); background: transparent; cursor: pointer; font-size: 11px; font-weight: 650; }
+.composer-model select { max-width: 190px; text-overflow: ellipsis; }
+.composer-mode select { max-width: 112px; }
+.composer-model:focus-within, .composer-mode:focus-within { border-color: var(--sg-sys-color-primary); }
+.composer-model select:disabled, .composer-mode select:disabled { cursor: not-allowed; opacity: .65; }
 .context-usage { display: inline-flex; height: 30px; align-items: center; gap: 6px; padding: 0 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-subtle); font: 600 10px/1 ui-monospace, "SFMono-Regular", monospace; }
 .context-track { display: block; width: 34px; height: 4px; overflow: hidden; border-radius: var(--sg-sys-radius-full); background: var(--sg-sys-color-outline); }
 .context-track > span { display: block; width: var(--context-used); height: 100%; border-radius: inherit; background: var(--sg-sys-color-primary); }

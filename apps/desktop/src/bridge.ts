@@ -16,7 +16,7 @@ import type {
   SessionSummary,
   RunStreamStatus,
   RunAttachment,
-  RunApprovalMode,
+  PermissionMode,
   RunContext,
   RunSummary,
   TimelineEvent,
@@ -37,7 +37,7 @@ export interface DesktopBridge {
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
   catalog(workspaceId: string, request: CatalogRequest): Promise<CatalogPage>;
-  createSession(workspaceId: string, label?: string): Promise<SessionSummary>;
+  createSession(workspaceId: string, label?: string, modelName?: string): Promise<SessionSummary>;
   openSession(
     workspaceId: string,
     input: SessionOpenInput,
@@ -58,7 +58,7 @@ export interface DesktopBridge {
     workspaceId: string,
     sessionId: string,
     prompt: string,
-    approvalMode: RunApprovalMode,
+    permissionMode: PermissionMode,
   ): Promise<RunSummary>;
   attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
@@ -95,10 +95,10 @@ export const desktopBridge: DesktopBridge = {
     }),
   catalog: (workspaceId, request) =>
     invoke<CatalogPage>("desktop_catalog", { workspaceId, request }),
-  createSession: (workspaceId, label) =>
+  createSession: (workspaceId, label, modelName) =>
     invoke<SessionSummary>("desktop_create_session", {
       workspaceId,
-      input: { label },
+      input: { label, modelName },
     }),
   openSession: (workspaceId, input) =>
     invoke<SessionSummary>("desktop_open_session", { workspaceId, input }),
@@ -116,10 +116,10 @@ export const desktopBridge: DesktopBridge = {
     }),
   runContext: (workspaceId, sessionId) =>
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
-  startRun: (workspaceId, sessionId, prompt, approvalMode) =>
+  startRun: (workspaceId, sessionId, prompt, permissionMode) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
-      input: { sessionId, prompt, approvalMode },
+      input: { sessionId, prompt, permissionMode },
     }),
   attachRun: (workspaceId, sessionId, runId) =>
     invoke<RunAttachment>("desktop_attach_run", {

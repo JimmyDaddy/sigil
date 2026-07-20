@@ -9,17 +9,17 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalHandler, NetworkEffect, PublicRunEvent, PublicRunEventKind, SessionRef, ToolAccess,
-    ToolApproval, ToolApprovalUserDecision, ToolCall, ToolSpec,
+    ApprovalHandler, PublicRunEvent, PublicRunEventKind, SessionRef, ToolApproval,
+    ToolApprovalUserDecision, ToolCall, ToolSpec,
 };
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
     application_run_context_view, application_session_transcript_page,
-    application_verification_view, bind_application_session, bind_existing_application_session,
-    prepare_application_run, record_application_preparation_cancellation,
-    rerun_application_verification,
+    application_verification_view, bind_application_session_with_model,
+    bind_existing_application_session, prepare_application_run,
+    record_application_preparation_cancellation, rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
@@ -28,7 +28,7 @@ use crate::{
     HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpContextWindowSource,
     HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
     HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpRunApprovalMode, HttpRunContextView, HttpRunDriver,
+    HttpPendingApproval, HttpPermissionMode, HttpRunContextView, HttpRunDriver,
     HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
     HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
     HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
@@ -215,14 +215,22 @@ impl HttpProductionRunDriver {
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
-    fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        let binding =
-            bind_application_session(&self.options.config_path, &self.options.launch_cwd, None)
-                .map_err(|error| {
-                    HttpRunDriverError::new(format!(
-                        "failed to bind durable session for {session_id}: {error}"
-                    ))
-                })?;
+    fn bind_session(
+        &self,
+        session_id: &str,
+        model_name: Option<&str>,
+    ) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        let binding = bind_application_session_with_model(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            None,
+            model_name,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "failed to bind durable session for {session_id}: {error}"
+            ))
+        })?;
         Ok(HttpSessionBinding {
             session_scope_id: binding.session_scope_id,
             session_log_path: binding.session_log_path.display().to_string(),
@@ -449,12 +457,14 @@ impl HttpRunDriver for HttpProductionRunDriver {
         Ok(HttpRunContextView {
             provider_name: view.provider_name,
             model_name: view.model_name,
+            available_models: view.available_models,
             model_selection: HttpModelSelectionPolicy::FixedForSession,
-            default_approval_mode: HttpRunApprovalMode::Ask,
-            available_approval_modes: vec![
-                HttpRunApprovalMode::Ask,
-                HttpRunApprovalMode::AllowReadonly,
-                HttpRunApprovalMode::Deny,
+            default_permission_mode: view.default_permission_mode.into(),
+            available_permission_modes: vec![
+                HttpPermissionMode::ReadOnly,
+                HttpPermissionMode::Manual,
+                HttpPermissionMode::AutoEdit,
+                HttpPermissionMode::DangerFullAccess,
             ],
             context_window_tokens: view.context_window_tokens,
             last_prompt_tokens: view.last_prompt_tokens,
@@ -540,19 +550,14 @@ impl HttpRunSupervisor {
         let registry = self.registry.upgrade().ok_or_else(|| {
             HttpRunDriverError::new("production registry closed before run preparation")
         })?;
-        let interaction = match self.start.run.approval_mode {
-            HttpRunApprovalMode::Ask => ApplicationRunInteraction::ExternallyInteractive,
-            HttpRunApprovalMode::Deny | HttpRunApprovalMode::AllowReadonly => {
-                ApplicationRunInteraction::AdapterManaged
-            }
-        };
         let request = ApplicationRunRequest {
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
             prompt: self.start.prompt.clone(),
             run_id: self.start.run.id.clone(),
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
-            interaction,
+            interaction: ApplicationRunInteraction::ExternallyInteractive,
+            permission_mode: Some(self.start.run.permission_mode.into()),
             constraints: None,
         };
         let services = self.services.clone();
@@ -650,14 +655,12 @@ impl HttpRunSupervisor {
         let event_handler = HttpProductionEventHandler {
             durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
             run_id: self.start.run.id.clone(),
-            approval_mode: self.start.run.approval_mode,
             approval_timeout: self.options.approval_timeout,
             registry: Arc::downgrade(&registry),
             broker: Arc::clone(&self.broker),
             event_bus: Arc::clone(&self.event_bus),
         };
         let approval_handler = HttpProductionApprovalHandler {
-            mode: self.start.run.approval_mode,
             run_id: self.start.run.id.clone(),
             registry: Arc::downgrade(&registry),
             broker: Arc::clone(&self.broker),
@@ -1082,7 +1085,6 @@ impl HttpRunSupervisor {
         let mut event_handler = HttpProductionEventHandler {
             durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
             run_id: self.start.run.id.clone(),
-            approval_mode: self.start.run.approval_mode,
             approval_timeout: self.options.approval_timeout,
             registry: Arc::downgrade(registry),
             broker: Arc::clone(&self.broker),
@@ -1305,7 +1307,6 @@ impl HttpRunSupervisor {
 struct HttpProductionEventHandler {
     durable_session_scope_id: String,
     run_id: String,
-    approval_mode: HttpRunApprovalMode,
     approval_timeout: Duration,
     registry: Weak<HttpSessionRunRegistry>,
     broker: Arc<HttpApprovalBroker>,
@@ -1325,9 +1326,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
             ));
         }
         let approval_request = match &event.event {
-            PublicRunEventKind::ApprovalRequested { call, spec, .. }
-                if self.approval_mode == HttpRunApprovalMode::Ask =>
-            {
+            PublicRunEventKind::ApprovalRequested { call, spec, .. } => {
                 let registry = self
                     .registry
                     .upgrade()
@@ -1363,68 +1362,47 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
 }
 
 struct HttpProductionApprovalHandler {
-    mode: HttpRunApprovalMode,
     run_id: String,
     registry: Weak<HttpSessionRunRegistry>,
     broker: Arc<HttpApprovalBroker>,
 }
 
 impl ApprovalHandler for HttpProductionApprovalHandler {
-    fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
-        match self.mode {
-            HttpRunApprovalMode::Deny => Ok(ToolApproval::Deny {
-                reason: "HTTP run approval mode denies gated tool calls".to_owned(),
+    fn approve_tool_call(&mut self, call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        let outcome = self.broker.wait_for_decision(&call.id)?;
+        if outcome.expired
+            && let Some(registry) = self.registry.upgrade()
+        {
+            registry
+                .expire_approval_request(&self.run_id, &call.id)
+                .map_err(|error| anyhow!(error))?;
+        }
+        match outcome.decision {
+            Some(HttpApprovalDecisionRecord {
+                decision: ToolApprovalUserDecision::Approved,
+                ..
+            }) => Ok(ToolApproval::Approve),
+            Some(HttpApprovalDecisionRecord {
+                decision: ToolApprovalUserDecision::Denied,
+                reason,
+                ..
+            }) => Ok(ToolApproval::Deny {
+                reason: reason.unwrap_or_else(|| "HTTP user denied tool call".to_owned()),
             }),
-            HttpRunApprovalMode::AllowReadonly
-                if spec.access == ToolAccess::Read && spec.network_effect.is_none() =>
-            {
-                Ok(ToolApproval::Approve)
-            }
-            HttpRunApprovalMode::AllowReadonly => Ok(ToolApproval::Deny {
-                reason: if matches!(spec.network_effect, Some(NetworkEffect::Read)) {
-                    "network read approval requires an explicit HTTP user decision".to_owned()
-                } else {
-                    "HTTP allow_readonly mode denies non-read-only tool calls".to_owned()
-                },
+            Some(HttpApprovalDecisionRecord {
+                decision: ToolApprovalUserDecision::ApprovedForSession,
+                ..
+            }) => Err(anyhow!(
+                "HTTP V1 does not support approve-for-session decisions"
+            )),
+            None => Ok(ToolApproval::Deny {
+                reason: "HTTP approval request expired before a decision arrived".to_owned(),
             }),
-            HttpRunApprovalMode::Ask => {
-                let outcome = self.broker.wait_for_decision(&call.id)?;
-                if outcome.expired
-                    && let Some(registry) = self.registry.upgrade()
-                {
-                    registry
-                        .expire_approval_request(&self.run_id, &call.id)
-                        .map_err(|error| anyhow!(error))?;
-                }
-                match outcome.decision {
-                    Some(HttpApprovalDecisionRecord {
-                        decision: ToolApprovalUserDecision::Approved,
-                        ..
-                    }) => Ok(ToolApproval::Approve),
-                    Some(HttpApprovalDecisionRecord {
-                        decision: ToolApprovalUserDecision::Denied,
-                        reason,
-                        ..
-                    }) => Ok(ToolApproval::Deny {
-                        reason: reason.unwrap_or_else(|| "HTTP user denied tool call".to_owned()),
-                    }),
-                    Some(HttpApprovalDecisionRecord {
-                        decision: ToolApprovalUserDecision::ApprovedForSession,
-                        ..
-                    }) => Err(anyhow!(
-                        "HTTP V1 does not support approve-for-session decisions"
-                    )),
-                    None => Ok(ToolApproval::Deny {
-                        reason: "HTTP approval request expired before a decision arrived"
-                            .to_owned(),
-                    }),
-                }
-            }
         }
     }
 
     fn approval_is_explicit_user_action(&self) -> bool {
-        self.mode == HttpRunApprovalMode::Ask
+        true
     }
 }
 

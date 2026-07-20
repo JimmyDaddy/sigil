@@ -10,7 +10,7 @@ export interface WorkspaceSummary {
 }
 
 export interface DesktopBootstrap {
-  protocolVersion: 1;
+  protocolVersion: 2;
   workspaces: WorkspaceSummary[];
   recentWorkspaces: RecentWorkspaceSummary[];
   appearance: AppearanceSnapshot;
@@ -153,14 +153,15 @@ export type RunStatus =
   | "cancelled"
   | "interrupted";
 
-export type RunApprovalMode = "ask" | "allow_readonly" | "deny";
+export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
 
 export interface RunContext {
   providerName: string;
   modelName: string;
+  availableModels: string[];
   modelSelection: "fixed_for_session";
-  defaultApprovalMode: RunApprovalMode;
-  availableApprovalModes: RunApprovalMode[];
+  defaultPermissionMode: PermissionMode;
+  availablePermissionModes: PermissionMode[];
   contextWindowTokens?: number;
   lastPromptTokens?: number;
   contextWindowSource: "provider" | "config" | "unavailable";
@@ -170,7 +171,7 @@ export interface RunSummary {
   id: string;
   sessionId: string;
   status: RunStatus;
-  approvalMode: RunApprovalMode;
+  permissionMode: PermissionMode;
   streamSequence: number;
 }
 

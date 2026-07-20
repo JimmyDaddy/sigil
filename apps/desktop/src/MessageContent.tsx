@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
 
 import { writeClipboard } from "./clipboard";
+import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { IconButton, Tooltip } from "./ui/primitives";
 
@@ -17,19 +18,20 @@ type ContentBlock =
   | { kind: "paragraph"; text: string };
 
 export function MessageContent({ text }: MessageContentProps) {
+  const { t } = useLocale();
   const [copied, setCopied] = useState(false);
   const blocks = parseBlocks(text);
   if (blocks.length === 0) {
-    return <p className="message-content-empty">Message content unavailable.</p>;
+    return <p className="message-content-empty">{t("messageUnavailable")}</p>;
   }
   return (
     <div className="message-content">
-      <Tooltip label={copied ? "Copied" : "Copy message"}>
+      <Tooltip label={copied ? t("copied") : t("copyMessage")}>
         <IconButton
           className="content-copy"
           type="button"
           onClick={() => void writeClipboard(text).then(setCopied)}
-          aria-label="Copy message"
+          aria-label={t("copyMessage")}
           icon={<Icon name={copied ? "check" : "copy"} />}
         />
       </Tooltip>
@@ -38,7 +40,7 @@ export function MessageContent({ text }: MessageContentProps) {
         if (block.kind === "code") {
           return (
             <div className="code-block" key={key}>
-              <header><span>{block.language ?? "code"}</span><CopyButton text={block.text} label="Copy code" /></header>
+              <header><span>{block.language ?? t("code")}</span><CopyButton text={block.text} label={t("copyCode")} /></header>
               <pre><code>{block.text}</code></pre>
             </div>
           );
@@ -60,9 +62,10 @@ export function MessageContent({ text }: MessageContentProps) {
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
+  const { t } = useLocale();
   const [copied, setCopied] = useState(false);
   return (
-    <Tooltip label={copied ? "Copied" : label}>
+    <Tooltip label={copied ? t("copied") : label}>
       <IconButton
         className="inline-copy"
         type="button"

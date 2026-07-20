@@ -4,10 +4,11 @@ import { ApprovalDock } from "./ApprovalDock";
 import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
 import { ErrorCard } from "./ErrorCard";
+import { translateEnglish, useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
-  RunApprovalMode,
+  PermissionMode,
   RunContext,
   RunStreamStatus,
   RunSummary,
@@ -24,6 +25,7 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
+  onModelChange: (modelName: string) => Promise<boolean>;
 }
 
 interface TimelineRowBase {
@@ -41,12 +43,15 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
+  onModelChange,
 }: ConversationPanelProps) {
+  const { t } = useLocale();
   const [run, setRun] = useState<RunSummary>();
   const [runContext, setRunContext] = useState<RunContext>();
   const [runContextBusy, setRunContextBusy] = useState(false);
   const [runContextReload, setRunContextReload] = useState(0);
-  const [approvalMode, setApprovalMode] = useState<RunApprovalMode>("ask");
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
+  const [modelChanging, setModelChanging] = useState(false);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
@@ -76,7 +81,8 @@ export function ConversationPanel({
     setRun(undefined);
     setRunContext(undefined);
     setRunContextBusy(false);
-    setApprovalMode("ask");
+    setPermissionMode("manual");
+    setModelChanging(false);
     setEvents([]);
     setStreamStatus(undefined);
     setVerification(undefined);
@@ -99,8 +105,8 @@ export function ConversationPanel({
       .then((context) => {
         if (disposed) return;
         setRunContext(context);
-        setApprovalMode((current) =>
-          activeRunIdRef.current === undefined ? context.defaultApprovalMode : current,
+        setPermissionMode((current) =>
+          activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
         );
       })
       .catch(() => {
@@ -190,7 +196,7 @@ export function ConversationPanel({
         setStreamStatus(status);
         if (status.message !== undefined) onNotice(status.message, status.state === "error");
         if (status.state === "terminal") {
-          setRunAnnouncement(status.message ?? "Run finished. Review the final response and verification status.");
+          setRunAnnouncement(status.message ?? t("runFinishedAnnouncement"));
           setRunContextReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
@@ -213,7 +219,7 @@ export function ConversationPanel({
         );
         if (disposed) return;
         setRun(attachment.run);
-        setApprovalMode(attachment.run.approvalMode);
+        setPermissionMode(attachment.run.permissionMode);
         setEvents((current) =>
           attachment.events.reduce(mergeTimelineEvent, current),
         );
@@ -235,7 +241,7 @@ export function ConversationPanel({
         if (!disposed) {
           activeRunIdRef.current = undefined;
           onNotice(
-            "The active run changed while reopening this conversation. Refresh its saved messages.",
+            t("activeRunChanged"),
             true,
           );
         }
@@ -243,18 +249,18 @@ export function ConversationPanel({
     };
     void setup().catch(() => {
       if (!disposed) {
-        onNotice("Live run controls could not be connected.", true);
+        onNotice(t("liveControlsUnavailable"), true);
       }
     });
     return () => {
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [bridge, onNotice, session.foregroundRunId, session.id, workspaceId]);
+  }, [bridge, onNotice, session.foregroundRunId, session.id, t, workspaceId]);
 
   const rows = useMemo(
-    () => [...reduceTranscript(transcript), ...reduceTimeline(events)],
-    [events, transcript],
+    () => [...reduceTranscript(transcript, t), ...reduceTimeline(events, t)],
+    [events, t, transcript],
   );
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
@@ -303,16 +309,16 @@ export function ConversationPanel({
   const submit = async (nextPrompt: string): Promise<boolean> => {
     if (nextPrompt === "" || active || submitting) return false;
     setSubmitting(true);
-    onNotice("Starting the run…");
+    onNotice(t("startingRunNotice"));
     try {
-      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, approvalMode);
+      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, permissionMode);
       activeRunIdRef.current = started.id;
       setRun(started);
-      setApprovalMode(started.approvalMode);
-      onNotice("Run started. Live updates are connected.");
+      setPermissionMode(started.permissionMode);
+      onNotice(t("runStarted"));
       return true;
     } catch {
-      onNotice("The run could not be started.", true);
+      onNotice(t("runStartFailed"), true);
       return false;
     } finally {
       setSubmitting(false);
@@ -322,12 +328,12 @@ export function ConversationPanel({
   const cancel = async () => {
     if (run === undefined || !active || controlBusy) return;
     setControlBusy(true);
-    onNotice("Requesting cooperative cancellation…");
+    onNotice(t("requestingCancellation"));
     try {
       setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
-      onNotice("Cancellation requested. Waiting for the run to stop safely.");
+      onNotice(t("cancellationRequested"));
     } catch {
-      onNotice("Cancellation could not be requested.", true);
+      onNotice(t("cancellationFailed"), true);
     } finally {
       setControlBusy(false);
     }
@@ -336,7 +342,7 @@ export function ConversationPanel({
   const decideApproval = async (approve: boolean) => {
     if (pendingApproval?.approval === undefined || controlBusy) return;
     setControlBusy(true);
-    onNotice(approve ? "Submitting approval…" : "Submitting denial…");
+    onNotice(approve ? t("submittingApproval") : t("submittingDenial"));
     try {
       const decision = await bridge.resolveApproval(
         workspaceId,
@@ -345,9 +351,9 @@ export function ConversationPanel({
         pendingApproval.approval,
         approve,
       );
-      onNotice(`Tool request ${decision.decision}.`);
+      onNotice(t("toolRequestDecision", { decision: decision.decision }));
     } catch {
-      onNotice("The approval decision was stale or could not be recorded.", true);
+      onNotice(t("approvalDecisionFailed"), true);
     } finally {
       setControlBusy(false);
     }
@@ -356,7 +362,7 @@ export function ConversationPanel({
   const rerunVerification = async () => {
     if (verification?.action?.kind !== "rerun" || verificationBusy || active) return;
     setVerificationBusy(true);
-    onNotice(`Running recommended check ${verification.recommendedCheckSpecId ?? ""}…`);
+    onNotice(t("runningRecommendedCheck", { check: verification.recommendedCheckSpecId ?? "" }));
     try {
       const next = await bridge.rerunVerification(
         workspaceId,
@@ -364,9 +370,9 @@ export function ConversationPanel({
         verification.action.request,
       );
       setVerification(next);
-      onNotice(`Verification finished: ${next.status}.`);
+      onNotice(t("verificationFinished", { status: next.status }));
     } catch {
-      onNotice("The recommendation changed or the check could not run. Review the latest evidence.", true);
+      onNotice(t("verificationChanged"), true);
       try {
         setVerification(await bridge.verification(workspaceId, session.id));
       } catch {
@@ -383,8 +389,8 @@ export function ConversationPanel({
       <header className="conversation-header">
         <div>
           <span className="conversation-title-row">
-            <h2 id="conversation-title">{session.label ?? "Untitled conversation"}</h2>
-            <small>{session.runCount} recorded run{session.runCount === 1 ? "" : "s"}</small>
+            <h2 id="conversation-title">{session.label ?? t("untitledConversation")}</h2>
+            <small>{t("recordedRuns", { count: session.runCount })}</small>
           </span>
         </div>
         <div className="conversation-header-actions">
@@ -394,14 +400,14 @@ export function ConversationPanel({
           {verification !== undefined ? (
             <Tooltip
               label={pendingApproval?.approval !== undefined
-                ? "Resolve approval before opening verification"
-                : `Verification · ${verification.status}`}
+                ? t("resolveApprovalFirst")
+                : t("verificationStatus", { status: verification.status })}
             >
               <IconButton
                 className={`review-trigger review-${verification.verdict}`}
                 ref={inspectorTriggerRef}
                 type="button"
-                aria-label={`Open verification: ${verification.status}`}
+                aria-label={t("openVerification", { status: verification.status })}
                 aria-controls="verification-inspector"
                 aria-expanded={inspectorOpen}
                 disabled={pendingApproval?.approval !== undefined}
@@ -417,7 +423,7 @@ export function ConversationPanel({
 
       {runNotice !== undefined ? (
         runNotice.error
-          ? <ErrorCard title="Run action needs attention" message={runNotice.message} actionLabel="Dismiss" onAction={() => setRunNotice(undefined)} />
+          ? <ErrorCard title={t("runActionAttention")} message={runNotice.message} actionLabel={t("dismiss")} onAction={() => setRunNotice(undefined)} />
           : <div className="run-notice" role="status">{runNotice.message}</div>
       ) : null}
 
@@ -426,7 +432,7 @@ export function ConversationPanel({
         ref={timelineRef}
         role="log"
         aria-live="off"
-        aria-label="Conversation timeline"
+        aria-label={t("conversationTimeline")}
         onScroll={(event) => {
           const timeline = event.currentTarget;
           timelinePinnedToEnd.current =
@@ -435,7 +441,7 @@ export function ConversationPanel({
       >
         {attachmentGap ? (
           <div className="timeline-gap" role="status">
-            Some live details were not retained while this conversation was away. Saved messages and the final run state remain available.
+            {t("liveDetailGap")}
           </div>
         ) : null}
         {nextBefore !== undefined ? (
@@ -446,23 +452,25 @@ export function ConversationPanel({
               disabled={transcriptBusy}
               onClick={() => void loadEarlier()}
             >
-              {transcriptBusy ? "Loading earlier messages…" : `Load earlier messages (${Math.max(0, transcriptTotal - transcript.length)} remaining)`}
+              {transcriptBusy
+                ? t("loadingEarlierMessages")
+                : t("loadEarlierMessages", { count: Math.max(0, transcriptTotal - transcript.length) })}
             </Button>
           </div>
         ) : null}
         {transcriptError ? (
           <ErrorCard
-            title="Saved messages are unavailable"
-            message="Live run controls remain available. Retry without leaving this conversation."
-            actionLabel={transcriptBusy ? "Retrying…" : "Retry messages"}
+            title={t("savedMessagesUnavailable")}
+            message={t("savedMessagesRetryDetail")}
+            actionLabel={transcriptBusy ? t("retrying") : t("retryMessages")}
             actionDisabled={transcriptBusy}
             onAction={() => setTranscriptReload((value) => value + 1)}
           />
         ) : null}
         {rows.length === 0 ? (
           <div className="timeline-empty">
-            <strong>{transcriptBusy ? "Loading conversation history…" : "Ready for a prompt."}</strong>
-            <span>{transcriptBusy ? "Loading saved messages." : "New run activity appears here."}</span>
+            <strong>{transcriptBusy ? t("loadingConversationHistory") : t("readyForPrompt")}</strong>
+            <span>{transcriptBusy ? t("loadingSavedMessages") : t("newRunActivity")}</span>
           </div>
         ) : (
           rows.map((row) => row.kind === "tool"
@@ -489,8 +497,14 @@ export function ConversationPanel({
         composerRef={composerRef}
         runContext={runContext}
         runContextBusy={runContextBusy}
-        approvalMode={approvalMode}
-        onApprovalModeChange={setApprovalMode}
+        modelChanging={modelChanging}
+        permissionMode={permissionMode}
+        onModelChange={(modelName) => {
+          if (modelName === runContext?.modelName) return;
+          setModelChanging(true);
+          void onModelChange(modelName).finally(() => setModelChanging(false));
+        }}
+        onPermissionModeChange={setPermissionMode}
         onSubmit={submit}
         onCancel={() => void cancel()}
       />
@@ -500,8 +514,8 @@ export function ConversationPanel({
         <Drawer
           id="verification-inspector"
           open={inspectorOpen}
-          title="Verification"
-          description="Evidence and recommended checks for this conversation."
+          title={t("verification")}
+          description={t("verificationDetail")}
           returnFocusRef={inspectorTriggerRef}
           onOpenChange={setInspectorOpen}
         >
@@ -537,7 +551,10 @@ export function mergeTranscriptPage(
   return [...messages.values()].sort((left, right) => left.ordinal - right.ordinal);
 }
 
-export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
+export function reduceTranscript(
+  messages: TranscriptMessage[],
+  t: Translate = translateEnglish,
+): TimelineRow[] {
   return messages.map((message) => {
     const attachmentText = message.imageAttachmentCount > 0
       ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
@@ -552,7 +569,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
       return {
         key: `history:${message.messageId}`,
         kind: "user",
-        label: "You",
+        label: t("you"),
         text,
         status,
       };
@@ -561,7 +578,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
       return {
         key: `history:${message.messageId}`,
         kind: "tool",
-        label: message.toolName ?? "Tool result",
+        label: message.toolName ?? t("toolResult"),
         text,
         status,
       };
@@ -570,7 +587,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
       return {
         key: `history:${message.messageId}`,
         kind: "reasoning",
-        label: "Reasoning",
+        label: t("reasoning"),
         text,
         status,
       };
@@ -579,7 +596,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
       return {
         key: `history:${message.messageId}`,
         kind: "progress",
-        label: "Progress",
+        label: t("progress"),
         text,
         status,
       };
@@ -611,14 +628,17 @@ export function mergeTimelineEvent(
   ];
 }
 
-export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
+export function reduceTimeline(
+  events: TimelineEvent[],
+  t: Translate = translateEnglish,
+): TimelineRow[] {
   const rows = new Map<string, TimelineRow>();
   for (const event of events) {
     const assistantKey = `${event.runId}:assistant`;
     switch (event.kind) {
       case "run_started":
         rows.set(`${event.runId}:user`, {
-          key: `${event.runId}:user`, kind: "user", label: "You", text: event.text ?? "",
+          key: `${event.runId}:user`, kind: "user", label: t("you"), text: event.text ?? "",
         });
         break;
       case "assistant_delta": {
@@ -648,7 +668,7 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
             key: assistantKey,
             kind: "assistant",
             label: "Sigil",
-            text: event.text ?? "Run completed.",
+            text: event.text ?? t("runCompleted"),
             status: "complete",
           });
         } else {
@@ -662,7 +682,7 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
         rows.set(key, {
           key,
           kind: "reasoning",
-          label: "Working",
+          label: t("working"),
           text: `${current?.text ?? ""}${event.text ?? ""}`,
         });
         break;
@@ -676,7 +696,7 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
         rows.set(key, {
           key,
           kind: "tool",
-          label: event.toolName ?? current?.label ?? "Tool",
+          label: event.toolName ?? current?.label ?? t("tool"),
           text: event.text ?? current?.text ?? "",
           status: event.status ?? event.kind.replace("tool_", ""),
         });
@@ -687,8 +707,8 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
         rows.set(key, {
           key,
           kind: "notice",
-          label: "Approval required",
-          text: `${event.toolName ?? "Tool"} is waiting for a decision.`,
+          label: t("approvalRequired"),
+          text: t("toolWaitingDecision", { tool: event.toolName ?? t("tool") }),
           status: "waiting",
         });
         break;
@@ -698,16 +718,16 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
         rows.set(`${event.runId}:terminal`, {
           key: `${event.runId}:terminal`,
           kind: "error",
-          label: event.kind === "run_cancelled" ? "Cancelled" : "Run failed",
-          text: event.text ?? (event.kind === "run_cancelled" ? "The run was cancelled." : "The run failed."),
+          label: event.kind === "run_cancelled" ? t("cancelled") : t("runFailed"),
+          text: event.text ?? (event.kind === "run_cancelled" ? t("runCancelled") : t("runFailedDetail")),
         });
         break;
       case "notice":
         rows.set(`${event.runId}:notice:${event.sequence}`, {
           key: `${event.runId}:notice:${event.sequence}`,
           kind: "notice",
-          label: "Notice",
-          text: event.text ?? "Run notice",
+          label: t("notice"),
+          text: event.text ?? t("runNotice"),
         });
         break;
       default:

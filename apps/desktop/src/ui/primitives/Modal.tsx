@@ -6,6 +6,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useLocale } from "../../i18n";
 import { Icon } from "../icons";
 import { focusableElements, focusInitial } from "./focus";
 
@@ -69,6 +70,7 @@ export function Modal({
   side = "end",
   destructive = false,
 }: ModalProps) {
+  const { t } = useLocale();
   const surfaceRef = useRef<HTMLElement>(null);
   const onOpenChangeRef = useRef(onOpenChange);
   onOpenChangeRef.current = onOpenChange;
@@ -145,7 +147,7 @@ export function Modal({
             {description === undefined ? null : <p id={descriptionId}>{description}</p>}
           </div>
           {destructive ? null : (
-            <button className="sg-icon-button" type="button" aria-label={`Close ${title}`} onClick={() => onOpenChange(false)}><Icon name="close" /></button>
+            <button className="sg-icon-button" type="button" aria-label={t("closeDialog", { title })} onClick={() => onOpenChange(false)}><Icon name="close" /></button>
           )}
         </header>
         <div className="sg-modal-content">{children}</div>

@@ -1,5 +1,5 @@
 use crate::{
-    HttpRunApprovalMode, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStatus,
+    HttpPermissionMode, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStatus,
     command_store::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpDurableCommandStore, HttpStoredCommandClaim,
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
@@ -28,7 +28,7 @@ fn receipt(command_id: &str) -> HttpRunStartCommandReceipt {
             id: "run-1".to_owned(),
             session_id: "session-1".to_owned(),
             status: HttpRunStatus::Running,
-            approval_mode: HttpRunApprovalMode::Deny,
+            permission_mode: HttpPermissionMode::ReadOnly,
             prompt_preview: HTTP_DURABLE_COMMAND_PROMPT_OMISSION.to_owned(),
             pending_approval_call_ids: Vec::new(),
             stream_sequence: 1,

@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { ErrorCard } from "../../ErrorCard";
 import { HistoryContent, type HistoryState } from "../../HistoryPanel";
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "../../types";
+import { useLocale } from "../../i18n";
 import { Icon } from "../../ui/icons";
 import { Button, Checkbox, IconButton, Popover, Select, TextField } from "../../ui/primitives";
 
@@ -53,6 +54,7 @@ export function SessionRail({
   onDelete,
   onQuarantine,
 }: SessionRailProps) {
+  const { t } = useLocale();
   const activeFilterCount = Number(providerFilter.trim() !== "") + Number(sourceFilter !== "all") + Number(pinnedOnly);
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -61,45 +63,45 @@ export function SessionRail({
   return (
     <section className="session-rail" aria-labelledby="session-rail-title">
       <header className="session-rail-header">
-        <h2 id="session-rail-title">Conversations</h2>
+        <h2 id="session-rail-title">{t("conversations")}</h2>
       </header>
       <form className="session-search" onSubmit={submit}>
         <TextField
-          label="Search conversations"
+          label={t("searchConversations")}
           labelHidden
           value={searchDraft}
           onChange={(event) => onSearchDraftChange(event.target.value)}
-          placeholder="Search conversations"
+          placeholder={t("searchConversations")}
         />
-        <IconButton aria-label="Search" icon={<Icon name="search" />} type="submit" />
+        <IconButton aria-label={t("search")} icon={<Icon name="search" />} type="submit" />
         <Popover
           className="session-filter-popover"
           label={<span className="filter-trigger-label"><Icon name="filter" />{activeFilterCount > 0 ? <span className="filter-count">{activeFilterCount}</span> : null}</span>}
-          accessibleLabel={`Filters${activeFilterCount === 0 ? "" : `, ${activeFilterCount} active`}`}
+          accessibleLabel={activeFilterCount === 0 ? t("filters") : t("activeFilters", { count: activeFilterCount })}
         >
           <div className="session-filter-panel">
-            <TextField label="Provider" value={providerFilter} onChange={(event) => onProviderFilterChange(event.target.value)} placeholder="Provider name" />
-            <Select label="Source state" value={sourceFilter} onChange={(event) => onSourceFilterChange(event.target.value as CatalogSourceState | "all")}>
-              <option value="all">All states</option>
-              <option value="ready">Ready</option>
-              <option value="oversized">Oversized</option>
-              <option value="scan_budget_exceeded">Scan limited</option>
-              <option value="unsupported_legacy">Unsupported</option>
-              <option value="invalid">Invalid</option>
+            <TextField label={t("provider")} value={providerFilter} onChange={(event) => onProviderFilterChange(event.target.value)} placeholder={t("providerName")} />
+            <Select label={t("sourceState")} value={sourceFilter} onChange={(event) => onSourceFilterChange(event.target.value as CatalogSourceState | "all")}>
+              <option value="all">{t("allStates")}</option>
+              <option value="ready">{t("ready")}</option>
+              <option value="oversized">{t("oversized")}</option>
+              <option value="scan_budget_exceeded">{t("scanLimited")}</option>
+              <option value="unsupported_legacy">{t("unsupported")}</option>
+              <option value="invalid">{t("invalid")}</option>
             </Select>
-            <Checkbox label="Pinned only" checked={pinnedOnly} onChange={(event) => onPinnedOnlyChange(event.target.checked)} />
-            <Button type="button" variant="quiet" disabled={activeFilterCount === 0} onClick={onClearFilters}>Clear filters</Button>
+            <Checkbox label={t("pinnedOnly")} checked={pinnedOnly} onChange={(event) => onPinnedOnlyChange(event.target.checked)} />
+            <Button type="button" variant="quiet" disabled={activeFilterCount === 0} onClick={onClearFilters}>{t("clearFilters")}</Button>
           </div>
         </Popover>
       </form>
       {activeFilterCount > 0 ? (
         <div className="active-filter-summary">
-          <span>{activeFilterCount} active filter{activeFilterCount === 1 ? "" : "s"}</span>
-          <Button type="button" variant="quiet" onClick={onClearFilters}>Clear</Button>
+          <span>{activeFilterCount === 1 ? t("activeFilter") : t("activeFilters", { count: activeFilterCount })}</span>
+          <Button type="button" variant="quiet" onClick={onClearFilters}>{t("clear")}</Button>
         </div>
       ) : null}
       {sessionMessage === undefined ? null : sessionError ? (
-        <ErrorCard title="Conversation unavailable" message={sessionMessage} actionLabel="Refresh conversations" onAction={onRetry} />
+        <ErrorCard title={t("conversationUnavailable")} message={sessionMessage} actionLabel={t("refreshConversations")} onAction={onRetry} />
       ) : (
         <div className="session-notice" role="status">{sessionMessage}</div>
       )}

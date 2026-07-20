@@ -53,6 +53,7 @@ describe("Sigil UI primitives", () => {
       </>,
     );
     expect((screen.getByRole("button", { name: "Saving" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.hover(screen.getByRole("button", { name: "Hover target" }));
     expect(screen.getByRole("tooltip").textContent).toBe("Nonessential hint");
     expect(screen.getByRole("status").textContent).toBe("Saved locally");
     await user.click(screen.getByText("Evidence"));

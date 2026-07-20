@@ -174,16 +174,17 @@ export const catalogFixtures: readonly CatalogFixture[] = [
   },
   {
     id: "coding-composer",
-    description: "Sticky coding composer with model, approval mode, context, and send control",
+    description: "Sticky coding composer with model, permission mode, context, and send control",
     ...environment,
     composer: {
       active: false,
       context: {
         providerName: "deepseek",
         modelName: "deepseek-v4-flash",
+        availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
         modelSelection: "fixed_for_session",
-        defaultApprovalMode: "ask",
-        availableApprovalModes: ["ask", "allow_readonly", "deny"],
+        defaultPermissionMode: "manual",
+        availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
         contextWindowTokens: 1_000_000,
         lastPromptTokens: 42_000,
         contextWindowSource: "provider",

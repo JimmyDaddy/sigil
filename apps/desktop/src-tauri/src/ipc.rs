@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopApprovalDecisionRecord, DesktopContextWindowSource, DesktopModelSelectionPolicy,
-    DesktopRunApprovalMode, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
+    DesktopPermissionMode, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
     DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
@@ -99,6 +99,7 @@ struct DesktopCatalogEntry {
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopSessionCreateInput {
     pub(crate) label: Option<String>,
+    pub(crate) model_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,7 +201,7 @@ pub(crate) struct DesktopTranscriptMessage {
 pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
-    pub(crate) approval_mode: DesktopRunApprovalMode,
+    pub(crate) permission_mode: DesktopPermissionMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,7 +217,7 @@ pub(crate) struct DesktopRunSummary {
     pub(crate) id: String,
     pub(crate) session_id: String,
     pub(crate) status: &'static str,
-    pub(crate) approval_mode: &'static str,
+    pub(crate) permission_mode: &'static str,
     pub(crate) stream_sequence: u64,
 }
 
@@ -225,9 +226,10 @@ pub(crate) struct DesktopRunSummary {
 pub(crate) struct DesktopRunContext {
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
+    pub(crate) available_models: Vec<String>,
     pub(crate) model_selection: &'static str,
-    pub(crate) default_approval_mode: &'static str,
-    pub(crate) available_approval_modes: Vec<&'static str>,
+    pub(crate) default_permission_mode: &'static str,
+    pub(crate) available_permission_modes: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) context_window_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -460,7 +462,7 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
                 DesktopRunStatus::Cancelled => "cancelled",
                 DesktopRunStatus::Interrupted => "interrupted",
             },
-            approval_mode: approval_mode_label(value.approval_mode),
+            permission_mode: permission_mode_label(value.permission_mode),
             stream_sequence: value.stream_sequence,
         }
     }
@@ -471,14 +473,15 @@ impl From<DesktopRunContextView> for DesktopRunContext {
         Self {
             provider_name: value.provider_name,
             model_name: value.model_name,
+            available_models: value.available_models,
             model_selection: match value.model_selection {
                 DesktopModelSelectionPolicy::FixedForSession => "fixed_for_session",
             },
-            default_approval_mode: approval_mode_label(value.default_approval_mode),
-            available_approval_modes: value
-                .available_approval_modes
+            default_permission_mode: permission_mode_label(value.default_permission_mode),
+            available_permission_modes: value
+                .available_permission_modes
                 .into_iter()
-                .map(approval_mode_label)
+                .map(permission_mode_label)
                 .collect(),
             context_window_tokens: value.context_window_tokens,
             last_prompt_tokens: value.last_prompt_tokens,
@@ -491,11 +494,12 @@ impl From<DesktopRunContextView> for DesktopRunContext {
     }
 }
 
-fn approval_mode_label(value: DesktopRunApprovalMode) -> &'static str {
+fn permission_mode_label(value: DesktopPermissionMode) -> &'static str {
     match value {
-        DesktopRunApprovalMode::Ask => "ask",
-        DesktopRunApprovalMode::AllowReadonly => "allow_readonly",
-        DesktopRunApprovalMode::Deny => "deny",
+        DesktopPermissionMode::ReadOnly => "read-only",
+        DesktopPermissionMode::Manual => "manual",
+        DesktopPermissionMode::AutoEdit => "auto-edit",
+        DesktopPermissionMode::DangerFullAccess => "danger-full-access",
     }
 }
 

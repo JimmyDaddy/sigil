@@ -307,7 +307,7 @@ impl DesktopHttpClient {
         .await
     }
 
-    /// Projects typed model, approval-mode, and context usage facts for one session.
+    /// Projects typed model, permission-mode, and context usage facts for one session.
     pub async fn run_context(
         &self,
         session_id: &str,

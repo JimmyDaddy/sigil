@@ -24,10 +24,10 @@ use super::{
     PublicApplicationEventBridge, application_run_context_view, application_run_input,
     application_session_transcript_page, application_terminal_projection,
     application_verification_view, attach_application_request_context, bind_application_session,
-    bind_existing_application_session, constrain_application_tool_registry,
-    default_application_session_path, optional_eager_mcp_warning,
-    record_application_preparation_cancellation, rerun_application_verification,
-    validate_execution_contract,
+    bind_application_session_with_model, bind_existing_application_session,
+    constrain_application_tool_registry, default_application_session_path,
+    optional_eager_mcp_warning, record_application_preparation_cancellation,
+    rerun_application_verification, validate_execution_contract,
 };
 
 struct RejectingDisclosurePresenter;
@@ -264,6 +264,58 @@ api_key = "test-secret-key"
 }
 
 #[test]
+fn adapter_session_binding_accepts_only_offered_models_for_new_durable_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let selected_path = temp.path().join("state/sessions/pro.jsonl");
+
+    let binding = bind_application_session_with_model(
+        &config_path,
+        temp.path(),
+        Some(&selected_path),
+        Some("deepseek-v4-pro"),
+    )?;
+    let context = application_run_context_view(
+        &config_path,
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(context.model_name, "deepseek-v4-pro");
+    assert!(
+        context
+            .available_models
+            .contains(&"deepseek-v4-flash".to_owned())
+    );
+    assert!(
+        context
+            .available_models
+            .contains(&"deepseek-v4-pro".to_owned())
+    );
+
+    let rejected = bind_application_session_with_model(
+        &config_path,
+        temp.path(),
+        Some(&temp.path().join("state/sessions/unknown.jsonl")),
+        Some("unknown-model"),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -313,6 +365,11 @@ model = "deepseek-v4-flash"
     )?;
     assert_eq!(empty.provider_name, "deepseek");
     assert_eq!(empty.model_name, "deepseek-v4-flash");
+    assert_eq!(
+        empty.default_permission_mode,
+        sigil_kernel::PermissionMode::Manual
+    );
+    assert_eq!(empty.available_models.len(), 2);
     assert_eq!(empty.context_window_tokens, Some(1_000_000));
     assert_eq!(
         empty.context_window_source,

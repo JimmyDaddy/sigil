@@ -213,8 +213,8 @@ const resetSource = readFileSync(resetPath, "utf8");
 if (!/body\s*\{[^}]*min-width:\s*320px[^}]*overflow:\s*hidden/.test(resetSource)) {
   fail("320px no-document-scroll root contract is missing");
 }
-if (!styles.includes("@media (max-width: 1279px)") || !styles.includes("@media (max-width: 899px)")) {
-  fail("expanded/medium/compact breakpoint contract is missing");
+if (!styles.includes("grid-template-columns: var(--sg-sys-navigation-width) minmax(0, 1fr)") || !styles.includes("@media (max-width: 899px)")) {
+  fail("resizable desktop navigation and compact fallback contract is missing");
 }
 for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".css")) {
   if (/url\(\s*["']?https?:/i.test(readFileSync(path, "utf8"))) {

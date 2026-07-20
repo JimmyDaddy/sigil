@@ -1,6 +1,7 @@
-import type { MouseEvent } from "react";
+import { useEffect, useRef, type MouseEvent } from "react";
 
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
+import { useLocale } from "./i18n";
 import { ErrorCard } from "./ErrorCard";
 import { Icon } from "./ui/icons";
 import { Button, Menu, MenuItem, Popover } from "./ui/primitives";
@@ -34,15 +35,24 @@ export function HistoryContent({
   onQuarantine: (entry: CatalogEntry) => void;
   selectedSessionId?: string;
 }) {
+  const { locale, t } = useLocale();
+  const previousSessionPress = useRef<
+    { readonly key: string; readonly timestamp: number } | undefined
+  >(undefined);
+  const suppressSessionOpen = useRef<string | undefined>(undefined);
+  const pendingSessionOpen = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    if (pendingSessionOpen.current !== undefined) window.clearTimeout(pendingSessionOpen.current);
+  }, []);
   if (state === "loading") {
-    return <div className="history-notice busy">Loading conversations…</div>;
+    return <div className="history-notice busy">{t("loadingConversations")}</div>;
   }
   if (state === "error" || state === "stale") {
     return (
       <ErrorCard
-        title={state === "stale" ? "History changed while paging." : "History is unavailable."}
-        message={state === "stale" ? "The list changed while more items were loading. Refresh and continue." : "Your saved conversations are unchanged. Try loading the list again."}
-        actionLabel="Refresh conversations"
+        title={t("historyUnavailable")}
+        message={t("historyUnavailableDetail")}
+        actionLabel={t("refreshConversations")}
         onAction={onRetry}
       />
     );
@@ -55,22 +65,22 @@ export function HistoryContent({
   return (
     <div className="history-results">
       <div className="history-meta">
-        <span>{page.entries.length} conversations</span>
+        <span>{t("conversationCount", { count: page.entries.length })}</span>
         <span className="history-meta-actions">
-          <small>Updated {formatTime(page.reconciledAtUnixMs)}</small>
+          <small>{t("updated", { time: formatTime(page.reconciledAtUnixMs, locale) })}</small>
           {hasWarnings ? (
             <Popover
               className="catalog-diagnostics"
               label={<span className="catalog-diagnostics-trigger"><Icon name="warning" /><span>{warningCount}</span></span>}
-              accessibleLabel={`Catalog diagnostics, ${warningCount} issue${warningCount === 1 ? "" : "s"}`}
+              accessibleLabel={t("catalogIssues", { count: warningCount })}
             >
               <div className="catalog-diagnostics-panel">
-                <strong>Catalog diagnostics</strong>
-                <p>Some saved conversation sources need attention.</p>
+                <strong>{t("catalogDiagnostics")}</strong>
+                <p>{t("catalogAttention")}</p>
                 <ul>
-                  {page.degradedSourceCount > 0 ? <li><span>Unavailable</span><strong>{page.degradedSourceCount}</strong></li> : null}
-                  {page.identityConflictCount > 0 ? <li><span>Changed</span><strong>{page.identityConflictCount}</strong></li> : null}
-                  {page.truncatedSourceCount > 0 ? <li><span>Too large to inspect</span><strong>{page.truncatedSourceCount}</strong></li> : null}
+                  {page.degradedSourceCount > 0 ? <li><span>{t("unavailable")}</span><strong>{page.degradedSourceCount}</strong></li> : null}
+                  {page.identityConflictCount > 0 ? <li><span>{t("changed")}</span><strong>{page.identityConflictCount}</strong></li> : null}
+                  {page.truncatedSourceCount > 0 ? <li><span>{t("tooLarge")}</span><strong>{page.truncatedSourceCount}</strong></li> : null}
                 </ul>
               </div>
             </Popover>
@@ -79,14 +89,14 @@ export function HistoryContent({
       </div>
       {page.entries.length === 0 ? (
         <div className="history-empty">
-          <strong>No matching conversation.</strong>
-          <p>Start a new conversation or adjust the filters.</p>
+          <strong>{t("noMatchingConversation")}</strong>
+          <p>{t("adjustFilters")}</p>
         </div>
       ) : (
         <div className="history-groups">
           {groups.map((group) => (
             <section className="history-group" key={group.id} aria-labelledby={`history-group-${group.id}`}>
-              <h3 id={`history-group-${group.id}`}>{group.label}</h3>
+              <h3 id={`history-group-${group.id}`}>{t(group.id)}</h3>
               <ul className="history-list">
                 {group.entries.map((entry) => {
                   const canOpen = entry.sourceState === "ready" && entry.sessionId !== undefined;
@@ -95,12 +105,12 @@ export function HistoryContent({
                   const content = (
                     <>
                       <span className="session-row-title">
-                        <strong>{entry.title ?? "Untitled conversation"}</strong>
-                        {entry.pinned ? <span className="pin-indicator" aria-label="Pinned"><Icon name="pin" /></span> : null}
-                        {entry.sourceState === "ready" ? null : <span className={`source-badge source-${entry.sourceState}`}>{sourceLabel(entry.sourceState)}</span>}
+                        <strong>{entry.title ?? t("untitledConversation")}</strong>
+                        {entry.pinned ? <span className="pin-indicator" aria-label={t("pinned")}><Icon name="pin" /></span> : null}
+                        {entry.sourceState === "ready" ? null : <span className={`source-badge source-${entry.sourceState}`}>{sourceLabel(entry.sourceState, t)}</span>}
                       </span>
                       <small>
-                        {formatActivityCount(entry)} · {formatRelativeTime(entry.sourceModifiedAtUnixMs, page.reconciledAtUnixMs)}
+                        {formatActivityCount(entry, locale)} · {formatRelativeTime(entry.sourceModifiedAtUnixMs, page.reconciledAtUnixMs, locale)}
                       </small>
                     </>
                   );
@@ -114,8 +124,48 @@ export function HistoryContent({
                             variant="quiet"
                             aria-current={entry.sessionId === selectedSessionId ? "page" : undefined}
                             title={providerContext || undefined}
-                            onClick={() => onOpen(entry)}
+                            onMouseDown={(event) => {
+                              if (event.button !== 0) return;
+                              const entryKey = `${entry.sessionRef}:${entry.sessionId}`;
+                              const previous = previousSessionPress.current;
+                              const timestamp = Date.now();
+                              if (previous?.key === entryKey && timestamp - previous.timestamp <= 500) {
+                                previousSessionPress.current = undefined;
+                                suppressSessionOpen.current = entryKey;
+                                if (pendingSessionOpen.current !== undefined) {
+                                  window.clearTimeout(pendingSessionOpen.current);
+                                  pendingSessionOpen.current = undefined;
+                                }
+                                event.preventDefault();
+                                onRename(entry);
+                                return;
+                              }
+                              previousSessionPress.current = { key: entryKey, timestamp };
+                            }}
+                            onClick={(event) => {
+                              const entryKey = `${entry.sessionRef}:${entry.sessionId}`;
+                              if (suppressSessionOpen.current === entryKey || event.detail >= 2) {
+                                suppressSessionOpen.current = undefined;
+                                event.preventDefault();
+                                return;
+                              }
+                              if (event.detail === 0) {
+                                onOpen(entry);
+                                return;
+                              }
+                              if (pendingSessionOpen.current !== undefined) {
+                                window.clearTimeout(pendingSessionOpen.current);
+                              }
+                              pendingSessionOpen.current = window.setTimeout(() => {
+                                pendingSessionOpen.current = undefined;
+                                onOpen(entry);
+                              }, 240);
+                            }}
                             onDoubleClick={(event) => {
+                              if (pendingSessionOpen.current !== undefined) {
+                                window.clearTimeout(pendingSessionOpen.current);
+                                pendingSessionOpen.current = undefined;
+                              }
                               event.preventDefault();
                               onRename(entry);
                             }}
@@ -123,12 +173,12 @@ export function HistoryContent({
                             {content}
                           </Button>
                           <Menu
-                            accessibleLabel={`Manage ${managementLabel}`}
+                            accessibleLabel={t("manageConversation", { name: managementLabel })}
                             label={<Icon name="more" />}
                           >
-                            <MenuItem onSelect={() => onRename(entry)}>Rename</MenuItem>
+                            <MenuItem onSelect={() => onRename(entry)}>{t("rename")}</MenuItem>
                             <MenuItem disabled={entry.pinned} onSelect={() => onDelete(entry)}>
-                              {entry.pinned ? "Pinned — cannot delete" : "Delete"}
+                              {entry.pinned ? t("pinnedCannotDelete") : t("delete")}
                             </MenuItem>
                           </Menu>
                         </div>
@@ -136,14 +186,14 @@ export function HistoryContent({
                         <div className="session-row-shell" onContextMenu={openContextMenu}>
                           <div className="session-row session-row-unavailable" aria-disabled="true" title={providerContext || undefined}>{content}</div>
                           <Menu
-                            accessibleLabel={`Manage ${managementLabel}`}
+                            accessibleLabel={t("manageConversation", { name: managementLabel })}
                             label={<Icon name="more" />}
                           >
                             <MenuItem
                               disabled={entry.sourceState !== "invalid"}
                               onSelect={() => onQuarantine(entry)}
                             >
-                              {entry.sourceState === "invalid" ? "Move invalid source to quarantine" : "No safe action available"}
+                              {entry.sourceState === "invalid" ? t("quarantineInvalid") : t("noSafeAction")}
                             </MenuItem>
                           </Menu>
                         </div>
@@ -158,7 +208,7 @@ export function HistoryContent({
       )}
       {page.nextCursor !== undefined ? (
         <Button className="load-more" type="button" onClick={onLoadMore} disabled={state === "loading_more"}>
-          {state === "loading_more" ? "Loading…" : "Load more"}
+          {state === "loading_more" ? t("loading") : t("loadMore")}
         </Button>
       ) : null}
     </div>
@@ -199,19 +249,19 @@ export function groupEntries(entries: readonly CatalogEntry[], referenceTimestam
     .map((id) => ({ id, label: labels[id], entries: grouped[id] }));
 }
 
-function sourceLabel(state: CatalogSourceState): string {
+function sourceLabel(state: CatalogSourceState, t: ReturnType<typeof useLocale>["t"]): string {
   switch (state) {
-    case "ready": return "Ready";
-    case "oversized": return "Oversized";
-    case "scan_budget_exceeded": return "Scan limited";
-    case "unsupported_legacy": return "Unavailable";
-    case "invalid": return "Invalid";
+    case "ready": return t("ready");
+    case "oversized": return t("oversized");
+    case "scan_budget_exceeded": return t("scanLimited");
+    case "unsupported_legacy": return t("unavailable");
+    case "invalid": return t("invalid");
   }
 }
 
-function formatTime(value: number): string {
-  if (value <= 0) return "just now";
-  return new Intl.DateTimeFormat(undefined, {
+function formatTime(value: number, locale?: string): string {
+  if (value <= 0) return locale === "zh-CN" ? "刚刚" : "just now";
+  return new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -219,19 +269,23 @@ function formatTime(value: number): string {
   }).format(new Date(value));
 }
 
-function formatRelativeTime(value: number, referenceTimestamp: number): string {
-  if (value <= 0) return "Just now";
+function formatRelativeTime(value: number, referenceTimestamp: number, locale?: string): string {
+  if (value <= 0) return locale === "zh-CN" ? "刚刚" : "Just now";
   const reference = referenceTimestamp > 0 ? referenceTimestamp : Date.now();
   const elapsedMinutes = Math.max(0, Math.floor((reference - value) / 60_000));
-  if (elapsedMinutes < 1) return "Just now";
-  if (elapsedMinutes < 60) return `${elapsedMinutes}m`;
+  if (elapsedMinutes < 1) return locale === "zh-CN" ? "刚刚" : "Just now";
+  if (elapsedMinutes < 60) return locale === "zh-CN" ? `${elapsedMinutes} 分钟前` : `${elapsedMinutes}m`;
   const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `${elapsedHours}h`;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(value));
+  if (elapsedHours < 24) return locale === "zh-CN" ? `${elapsedHours} 小时前` : `${elapsedHours}h`;
+  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(new Date(value));
 }
 
-function formatActivityCount(entry: CatalogEntry): string {
+function formatActivityCount(entry: CatalogEntry, locale: string): string {
   const messageCount = entry.userMessageCount + entry.assistantMessageCount;
+  if (locale === "zh-CN") {
+    const tools = entry.toolResultCount === 0 ? "" : ` · ${entry.toolResultCount} 个工具结果`;
+    return `${messageCount} 条消息${tools}`;
+  }
   const messages = `${messageCount} message${messageCount === 1 ? "" : "s"}`;
   if (entry.toolResultCount === 0) return messages;
   return `${messages} · ${entry.toolResultCount} tool${entry.toolResultCount === 1 ? "" : "s"}`;

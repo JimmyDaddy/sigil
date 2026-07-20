@@ -358,7 +358,7 @@ pub(crate) async fn desktop_start_run(
             &input.session_id,
             DesktopRunStartRequest {
                 prompt: input.prompt,
-                approval_mode: input.approval_mode,
+                permission_mode: input.permission_mode,
             },
         )
         .await
@@ -574,6 +574,7 @@ pub(crate) async fn desktop_create_session(
 ) -> Result<DesktopSessionSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
     validate_optional_label(input.label.as_deref())?;
+    validate_optional_model(input.model_name.as_deref())?;
     let client = state
         .manager
         .lock()
@@ -581,7 +582,10 @@ pub(crate) async fn desktop_create_session(
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
-        .create_session(DesktopSessionCreateRequest { label: input.label })
+        .create_session(DesktopSessionCreateRequest {
+            label: input.label,
+            model_name: input.model_name,
+        })
         .await
         .map(Into::into)
         .map_err(project_client_error)
@@ -787,6 +791,21 @@ fn validate_optional_label(value: Option<&str>) -> Result<(), DesktopCommandErro
         return Err(DesktopCommandError::new(
             "session_label_invalid",
             "The conversation label is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_model(value: Option<&str>) -> Result<(), DesktopCommandError> {
+    if value.is_some_and(|model| {
+        model.is_empty()
+            || model.trim() != model
+            || model.len() > 160
+            || model.chars().any(char::is_control)
+    }) {
+        return Err(DesktopCommandError::new(
+            "session_model_invalid",
+            "The selected model is invalid.",
         ));
     }
     Ok(())

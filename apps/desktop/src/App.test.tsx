@@ -61,7 +61,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     bootstrap: async () => ({
       appearance: defaultAppearance,
       ...(bootstrap === undefined
-        ? { protocolVersion: 1, workspaces: [], recentWorkspaces: [] }
+        ? { protocolVersion: 2, workspaces: [], recentWorkspaces: [] }
         : await bootstrap()),
     }),
     setAppearance: async (preference) => ({
@@ -104,9 +104,10 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     runContext: async () => ({
       providerName: "deepseek",
       modelName: "deepseek-v4-flash",
+      availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
       modelSelection: "fixed_for_session",
-      defaultApprovalMode: "ask",
-      availableApprovalModes: ["ask", "allow_readonly", "deny"],
+      defaultPermissionMode: "manual",
+      availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
       contextWindowTokens: 128_000,
       lastPromptTokens: 4_096,
       contextWindowSource: "provider",
@@ -115,7 +116,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       id: "run-1",
       sessionId,
       status: "running",
-      approvalMode: "ask",
+      permissionMode: "manual",
       streamSequence: 0,
     }),
     attachRun: async (_workspaceId, sessionId, runId) => ({
@@ -123,7 +124,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         id: runId,
         sessionId,
         status: "running",
-        approvalMode: "ask",
+        permissionMode: "manual",
         streamSequence: 0,
       },
       events: [],
@@ -134,7 +135,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       id: runId,
       sessionId,
       status: "cancel_requested",
-      approvalMode: "ask",
+      permissionMode: "manual",
       streamSequence: 1,
     }),
     resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => ({
@@ -257,7 +258,7 @@ describe("desktop workspace and history shell", () => {
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -374,7 +375,7 @@ describe("desktop workspace and history shell", () => {
     const openRecentWorkspace = vi.fn(async () => workspace);
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [],
         recentWorkspaces: [
           { id: workspace.id, displayName: "sigil", isOpen: false },
@@ -392,7 +393,7 @@ describe("desktop workspace and history shell", () => {
   it("surfaces the actionable native error when a recent workspace cannot reopen", async () => {
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [],
         recentWorkspaces: [
           { id: workspace.id, displayName: "sigil", isOpen: false },
@@ -413,7 +414,7 @@ describe("desktop workspace and history shell", () => {
 
   it("resizes and persists the desktop conversation sidebar", async () => {
     render(<App bridge={bridgeWith({
-      bootstrap: async () => ({ protocolVersion: 1, workspaces: [workspace], recentWorkspaces: [] }),
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
     })} />);
 
     const separator = await screen.findByRole("separator", { name: "Resize conversation sidebar" });
@@ -460,7 +461,7 @@ describe("desktop workspace and history shell", () => {
     const cursors: Array<string | undefined> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [
           { id: workspace.id, displayName: "sigil", isOpen: true },
@@ -524,7 +525,7 @@ describe("desktop workspace and history shell", () => {
     const transcriptQueries: Array<number | undefined> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -646,7 +647,7 @@ describe("desktop workspace and history shell", () => {
     };
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -687,7 +688,7 @@ describe("desktop workspace and history shell", () => {
             id: "run-active",
             sessionId: "http-session-active",
             status: "waiting_for_approval",
-            approvalMode: "ask",
+            permissionMode: "manual",
             streamSequence: 2,
           },
           events: [activeEvent, approvalEvent],
@@ -697,7 +698,7 @@ describe("desktop workspace and history shell", () => {
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
-        return { id: runId, sessionId, status: "cancel_requested", approvalMode: "ask", streamSequence: 3 };
+        return { id: runId, sessionId, status: "cancel_requested", permissionMode: "manual", streamSequence: 3 };
       },
     });
     render(<App bridge={bridge} />);
@@ -719,7 +720,7 @@ describe("desktop workspace and history shell", () => {
     const user = userEvent.setup();
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -763,7 +764,7 @@ describe("desktop workspace and history shell", () => {
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -790,7 +791,8 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("Managed conversation");
     const managedRow = screen.getByRole("button", { name: /^Managed conversation/ });
-    await user.dblClick(managedRow);
+    await user.click(managedRow);
+    await user.click(managedRow);
     expect(screen.getByRole("dialog", { name: "Rename conversation" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -825,7 +827,7 @@ describe("desktop workspace and history shell", () => {
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -865,7 +867,7 @@ describe("desktop workspace and history shell", () => {
     const queries: Array<string | undefined> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -890,7 +892,7 @@ describe("desktop workspace and history shell", () => {
     const confirmations: boolean[] = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -937,7 +939,7 @@ describe("desktop workspace and history shell", () => {
     const user = userEvent.setup();
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -994,7 +996,7 @@ describe("desktop workspace and history shell", () => {
     let firstPageRequests = 0;
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -1019,7 +1021,7 @@ describe("desktop workspace and history shell", () => {
     let statusListener: ((status: RunStreamStatus) => void) | undefined;
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -1068,13 +1070,13 @@ describe("desktop workspace and history shell", () => {
     const prompts: string[] = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
       startRun: async (_workspaceId, sessionId, prompt) => {
         prompts.push(prompt);
-        return { id: "run-ime", sessionId, status: "running", approvalMode: "ask", streamSequence: 0 };
+        return { id: "run-ime", sessionId, status: "running", permissionMode: "manual", streamSequence: 0 };
       },
     });
     render(<App bridge={bridge} />);
@@ -1094,22 +1096,22 @@ describe("desktop workspace and history shell", () => {
     expect(prompts).toEqual(["请检查 中文输入，包含粘贴"]);
   });
 
-  it("projects model and context facts and sends the selected approval mode", async () => {
+  it("projects model and context facts and sends the selected permission mode", async () => {
     const user = userEvent.setup();
     let selectedMode = "";
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
-      startRun: async (_workspaceId, sessionId, _prompt, approvalMode) => {
-        selectedMode = approvalMode;
+      startRun: async (_workspaceId, sessionId, _prompt, permissionMode) => {
+        selectedMode = permissionMode;
         return {
           id: "run-mode",
           sessionId,
           status: "running",
-          approvalMode,
+          permissionMode,
           streamSequence: 0,
         };
       },
@@ -1118,16 +1120,62 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByRole("button", { name: "deepseek-v4-flash" })).toBeTruthy();
+    expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
-    await user.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "allow_readonly");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
     const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
     Object.defineProperty(composer, "scrollHeight", { configurable: true, value: 240 });
     await user.type(composer, "Inspect safely");
     expect(composer.style.height).toBe("176px");
     expect(composer.style.overflowY).toBe("auto");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(selectedMode).toBe("allow_readonly");
+    expect(selectedMode).toBe("read-only");
+  });
+
+  it("creates a new durable conversation when the model changes", async () => {
+    const user = userEvent.setup();
+    const selectedModels: Array<string | undefined> = [];
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      createSession: async (_workspaceId, _label, modelName) => {
+        selectedModels.push(modelName);
+        return {
+          id: `http-session-${selectedModels.length}`,
+          label: "New conversation",
+          runCount: 0,
+        };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "Model" }),
+      "deepseek-v4-pro",
+    );
+
+    expect(selectedModels).toEqual([undefined, "deepseek-v4-pro"]);
+  });
+
+  it("switches and persists the desktop language", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem("sigil.desktop.locale.v1");
+    render(<App bridge={bridgeWith()} />);
+
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    await user.click(screen.getByRole("button", { name: "Language: English. Switch to Chinese" }));
+
+    expect(screen.getByRole("heading", { name: "打开工作区" })).toBeTruthy();
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(window.localStorage.getItem("sigil.desktop.locale.v1")).toBe("zh-CN");
+
+    await user.click(screen.getByRole("button", { name: "语言：中文。切换为英文" }));
+    expect(document.documentElement.lang).toBe("en");
   });
 
   it("sends with Enter, keeps active-run input editable, and restores a session draft", async () => {
@@ -1145,13 +1193,13 @@ describe("desktop workspace and history shell", () => {
     } satisfies Storage });
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
       startRun: async (_workspaceId, sessionId, prompt) => {
         prompts.push(prompt);
-        return { id: "run-draft", sessionId, status: "running", approvalMode: "ask", streamSequence: 0 };
+        return { id: "run-draft", sessionId, status: "running", permissionMode: "manual", streamSequence: 0 };
       },
     });
     const first = render(<App bridge={bridge} />);
@@ -1181,7 +1229,7 @@ describe("desktop workspace and history shell", () => {
     let eventListener: ((event: TimelineEvent) => void) | undefined;
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -1226,7 +1274,7 @@ describe("desktop workspace and history shell", () => {
     let cancelledRun = "";
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
@@ -1240,7 +1288,7 @@ describe("desktop workspace and history shell", () => {
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
-        return { id: runId, sessionId, status: "cancel_requested", approvalMode: "ask", streamSequence: 4 };
+        return { id: runId, sessionId, status: "cancel_requested", permissionMode: "manual", streamSequence: 4 };
       },
       verification: async () => ({
         taskId: "task-approval",
@@ -1350,7 +1398,7 @@ describe("desktop workspace and history shell", () => {
     };
     const bridge = bridgeWith({
       bootstrap: async () => ({
-        protocolVersion: 1,
+        protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),

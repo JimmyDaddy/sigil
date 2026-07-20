@@ -12,7 +12,7 @@ use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
     AssistantMessageKind, ControlEntry, EgressDisclosurePresenter, EventHandler, InteractionMode,
     JsonlSessionStore, McpServerStartup, MessageRole, MutationEventRecorder, NoopEventHandler,
-    PublicRunEvent, PublicRunEventKind, RootConfig, RunCancellationFinalizedEntry,
+    PermissionMode, PublicRunEvent, PublicRunEventKind, RootConfig, RunCancellationFinalizedEntry,
     RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
     RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
     RunQuiescenceOutcome, RunTaskGuard, Session, SessionLogEntry, TaskVerificationRerunRequest,
@@ -191,6 +191,10 @@ pub struct ApplicationRunContextView {
     pub provider_name: String,
     /// Model identity durably frozen for this session.
     pub model_name: String,
+    /// Models this application surface may bind for a new session with the same provider.
+    pub available_models: Vec<String>,
+    /// Configured permission mode used when a client does not override one run.
+    pub default_permission_mode: PermissionMode,
     /// Effective context window when provider metadata or configuration proves one.
     pub context_window_tokens: Option<u32>,
     /// Prompt tokens recorded by the latest durable usage snapshot.
@@ -214,6 +218,8 @@ pub struct ApplicationRunRequest {
     pub session_path: Option<PathBuf>,
     /// Whether the adapter can provide explicit approvals after run start.
     pub interaction: ApplicationRunInteraction,
+    /// Optional user-selected permission mode for this run.
+    pub permission_mode: Option<PermissionMode>,
     /// Optional adapter-owned hard constraints applied before provider dispatch.
     pub constraints: Option<ApplicationRunConstraints>,
 }
@@ -245,6 +251,7 @@ impl ApplicationRunRequest {
             run_id: run_id.into(),
             session_path: None,
             interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
             constraints: None,
         }
     }
@@ -930,8 +937,41 @@ pub fn bind_application_session(
     launch_cwd: &Path,
     session_path: Option<&Path>,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
-    let root_config =
+    bind_application_session_with_model(config_path, launch_cwd, session_path, None)
+}
+
+/// Creates or reopens a durable V2 session using an optional application-selected model.
+///
+/// The selected model establishes only a new session identity. Durable identity remains
+/// authoritative when `session_path` already contains session state.
+///
+/// # Errors
+///
+/// Returns a typed preparation error when the model is unavailable for the configured provider,
+/// or configuration/session recovery fails.
+pub fn bind_application_session_with_model(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+    model_name: Option<&str>,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let mut root_config =
         RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    if let Some(model_name) = model_name {
+        let requested =
+            crate::normalize_provider_model_alias(&root_config.agent.provider, model_name)
+                .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
+                    message: "application session model must not be empty".to_owned(),
+                })?;
+        let available =
+            application_model_options(&root_config.agent.provider, &root_config.agent.model);
+        if !available.contains(&requested) {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: format!("model {requested} is not available for the configured provider"),
+            });
+        }
+        root_config.agent.model = requested;
+    }
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let sigil_paths =
@@ -950,6 +990,17 @@ pub fn bind_application_session(
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
     })
+}
+
+fn application_model_options(provider_name: &str, current_model: &str) -> Vec<String> {
+    let mut models = vec![current_model.to_owned()];
+    if crate::normalize_provider_name(provider_name) == crate::DEEPSEEK_PROVIDER_KEY {
+        models.push("deepseek-v4-flash".to_owned());
+        models.push("deepseek-v4-pro".to_owned());
+    }
+    models.sort();
+    models.dedup();
+    models
 }
 
 /// Reopens one existing durable V2 session without creating a missing path.
@@ -1042,6 +1093,8 @@ pub fn application_run_context_view(
     Ok(ApplicationRunContextView {
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
+        available_models: application_model_options(session.provider_name(), session.model_name()),
+        default_permission_mode: root_config.permission.mode,
         context_window_tokens: resolved.tokens,
         last_prompt_tokens,
         context_window_source: resolved.source,
@@ -1410,10 +1463,8 @@ fn prepare_application_run_blocking(
             message: "application run constraints must be non-zero and non-empty".to_owned(),
         });
     }
-    let root_config = RootConfig::load(&request.config_path)
+    let mut root_config = RootConfig::load(&request.config_path)
         .map_err(ApplicationRunPrepareError::configuration)?;
-    let provider =
-        crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     let workspace_root = resolve_workspace_root(
         &request.config_path,
         &request.launch_cwd,
@@ -1440,6 +1491,10 @@ fn prepare_application_run_blocking(
         &workspace_root,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
+    root_config.agent.provider = session.provider_name().to_owned();
+    root_config.agent.model = session.model_name().to_owned();
+    let provider =
+        crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     attach_session_url_capability_store(&mut session)
         .map_err(ApplicationRunPrepareError::execution)?;
 
@@ -1456,6 +1511,9 @@ fn prepare_application_run_blocking(
         workspace_root.clone(),
         request.interaction.kernel_mode(),
     );
+    if let Some(permission_mode) = request.permission_mode {
+        options.permission_config.mode = permission_mode;
+    }
     if let Some(constraints) = request.constraints.as_ref() {
         options.max_turns = Some(constraints.max_turns);
     }

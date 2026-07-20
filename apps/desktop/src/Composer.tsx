@@ -1,8 +1,9 @@
 import { useLayoutEffect, useState, type CSSProperties, type RefObject } from "react";
 
-import type { RunApprovalMode, RunContext } from "./types";
+import type { PermissionMode, RunContext } from "./types";
+import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
-import { Button, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
+import { IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
 const MAX_COMPOSER_HEIGHT = 176;
@@ -15,8 +16,10 @@ export function Composer({
   composerRef,
   runContext,
   runContextBusy,
-  approvalMode,
-  onApprovalModeChange,
+  modelChanging,
+  permissionMode,
+  onModelChange,
+  onPermissionModeChange,
   onSubmit,
   onCancel,
 }: {
@@ -27,11 +30,14 @@ export function Composer({
   composerRef: RefObject<HTMLTextAreaElement | null>;
   runContext?: RunContext;
   runContextBusy: boolean;
-  approvalMode: RunApprovalMode;
-  onApprovalModeChange: (mode: RunApprovalMode) => void;
+  modelChanging: boolean;
+  permissionMode: PermissionMode;
+  onModelChange: (modelName: string) => void;
+  onPermissionModeChange: (mode: PermissionMode) => void;
   onSubmit: (prompt: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
+  const { t } = useLocale();
   const [prompt, setPrompt] = useState(() => readDraft(draftKey));
   useLayoutEffect(() => {
     const input = composerRef.current;
@@ -50,8 +56,9 @@ export function Composer({
       writeDraft(draftKey, "");
     }
   };
-  const modelName = runContext?.modelName ?? (runContextBusy ? "Loading model…" : "Model unavailable");
-  const approvalModes = runContext?.availableApprovalModes ?? ["ask", "allow_readonly", "deny"];
+  const modelName = runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
+  const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
+  const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
 
   return (
     <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
@@ -60,7 +67,7 @@ export function Composer({
           id="desktop-prompt"
           className="composer-input"
           containerClassName="composer-input-field"
-          label="Message Sigil"
+          label={t("messageSigil")}
           labelHidden
           ref={composerRef}
           value={prompt}
@@ -68,7 +75,7 @@ export function Composer({
             setPrompt(event.target.value);
             writeDraft(draftKey, event.target.value);
           }}
-          placeholder={active ? "Draft the next message while this run finishes…" : "Ask Sigil to inspect, explain, or change code…"}
+          placeholder={active ? t("activePrompt") : t("prompt")}
           rows={1}
           onKeyDown={(event) => {
             if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -78,46 +85,59 @@ export function Composer({
         />
         <div className="composer-toolbar">
           <div className="composer-options">
-            <Tooltip label={runContext === undefined ? modelName : `${runContext.providerName} · fixed for this conversation`}>
-              <Button className="composer-chip composer-model" variant="quiet" type="button" leadingIcon={<Icon name="lock" />} disabled>
-                {modelName}
-              </Button>
+            <Tooltip label={runContext === undefined ? modelName : t("modelHint", { provider: runContext.providerName })}>
+              <div className="composer-model">
+                <Icon name="model" />
+                <Select
+                  label={t("model")}
+                  labelHidden
+                  containerClassName="composer-model-field"
+                  className="composer-model-select"
+                  value={runContext?.modelName ?? ""}
+                  disabled={active || runContextBusy || modelChanging || models.length < 2}
+                  onChange={(event) => onModelChange(event.target.value)}
+                >
+                  {models.length === 0 ? <option value="">{modelName}</option> : models.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </Select>
+              </div>
             </Tooltip>
             <div className="composer-mode">
               <Icon name="shield" />
               <Select
-                label="Approval mode"
+                label={t("permissionMode")}
                 labelHidden
                 containerClassName="composer-mode-field"
                 className="composer-mode-select"
-                value={approvalMode}
+                value={permissionMode}
                 disabled={active || runContextBusy}
-                onChange={(event) => onApprovalModeChange(event.target.value as RunApprovalMode)}
+                onChange={(event) => onPermissionModeChange(event.target.value as PermissionMode)}
               >
-                {approvalModes.map((mode) => (
-                  <option key={mode} value={mode}>{approvalModeLabel(mode)}</option>
+                {permissionModes.map((mode) => (
+                  <option key={mode} value={mode}>{permissionModeLabel(mode, t)}</option>
                 ))}
               </Select>
             </div>
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
           {active ? (
-            <Tooltip label="Stop this run cooperatively">
+            <Tooltip label={t("stopRunHint")}>
               <IconButton
                 className="composer-submit composer-stop"
                 type="button"
-                aria-label="Stop run"
+                aria-label={t("stopRun")}
                 icon={<Icon name="stop" />}
                 disabled={controlBusy}
                 onClick={onCancel}
               />
             </Tooltip>
           ) : (
-            <Tooltip label={submitting ? "Starting run" : "Send message (Enter)"}>
+            <Tooltip label={submitting ? t("startingRun") : t("sendMessageHint")}>
               <IconButton
                 className="composer-submit sg-icon-button-primary"
                 type="submit"
-                aria-label="Send message"
+                aria-label={t("sendMessage")}
                 icon={<Icon name="send" />}
                 disabled={prompt.trim() === "" || submitting}
                 aria-busy={submitting || undefined}
@@ -131,13 +151,14 @@ export function Composer({
 }
 
 function ContextUsage({ context, loading }: { context?: RunContext; loading: boolean }) {
+  const { t } = useLocale();
   const used = context?.lastPromptTokens;
   const limit = context?.contextWindowTokens;
   if (loading) {
-    return <span className="context-usage context-unavailable" aria-label="Loading context usage">Context…</span>;
+    return <span className="context-usage context-unavailable" aria-label={t("contextLoading")}>{t("contextLoading")}</span>;
   }
   if (used === undefined || limit === undefined || limit === 0) {
-    return <span className="context-usage context-unavailable" aria-label="Context usage unavailable">Context —</span>;
+    return <span className="context-usage context-unavailable" aria-label={t("contextUnavailable")}>{t("contextUnavailable")}</span>;
   }
   const boundedUsed = Math.min(used, limit);
   const ratio = boundedUsed / limit;
@@ -145,11 +166,11 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
   const percentLabel = percent < 1 ? percent.toFixed(1) : Math.round(percent).toString();
   const style = { "--context-used": `${ratio * 100}%` } as CSSProperties;
   return (
-    <Tooltip label={`${formatTokens(used)} of ${formatTokens(limit)} context tokens used`}>
+    <Tooltip label={t("contextTokens", { used: formatTokens(used), limit: formatTokens(limit) })}>
       <span
         className="context-usage"
         role="meter"
-        aria-label={`Context usage ${percentLabel}%`}
+        aria-label={t("contextUsage", { percent: percentLabel })}
         aria-valuemin={0}
         aria-valuemax={limit}
         aria-valuenow={boundedUsed}
@@ -162,11 +183,12 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
   );
 }
 
-function approvalModeLabel(mode: RunApprovalMode): string {
+function permissionModeLabel(mode: PermissionMode, t: ReturnType<typeof useLocale>["t"]): string {
   switch (mode) {
-    case "ask": return "Ask";
-    case "allow_readonly": return "Read only";
-    case "deny": return "No tools";
+    case "read-only": return t("readOnly");
+    case "manual": return t("manual");
+    case "auto-edit": return t("autoEdit");
+    case "danger-full-access": return t("fullAccess");
   }
 }
 

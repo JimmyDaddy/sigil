@@ -1,6 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
+import { useLocale } from "./i18n";
 import type { TimelineApproval } from "./types";
 import { Button } from "./ui/primitives";
 
@@ -15,6 +16,7 @@ export function ApprovalDock({
   composerRef: RefObject<HTMLTextAreaElement | null>;
   onDecision: (approve: boolean) => void;
 }) {
+  const { locale, t } = useLocale();
   const dockRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -25,7 +27,7 @@ export function ApprovalDock({
     };
   }, [approval.approvalRequestId, composerRef]);
 
-  const expires = new Intl.DateTimeFormat(undefined, {
+  const expires = new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -45,26 +47,26 @@ export function ApprovalDock({
       }}
     >
       <header>
-        <div><p className="eyebrow">Approval required</p><h3 id="approval-title">{approval.previewTitle ?? approval.toolName}</h3></div>
-        <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? "not classified"}</span>
+        <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{approval.previewTitle ?? approval.toolName}</h3></div>
+        <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
       </header>
-      <p>{approval.previewSummary ?? "Review this exact tool action before the run can continue."}</p>
+      <p>{approval.previewSummary ?? t("reviewExactToolAction")}</p>
       {approval.previewBody ? (
         isUnifiedDiff(approval.previewBody)
           ? <DiffViewer diff={approval.previewBody} />
           : <pre>{approval.previewBody}</pre>
       ) : null}
       <dl>
-        <div><dt>Tool</dt><dd>{approval.toolName}</dd></div>
-        <div><dt>Action</dt><dd>{approval.operation ?? "not described"}</dd></div>
-        <div><dt>File snapshot</dt><dd>{approval.snapshotRequired ? "required" : "not required"}</dd></div>
-        <div><dt>Decision expires</dt><dd>{expires}</dd></div>
+        <div><dt>{t("approvalTool")}</dt><dd>{approval.toolName}</dd></div>
+        <div><dt>{t("approvalAction")}</dt><dd>{approval.operation ?? t("notDescribed")}</dd></div>
+        <div><dt>{t("fileSnapshot")}</dt><dd>{approval.snapshotRequired ? t("required") : t("notRequired")}</dd></div>
+        <div><dt>{t("decisionExpires")}</dt><dd>{expires}</dd></div>
       </dl>
-      <small>“Approve once” applies only to this exact request. It cannot undo file, shell, or remote side effects that already happened.</small>
-      {expired ? <div className="approval-expired" role="alert">This decision expired. Reopen the conversation to refresh the run state.</div> : null}
+      <small>{t("approveOnceDetail")}</small>
+      {expired ? <div className="approval-expired" role="alert">{t("approvalExpired")}</div> : null}
       <div className="approval-actions">
-        <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision(false)}>Deny</Button>
-        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision(true)}>Approve once</Button>
+        <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision(false)}>{t("deny")}</Button>
+        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision(true)}>{t("approveOnce")}</Button>
       </div>
     </section>
   );

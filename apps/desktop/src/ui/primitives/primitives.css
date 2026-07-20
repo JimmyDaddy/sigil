@@ -63,9 +63,8 @@
   .sg-modal-side-start { margin-right: auto; }
   .sg-modal-side-end { margin-left: auto; }
 
-  .sg-tooltip-anchor { position: relative; display: inline-flex; }
-  .sg-tooltip { position: absolute; z-index: var(--sg-sys-z-popover); left: 50%; bottom: calc(100% + var(--sg-sys-space-2)); width: max-content; max-width: 240px; padding: 5px 8px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-dock); opacity: 0; pointer-events: none; transform: translateX(-50%); transition: opacity var(--sg-sys-motion-fast); font-size: 11px; }
-  .sg-tooltip-anchor:hover .sg-tooltip, .sg-tooltip-anchor:focus-within .sg-tooltip { opacity: 1; }
+  .sg-tooltip-anchor { display: inline-flex; min-width: 0; }
+  .sg-tooltip { position: fixed; z-index: var(--sg-sys-z-tooltip); width: max-content; max-width: min(240px, calc(100vw - 24px)); padding: 5px 8px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-dock); pointer-events: none; font-size: 11px; }
   .sg-toast { padding: 9px var(--sg-sys-space-3); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-dock); font-size: 12px; }
 }
 

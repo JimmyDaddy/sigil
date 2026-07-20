@@ -4,6 +4,8 @@ import { desktopBridge, type DesktopBridge } from "./bridge";
 import { AppearanceToggle } from "./appearance/AppearanceToggle";
 import { ThemeProvider, useAppearance } from "./appearance/ThemeProvider";
 import { ConversationPanel } from "./ConversationPanel";
+import { LocaleToggle } from "./LocaleToggle";
+import { LocaleProvider, useLocale } from "./i18n";
 import { type HistoryState } from "./HistoryPanel";
 import { SessionRail } from "./features/sessions/SessionRail";
 import { WorkspaceSwitcher } from "./features/workspaces/WorkspaceSwitcher";
@@ -54,19 +56,22 @@ const MAX_NAVIGATION_WIDTH = 480;
 
 export function App({ bridge = desktopBridge }: AppProps) {
   return (
-    <ThemeProvider bridge={bridge}>
-      <DesktopApp bridge={bridge} />
-    </ThemeProvider>
+    <LocaleProvider>
+      <ThemeProvider bridge={bridge}>
+        <DesktopApp bridge={bridge} />
+      </ThemeProvider>
+    </LocaleProvider>
   );
 }
 
 function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const appearance = useAppearance();
+  const { t } = useLocale();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
   const [loadState, setLoadState] = useState<LoadState>("loading");
-  const [message, setMessage] = useState("Starting Sigil…");
+  const [message, setMessage] = useState(() => t("startingSigil"));
   const [workspaceHealthError, setWorkspaceHealthError] = useState<string>();
   const [historyState, setHistoryState] = useState<HistoryState>("idle");
   const [catalog, setCatalog] = useState<CatalogPage>(EMPTY_CATALOG);
@@ -93,10 +98,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   const dismissWorkspaceClose = useCallback(() => {
     setPendingWorkspaceClose((pending) => {
-      if (pending !== undefined) setMessage(`${pending.displayName} remains open.`);
+      if (pending !== undefined) setMessage(t("workspaceRemainsOpen", { name: pending.displayName }));
       return undefined;
     });
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!compactNavigation) setNavigationOpen(false);
@@ -129,7 +134,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   const refresh = useCallback(async () => {
     setLoadState("loading");
-    setMessage("Checking open workspaces…");
+    setMessage(t("checkingWorkspaces"));
     try {
       const bootstrap = await bridge.bootstrap();
       applyBootstrap(bootstrap);
@@ -145,25 +150,25 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           ]);
           setActiveWorkspaceId(workspace.id);
           setLoadState("ready");
-          setMessage(`${workspace.displayName} was restored.`);
+          setMessage(t("workspaceRestored", { name: workspace.displayName }));
           return;
         } catch (error) {
           setLoadState("error");
-          setMessage(errorMessage(error) ?? "The last workspace could not be restored. Choose it again to continue.");
+          setMessage(errorMessage(error) ?? t("lastWorkspaceRestoreFailed"));
           return;
         }
       }
       setLoadState("ready");
       setMessage(
         bootstrap.workspaces.length === 0
-          ? "Choose a workspace to begin."
-          : "Sigil is ready.",
+          ? t("chooseWorkspaceBegin")
+          : t("sigilReady"),
       );
     } catch {
       setLoadState("error");
-      setMessage("Sigil could not be started.");
+      setMessage(t("sigilStartFailed"));
     }
-  }, [applyBootstrap, bridge]);
+  }, [applyBootstrap, bridge, t]);
 
   useEffect(() => {
     void refresh();
@@ -180,18 +185,18 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           );
           if (unavailable !== undefined) {
             setWorkspaceHealthError(
-              `${unavailable.displayName} stopped unexpectedly. Close it and reopen the workspace.`,
+              t("workspaceStopped", { name: unavailable.displayName }),
             );
           } else {
             setWorkspaceHealthError(undefined);
           }
         })
         .catch(() => {
-          setWorkspaceHealthError("Sigil cannot reach the workspace service.");
+          setWorkspaceHealthError(t("workspaceServiceUnavailable"));
         });
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [applyBootstrap, bridge]);
+  }, [applyBootstrap, bridge, t]);
 
   const catalogRequest = useCallback(
     (cursor?: string): CatalogRequest => ({
@@ -223,7 +228,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
             const page = await bridge.catalog(workspaceId, catalogRequest());
             setCatalog(page);
             setHistoryState("ready");
-            setSessionMessage("Conversation history refreshed because the list changed.");
+            setSessionMessage(t("historyChangedRefreshed"));
             return;
           } catch {
             setHistoryState("error");
@@ -233,7 +238,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setHistoryState("error");
       }
     },
-    [bridge, catalogRequest],
+    [bridge, catalogRequest, t],
   );
 
   useEffect(() => {
@@ -266,22 +271,22 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   const pickWorkspace = async () => {
     setLoadState("working");
-    setMessage("Waiting for a workspace selection…");
+    setMessage(t("waitingWorkspaceSelection"));
     try {
       const selection = await bridge.pickWorkspace();
       if (selection.cancelled || selection.workspace === undefined) {
         setLoadState("ready");
-        setMessage("Workspace selection cancelled.");
+        setMessage(t("workspaceSelectionCancelled"));
         return;
       }
       rememberOpenWorkspace(selection.workspace);
       setNavigationOpen(false);
       setLoadState("ready");
-      setMessage(`${selection.workspace.displayName} is ready.`);
+      setMessage(t("workspaceReady", { name: selection.workspace.displayName }));
     } catch {
       setLoadState("error");
       setMessage(
-        "The workspace could not be opened. Check that it contains sigil.toml.",
+        t("workspaceOpenFailed"),
       );
     }
   };
@@ -293,22 +298,22 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       return;
     }
     setLoadState("working");
-    setMessage(`Opening ${recent.displayName}…`);
+    setMessage(t("openingWorkspace", { name: recent.displayName }));
     try {
       const workspace = await bridge.openRecentWorkspace(recent.id);
       rememberOpenWorkspace(workspace);
       setNavigationOpen(false);
       setLoadState("ready");
-      setMessage(`${workspace.displayName} is ready.`);
+      setMessage(t("workspaceReady", { name: workspace.displayName }));
     } catch (error) {
       setLoadState("error");
-      setMessage(errorMessage(error) ?? "The recent workspace could not be reopened.");
+      setMessage(errorMessage(error) ?? t("recentWorkspaceOpenFailed"));
     }
   };
 
   const closeWorkspace = async (workspaceId: string, confirmed = false) => {
     setLoadState("working");
-    setMessage("Closing the workspace…");
+    setMessage(t("closingWorkspace"));
     try {
       const remaining = await bridge.closeWorkspace(workspaceId, confirmed);
       setWorkspaces(remaining);
@@ -323,7 +328,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           : current,
       );
       setLoadState("ready");
-      setMessage("Workspace closed.");
+      setMessage(t("workspaceClosed"));
       setPendingWorkspaceClose(undefined);
     } catch (error) {
       if (
@@ -334,43 +339,46 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
         setPendingWorkspaceClose({
           id: workspaceId,
-          displayName: workspace?.displayName ?? "workspace",
-          message: errorMessage(error) ?? "An active run still belongs to this workspace.",
+          displayName: workspace?.displayName ?? t("workspace"),
+          message: errorMessage(error) ?? t("activeRunOwnsWorkspace"),
         });
         setLoadState("ready");
-        setMessage("Workspace close needs confirmation because a run is active.");
+        setMessage(t("workspaceCloseNeedsConfirmation"));
         return;
       }
       setLoadState("error");
-      setMessage("The workspace could not be closed cleanly.");
+      setMessage(t("workspaceCloseFailed"));
     }
   };
 
-  const createSession = async () => {
-    if (activeWorkspaceId === undefined) return;
+  const createSession = async (modelName?: string): Promise<boolean> => {
+    if (activeWorkspaceId === undefined) return false;
     setSessionActionState("working");
-    setSessionMessage("Creating a new conversation…");
+    setSessionMessage(t("creatingConversation"));
     try {
       const session = await bridge.createSession(
         activeWorkspaceId,
-        "New conversation",
+        t("newConversation"),
+        modelName,
       );
       setSelectedSession(session);
       setSelectedDurableSessionId(undefined);
       setNavigationOpen(false);
       setSessionActionState("idle");
-      setSessionMessage("New conversation ready.");
+      setSessionMessage(t("newConversationReady"));
       await loadHistory(activeWorkspaceId);
+      return true;
     } catch {
       setSessionActionState("error");
-      setSessionMessage("The conversation could not be created. Try again.");
+      setSessionMessage(t("conversationCreateFailed"));
+      return false;
     }
   };
 
   const openSession = async (entry: CatalogEntry) => {
     if (activeWorkspaceId === undefined || entry.sessionId === undefined) return;
     setSessionActionState("working");
-    setSessionMessage("Opening conversation…");
+    setSessionMessage(t("openingConversation"));
     try {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef: entry.sessionRef,
@@ -384,7 +392,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionMessage(undefined);
     } catch {
       setSessionActionState("error");
-      setSessionMessage("This conversation could not be opened. Refresh the list and try again.");
+      setSessionMessage(t("conversationOpenFailed"));
     }
   };
 
@@ -392,7 +400,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     if (activeWorkspaceId === undefined || pendingSessionRename === undefined) return;
     const displayName = pendingSessionRename.displayName.trim();
     if (displayName.length === 0 || displayName.length > 160) {
-      setSessionManagementError("Enter a conversation name between 1 and 160 characters.");
+      setSessionManagementError(t("conversationNameValidation"));
       return;
     }
     setSessionActionState("working");
@@ -408,11 +416,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       }
       setPendingSessionRename(undefined);
       setSessionActionState("idle");
-      setSessionMessage("Conversation renamed.");
+      setSessionMessage(t("conversationRenamed"));
       await loadHistory(activeWorkspaceId);
     } catch (error) {
       setSessionActionState("error");
-      setSessionManagementError(errorMessage(error) ?? "The conversation could not be renamed safely.");
+      setSessionManagementError(errorMessage(error) ?? t("conversationRenameFailed"));
     }
   };
 
@@ -431,11 +439,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       }
       setPendingSessionDelete(undefined);
       setSessionActionState("idle");
-      setSessionMessage("Conversation deleted.");
+      setSessionMessage(t("conversationDeleted"));
       await loadHistory(activeWorkspaceId);
     } catch (error) {
       setSessionActionState("error");
-      setSessionManagementError(errorMessage(error) ?? "The conversation could not be deleted safely.");
+      setSessionManagementError(errorMessage(error) ?? t("conversationDeleteFailed"));
     }
   };
 
@@ -451,11 +459,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       });
       setPendingSessionQuarantine(undefined);
       setSessionActionState("idle");
-      setSessionMessage("Invalid conversation source moved to quarantine.");
+      setSessionMessage(t("invalidSourceQuarantined"));
       await loadHistory(activeWorkspaceId);
     } catch (error) {
       setSessionActionState("error");
-      setSessionManagementError(errorMessage(error) ?? "The invalid source could not be quarantined safely.");
+      setSessionManagementError(errorMessage(error) ?? t("invalidSourceQuarantineFailed"));
     }
   };
 
@@ -491,7 +499,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       onRename={(entry) => {
         setSessionActionState("idle");
         setSessionManagementError(undefined);
-        setPendingSessionRename({ entry, displayName: entry.title ?? "Untitled conversation" });
+        setPendingSessionRename({ entry, displayName: entry.title ?? t("untitledConversation") });
       }}
       onDelete={(entry) => {
         setSessionActionState("idle");
@@ -510,20 +518,20 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     <div className="app-shell">
       <header className="topbar">
         {activeWorkspace === undefined ? null : (
-          <Tooltip label="Browse conversations">
+          <Tooltip label={t("browseConversations")}>
             <IconButton
               className="pane-toggle navigation-toggle"
               ref={navigationTriggerRef}
               type="button"
               icon={<Icon name="menu" />}
-              aria-label="Browse conversations"
+              aria-label={t("browseConversations")}
               aria-controls="desktop-navigation"
               aria-expanded={navigationOpen}
               onClick={() => setNavigationOpen((open) => !open)}
             />
           </Tooltip>
         )}
-        <a className="brand" href="#main" aria-label="Sigil desktop home">
+        <a className="brand" href="#main" aria-label={t("sigilDesktopHome")}>
           <span className="brand-mark" aria-hidden="true">
             <img className="brand-mark-light" src={sigilMarkLight} alt="" />
             <img className="brand-mark-dark" src={sigilMarkDark} alt="" />
@@ -546,10 +554,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         />
         <div className="topbar-actions">
           {activeWorkspace === undefined ? null : (
-            <Tooltip label="New conversation">
+            <Tooltip label={t("newConversation")}>
               <IconButton
                 className="sg-icon-button-primary"
-                aria-label="New conversation"
+                aria-label={t("newConversation")}
                 type="button"
                 icon={<Icon name="add" />}
                 disabled={sessionActionState === "working"}
@@ -557,6 +565,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               />
             </Tooltip>
           )}
+          <LocaleToggle />
           <AppearanceToggle />
         </div>
       </header>
@@ -570,7 +579,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           <Drawer
             id="desktop-navigation"
             open={navigationOpen}
-            title="Browse conversations"
+            title={t("browseConversations")}
             side="start"
             returnFocusRef={navigationTriggerRef}
             onOpenChange={setNavigationOpen}
@@ -578,32 +587,41 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
             {navigationContent}
           </Drawer>
         ) : (
-          <aside id="desktop-navigation" className="navigation-pane" aria-label="Conversation navigation">
+          <aside id="desktop-navigation" className="navigation-pane" aria-label={t("conversationNavigation")}>
             {navigationContent}
-            <NavigationResizeHandle width={navigationWidth} onWidthChange={setNavigationWidth} />
+            <NavigationResizeHandle
+              width={navigationWidth}
+              label={t("resizeConversationSidebar")}
+              onWidthChange={setNavigationWidth}
+            />
           </aside>
         )}
 
-        <section className="conversation-stage" aria-label="Conversation workspace">
+        <section className="conversation-stage" aria-label={t("conversationWorkspace")}>
           {activeWorkspace === undefined ? (
             <div className="welcome-state">
               <span className="welcome-mark" aria-hidden="true">
                 <img className="brand-mark-light" src={sigilMarkLight} alt="" />
                 <img className="brand-mark-dark" src={sigilMarkDark} alt="" />
               </span>
-              <h1>Open a workspace</h1>
-              <p>Choose a project to start or continue a coding conversation.</p>
-              <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>Open workspace</Button>
+              <h1>{t("openWorkspaceTitle")}</h1>
+              <p>{t("openWorkspaceDetail")}</p>
+              <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>{t("openWorkspace")}</Button>
             </div>
           ) : selectedSession === undefined ? (
             <div className="conversation-empty">
               <p className="eyebrow">{activeWorkspace.displayName}</p>
-              <h1>Select a conversation</h1>
-              <p>Continue from the list or start a new coding task in this workspace.</p>
+              <h1>{t("selectConversation")}</h1>
+              <p>{t("selectConversationDetail")}</p>
             </div>
           ) : (
             <div className="conversation-surface">
-              <ConversationPanel bridge={bridge} workspaceId={activeWorkspace.id} session={selectedSession} />
+              <ConversationPanel
+                bridge={bridge}
+                workspaceId={activeWorkspace.id}
+                session={selectedSession}
+                onModelChange={createSession}
+              />
             </div>
           )}
         </section>
@@ -619,8 +637,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
       <Dialog
         open={pendingSessionRename !== undefined}
-        title="Rename conversation"
-        description="Use a short name that makes this conversation easy to find."
+        title={t("renameConversation")}
+        description={t("renameConversationDetail")}
         initialFocusRef={sessionRenameInputRef}
         onOpenChange={(open) => {
           if (!open && sessionActionState !== "working") {
@@ -634,7 +652,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           <form onSubmit={(event) => { event.preventDefault(); void renameSession(); }}>
             <TextField
               ref={sessionRenameInputRef}
-              label="Conversation name"
+              label={t("conversationName")}
               value={pendingSessionRename.displayName}
               maxLength={160}
               error={sessionManagementError}
@@ -645,8 +663,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 setPendingSessionRename(undefined);
                 setSessionActionState("idle");
                 setSessionManagementError(undefined);
-              }}>Cancel</Button>
-              <Button type="submit" variant="primary" busy={sessionActionState === "working"}>Rename</Button>
+              }}>{t("cancel")}</Button>
+              <Button type="submit" variant="primary" busy={sessionActionState === "working"}>{t("rename")}</Button>
             </div>
           </form>
         )}
@@ -654,8 +672,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
       <Dialog
         open={pendingSessionDelete !== undefined}
-        title="Delete conversation?"
-        description={pendingSessionDelete?.title ?? "Untitled conversation"}
+        title={t("deleteConversation")}
+        description={pendingSessionDelete?.title ?? t("untitledConversation")}
         destructive
         onOpenChange={(open) => {
           if (!open && sessionActionState !== "working") {
@@ -668,7 +686,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         {pendingSessionDelete === undefined ? null : (
           <>
             <p className="destructive-explanation">
-              This permanently removes the local conversation history. File, shell, and remote side effects are not undone.
+              {t("deleteConversationDetail")}
             </p>
             {sessionManagementError === undefined ? null : <p role="alert">{sessionManagementError}</p>}
             <div className="confirmation-actions">
@@ -676,8 +694,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 setPendingSessionDelete(undefined);
                 setSessionActionState("idle");
                 setSessionManagementError(undefined);
-              }}>Keep conversation</Button>
-              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void deleteSession()}>Delete permanently</Button>
+              }}>{t("keepConversation")}</Button>
+              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void deleteSession()}>{t("deletePermanently")}</Button>
             </div>
           </>
         )}
@@ -685,7 +703,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
       <Dialog
         open={pendingSessionQuarantine !== undefined}
-        title="Quarantine invalid conversation source?"
+        title={t("quarantineConversation")}
         description={pendingSessionQuarantine?.sessionRef}
         destructive
         onOpenChange={(open) => {
@@ -699,7 +717,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         {pendingSessionQuarantine === undefined ? null : (
           <>
             <p className="destructive-explanation">
-              Sigil will revalidate this malformed source and move it out of the active conversation list. It is kept in the local quarantine directory for manual recovery.
+              {t("quarantineConversationDetail")}
             </p>
             {sessionManagementError === undefined ? null : <p role="alert">{sessionManagementError}</p>}
             <div className="confirmation-actions">
@@ -707,8 +725,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 setPendingSessionQuarantine(undefined);
                 setSessionActionState("idle");
                 setSessionManagementError(undefined);
-              }}>Keep source</Button>
-              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void quarantineSession()}>Move to quarantine</Button>
+              }}>{t("keepSource")}</Button>
+              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void quarantineSession()}>{t("moveToQuarantine")}</Button>
             </div>
           </>
         )}
@@ -716,7 +734,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
       <Dialog
         open={pendingWorkspaceClose !== undefined}
-        title={`Close ${pendingWorkspaceClose?.displayName ?? "workspace"}?`}
+        title={t("closeWorkspaceQuestion", { name: pendingWorkspaceClose?.displayName ?? t("workspace") })}
         description={pendingWorkspaceClose?.message}
         destructive
         returnFocusRef={workspaceSwitcherRef}
@@ -727,14 +745,14 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         {pendingWorkspaceClose === undefined ? null : (
           <>
             <p className="destructive-explanation">
-              Closing stops the local runtime and interrupts its active runs. File, shell, and remote side effects that already happened are not undone.
+              {t("closeWorkspaceDetail")}
             </p>
             <div className="confirmation-actions">
               <Button type="button" data-initial-focus onClick={dismissWorkspaceClose}>
-                Keep running
+                {t("keepRunning")}
               </Button>
               <Button type="button" variant="danger" onClick={() => void closeWorkspace(pendingWorkspaceClose.id, true)}>
-                Close workspace and interrupt runs
+                {t("closeAndInterrupt")}
               </Button>
             </div>
           </>
@@ -746,9 +764,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
 function NavigationResizeHandle({
   width,
+  label,
   onWidthChange,
 }: {
   readonly width: number;
+  readonly label: string;
   readonly onWidthChange: (width: number) => void;
 }) {
   const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -781,7 +801,7 @@ function NavigationResizeHandle({
     <div
       className="navigation-resize-handle"
       role="separator"
-      aria-label="Resize conversation sidebar"
+      aria-label={label}
       aria-orientation="vertical"
       aria-valuemin={MIN_NAVIGATION_WIDTH}
       aria-valuemax={MAX_NAVIGATION_WIDTH}

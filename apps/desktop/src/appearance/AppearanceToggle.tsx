@@ -1,6 +1,7 @@
 import type { ThemePreference } from "./contract";
 import { useAppearance } from "./ThemeProvider";
 import { Icon, type IconName } from "../ui/icons";
+import { useLocale } from "../i18n";
 import { IconButton, Tooltip } from "../ui/primitives";
 
 const nextPreference: Record<ThemePreference, ThemePreference> = {
@@ -15,19 +16,17 @@ const preferenceIcon: Record<ThemePreference, IconName> = {
   dark: "moon",
 };
 
-const preferenceLabel: Record<ThemePreference, string> = {
-  system: "System theme",
-  light: "Light theme",
-  dark: "Dark theme",
-};
-
 export function AppearanceToggle() {
   const appearance = useAppearance();
+  const { t } = useLocale();
   const next = nextPreference[appearance.preference];
   const failed = appearance.error !== undefined;
   const label = failed
-    ? "Theme change failed. Retry"
-    : `${preferenceLabel[appearance.preference]}. Switch to ${preferenceLabel[next].toLowerCase()}`;
+    ? t("themeFailed")
+    : t("switchTheme", {
+      current: themeLabel(appearance.preference, t),
+      next: themeLabel(next, t).toLocaleLowerCase(),
+    });
 
   const changeAppearance = () => {
     if (failed) void appearance.retry();
@@ -50,4 +49,12 @@ export function AppearanceToggle() {
       )}
     </span>
   );
+}
+
+function themeLabel(preference: ThemePreference, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (preference) {
+    case "system": return t("systemTheme");
+    case "light": return t("lightTheme");
+    case "dark": return t("darkTheme");
+  }
 }

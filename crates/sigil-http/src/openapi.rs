@@ -351,7 +351,7 @@ pub fn http_openapi_document() -> Value {
             },
             "/sessions/{session_id}/run-context": {
                 "get": {
-                    "summary": "Read typed model, approval-mode, and context usage facts",
+                    "summary": "Read typed model, permission-mode, and context usage facts",
                     "description": "Projects the durable session model identity and latest provider usage without exposing server-private paths or inventing missing context values.",
                     "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
                     "responses": {
@@ -586,7 +586,8 @@ pub fn http_openapi_document() -> Value {
                 "SessionCreateRequest": {
                     "type": "object",
                     "properties": {
-                        "label": { "type": "string" }
+                        "label": { "type": "string" },
+                        "model_name": { "type": "string" }
                     }
                 },
                 "SessionOpenRequest": {
@@ -786,30 +787,36 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunStartRequest": {
                     "type": "object",
-                    "required": ["prompt", "approval_mode"],
+                    "required": ["prompt", "permission_mode"],
                     "properties": {
                         "prompt": { "type": "string" },
-                        "approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" }
+                        "permission_mode": { "$ref": "#/components/schemas/PermissionMode" }
                     }
                 },
-                "RunApprovalMode": {
+                "PermissionMode": {
                     "type": "string",
-                    "enum": ["ask", "allow_readonly", "deny"]
+                    "enum": ["read-only", "manual", "auto-edit", "danger-full-access"]
                 },
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "model_selection", "default_approval_mode", "available_approval_modes", "context_window_source"],
+                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "context_window_source"],
                     "properties": {
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
-                        "model_selection": { "type": "string", "enum": ["fixed_for_session"] },
-                        "default_approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" },
-                        "available_approval_modes": {
+                        "available_models": {
                             "type": "array",
                             "minItems": 1,
                             "uniqueItems": true,
-                            "items": { "$ref": "#/components/schemas/RunApprovalMode" }
+                            "items": { "type": "string" }
+                        },
+                        "model_selection": { "type": "string", "enum": ["fixed_for_session"] },
+                        "default_permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
+                        "available_permission_modes": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": { "$ref": "#/components/schemas/PermissionMode" }
                         },
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
@@ -862,12 +869,12 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunSnapshot": {
                     "type": "object",
-                    "required": ["id", "session_id", "status", "approval_mode", "prompt_preview", "pending_approval_call_ids", "stream_sequence"],
+                    "required": ["id", "session_id", "status", "permission_mode", "prompt_preview", "pending_approval_call_ids", "stream_sequence"],
                     "properties": {
                         "id": { "type": "string" },
                         "session_id": { "type": "string" },
                         "status": { "$ref": "#/components/schemas/RunStatus" },
-                        "approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" },
+                        "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "prompt_preview": { "type": "string" },
                         "stream_sequence": { "type": "integer", "format": "uint64" },
                         "pending_approval_call_ids": { "type": "array", "items": { "type": "string" } }

@@ -18,7 +18,7 @@ pub use dto::{
     DesktopApprovalCommandReceipt, DesktopApprovalDecision, DesktopApprovalDecisionRecord,
     DesktopApprovalDecisionRequest, DesktopApprovalRecordedDecision, DesktopCatalogQuery,
     DesktopCommandEnvelope, DesktopContextWindowSource, DesktopModelSelectionPolicy,
-    DesktopPendingApproval, DesktopRunApprovalMode, DesktopRunCancelCommandReceipt,
+    DesktopPendingApproval, DesktopPermissionMode, DesktopRunCancelCommandReceipt,
     DesktopRunCancelRequest, DesktopRunContextView, DesktopRunSnapshot,
     DesktopRunStartCommandReceipt, DesktopRunStartRequest, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,

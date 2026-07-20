@@ -688,7 +688,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read typed model, approval-mode, and context usage facts
+         * Read typed model, permission-mode, and context usage facts
          * @description Projects the durable session model identity and latest provider usage without exposing server-private paths or inventing missing context values.
          */
         get: {
@@ -954,7 +954,7 @@ export interface components {
             /** Format: uint64 */
             expected_stream_sequence?: number | null;
             /** @constant */
-            protocol_version: 1;
+            protocol_version: 2;
             session_id: string;
         };
         DisclosureListResponse: {
@@ -976,7 +976,7 @@ export interface components {
             status: "ok";
         };
         /** @enum {string} */
-        RunApprovalMode: "ask" | "allow_readonly" | "deny";
+        PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
         };
@@ -994,12 +994,13 @@ export interface components {
             reason?: string | null;
         };
         RunContextView: {
-            available_approval_modes: components["schemas"]["RunApprovalMode"][];
+            available_models: string[];
+            available_permission_modes: components["schemas"]["PermissionMode"][];
             /** @enum {string} */
             context_window_source: "provider" | "config" | "unavailable";
             /** Format: uint32 */
             context_window_tokens?: number | null;
-            default_approval_mode: components["schemas"]["RunApprovalMode"];
+            default_permission_mode: components["schemas"]["PermissionMode"];
             /** Format: uint64 */
             last_prompt_tokens?: number | null;
             model_name: string;
@@ -1008,9 +1009,9 @@ export interface components {
             provider_name: string;
         };
         RunSnapshot: {
-            approval_mode: components["schemas"]["RunApprovalMode"];
             id: string;
             pending_approval_call_ids: string[];
+            permission_mode: components["schemas"]["PermissionMode"];
             prompt_preview: string;
             session_id: string;
             status: components["schemas"]["RunStatus"];
@@ -1031,7 +1032,7 @@ export interface components {
             session_id: string;
         };
         RunStartRequest: {
-            approval_mode: components["schemas"]["RunApprovalMode"];
+            permission_mode: components["schemas"]["PermissionMode"];
             prompt: string;
         };
         /** @enum {string} */
@@ -1053,7 +1054,7 @@ export interface components {
             bind_addr: string;
             capabilities: components["schemas"]["ServerCapabilities"];
             /** @constant */
-            protocol_version: 1;
+            protocol_version: 2;
             /** @constant */
             schema_version: 4;
             server_version: string;
@@ -1103,6 +1104,7 @@ export interface components {
         };
         SessionCreateRequest: {
             label?: string;
+            model_name?: string;
         };
         SessionDeleteRequest: {
             session_id: string;

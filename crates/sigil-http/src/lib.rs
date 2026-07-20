@@ -31,7 +31,7 @@ pub use driver::{
 pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
     HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
-    HttpContextWindowSource, HttpModelSelectionPolicy, HttpPendingApproval, HttpRunApprovalMode,
+    HttpContextWindowSource, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
     HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot,
     HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
     HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo, HttpSessionBinding,

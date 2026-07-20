@@ -1,6 +1,7 @@
 import { useRef, useState, type RefObject } from "react";
 
 import type { RecentWorkspaceSummary, WorkspaceSummary } from "../../types";
+import { useLocale } from "../../i18n";
 import { StatusIndicator } from "../../ui/feedback";
 import { Icon } from "../../ui/icons";
 import { Button, IconButton, Popover } from "../../ui/primitives";
@@ -28,6 +29,7 @@ export function WorkspaceSwitcher({
   onClose,
   triggerRef,
 }: WorkspaceSwitcherProps) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const localTriggerRef = useRef<HTMLButtonElement>(null);
   const resolvedTriggerRef = triggerRef ?? localTriggerRef;
@@ -47,7 +49,7 @@ export function WorkspaceSwitcher({
       label={
         <span className="workspace-switcher-label">
           {active === undefined ? (
-            <span className="workspace-switcher-placeholder">Workspaces</span>
+            <span className="workspace-switcher-placeholder">{t("workspaces")}</span>
           ) : (
             <StatusIndicator
               label={active.displayName}
@@ -57,18 +59,18 @@ export function WorkspaceSwitcher({
           <span aria-hidden="true">⌄</span>
         </span>
       }
-      accessibleLabel={`Switch workspace${active === undefined ? "" : `: ${active.displayName}`}`}
+      accessibleLabel={active === undefined ? t("switchWorkspace") : t("switchWorkspaceNamed", { name: active.displayName })}
       open={open}
       onOpenChange={setOpen}
       triggerRef={resolvedTriggerRef}
     >
       <div className="workspace-switcher-panel">
         <div className="workspace-switcher-heading">
-          <strong>Workspaces</strong>
-          <small>{workspaces.length} open</small>
+          <strong>{t("workspaces")}</strong>
+          <small>{t("openCount", { count: workspaces.length })}</small>
         </div>
         {workspaces.length === 0 ? (
-          <p className="workspace-switcher-empty">No workspace is open.</p>
+          <p className="workspace-switcher-empty">{t("noWorkspaceOpen")}</p>
         ) : (
           <ul className="workspace-switcher-list">
             {workspaces.map((workspace) => (
@@ -89,7 +91,7 @@ export function WorkspaceSwitcher({
                   />
                 </Button>
                 <IconButton
-                  aria-label={`Close ${workspace.displayName}`}
+                  aria-label={t("closeWorkspace", { name: workspace.displayName })}
                   icon={<Icon name="close" />}
                   onClick={() => {
                     onClose(workspace.id);
@@ -102,7 +104,7 @@ export function WorkspaceSwitcher({
         )}
         {closedRecent.length > 0 ? (
           <div className="workspace-recent-group">
-            <strong>Recent</strong>
+            <strong>{t("recent")}</strong>
             <ul className="workspace-switcher-list">
               {closedRecent.map((recent) => (
                 <li key={recent.id}>
@@ -123,7 +125,7 @@ export function WorkspaceSwitcher({
           </div>
         ) : null}
         <Button type="button" variant="primary" busy={busy} leadingIcon={<Icon name="add" />} onClick={choose}>
-          Open workspace
+          {t("openWorkspace")}
         </Button>
       </div>
     </Popover>

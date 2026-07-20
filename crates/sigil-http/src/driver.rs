@@ -54,7 +54,11 @@ pub trait HttpRunDriver: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the runtime cannot establish a durable V2 session scope and path.
-    fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError>;
+    fn bind_session(
+        &self,
+        session_id: &str,
+        model_name: Option<&str>,
+    ) -> Result<HttpSessionBinding, HttpRunDriverError>;
 
     /// Resolves an existing durable session after the registry validates its wire identity.
     ///
@@ -122,7 +126,7 @@ pub trait HttpRunDriver: Send + Sync {
         ))
     }
 
-    /// Projects typed model, approval-mode, and context usage facts for one bound session.
+    /// Projects typed model, permission-mode, and context usage facts for one bound session.
     ///
     /// # Errors
     ///

@@ -26,9 +26,9 @@ use crate::{
     },
     dto::{
         HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
-        HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt,
-        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
+        HttpPendingApproval, HttpPermissionMode, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
+        HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
+        HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
         HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
         HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
@@ -52,9 +52,9 @@ pub enum HttpRegistryError {
     /// The run prompt is empty after trimming whitespace.
     #[error("http run start prompt must not be empty")]
     EmptyPrompt,
-    /// The run did not include an explicit HTTP approval mode.
-    #[error("http run start requires an explicit approval mode")]
-    MissingApprovalMode,
+    /// The run did not include an explicit permission mode.
+    #[error("http run start requires an explicit permission mode")]
+    MissingPermissionMode,
     /// The runtime driver could not establish a durable binding for the adapter session.
     #[error("http driver rejected durable binding for session {session_id}: {message}")]
     SessionBindingRejected { session_id: String, message: String },
@@ -91,12 +91,6 @@ pub enum HttpRegistryError {
     /// The approval call id is not currently pending for the run.
     #[error("http approval not pending for run {run_id} call {call_id}")]
     ApprovalNotPending { run_id: String, call_id: String },
-    /// The run's approval mode does not use the approval endpoint.
-    #[error("http run {run_id} approval mode {approval_mode} does not use approval endpoint")]
-    ApprovalModeDoesNotAsk {
-        run_id: String,
-        approval_mode: HttpRunApprovalMode,
-    },
     /// The underlying run driver rejected the registry operation.
     #[error("http driver rejected {operation} for run {run_id}: {message}")]
     DriverRejected {
@@ -263,12 +257,13 @@ impl HttpSessionRunRegistry {
             state.ensure_accepting_commands()?;
             state.next_session_id()
         };
-        let binding = self.driver.bind_session(&id).map_err(|error| {
-            HttpRegistryError::SessionBindingRejected {
+        let binding = self
+            .driver
+            .bind_session(&id, request.model_name.as_deref())
+            .map_err(|error| HttpRegistryError::SessionBindingRejected {
                 session_id: id.clone(),
                 message: error.message,
-            }
-        })?;
+            })?;
         validate_session_binding(&id, &binding)?;
         let mut state = self.lock_state();
         let session = HttpSessionState {
@@ -462,7 +457,7 @@ impl HttpSessionRunRegistry {
     ///
     /// # Errors
     ///
-    /// Returns an error when the session is unknown, the prompt is empty, approval mode is missing,
+    /// Returns an error when the session is unknown, the prompt is empty, permission mode is missing,
     /// or the driver rejects the run.
     pub fn start_run(
         &self,
@@ -472,9 +467,9 @@ impl HttpSessionRunRegistry {
         if request.prompt.trim().is_empty() {
             return Err(HttpRegistryError::EmptyPrompt);
         }
-        let approval_mode = request
-            .approval_mode
-            .ok_or(HttpRegistryError::MissingApprovalMode)?;
+        let permission_mode = request
+            .permission_mode
+            .ok_or(HttpRegistryError::MissingPermissionMode)?;
         let prompt = request.prompt;
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
@@ -514,7 +509,7 @@ impl HttpSessionRunRegistry {
             let run = HttpRunState::new(
                 run_id.clone(),
                 session_id.to_owned(),
-                approval_mode,
+                permission_mode,
                 prompt_preview(&prompt),
             );
             session.run_ids.push(run_id.clone());
@@ -1952,7 +1947,7 @@ struct HttpRunState {
     status: HttpRunStatus,
     previous_status: Option<HttpRunStatus>,
     cancel_operation: Option<Arc<HttpCancelOperation>>,
-    approval_mode: HttpRunApprovalMode,
+    permission_mode: HttpPermissionMode,
     prompt_preview: String,
     pending_approvals: BTreeMap<String, HttpPendingApproval>,
     in_flight_approvals: BTreeMap<String, HttpPendingApproval>,
@@ -1964,7 +1959,7 @@ impl HttpRunState {
     fn new(
         id: String,
         session_id: String,
-        approval_mode: HttpRunApprovalMode,
+        permission_mode: HttpPermissionMode,
         prompt_preview: String,
     ) -> Self {
         Self {
@@ -1973,7 +1968,7 @@ impl HttpRunState {
             status: HttpRunStatus::Starting,
             previous_status: None,
             cancel_operation: None,
-            approval_mode,
+            permission_mode,
             prompt_preview,
             pending_approvals: BTreeMap::new(),
             in_flight_approvals: BTreeMap::new(),
@@ -1987,7 +1982,7 @@ impl HttpRunState {
             id: self.id.clone(),
             session_id: self.session_id.clone(),
             status: self.status,
-            approval_mode: self.approval_mode,
+            permission_mode: self.permission_mode,
             prompt_preview: self.prompt_preview.clone(),
             pending_approval_call_ids: self.pending_approvals.keys().cloned().collect(),
             stream_sequence: self.stream_sequence,
@@ -2008,12 +2003,6 @@ impl HttpRunState {
         if !status_accepts_approval {
             return Some(HttpRegistryError::RunNotActive {
                 run_id: run_id.to_owned(),
-            });
-        }
-        if self.approval_mode != HttpRunApprovalMode::Ask {
-            return Some(HttpRegistryError::ApprovalModeDoesNotAsk {
-                run_id: run_id.to_owned(),
-                approval_mode: self.approval_mode,
             });
         }
         None

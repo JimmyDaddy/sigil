@@ -39,7 +39,7 @@ pub struct HttpServerCapabilities {
     pub cancellation: bool,
     /// Durable task verification can be inspected and one exact recommended check rerun.
     pub verification: bool,
-    /// Bound sessions expose typed model, approval-mode, and context-usage facts.
+    /// Bound sessions expose typed model, permission-mode, and context-usage facts.
     pub run_context: bool,
 }
 
@@ -111,6 +111,9 @@ pub struct HttpSessionCreateRequest {
     /// Optional user-facing label for clients that manage multiple sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional model for the new durable session, selected from the run-context offer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 /// Request body for reopening one durable workspace session as a live adapter handle.
@@ -300,11 +303,9 @@ pub struct HttpSessionBinding {
 pub struct HttpRunStartRequest {
     /// User prompt for the run.
     pub prompt: String,
-    /// Explicit HTTP approval policy for the run.
-    ///
-    /// The HTTP adapter intentionally exposes `allow_readonly` instead of a broad `allow`.
+    /// Explicit user-facing permission mode for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval_mode: Option<HttpRunApprovalMode>,
+    pub permission_mode: Option<HttpPermissionMode>,
 }
 
 /// Request body for cancelling one run.
@@ -316,16 +317,14 @@ pub struct HttpRunCancelRequest {
     pub reason: Option<String>,
 }
 
-/// Approval policy accepted by the HTTP run start endpoint.
+/// Permission mode accepted by the HTTP run start endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpRunApprovalMode {
-    /// Deny tool calls that need approval.
-    Deny,
-    /// Allow read-only work while keeping mutating operations gated by policy.
-    AllowReadonly,
-    /// Require an explicit approval endpoint decision for gated tool calls.
-    Ask,
+#[serde(rename_all = "kebab-case")]
+pub enum HttpPermissionMode {
+    ReadOnly,
+    Manual,
+    AutoEdit,
+    DangerFullAccess,
 }
 
 /// Model-selection policy for one durable session.
@@ -356,12 +355,14 @@ pub struct HttpRunContextView {
     pub provider_name: String,
     /// Model identity durably frozen for this session.
     pub model_name: String,
+    /// Models accepted when creating a new session for this provider.
+    pub available_models: Vec<String>,
     /// Whether the model can change without forking the durable session.
     pub model_selection: HttpModelSelectionPolicy,
-    /// Default approval mode selected by clients for a new run.
-    pub default_approval_mode: HttpRunApprovalMode,
-    /// Complete bounded set of approval modes accepted by run start.
-    pub available_approval_modes: Vec<HttpRunApprovalMode>,
+    /// Configured permission mode selected by clients for a new run.
+    pub default_permission_mode: HttpPermissionMode,
+    /// Complete bounded set of permission modes accepted by run start.
+    pub available_permission_modes: Vec<HttpPermissionMode>,
     /// Effective context limit when one is provable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u32>,
@@ -372,19 +373,42 @@ pub struct HttpRunContextView {
     pub context_window_source: HttpContextWindowSource,
 }
 
-impl HttpRunApprovalMode {
+impl HttpPermissionMode {
     /// Returns the stable wire label.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Deny => "deny",
-            Self::AllowReadonly => "allow_readonly",
-            Self::Ask => "ask",
+            Self::ReadOnly => "read-only",
+            Self::Manual => "manual",
+            Self::AutoEdit => "auto-edit",
+            Self::DangerFullAccess => "danger-full-access",
         }
     }
 }
 
-impl fmt::Display for HttpRunApprovalMode {
+impl From<HttpPermissionMode> for sigil_kernel::PermissionMode {
+    fn from(value: HttpPermissionMode) -> Self {
+        match value {
+            HttpPermissionMode::ReadOnly => Self::ReadOnly,
+            HttpPermissionMode::Manual => Self::Manual,
+            HttpPermissionMode::AutoEdit => Self::AutoEdit,
+            HttpPermissionMode::DangerFullAccess => Self::DangerFullAccess,
+        }
+    }
+}
+
+impl From<sigil_kernel::PermissionMode> for HttpPermissionMode {
+    fn from(value: sigil_kernel::PermissionMode) -> Self {
+        match value {
+            sigil_kernel::PermissionMode::ReadOnly => Self::ReadOnly,
+            sigil_kernel::PermissionMode::Manual => Self::Manual,
+            sigil_kernel::PermissionMode::AutoEdit => Self::AutoEdit,
+            sigil_kernel::PermissionMode::DangerFullAccess => Self::DangerFullAccess,
+        }
+    }
+}
+
+impl fmt::Display for HttpPermissionMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -462,8 +486,8 @@ pub struct HttpRunSnapshot {
     pub session_id: String,
     /// Current adapter-visible run status.
     pub status: HttpRunStatus,
-    /// Explicit approval mode provided when the run started.
-    pub approval_mode: HttpRunApprovalMode,
+    /// Explicit permission mode provided when the run started.
+    pub permission_mode: HttpPermissionMode,
     /// Bounded prompt preview for adapter clients.
     pub prompt_preview: String,
     /// Pending approval call ids in deterministic order.

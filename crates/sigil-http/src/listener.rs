@@ -1176,7 +1176,6 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::StaleCommandSequence { .. }
         | HttpRegistryError::RunNotActive { .. }
         | HttpRegistryError::ApprovalNotPending { .. }
-        | HttpRegistryError::ApprovalModeDoesNotAsk { .. }
         | HttpRegistryError::ApprovalRequestChanged { .. }
         | HttpRegistryError::ApprovalToolCallChanged { .. }
         | HttpRegistryError::ApprovalPolicyChanged { .. }
@@ -1190,7 +1189,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::DurableSessionNotReady
         | HttpRegistryError::DurableSessionIdentityChanged => 409,
         HttpRegistryError::EmptyPrompt
-        | HttpRegistryError::MissingApprovalMode
+        | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidSessionOpenRequest => 400,
         HttpRegistryError::DriverRejected { .. }
         | HttpRegistryError::DriverPanicked { .. }

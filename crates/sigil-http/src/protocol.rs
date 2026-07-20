@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
 /// Current protocol command/event surface version.
-pub const HTTP_PROTOCOL_VERSION: u16 = 1;
+pub const HTTP_PROTOCOL_VERSION: u16 = 2;
 
 /// Versioned command envelope shared by future HTTP, IDE, and TUI command bridges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

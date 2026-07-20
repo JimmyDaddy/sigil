@@ -30,8 +30,9 @@ fn run_context_decodes_exact_typed_server_contract() {
         "provider_name": "deepseek",
         "model_name": "deepseek-v4-flash",
         "model_selection": "fixed_for_session",
-        "default_approval_mode": "ask",
-        "available_approval_modes": ["ask", "allow_readonly", "deny"],
+        "available_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "default_permission_mode": "manual",
+        "available_permission_modes": ["read-only", "manual", "auto-edit", "danger-full-access"],
         "context_window_tokens": 1_000_000,
         "last_prompt_tokens": 42_000,
         "context_window_source": "provider"

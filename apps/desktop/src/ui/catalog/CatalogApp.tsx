@@ -107,7 +107,7 @@ function FixtureSurface({
   readonly theme: CatalogTheme;
 }) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const [approvalMode, setApprovalMode] = useState<"ask" | "allow_readonly" | "deny">("ask");
+  const [permissionMode, setPermissionMode] = useState<"read-only" | "manual" | "auto-edit" | "danger-full-access">("manual");
   const counts = fixture.degradedCounts;
   if (fixture.fullWorkbench) {
     return (
@@ -159,8 +159,10 @@ function FixtureSurface({
             composerRef={composerRef}
             runContext={fixture.composer.context}
             runContextBusy={false}
-            approvalMode={approvalMode}
-            onApprovalModeChange={setApprovalMode}
+            modelChanging={false}
+            permissionMode={permissionMode}
+            onModelChange={() => undefined}
+            onPermissionModeChange={setPermissionMode}
             onSubmit={async () => false}
             onCancel={() => undefined}
           />

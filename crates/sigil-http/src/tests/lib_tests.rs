@@ -31,15 +31,15 @@ use super::{
     HttpAuthError, HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource,
     HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
-    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError,
-    HttpRunApprovalMode, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
-    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
+    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
+    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
+    HttpSseEvent, HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
     HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
@@ -68,10 +68,7 @@ fn module_split_facade_exports_protocol_auth_sse_and_dto_contracts() {
 
     assert_eq!(HTTP_RUN_EVENT_SSE_NAME, "run_event");
     assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 1);
-    assert_eq!(
-        HttpRunApprovalMode::AllowReadonly.to_string(),
-        "allow_readonly"
-    );
+    assert_eq!(HttpPermissionMode::ReadOnly.to_string(), "read-only");
 }
 
 #[test]
@@ -664,7 +661,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         "http-session-1",
         HttpRunStartRequest {
             prompt: "hello from desktop".to_owned(),
-            approval_mode: Some(HttpRunApprovalMode::Ask),
+            permission_mode: Some(HttpPermissionMode::Manual),
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -826,12 +823,14 @@ async fn local_server_projects_typed_run_context() {
     driver.set_run_context_view(HttpRunContextView {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        available_models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
         model_selection: HttpModelSelectionPolicy::FixedForSession,
-        default_approval_mode: HttpRunApprovalMode::Ask,
-        available_approval_modes: vec![
-            HttpRunApprovalMode::Ask,
-            HttpRunApprovalMode::AllowReadonly,
-            HttpRunApprovalMode::Deny,
+        default_permission_mode: HttpPermissionMode::Manual,
+        available_permission_modes: vec![
+            HttpPermissionMode::ReadOnly,
+            HttpPermissionMode::Manual,
+            HttpPermissionMode::AutoEdit,
+            HttpPermissionMode::DangerFullAccess,
         ],
         context_window_tokens: Some(128_000),
         last_prompt_tokens: Some(4_096),
@@ -847,9 +846,10 @@ async fn local_server_projects_typed_run_context() {
         http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
     assert_eq!(status, 200);
     assert_eq!(body["model_name"], "deepseek-v4-flash");
+    assert_eq!(body["available_models"][1], "deepseek-v4-pro");
     assert_eq!(body["model_selection"], "fixed_for_session");
-    assert_eq!(body["default_approval_mode"], "ask");
-    assert_eq!(body["available_approval_modes"][1], "allow_readonly");
+    assert_eq!(body["default_permission_mode"], "manual");
+    assert_eq!(body["available_permission_modes"][2], "auto-edit");
     assert_eq!(body["context_window_tokens"], 128_000);
     assert_eq!(body["last_prompt_tokens"], 4_096);
     assert_eq!(body["context_window_source"], "provider");
@@ -868,7 +868,7 @@ fn verification_rerun_never_overlaps_a_foreground_agent_run() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("foreground", HttpRunApprovalMode::Ask),
+            run_start("foreground", HttpPermissionMode::Manual),
         )
         .expect("foreground run should start");
     let command = HttpCommandEnvelope::new(
@@ -915,7 +915,7 @@ async fn local_server_duplicate_wait_does_not_block_async_health_routing() {
         "command-concurrent-http",
         "desktop-client",
         "http-session-1",
-        run_start("hello", HttpRunApprovalMode::Ask),
+        run_start("hello", HttpPermissionMode::Manual),
     );
     let body = serde_json::to_string(&command).expect("command should serialize");
     let request = http_post("/sessions/http-session-1/runs", Some("secret-token"), &body);
@@ -970,7 +970,7 @@ async fn local_server_returns_503_when_command_capacity_is_exhausted() {
             format!("capacity-{index}"),
             "client-a",
             &session.id,
-            run_start(" ", HttpRunApprovalMode::Ask),
+            run_start(" ", HttpPermissionMode::Manual),
         );
         assert_eq!(
             registry.start_run_command(&session.id, command),
@@ -981,7 +981,7 @@ async fn local_server_returns_503_when_command_capacity_is_exhausted() {
         "capacity-256",
         "client-a",
         &session.id,
-        run_start(" ", HttpRunApprovalMode::Ask),
+        run_start(" ", HttpPermissionMode::Manual),
     );
     let body = serde_json::to_string(&saturated).expect("command should serialize");
     let request = http_post(
@@ -1017,7 +1017,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         "http-session-1",
         HttpRunStartRequest {
             prompt: "approval needed".to_owned(),
-            approval_mode: Some(HttpRunApprovalMode::Ask),
+            permission_mode: Some(HttpPermissionMode::Manual),
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1099,7 +1099,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         "http-session-1",
         HttpRunStartRequest {
             prompt: "run desktop smoke".to_owned(),
-            approval_mode: Some(HttpRunApprovalMode::Ask),
+            permission_mode: Some(HttpPermissionMode::Manual),
         },
     );
     let start_body = serde_json::to_string(&start_command).expect("start command should serialize");
@@ -1253,7 +1253,7 @@ async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_event
     let run = registry
         .start_run(
             &session.id,
-            run_start("stream events", HttpRunApprovalMode::Deny),
+            run_start("stream events", HttpPermissionMode::ReadOnly),
         )
         .expect("run should start");
     event_bus
@@ -1344,7 +1344,7 @@ async fn graceful_shutdown_reaps_idle_connections_cancels_runs_and_stops_command
     let run = registry
         .start_run(
             &session.id,
-            run_start("wait for shutdown", HttpRunApprovalMode::Deny),
+            run_start("wait for shutdown", HttpPermissionMode::ReadOnly),
         )
         .expect("run should start");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -2093,17 +2093,22 @@ fn crate_dependency_boundary_excludes_tui_and_extra_sigil_crates() {
 
 #[test]
 fn session_create_get_returns_stable_snapshot() {
-    let (registry, _driver) = registry_with_driver();
+    let (registry, driver) = registry_with_driver();
 
     let session = create_session(
         &registry,
         HttpSessionCreateRequest {
             label: Some("mobile-client".to_owned()),
+            model_name: Some("deepseek-v4-pro".to_owned()),
         },
     );
 
     assert_eq!(session.id, "http-session-1");
     assert_eq!(session.label.as_deref(), Some("mobile-client"));
+    assert_eq!(
+        driver.bound_models(),
+        vec![Some("deepseek-v4-pro".to_owned())]
+    );
     assert!(session.run_ids.is_empty());
     assert_eq!(session.durable_session_scope_id, "scope-http-session-1");
     assert_eq!(
@@ -2232,7 +2237,7 @@ fn durable_command_receipt_omits_prompt_preview_and_replays_without_reexecution(
             &session.id,
             run_start(
                 "secret prompt must not enter command store",
-                HttpRunApprovalMode::Deny,
+                HttpPermissionMode::ReadOnly,
             ),
         );
         let receipt = registry
@@ -2302,13 +2307,13 @@ fn session_foreground_lease_releases_only_after_typed_terminal() {
         let run = registry
             .start_run(
                 &session.id,
-                run_start("foreground", HttpRunApprovalMode::Ask),
+                run_start("foreground", HttpPermissionMode::Manual),
             )
             .expect("foreground run should start");
         assert_eq!(
             registry.start_run(
                 &session.id,
-                run_start("competing", HttpRunApprovalMode::Ask),
+                run_start("competing", HttpPermissionMode::Manual),
             ),
             Err(HttpRegistryError::SessionForegroundRunActive {
                 session_id: session.id.clone(),
@@ -2349,7 +2354,10 @@ fn contradictory_terminal_callback_fails_closed() {
     let (registry, _driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
-        .start_run(&session.id, run_start("terminal", HttpRunApprovalMode::Ask))
+        .start_run(
+            &session.id,
+            run_start("terminal", HttpPermissionMode::Manual),
+        )
         .expect("run should start");
     registry
         .record_run_terminal(&run.id, HttpRunTerminalOutcome::Cancelled)
@@ -2381,7 +2389,7 @@ fn driver_panics_quarantine_tentative_start_cancel_and_approval_state() {
     assert_eq!(
         start_registry.start_run(
             &start_session.id,
-            run_start("panic", HttpRunApprovalMode::Ask),
+            run_start("panic", HttpPermissionMode::Manual),
         ),
         Err(HttpRegistryError::DriverPanicked {
             operation: "start",
@@ -2420,7 +2428,7 @@ fn driver_panics_quarantine_tentative_start_cancel_and_approval_state() {
     let cancel_run = cancel_registry
         .start_run(
             &cancel_session.id,
-            run_start("cancel panic", HttpRunApprovalMode::Ask),
+            run_start("cancel panic", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     cancel_driver.observe_cancel(Arc::new(|_cancel| panic!("cancel driver panic")));
@@ -2448,7 +2456,7 @@ fn driver_panics_quarantine_tentative_start_cancel_and_approval_state() {
     let approval_run = approval_registry
         .start_run(
             &approval_session.id,
-            run_start("approval panic", HttpRunApprovalMode::Ask),
+            run_start("approval panic", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     approval_registry
@@ -2493,7 +2501,7 @@ fn concurrent_duplicate_start_waits_and_replays_one_driver_receipt() {
         "command-concurrent-start",
         "client-a",
         &session.id,
-        run_start("hello", HttpRunApprovalMode::Ask),
+        run_start("hello", HttpPermissionMode::Manual),
     );
     let first_registry = Arc::clone(&registry);
     let first_session_id = session.id.clone();
@@ -2507,7 +2515,7 @@ fn concurrent_duplicate_start_waits_and_replays_one_driver_receipt() {
         "command-concurrent-start",
         "client-a",
         &session.id,
-        run_start("different payload", HttpRunApprovalMode::Ask),
+        run_start("different payload", HttpPermissionMode::Manual),
     );
     assert_eq!(
         registry.start_run_command(&session.id, conflicting),
@@ -2548,7 +2556,7 @@ fn command_key_conflict_is_global_and_does_not_reuse_receipt() {
         "command-global-key",
         "client-a",
         &session.id,
-        run_start("first", HttpRunApprovalMode::Ask),
+        run_start("first", HttpPermissionMode::Manual),
     );
     let receipt = registry
         .start_run_command(&session.id, command)
@@ -2584,7 +2592,7 @@ fn durable_session_mutation_guard_blocks_new_runs_and_evicts_idle_handle() {
     assert_eq!(
         registry.start_run(
             &session.id,
-            run_start("must wait", HttpRunApprovalMode::Ask)
+            run_start("must wait", HttpPermissionMode::Manual)
         ),
         Err(HttpRegistryError::DurableSessionMutationActive)
     );
@@ -2604,7 +2612,7 @@ fn command_capacity_fails_closed_without_forgetting_completed_identities() {
             format!("bounded-{index}"),
             "client-a",
             &session.id,
-            run_start(" ", HttpRunApprovalMode::Ask),
+            run_start(" ", HttpPermissionMode::Manual),
         );
         assert_eq!(
             registry.start_run_command(&session.id, command),
@@ -2616,7 +2624,7 @@ fn command_capacity_fails_closed_without_forgetting_completed_identities() {
         "bounded-256",
         "client-a",
         &session.id,
-        run_start(" ", HttpRunApprovalMode::Ask),
+        run_start(" ", HttpPermissionMode::Manual),
     );
     assert_eq!(
         registry.start_run_command(&session.id, saturated),
@@ -2626,7 +2634,7 @@ fn command_capacity_fails_closed_without_forgetting_completed_identities() {
         "bounded-0",
         "client-a",
         &session.id,
-        run_start(" ", HttpRunApprovalMode::Ask),
+        run_start(" ", HttpPermissionMode::Manual),
     );
     assert_eq!(
         registry.start_run_command(&session.id, replayed),
@@ -2637,7 +2645,7 @@ fn command_capacity_fails_closed_without_forgetting_completed_identities() {
         "bounded-0",
         "client-a",
         &session.id,
-        run_start("\t", HttpRunApprovalMode::Ask),
+        run_start("\t", HttpPermissionMode::Manual),
     );
     assert_eq!(
         registry.start_run_command(&session.id, conflicting),
@@ -2652,11 +2660,11 @@ fn command_capacity_fails_closed_without_forgetting_completed_identities() {
 }
 
 #[test]
-fn run_start_requires_session_prompt_and_explicit_approval_mode() {
+fn run_start_requires_session_prompt_and_explicit_permission_mode() {
     let (registry, _driver) = registry_with_driver();
 
     assert_eq!(
-        registry.start_run("missing", run_start("hello", HttpRunApprovalMode::Ask)),
+        registry.start_run("missing", run_start("hello", HttpPermissionMode::Manual)),
         Err(HttpRegistryError::SessionNotFound {
             session_id: "missing".to_owned()
         })
@@ -2664,7 +2672,7 @@ fn run_start_requires_session_prompt_and_explicit_approval_mode() {
 
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     assert_eq!(
-        registry.start_run(&session.id, run_start("   ", HttpRunApprovalMode::Ask)),
+        registry.start_run(&session.id, run_start("   ", HttpPermissionMode::Manual)),
         Err(HttpRegistryError::EmptyPrompt)
     );
     assert_eq!(
@@ -2672,10 +2680,10 @@ fn run_start_requires_session_prompt_and_explicit_approval_mode() {
             &session.id,
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
-                approval_mode: None,
+                permission_mode: None,
             }
         ),
-        Err(HttpRegistryError::MissingApprovalMode)
+        Err(HttpRegistryError::MissingPermissionMode)
     );
 }
 
@@ -2686,18 +2694,19 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
         &registry,
         HttpSessionCreateRequest {
             label: Some("desktop".to_owned()),
+            model_name: None,
         },
     );
     let prompt = format!("{}{}", "x".repeat(120), "tail");
 
     let run = registry
-        .start_run(&session.id, run_start(&prompt, HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start(&prompt, HttpPermissionMode::Manual))
         .expect("driver should accept run");
 
     assert_eq!(run.id, "http-run-1");
     assert_eq!(run.session_id, session.id);
     assert_eq!(run.status, HttpRunStatus::Running);
-    assert_eq!(run.approval_mode, HttpRunApprovalMode::Ask);
+    assert_eq!(run.permission_mode, HttpPermissionMode::Manual);
     assert_eq!(run.prompt_preview, format!("{}...", "x".repeat(120)));
     assert!(run.pending_approval_call_ids.is_empty());
     assert_eq!(
@@ -2722,7 +2731,10 @@ fn run_start_driver_failure_marks_run_failed() {
     let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     let error = registry
-        .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Deny))
+        .start_run(
+            &session.id,
+            run_start("hello", HttpPermissionMode::ReadOnly),
+        )
         .expect_err("driver failure should reject run start");
 
     assert_eq!(
@@ -2751,7 +2763,7 @@ fn cancel_routes_to_driver_and_is_idempotent() {
     let (registry, driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
-        .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start("hello", HttpPermissionMode::Manual))
         .expect("driver should accept run");
 
     let canceled = registry
@@ -2788,7 +2800,7 @@ fn concurrent_duplicate_cancel_waits_and_routes_once() {
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
-        .start_run(&session.id, run_start("cancel", HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start("cancel", HttpPermissionMode::Manual))
         .expect("run should start");
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
@@ -2841,7 +2853,7 @@ fn distinct_cancel_commands_share_late_driver_rejection() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("cancel rejection", HttpRunApprovalMode::Ask),
+            run_start("cancel rejection", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     driver.reject_next_cancel("cancel route closed");
@@ -2919,7 +2931,7 @@ fn cancel_rejects_terminal_run_and_restores_status_on_driver_failure() {
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     driver.reject_next_start("start failed");
     let _error = registry
-        .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start("hello", HttpPermissionMode::Manual))
         .expect_err("start should fail");
     assert_eq!(
         registry.cancel_run("http-run-1"),
@@ -2929,7 +2941,7 @@ fn cancel_rejects_terminal_run_and_restores_status_on_driver_failure() {
     );
 
     let run = registry
-        .start_run(&session.id, run_start("second", HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start("second", HttpPermissionMode::Manual))
         .expect("second run should start");
     driver.reject_next_cancel("cancel channel closed");
 
@@ -2957,7 +2969,7 @@ fn approval_requests_and_decisions_are_routed_in_order() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("needs tools", HttpRunApprovalMode::Ask),
+            run_start("needs tools", HttpPermissionMode::Manual),
         )
         .expect("run should start");
 
@@ -3027,7 +3039,7 @@ fn approval_command_deduplicates_retries_and_audits_client_fields() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("needs approval", HttpRunApprovalMode::Ask),
+            run_start("needs approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     let waiting = registry
@@ -3081,7 +3093,10 @@ fn concurrent_duplicate_approval_waits_and_routes_once() {
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
-        .start_run(&session.id, run_start("approval", HttpRunApprovalMode::Ask))
+        .start_run(
+            &session.id,
+            run_start("approval", HttpPermissionMode::Manual),
+        )
         .expect("run should start");
     let waiting = registry
         .register_approval_request(&run.id, pending_approval("call-1", "write_file"))
@@ -3138,7 +3153,7 @@ fn approval_command_rejects_stale_stream_sequence() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("needs approval", HttpRunApprovalMode::Ask),
+            run_start("needs approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3178,7 +3193,7 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("changed tool call", HttpRunApprovalMode::Ask),
+            run_start("changed tool call", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3204,7 +3219,7 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("changed policy", HttpRunApprovalMode::Ask),
+            run_start("changed policy", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3226,7 +3241,7 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("changed expiry", HttpRunApprovalMode::Ask),
+            run_start("changed expiry", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3252,7 +3267,7 @@ fn approval_command_rejects_expired_request_without_consuming_pending_call() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("expired approval", HttpRunApprovalMode::Ask),
+            run_start("expired approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     let mut expired = pending_approval("call-1", "bash");
@@ -3295,7 +3310,7 @@ fn start_does_not_overwrite_approval_registered_by_driver() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("approval during start", HttpRunApprovalMode::Ask),
+            run_start("approval during start", HttpPermissionMode::Manual),
         )
         .expect("start should complete");
 
@@ -3304,33 +3319,29 @@ fn start_does_not_overwrite_approval_registered_by_driver() {
 }
 
 #[test]
-fn approval_endpoint_only_accepts_ask_runs() {
+fn approval_endpoint_accepts_pending_requests_for_every_permission_mode() {
     let (registry, _driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     for mode in [
-        HttpRunApprovalMode::Deny,
-        HttpRunApprovalMode::AllowReadonly,
+        HttpPermissionMode::ReadOnly,
+        HttpPermissionMode::Manual,
+        HttpPermissionMode::AutoEdit,
+        HttpPermissionMode::DangerFullAccess,
     ] {
         let run = registry
             .start_run(&session.id, run_start("no approval endpoint", mode))
             .expect("run should start");
-        let expected = HttpRegistryError::ApprovalModeDoesNotAsk {
-            run_id: run.id.clone(),
-            approval_mode: mode,
-        };
-        assert_eq!(
-            registry.register_approval_request(&run.id, pending_approval("call-1", "bash")),
-            Err(expected.clone())
-        );
-        assert_eq!(
-            registry.submit_approval_decision(
+        registry
+            .register_approval_request(&run.id, pending_approval("call-1", "bash"))
+            .expect("a kernel-requested approval should be routable");
+        registry
+            .submit_approval_decision(
                 &run.id,
                 "call-1",
                 approval_decision("call-1", HttpApprovalDecision::Approve, None),
-            ),
-            Err(expected)
-        );
+            )
+            .expect("an explicit decision should be recorded");
         registry
             .record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished)
             .expect("terminal callback should release the foreground lease");
@@ -3349,7 +3360,7 @@ fn approval_routing_reports_missing_or_inactive_runs() {
 
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
-        .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
+        .start_run(&session.id, run_start("hello", HttpPermissionMode::Manual))
         .expect("run should start");
     assert_eq!(
         registry.submit_approval_decision(
@@ -3394,7 +3405,7 @@ fn duplicate_approval_submit_during_driver_route_is_rejected() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("needs approval", HttpRunApprovalMode::Ask),
+            run_start("needs approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3450,7 +3461,7 @@ fn approval_driver_failure_keeps_pending_call() {
     let run = registry
         .start_run(
             &session.id,
-            run_start("needs approval", HttpRunApprovalMode::Ask),
+            run_start("needs approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
     registry
@@ -3483,19 +3494,19 @@ fn approval_driver_failure_keeps_pending_call() {
 fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
         prompt: "hello".to_owned(),
-        approval_mode: Some(HttpRunApprovalMode::AllowReadonly),
+        permission_mode: Some(HttpPermissionMode::ReadOnly),
     };
     assert_eq!(
         serde_json::to_value(&start).expect("start request should serialize"),
         json!({
             "prompt": "hello",
-            "approval_mode": "allow_readonly"
+            "permission_mode": "read-only"
         })
     );
 
     let missing_mode: HttpRunStartRequest =
         serde_json::from_value(json!({"prompt": "hello"})).expect("missing mode should parse");
-    assert_eq!(missing_mode.approval_mode, None);
+    assert_eq!(missing_mode.permission_mode, None);
     let decision: HttpApprovalDecisionRequest = serde_json::from_value(json!({
         "approval_request_id": "approval-call-1",
         "tool_call_hash": "hash-call-1",
@@ -3506,10 +3517,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     .expect("decision should parse");
     assert_eq!(decision.decision, HttpApprovalDecision::Deny);
     assert_eq!(decision.reason, None);
-    assert_eq!(
-        HttpRunApprovalMode::AllowReadonly.as_str(),
-        "allow_readonly"
-    );
+    assert_eq!(HttpPermissionMode::ReadOnly.as_str(), "read-only");
     assert!(
         serde_json::from_value::<HttpApprovalDecisionRequest>(json!({})).is_err(),
         "approval decision must be explicit"
@@ -3591,10 +3599,10 @@ fn wait_for_registry_activity(
     }
 }
 
-fn run_start(prompt: &str, approval_mode: HttpRunApprovalMode) -> HttpRunStartRequest {
+fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartRequest {
     HttpRunStartRequest {
         prompt: prompt.to_owned(),
-        approval_mode: Some(approval_mode),
+        permission_mode: Some(permission_mode),
     }
 }
 
@@ -3638,6 +3646,7 @@ fn policy_version() -> String {
 
 #[derive(Default)]
 struct RecordingRunDriver {
+    bound_models: Mutex<Vec<Option<String>>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
@@ -3657,6 +3666,10 @@ struct RecordingRunDriver {
 }
 
 impl RecordingRunDriver {
+    fn bound_models(&self) -> Vec<Option<String>> {
+        lock(&self.bound_models).clone()
+    }
+
     fn starts(&self) -> Vec<HttpRunDriverStart> {
         lock(&self.starts).clone()
     }
@@ -3723,7 +3736,12 @@ impl RecordingRunDriver {
 }
 
 impl HttpRunDriver for RecordingRunDriver {
-    fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError> {
+    fn bind_session(
+        &self,
+        session_id: &str,
+        model_name: Option<&str>,
+    ) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        lock(&self.bound_models).push(model_name.map(str::to_owned));
         if let Some(message) = lock(&self.next_binding_error).take() {
             return Err(HttpRunDriverError::new(message));
         }
