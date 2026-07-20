@@ -1,4 +1,4 @@
-import { useState, type RefObject } from "react";
+import { useRef, useState, type RefObject } from "react";
 
 import type { RecentWorkspaceSummary, WorkspaceSummary } from "../../types";
 import { StatusIndicator } from "../../ui/feedback";
@@ -29,10 +29,16 @@ export function WorkspaceSwitcher({
   triggerRef,
 }: WorkspaceSwitcherProps) {
   const [open, setOpen] = useState(false);
+  const localTriggerRef = useRef<HTMLButtonElement>(null);
+  const resolvedTriggerRef = triggerRef ?? localTriggerRef;
   const active = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const closedRecent = recentWorkspaces.filter((recent) => !recent.isOpen);
-  const choose = () => {
+  const closeAndRestore = () => {
     setOpen(false);
+    window.requestAnimationFrame(() => resolvedTriggerRef.current?.focus());
+  };
+  const choose = () => {
+    closeAndRestore();
     onChoose();
   };
   return (
@@ -50,7 +56,7 @@ export function WorkspaceSwitcher({
       accessibleLabel={`Switch workspace${active === undefined ? "" : `: ${active.displayName}`}`}
       open={open}
       onOpenChange={setOpen}
-      triggerRef={triggerRef}
+      triggerRef={resolvedTriggerRef}
     >
       <div className="workspace-switcher-panel">
         <div className="workspace-switcher-heading">
@@ -70,7 +76,7 @@ export function WorkspaceSwitcher({
                   aria-current={workspace.id === activeWorkspaceId ? "page" : undefined}
                   onClick={() => {
                     onSelect(workspace.id);
-                    setOpen(false);
+                    closeAndRestore();
                   }}
                 >
                   <StatusIndicator
@@ -83,7 +89,7 @@ export function WorkspaceSwitcher({
                   icon={<Icon name="close" />}
                   onClick={() => {
                     onClose(workspace.id);
-                    setOpen(false);
+                    closeAndRestore();
                   }}
                 />
               </li>
@@ -102,7 +108,7 @@ export function WorkspaceSwitcher({
                     variant="quiet"
                     onClick={() => {
                       onOpenRecent(recent);
-                      setOpen(false);
+                      closeAndRestore();
                     }}
                   >
                     {recent.displayName}

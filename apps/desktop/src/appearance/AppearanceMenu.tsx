@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { ThemePreference } from "./contract";
 import { useAppearance } from "./ThemeProvider";
+import { Icon } from "../ui/icons";
 import { Button, Popover, Radio } from "../ui/primitives";
 
 const choices: readonly { value: ThemePreference; label: string }[] = [
@@ -30,7 +31,8 @@ export function AppearanceMenu() {
   return (
     <Popover
       className="appearance-menu"
-      label="Appearance"
+      label={<span className="appearance-trigger-label"><Icon name="appearance" /><span>Appearance</span></span>}
+      accessibleLabel="Appearance"
       open={open}
       onOpenChange={setOpen}
     >

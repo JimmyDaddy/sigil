@@ -65,6 +65,7 @@
 }
 
 .appearance-menu { flex: 0 0 auto; }
+.appearance-trigger-label { display: inline-flex; align-items: center; gap: var(--sg-sys-space-2); }
 .appearance-content { padding: var(--sg-sys-space-1); }
 .appearance-content fieldset { display: grid; gap: var(--sg-sys-space-1); margin: 0; padding: 0; border: 0; }
 .appearance-content legend { margin-bottom: var(--sg-sys-space-2); font-size: 13px; font-weight: 700; }
@@ -145,6 +146,8 @@
 }
 
 @media (max-width: 480px) {
+  .navigation-toggle, .appearance-menu > .sg-popover-trigger { width: var(--sg-sys-control-height); min-width: var(--sg-sys-control-height); padding-inline: 8px; }
+  .navigation-toggle > span, .appearance-trigger-label > span { display: none; }
   .confirmation-actions { align-items: stretch; flex-direction: column-reverse; }
   .confirmation-actions button { width: 100%; }
 }

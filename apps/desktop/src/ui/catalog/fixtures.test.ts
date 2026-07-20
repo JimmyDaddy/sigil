@@ -1,10 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { HistoryContent } from "../../HistoryPanel";
 import { ToolCard } from "../../ToolCard";
 import { isUnifiedDiff } from "../../DiffViewer";
+import { CatalogApp } from "./CatalogApp";
 import { catalogFixtures, UI_CATALOG_MARKER } from "./fixtures";
 
 describe("desktop UI catalog contract", () => {
@@ -84,5 +85,15 @@ describe("desktop UI catalog contract", () => {
     render(createElement(ToolCard, { tool: tool! }));
     expect(screen.queryByText(/duration not recorded|risk not classified/i)).toBeNull();
     expect(screen.getByText("shell")).toBeTruthy();
+  });
+
+  it("provides a runnable catalog surface for theme and viewport inspection", () => {
+    render(createElement(CatalogApp));
+    expect(screen.getByRole("heading", { name: "Sigil UI catalog" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
+    fireEvent.change(screen.getByLabelText("Viewport"), { target: { value: "320" } });
+    fireEvent.change(screen.getByLabelText("Zoom"), { target: { value: "2" } });
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(screen.getByText(/320px viewport · 200% zoom/)).toBeTruthy();
   });
 });

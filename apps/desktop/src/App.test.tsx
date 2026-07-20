@@ -312,9 +312,13 @@ describe("desktop workspace and history shell", () => {
 
     expect(await screen.findByText("No workspace is open.")).toBeTruthy();
     expect(screen.getByText("Choose a workspace to begin.")).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Switch workspace" }));
     expect(screen.getByText("Recent")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "sigil" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "sigil" }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    });
   });
 
   it("opens a workspace, creates a conversation, and closes the owned server", async () => {

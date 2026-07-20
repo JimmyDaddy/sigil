@@ -42,6 +42,7 @@ export function Popover({
   const triggerRef = externalTriggerRef ?? localTriggerRef;
   const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
+  const panelLabel = accessibleLabel ?? (typeof label === "string" ? label : "Popover");
   const updateOpen = (next: boolean) => {
     if (controlledOpen === undefined) setInternalOpen(next);
     onOpenChange?.(next);
@@ -87,7 +88,14 @@ export function Popover({
         {label}
       </button>
       {open ? (
-        <div className="sg-popover-panel" id={panelId} ref={panelRef} role={panelRole} tabIndex={-1}>
+        <div
+          className="sg-popover-panel"
+          id={panelId}
+          ref={panelRef}
+          role={panelRole}
+          aria-label={panelRole === "dialog" ? panelLabel : undefined}
+          tabIndex={-1}
+        >
           {children}
         </div>
       ) : null}
@@ -97,6 +105,11 @@ export function Popover({
 
 export function Menu({ label, children }: { readonly label: ReactNode; readonly children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dismiss = () => {
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
   return (
     <Popover
       label={label}
@@ -105,8 +118,9 @@ export function Menu({ label, children }: { readonly label: ReactNode; readonly 
       onOpenChange={setOpen}
       triggerPopup="menu"
       panelRole="presentation"
+      triggerRef={triggerRef}
     >
-      <MenuDismissContext.Provider value={() => setOpen(false)}>
+      <MenuDismissContext.Provider value={dismiss}>
         <MenuItems>{children}</MenuItems>
       </MenuDismissContext.Provider>
     </Popover>

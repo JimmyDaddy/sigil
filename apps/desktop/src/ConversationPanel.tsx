@@ -488,7 +488,8 @@ function latestPendingApproval(events: TimelineEvent[]): TimelineEvent | undefin
       pending.delete(`${event.runId}:${event.itemId}`);
     }
   }
-  return [...pending.values()].at(-1);
+  const pendingEvents = [...pending.values()];
+  return pendingEvents[pendingEvents.length - 1];
 }
 
 export function mergeTranscriptPage(

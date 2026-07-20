@@ -64,7 +64,7 @@ describe("Sigil UI primitives", () => {
     render(<><Popover label="Filters"><button type="button">Apply filters</button></Popover><button type="button">Outside</button></>);
     const trigger = screen.getByRole("button", { name: "Filters" });
     await user.click(trigger);
-    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Filters" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(trigger);
@@ -91,6 +91,7 @@ describe("Sigil UI primitives", () => {
     fireEvent.click(document.activeElement as HTMLElement);
     expect(selected).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
 
     fireEvent.keyDown(trigger, { key: "ArrowDown" });
     await waitFor(() => expect(document.activeElement?.textContent).toBe("Open"));
@@ -138,9 +139,12 @@ describe("Sigil UI primitives", () => {
     render(<Fixture />);
     await user.click(screen.getByRole("button", { name: "Open outer" }));
     await user.click(screen.getByRole("button", { name: "Open inner" }));
-    expect(screen.getAllByRole("dialog")).toHaveLength(2);
+    expect(screen.getAllByRole("dialog", { hidden: true })).toHaveLength(2);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Inner" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Outer" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
 

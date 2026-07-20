@@ -4,7 +4,7 @@
   .workspace-switcher-label { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); }
   .workspace-switcher-label .sg-status-indicator { min-width: 0; }
   .workspace-switcher-label .sg-status-indicator > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .workspace-switcher-panel { display: grid; gap: var(--sg-sys-space-3); }
+  .workspace-switcher-panel { display: grid; max-height: min(520px, calc(100vh - 96px)); gap: var(--sg-sys-space-3); overflow-y: auto; overscroll-behavior: contain; }
   .workspace-switcher-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sg-sys-space-3); }
   .workspace-switcher-heading small, .workspace-recent-group > strong { color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
   .workspace-switcher-empty { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }

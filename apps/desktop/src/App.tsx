@@ -380,6 +380,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           className="pane-toggle navigation-toggle"
           ref={navigationTriggerRef}
           type="button"
+          leadingIcon={<Icon name="menu" />}
           aria-controls="desktop-navigation"
           aria-expanded={navigationOpen}
           onClick={() => setNavigationOpen((open) => !open)}

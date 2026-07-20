@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.30.3",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "dev:catalog": "vite --host 127.0.0.1 --port 1421 --strictPort",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

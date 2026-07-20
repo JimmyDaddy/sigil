@@ -10,6 +10,37 @@ import { Icon } from "../icons";
 import { focusableElements, focusInitial } from "./focus";
 
 const modalStack: HTMLElement[] = [];
+const isolatedBodyChildren = new Map<HTMLElement, { inert: boolean; ariaHidden: string | null }>();
+
+function restoreIsolation(element: HTMLElement, state: { inert: boolean; ariaHidden: string | null }) {
+  element.inert = state.inert;
+  if (state.ariaHidden === null) element.removeAttribute("aria-hidden");
+  else element.setAttribute("aria-hidden", state.ariaHidden);
+}
+
+function updateModalIsolation() {
+  const topSurface = modalStack[modalStack.length - 1];
+  const topRoot = topSurface?.closest<HTMLElement>("[data-sigil-overlay-root]");
+  for (const element of [...document.body.children]) {
+    if (!(element instanceof HTMLElement)) continue;
+    if (!isolatedBodyChildren.has(element)) {
+      isolatedBodyChildren.set(element, {
+        inert: element.inert,
+        ariaHidden: element.getAttribute("aria-hidden"),
+      });
+    }
+    const original = isolatedBodyChildren.get(element);
+    if (original === undefined) continue;
+    if (topRoot === element) restoreIsolation(element, original);
+    else {
+      element.inert = true;
+      element.setAttribute("aria-hidden", "true");
+    }
+  }
+  if (topSurface !== undefined) return;
+  for (const [element, original] of isolatedBodyChildren) restoreIsolation(element, original);
+  isolatedBodyChildren.clear();
+}
 
 interface ModalProps {
   readonly id?: string;
@@ -49,27 +80,14 @@ export function Modal({
     const surface = surfaceRef.current;
     if (surface === null) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    const overlayRoot = surface.closest<HTMLElement>("[data-sigil-overlay-root]");
-    const inerted = [...document.body.children]
-      .filter((element): element is HTMLElement => element instanceof HTMLElement)
-      .filter((element) => !element.hasAttribute("data-sigil-overlay-root"))
-      .map((element) => ({
-        element,
-        inert: element.inert,
-        ariaHidden: element.getAttribute("aria-hidden"),
-      }));
-    for (const { element } of inerted) {
-      element.inert = true;
-      element.setAttribute("aria-hidden", "true");
-    }
-
     modalStack.push(surface);
+    updateModalIsolation();
     const focusTarget = initialFocusRef?.current;
     if (focusTarget !== undefined && focusTarget !== null) focusTarget.focus();
     else focusInitial(surface);
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (modalStack.at(-1) !== surface) return;
+      if (modalStack[modalStack.length - 1] !== surface) return;
       if (event.key === "Escape") {
         event.preventDefault();
         onOpenChangeRef.current(false);
@@ -83,7 +101,7 @@ export function Modal({
         return;
       }
       const first = focusable[0];
-      const last = focusable.at(-1) ?? first;
+      const last = focusable[focusable.length - 1] ?? first;
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
@@ -97,16 +115,9 @@ export function Modal({
       document.removeEventListener("keydown", handleKeyDown);
       const index = modalStack.lastIndexOf(surface);
       if (index >= 0) modalStack.splice(index, 1);
-      if (modalStack.length === 0) {
-        for (const { element, inert, ariaHidden } of inerted) {
-          element.inert = inert;
-          if (ariaHidden === null) element.removeAttribute("aria-hidden");
-          else element.setAttribute("aria-hidden", ariaHidden);
-        }
-      }
+      updateModalIsolation();
       const target = returnFocusRef?.current ?? previous;
       if (target !== undefined && document.contains(target)) target.focus();
-      overlayRoot?.removeAttribute("data-closing");
     };
   }, [initialFocusRef, open, returnFocusRef]);
 

@@ -20,6 +20,15 @@ pnpm --dir apps/desktop install --frozen-lockfile
 Linux 还需要 Tauri 2 的 WebKitGTK 4.1、AppIndicator、OpenSSL、rsvg 与 xdo 开发包。具体 CI 包名以
 `.github/workflows/desktop-package.yml` 为准。
 
+检查内部 component/fixture catalog 时可运行：
+
+```bash
+pnpm --dir apps/desktop dev:catalog
+```
+
+然后打开 `http://127.0.0.1:1421/catalog.html`。该页面只使用 synthetic fixture，不持有 desktop bridge、bearer、
+workspace path 或 network capability，production build gate 会阻止它进入正式 bundle。
+
 ## 3. 本机构建
 
 先验证 contract、TypeScript、交互测试和 production frontend：
@@ -59,6 +68,9 @@ pnpm --dir apps/desktop package --bundles nsis  # Windows
 7. 检查 verification receipt、snapshot、changeset 与 failure locator；只允许重跑 server 推荐的 exact check。
 8. 关闭工作区和应用，确认 owned stream 先停止、owner pipe 触发 server graceful drain，超时才终止完整进程树。
 9. 重新打开同一工作区，确认 recent 记录只用于重新认证启动；durable history 仍由 server catalog 重建。
+10. 在 **Appearance**（`Cmd/Ctrl+,`）中切换 Follow system、Light 和 Dark；重启后仍保留手动选择，System 模式会跟随 OS，切换过程不丢 draft、timeline scroll、approval 或 active-run attachment。
+11. 分别在 1280、840、839 和 320px 检查顶栏、紧凑对话列表与 review surface；320px 下 Browse、workspace、new conversation 和 Appearance 均必须保持可见可操作，不出现 document 横向滚动。
+12. 用键盘完成 workspace/session 选择、filter、navigation/review drawer、approval 和 theme 切换，确认 Esc、Tab trap、选择后焦点恢复与中文 IME；每个公开 installer candidate 还需在当前 Space 使用 VoiceOver 验证 WebView 内容导航，不得用 hidden-window AX probe 代替。
 
 macOS package 还必须通过：
 

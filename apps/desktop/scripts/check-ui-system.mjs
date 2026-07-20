@@ -14,6 +14,7 @@ const forcedColorsPath = join(foundations, "forced-colors.css");
 const resetPath = join(foundations, "reset.css");
 const packagePath = join(desktopRoot, "package.json");
 const indexPath = join(desktopRoot, "index.html");
+const catalogHtmlPath = join(desktopRoot, "catalog.html");
 const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
 const rawInteractiveAllowlistPath = join(srcRoot, "ui", "raw-interactive-allowlist.json");
 
@@ -167,6 +168,10 @@ if ([...graph].some((path) => path.includes(`${join("ui", "catalog")}`))) {
 if (!readFileSync(join(srcRoot, "ui", "catalog", "fixtures.ts"), "utf8").includes("sigil-desktop-dev-ui-catalog")) {
   fail("development UI catalog marker is missing");
 }
+const catalogHtml = readFileSync(catalogHtmlPath, "utf8");
+if (!catalogHtml.includes('/src/ui/catalog/main.tsx')) {
+  fail("development UI catalog has no runnable Vite entrypoint");
+}
 
 const indexSource = readFileSync(indexPath, "utf8");
 if (!indexSource.includes('<script src="/appearance-bootstrap.js"></script>')) {
@@ -224,12 +229,21 @@ if (sourceFiles.some((path) => path.endsWith("useFocusBoundary.ts"))) {
 for (const path of sourceFiles) {
   const source = readFileSync(path, "utf8");
   const relativePath = relative(srcRoot, path);
+  for (const unsupported of [".at(", ".replaceAll("]) {
+    if (source.includes(unsupported)) {
+      fail(`runtime builtin exceeds the frozen Safari 13 floor (${unsupported}): ${relativePath}`);
+    }
+  }
   if (!relativePath.startsWith(`ui${String.raw`/`}primitives${String.raw`/`}`) && /from\s+["'](?:@base-ui\/|@mui\/|@material\/)/.test(source)) {
     fail(`third-party primitive import outside internal adapter: ${relativePath}`);
   }
   if (!relativePath.startsWith(`ui${String.raw`/`}icons${String.raw`/`}`) && /<svg\b/.test(source)) {
     fail(`raw SVG outside internal icon adapter: ${relativePath}`);
   }
+}
+
+if (!styles.includes(".navigation-toggle > span, .appearance-trigger-label > span { display: none; }")) {
+  fail("320px topbar does not collapse secondary control labels");
 }
 
 const rawAllowlist = JSON.parse(readFileSync(rawInteractiveAllowlistPath, "utf8"));

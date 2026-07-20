@@ -23,7 +23,7 @@ Sigil is an early preview. Core TUI work is usable, but config, plugins, advance
 - Deferred MCP servers must be activated before their tools are available.
 - Image input is limited to supported formats, sources, providers, and model capabilities.
 - Context compaction is offered only when Sigil can safely apply it for the selected model.
-- An opt-in desktop shell can be built from `main` for contributor dogfood. It now offers bounded saved conversation history, run reattachment and control while the workspace service stays open, dedicated tool/diff/approval/verification surfaces, adaptive panes, system light/dark themes, and keyboard/focus accessibility behavior. It uses the same local service as the TUI, but it is not a supported install channel.
+- An opt-in desktop shell can be built from `main` for contributor dogfood. It offers bounded saved conversation history, run reattachment and control while the workspace service stays open, and dedicated tool, diff, approval, and verification surfaces. Its compact navigation keeps workspace selection in the top bar, makes each conversation row directly selectable, and shows verification only when evidence exists. The **Appearance** menu (`Cmd/Ctrl+,`) can follow the system or persist an app-wide light or dark choice without interrupting the active conversation. The shell uses the same local service as the TUI, but it is not a supported install channel.
 
 ## Not Supported Yet
 

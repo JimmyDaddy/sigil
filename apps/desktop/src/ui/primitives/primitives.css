@@ -51,7 +51,7 @@
 
   .sg-modal-backdrop { position: fixed; z-index: var(--sg-sys-z-modal); inset: 0; display: grid; place-items: center; padding: var(--sg-sys-space-6); }
   .sg-modal-scrim { position: absolute; inset: 0; border: 0; background: var(--sg-sys-color-overlay); cursor: default; }
-  .sg-modal-surface { position: relative; z-index: 1; display: flex; width: min(520px, 100%); max-height: min(720px, calc(100dvh - 48px)); flex-direction: column; overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-lg); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface); box-shadow: var(--sg-sys-elevation-modal); }
+  .sg-modal-surface { position: relative; z-index: 1; display: flex; width: min(520px, 100%); max-height: min(720px, calc(100vh - 48px)); max-height: min(720px, calc(100dvh - 48px)); flex-direction: column; overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-lg); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface); box-shadow: var(--sg-sys-elevation-modal); }
   .sg-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sg-sys-space-4); padding: var(--sg-sys-space-4); border-bottom: 1px solid var(--sg-sys-color-outline); }
   .sg-modal-header h2, .sg-modal-header p { margin: 0; }
   .sg-modal-header h2 { font-size: 18px; }

@@ -66,7 +66,7 @@ function inlineCode(text: string) {
 }
 
 export function parseBlocks(text: string): ContentBlock[] {
-  const lines = text.replaceAll("\r\n", "\n").split("\n");
+  const lines = text.split("\r\n").join("\n").split("\n");
   const blocks: ContentBlock[] = [];
   let index = 0;
   while (index < lines.length) {

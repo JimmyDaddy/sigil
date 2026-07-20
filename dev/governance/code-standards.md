@@ -155,6 +155,10 @@
 - HTTP OpenAPI snapshot 与生成的 TypeScript schema 必须由 `scripts/generate-desktop-contract.sh --check` 验证；不要手写第二套 wire DTO
 - React 可见状态必须覆盖 loading、empty、stale/reconnect、error 和 terminal 分支；新增业务交互至少带一个 UI interaction test，并以真实 `sigil serve` contract test 证明跨层行为
 - SQLite/JSONL 只由 server/runtime 读取；desktop 不得把 projection 当 durable truth，也不得直接查询本地 session 数据文件
+- Desktop 样式按 `reset → tokens → base → primitives → patterns → features → utilities` 的 CSS layer 顺序组装；feature 只消费 `--sg-sys-*` / `--sg-domain-*` 语义角色，原始颜色只能留在 reference 和 forced-colors foundation
+- 业务 surface 的 button、field、dialog/drawer、menu/popover、tooltip、collapsible 和 icon 只能通过 `apps/desktop/src/ui` 内部 API 使用；不得直接 import 第三方 primitive/icon 或绕过 raw-interactive ledger
+- Desktop 主题是 application-scope presentation preference；native store 只持久化 bounded `system | light | dark` 枚举，DOM `data-theme` 只是渲染真相，两者都不得进入 workspace/session/OpenAPI/SQLite/runtime truth
+- 主题、navigation 和 review surface 变化不得 remount active conversation、丢失 draft/IME/scroll/focus 或重复 follower attachment；320px、200% zoom、forced-colors、reduced-motion 和 keyboard/focus 回归必须继续由 UI gate 和 interaction tests 覆盖
 
 ## 4. 数据与状态规则
 
