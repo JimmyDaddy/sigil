@@ -163,6 +163,7 @@ function FixtureSurface({
             modelChanging={false}
             permissionMode={permissionMode}
             reasoningEffort={reasoningEffort}
+            requestedSkill={undefined}
             onModelChange={() => Promise.resolve(true)}
             onNewSession={() => Promise.resolve(true)}
             onNotice={() => undefined}

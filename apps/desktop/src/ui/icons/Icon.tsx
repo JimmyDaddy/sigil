@@ -1,6 +1,6 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "appearance-auto" | "check" | "close" | "copy" | "filter" | "language" | "lock" | "menu" | "model" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "warning";
+export type IconName = "add" | "appearance-auto" | "check" | "close" | "copy" | "extensions" | "filter" | "language" | "lock" | "menu" | "model" | "moon" | "more" | "pin" | "search" | "send" | "shield" | "stop" | "sun" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
@@ -8,6 +8,7 @@ const paths: Record<IconName, string> = {
   check: "m5 12 4 4L19 6",
   close: "m6 6 12 12M18 6 6 18",
   copy: "M9 8h10v11H9zM5 15V5h10",
+  extensions: "M8 4h8v5h4v7h-4v4H8v-4H4V9h4V4Zm3 5h2m-2 6h2",
   filter: "M4 6h16M7 12h10m-7 6h4",
   language: "M4 5h10M9 3v2m-3 4c1.6 3.2 4.4 5.5 8 6.5M13 8c-1.2 4-4.1 7.2-8 9m10-5 4 9m-6 0 4-9 4 9m-6-3h6",
   lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z",

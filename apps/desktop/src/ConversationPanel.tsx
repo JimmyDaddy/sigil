@@ -4,6 +4,7 @@ import { ApprovalDock } from "./ApprovalDock";
 import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
 import { ErrorCard } from "./ErrorCard";
+import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { translateEnglish, useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
@@ -15,6 +16,7 @@ import type {
   RunSummary,
   SessionSummary,
   SkillBinding,
+  SkillCatalogEntry,
   TimelineEvent,
   TranscriptMessage,
   VerificationSummary,
@@ -73,12 +75,15 @@ export function ConversationPanel({
   const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [extensionWorkbenchOpen, setExtensionWorkbenchOpen] = useState(false);
+  const [requestedSkill, setRequestedSkill] = useState<SkillCatalogEntry>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
+  const extensionTriggerRef = useRef<HTMLButtonElement>(null);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
@@ -100,6 +105,8 @@ export function ConversationPanel({
     setRunNotice(undefined);
     setRunAnnouncement("");
     setInspectorOpen(false);
+    setExtensionWorkbenchOpen(false);
+    setRequestedSkill(undefined);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
@@ -416,6 +423,18 @@ export function ConversationPanel({
           <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
             {streamStatus?.state ?? "ready"}
           </span>
+          <Tooltip label={t("openExtensions")}>
+            <IconButton
+              className="extension-trigger"
+              ref={extensionTriggerRef}
+              type="button"
+              aria-label={t("openExtensions")}
+              aria-controls="extension-workbench"
+              aria-expanded={extensionWorkbenchOpen}
+              icon={<Icon name="extensions" />}
+              onClick={() => setExtensionWorkbenchOpen(true)}
+            />
+          </Tooltip>
           {verification !== undefined ? (
             <Tooltip
               label={pendingApproval?.approval !== undefined
@@ -519,6 +538,7 @@ export function ConversationPanel({
         modelChanging={modelChanging}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
+        requestedSkill={requestedSkill}
         onModelChange={(modelName) => {
           if (modelName === runContext?.modelName) return;
           setModelChanging(true);
@@ -545,6 +565,27 @@ export function ConversationPanel({
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
         </Drawer>
       ) : null}
+      <Drawer
+        id="extension-workbench"
+        open={extensionWorkbenchOpen}
+        title={t("extensions")}
+        description={t("extensionsDetail")}
+        returnFocusRef={extensionTriggerRef}
+        onOpenChange={setExtensionWorkbenchOpen}
+      >
+        {runContext === undefined ? (
+          <div className="extension-detail extension-empty">{t("extensionsUnavailable")}</div>
+        ) : (
+          <ExtensionWorkbench
+            catalog={runContext.extensionCatalog}
+            runActive={active}
+            onUseSkill={(skill) => {
+              setRequestedSkill({ ...skill });
+              setExtensionWorkbenchOpen(false);
+            }}
+          />
+        )}
+      </Drawer>
     </div>
   );
 }

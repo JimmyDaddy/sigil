@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type { PermissionMode, ReasoningEffort, RunContext, SkillBinding, SkillCatalogEntry } from "./types";
@@ -20,6 +20,7 @@ export function Composer({
   modelChanging,
   permissionMode,
   reasoningEffort,
+  requestedSkill,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -38,6 +39,7 @@ export function Composer({
   modelChanging: boolean;
   permissionMode: PermissionMode;
   reasoningEffort?: ReasoningEffort;
+  requestedSkill?: SkillCatalogEntry;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -53,6 +55,11 @@ export function Composer({
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
+  useEffect(() => {
+    if (requestedSkill === undefined) return;
+    setSelectedSkill(requestedSkill);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [composerRef, requestedSkill]);
   const suggestionQuery = leadingInvocationToken(prompt);
   const suggestions = useMemo(
     () => buildSuggestions(runContext, suggestionQuery, selectedSkill),

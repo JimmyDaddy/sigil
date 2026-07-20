@@ -15,6 +15,7 @@
 .conversation-title-row small { flex: 0 0 auto; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
 .conversation-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--sg-sys-space-2); }
 .review-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
+.extension-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
 .review-passed { color: var(--sg-domain-color-on-success); }
 .review-failed, .review-missing, .review-inconclusive { color: var(--sg-domain-color-on-danger); }
 .review-pending, .review-stale { color: var(--sg-domain-color-on-warning); }
@@ -169,6 +170,30 @@
 .context-unavailable { white-space: nowrap; }
 .composer-submit { flex: 0 0 auto; width: 34px; min-width: 34px; min-height: 34px; border-radius: 11px; }
 .composer-stop { border-color: var(--sg-sys-color-error); color: var(--sg-sys-color-on-error-container); background: var(--sg-sys-color-error-container); }
+
+.extension-workbench { display: grid; min-height: min(620px, 70vh); grid-template-rows: auto auto minmax(0, 1fr); gap: var(--sg-sys-space-3); }
+.extension-tabs { display: flex; gap: var(--sg-sys-space-2); }
+.extension-workbench-body { display: grid; min-height: 0; grid-template-columns: minmax(190px, .8fr) minmax(240px, 1.2fr); gap: var(--sg-sys-space-3); }
+.extension-list { display: grid; min-height: 0; align-content: start; gap: 4px; padding-right: 4px; overflow-y: auto; border-right: 1px solid var(--sg-sys-color-outline); }
+.extension-row { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; justify-content: stretch; gap: 8px; padding: 9px; text-align: left; }
+.extension-row > span { display: contents; }
+.extension-row > span > span:first-child { display: grid; min-width: 0; gap: 3px; }
+.extension-row strong, .extension-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extension-row small { color: var(--sg-sys-color-on-surface-subtle); font-weight: 400; }
+.extension-row[aria-selected="true"] { background: var(--sg-sys-color-surface-container-high); box-shadow: inset 3px 0 var(--sg-sys-color-primary); }
+.extension-status { align-self: center; padding: 2px 6px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-subtle); background: var(--sg-sys-color-surface-container-high); font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.extension-status.is-available { color: var(--sg-domain-color-on-success); }
+.extension-detail { display: grid; min-width: 0; align-content: start; gap: 12px; padding: var(--sg-sys-space-4); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
+.extension-detail header { display: flex; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); }
+.extension-detail h3, .extension-detail p { margin: 0; }
+.extension-detail p { color: var(--sg-sys-color-on-surface-variant); line-height: 1.5; }
+.extension-token { overflow: hidden; padding: 4px 7px; border-radius: 6px; color: var(--sg-sys-color-primary); background: var(--sg-sys-color-primary-container); font-family: ui-monospace, "SFMono-Regular", monospace; font-size: 12px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.extension-detail dl { display: grid; gap: 6px; margin: 0; }
+.extension-detail dl div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--sg-sys-color-outline); }
+.extension-detail dt { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; text-transform: uppercase; }
+.extension-detail dd { margin: 0; overflow-wrap: anywhere; }
+.extension-unavailable-reason { padding: 9px; border-left: 3px solid var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 12px; }
+.extension-empty { color: var(--sg-sys-color-on-surface-subtle); }
 .approval-actions, .verification-actions { display: flex; gap: var(--sg-sys-space-2); align-items: center; }
 
 .error-card { display: flex; max-width: 100%; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-danger); border-radius: 9px; color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
