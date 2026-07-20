@@ -257,7 +257,7 @@ pub enum DesktopPermissionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopModelSelectionPolicy {
-    FixedForSession,
+    PerRun,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -365,6 +365,7 @@ pub struct DesktopRunContextView {
     pub model_name: String,
     pub available_models: Vec<String>,
     pub model_selection: DesktopModelSelectionPolicy,
+    pub model_selection_binding: String,
     pub default_permission_mode: DesktopPermissionMode,
     pub available_permission_modes: Vec<DesktopPermissionMode>,
     pub available_reasoning_efforts: Vec<DesktopReasoningEffort>,
@@ -386,6 +387,10 @@ pub struct DesktopRunContextView {
 pub struct DesktopRunStartRequest {
     pub prompt: String,
     pub permission_mode: DesktopPermissionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection_binding: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<DesktopReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]

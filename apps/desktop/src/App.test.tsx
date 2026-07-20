@@ -106,7 +106,8 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       providerName: "deepseek",
       modelName: "deepseek-v4-flash",
       availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
-      modelSelection: "fixed_for_session",
+      modelSelection: "per_run",
+      modelSelectionBinding: "model-binding-deepseek-v4-flash",
       defaultPermissionMode: "manual",
       availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
       availableReasoningEfforts: ["low", "medium", "high", "max"],
@@ -1177,6 +1178,8 @@ describe("desktop workspace and history shell", () => {
         sessionId,
         _prompt,
         permissionMode,
+        _modelName,
+        _modelSelectionBinding,
         reasoningEffort,
         reasoningEffortBinding,
       ) => {
@@ -1211,9 +1214,10 @@ describe("desktop workspace and history shell", () => {
     expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
-  it("creates a new durable conversation when the model changes", async () => {
+  it("selects a model for the next run without creating another conversation", async () => {
     const user = userEvent.setup();
     const selectedModels: Array<string | undefined> = [];
+    const runSelections: Array<{ sessionId: string; modelName?: string; binding?: string }> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -1228,6 +1232,23 @@ describe("desktop workspace and history shell", () => {
           runCount: 0,
         };
       },
+      startRun: async (
+        _workspaceId,
+        sessionId,
+        _prompt,
+        permissionMode,
+        modelName,
+        modelSelectionBinding,
+      ) => {
+        runSelections.push({ sessionId, modelName, binding: modelSelectionBinding });
+        return {
+          id: "run-model-switch",
+          sessionId,
+          status: "running",
+          permissionMode,
+          streamSequence: 0,
+        };
+      },
     });
     render(<App bridge={bridge} />);
 
@@ -1237,8 +1258,15 @@ describe("desktop workspace and history shell", () => {
       await screen.findByRole("combobox", { name: "Model" }),
       "deepseek-v4-pro",
     );
+    await user.type(screen.getByLabelText("Message Sigil"), "Continue with pro");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(selectedModels).toEqual([undefined, "deepseek-v4-pro"]);
+    expect(selectedModels).toEqual([undefined]);
+    expect(runSelections).toEqual([{
+      sessionId: "http-session-1",
+      modelName: "deepseek-v4-pro",
+      binding: "model-binding-deepseek-v4-flash",
+    }]);
   });
 
   it("switches and persists the desktop language", async () => {

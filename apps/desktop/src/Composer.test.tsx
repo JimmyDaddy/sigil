@@ -16,7 +16,8 @@ const context: RunContext = {
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
   availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
-  modelSelection: "fixed_for_session",
+  modelSelection: "per_run",
+  modelSelectionBinding: "model-binding",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
   availableReasoningEfforts: ["low", "medium", "high", "max"],
@@ -111,10 +112,10 @@ function renderComposer(overrides: {
         composerRef={createRef<HTMLTextAreaElement>()}
         runContext={context}
         runContextBusy={false}
-        modelChanging={false}
+        selectedModelName={context.modelName}
         permissionMode="manual"
         reasoningEffort="max"
-        onModelChange={async () => true}
+        onModelChange={() => undefined}
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
         onNewSession={async () => true}

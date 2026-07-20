@@ -160,11 +160,11 @@ function FixtureSurface({
             composerRef={composerRef}
             runContext={fixture.composer.context}
             runContextBusy={false}
-            modelChanging={false}
+            selectedModelName={fixture.composer.context.modelName}
             permissionMode={permissionMode}
             reasoningEffort={reasoningEffort}
             requestedSkill={undefined}
-            onModelChange={() => Promise.resolve(true)}
+            onModelChange={() => undefined}
             onNewSession={() => Promise.resolve(true)}
             onOpenAgentWorkbench={() => undefined}
             onNotice={() => undefined}

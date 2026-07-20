@@ -1248,6 +1248,9 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
                 projection.provider_name.get_or_insert(provider_name);
                 projection.model_name.get_or_insert(model_name);
             }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name }) => {
+                projection.model_name = Some(model_name);
+            }
             SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance)) => {
                 projection.external_provenance.push(provenance);
             }

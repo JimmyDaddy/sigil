@@ -556,6 +556,8 @@ model = "deepseek-v4-flash"
             HttpRunStartRequest {
                 prompt: "wait in preparation".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
+                model_name: None,
+                model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -750,6 +752,8 @@ model = "deepseek-v4-flash"
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
+                model_name: None,
+                model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,

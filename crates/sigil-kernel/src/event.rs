@@ -1301,6 +1301,7 @@ impl From<RunEvent> for PublicRunEventKind {
 fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionIdentity { .. } => "session_identity",
+        ControlEntry::SessionModelSelected { .. } => "session_model_selected",
         ControlEntry::ContinuationStateSaved(_) => "continuation_state_saved",
         ControlEntry::ResponseHandleTracked(_) => "response_handle_tracked",
         ControlEntry::BackgroundTaskTracked(_) => "background_task_tracked",

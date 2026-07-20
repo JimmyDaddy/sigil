@@ -208,6 +208,8 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
     pub(crate) permission_mode: DesktopPermissionMode,
+    pub(crate) model_name: Option<String>,
+    pub(crate) model_selection_binding: Option<String>,
     pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
     pub(crate) reasoning_effort_binding: Option<String>,
     pub(crate) skill_binding: Option<DesktopSkillBindingInput>,
@@ -247,6 +249,7 @@ pub(crate) struct DesktopRunContext {
     pub(crate) model_name: String,
     pub(crate) available_models: Vec<String>,
     pub(crate) model_selection: &'static str,
+    pub(crate) model_selection_binding: String,
     pub(crate) default_permission_mode: &'static str,
     pub(crate) available_permission_modes: Vec<&'static str>,
     pub(crate) available_reasoning_efforts: Vec<&'static str>,
@@ -626,8 +629,9 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             model_name: value.model_name,
             available_models: value.available_models,
             model_selection: match value.model_selection {
-                DesktopModelSelectionPolicy::FixedForSession => "fixed_for_session",
+                DesktopModelSelectionPolicy::PerRun => "per_run",
             },
+            model_selection_binding: value.model_selection_binding,
             default_permission_mode: permission_mode_label(value.default_permission_mode),
             available_permission_modes: value
                 .available_permission_modes

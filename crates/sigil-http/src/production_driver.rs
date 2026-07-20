@@ -461,7 +461,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             provider_name: view.provider_name,
             model_name: view.model_name,
             available_models: view.available_models,
-            model_selection: HttpModelSelectionPolicy::FixedForSession,
+            model_selection: HttpModelSelectionPolicy::PerRun,
+            model_selection_binding: view.model_selection_binding,
             default_permission_mode: view.default_permission_mode.into(),
             available_permission_modes: vec![
                 HttpPermissionMode::ReadOnly,
@@ -641,6 +642,8 @@ impl HttpRunSupervisor {
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
             interaction: ApplicationRunInteraction::ExternallyInteractive,
             permission_mode: Some(self.start.run.permission_mode.into()),
+            model_name: self.start.model_name.clone(),
+            model_selection_binding: self.start.model_selection_binding.clone(),
             reasoning_effort: self.start.run.reasoning_effort.map(Into::into),
             reasoning_effort_binding: self.start.reasoning_effort_binding.clone(),
             skill_binding: self.start.skill_binding.clone().map(|binding| {

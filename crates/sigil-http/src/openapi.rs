@@ -791,6 +791,8 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "prompt": { "type": "string" },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
+                        "model_name": { "type": ["string", "null"] },
+                        "model_selection_binding": { "type": ["string", "null"] },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] }
@@ -807,7 +809,7 @@ pub fn http_openapi_document() -> Value {
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
+                    "required": ["provider_name", "model_name", "available_models", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
                     "properties": {
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
@@ -817,7 +819,8 @@ pub fn http_openapi_document() -> Value {
                             "uniqueItems": true,
                             "items": { "type": "string" }
                         },
-                        "model_selection": { "type": "string", "enum": ["fixed_for_session"] },
+                        "model_selection": { "type": "string", "enum": ["per_run"] },
+                        "model_selection_binding": { "type": "string" },
                         "default_permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "available_permission_modes": {
                             "type": "array",

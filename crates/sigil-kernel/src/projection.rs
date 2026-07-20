@@ -1619,6 +1619,9 @@ fn apply_control_entry_to_session_list(
             projection.provider_name = Some(provider_name.clone());
             projection.model_name = Some(model_name.clone());
         }
+        ControlEntry::SessionModelSelected { model_name } => {
+            projection.model_name = Some(model_name.clone());
+        }
         ControlEntry::UsageSnapshot(usage) => {
             projection.latest_usage = Some(SessionListUsageSummary {
                 prompt_tokens: usage.prompt_tokens,

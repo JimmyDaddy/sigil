@@ -303,6 +303,12 @@ pub struct HttpSessionBinding {
 pub struct HttpRunStartRequest {
     /// User prompt for the run.
     pub prompt: String,
+    /// Optional model selected for this run in the existing durable session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Opaque run-context binding required with an explicit model selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection_binding: Option<String>,
     /// Explicit user-facing permission mode for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<HttpPermissionMode>,
@@ -350,8 +356,8 @@ pub enum HttpReasoningEffort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpModelSelectionPolicy {
-    /// The durable session identity fixes the provider and model for all subsequent runs.
-    FixedForSession,
+    /// Each run may select an admitted model while retaining the durable session and transcript.
+    PerRun,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -462,6 +468,8 @@ pub struct HttpRunContextView {
     pub available_models: Vec<String>,
     /// Whether the model can change without forking the durable session.
     pub model_selection: HttpModelSelectionPolicy,
+    /// Opaque binding proving the exact current and available model set.
+    pub model_selection_binding: String,
     /// Configured permission mode selected by clients for a new run.
     pub default_permission_mode: HttpPermissionMode,
     /// Complete bounded set of permission modes accepted by run start.

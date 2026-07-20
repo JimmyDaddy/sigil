@@ -152,6 +152,9 @@ pub enum ControlEntry {
         provider_name: String,
         model_name: String,
     },
+    SessionModelSelected {
+        model_name: String,
+    },
     ContinuationStateSaved(ProviderContinuationState),
     ResponseHandleTracked(crate::provider::ResponseHandle),
     BackgroundTaskTracked(crate::provider::BackgroundTaskHandle),

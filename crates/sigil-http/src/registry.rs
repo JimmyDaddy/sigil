@@ -470,6 +470,8 @@ impl HttpSessionRunRegistry {
         let permission_mode = request
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
+        let model_name = request.model_name;
+        let model_selection_binding = request.model_selection_binding;
         let reasoning_effort = request.reasoning_effort;
         let reasoning_effort_binding = request.reasoning_effort_binding;
         let skill_binding = request.skill_binding;
@@ -528,6 +530,8 @@ impl HttpSessionRunRegistry {
             session: session_snapshot,
             run: run_snapshot,
             prompt,
+            model_name,
+            model_selection_binding,
             reasoning_effort_binding,
             skill_binding,
         };

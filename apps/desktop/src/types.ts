@@ -217,7 +217,8 @@ export interface RunContext {
   providerName: string;
   modelName: string;
   availableModels: string[];
-  modelSelection: "fixed_for_session";
+  modelSelection: "per_run";
+  modelSelectionBinding: string;
   defaultPermissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
   availableReasoningEfforts: ReasoningEffort[];

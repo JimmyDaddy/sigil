@@ -87,7 +87,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         canonical: "/model",
         aliases: &["/m"],
         label: "Change model",
-        description: "switch model for a new conversation",
+        description: "set the model for the next run in this conversation",
         argument_hint: Some("<model>"),
         completes_with_space: true,
         client_action: Some(ApplicationClientAction::FocusModel),

@@ -29,7 +29,6 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
-  onModelChange: (modelName: string) => Promise<boolean>;
   onNewSession: () => Promise<boolean>;
 }
 
@@ -48,7 +47,6 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
-  onModelChange,
   onNewSession,
 }: ConversationPanelProps) {
   const { t } = useLocale();
@@ -58,7 +56,7 @@ export function ConversationPanel({
   const [runContextReload, setRunContextReload] = useState(0);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
-  const [modelChanging, setModelChanging] = useState(false);
+  const [selectedModelName, setSelectedModelName] = useState<string>();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
@@ -95,7 +93,7 @@ export function ConversationPanel({
     setRunContextBusy(false);
     setPermissionMode("manual");
     setReasoningEffort(undefined);
-    setModelChanging(false);
+    setSelectedModelName(undefined);
     setEvents([]);
     setStreamStatus(undefined);
     setVerification(undefined);
@@ -122,6 +120,7 @@ export function ConversationPanel({
       .then((context) => {
         if (disposed) return;
         setRunContext(context);
+        setSelectedModelName(context.modelName);
         setPermissionMode((current) =>
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
         );
@@ -332,19 +331,26 @@ export function ConversationPanel({
     setSubmitting(true);
     onNotice(t("startingRunNotice"));
     try {
+      const modelChanged =
+        runContext !== undefined && selectedModelName !== runContext.modelName;
       const started = await bridge.startRun(
         workspaceId,
         session.id,
         nextPrompt,
         permissionMode,
-        reasoningEffort,
-        reasoningEffort === undefined ? undefined : runContext?.reasoningEffortBinding,
+        modelChanged ? selectedModelName : undefined,
+        modelChanged ? runContext?.modelSelectionBinding : undefined,
+        modelChanged ? undefined : reasoningEffort,
+        modelChanged || reasoningEffort === undefined
+          ? undefined
+          : runContext?.reasoningEffortBinding,
         skillBinding,
       );
       activeRunIdRef.current = started.id;
       setRun(started);
       setPermissionMode(started.permissionMode);
-      setReasoningEffort(started.reasoningEffort ?? reasoningEffort);
+      setReasoningEffort(started.reasoningEffort ?? (modelChanged ? undefined : reasoningEffort));
+      if (modelChanged) setRunContextReload((current) => current + 1);
       onNotice(t("runStarted"));
       return true;
     } catch {
@@ -543,14 +549,13 @@ export function ConversationPanel({
         composerRef={composerRef}
         runContext={runContext}
         runContextBusy={runContextBusy}
-        modelChanging={modelChanging}
+        selectedModelName={selectedModelName}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
         requestedSkill={requestedSkill}
         onModelChange={(modelName) => {
-          if (modelName === runContext?.modelName) return;
-          setModelChanging(true);
-          void onModelChange(modelName).finally(() => setModelChanging(false));
+          setSelectedModelName(modelName);
+          setReasoningEffort(undefined);
         }}
         onPermissionModeChange={setPermissionMode}
         onReasoningEffortChange={setReasoningEffort}

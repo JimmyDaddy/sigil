@@ -193,6 +193,8 @@ pub struct ApplicationRunContextView {
     pub model_name: String,
     /// Models this application surface may bind for a new session with the same provider.
     pub available_models: Vec<String>,
+    /// Opaque binding proving the exact current-model and available-model selection set.
+    pub model_selection_binding: String,
     /// Configured permission mode used when a client does not override one run.
     pub default_permission_mode: PermissionMode,
     /// Exact reasoning-effort values implemented for this durable provider and model.
@@ -228,6 +230,10 @@ pub struct ApplicationRunRequest {
     pub interaction: ApplicationRunInteraction,
     /// Optional user-selected permission mode for this run.
     pub permission_mode: Option<PermissionMode>,
+    /// Optional model selected for this run and subsequent runs in the same durable session.
+    pub model_name: Option<String>,
+    /// Opaque binding returned with the run-context model selection capability.
+    pub model_selection_binding: Option<String>,
     /// Optional exact effort selected for this run.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Opaque binding returned with the run-context effort capability.
@@ -266,6 +272,8 @@ impl ApplicationRunRequest {
             session_path: None,
             interaction: ApplicationRunInteraction::NonInteractive,
             permission_mode: None,
+            model_name: None,
+            model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -1024,6 +1032,20 @@ fn application_model_options(provider_name: &str, current_model: &str) -> Vec<St
     models
 }
 
+fn application_model_selection_binding(
+    provider_name: &str,
+    current_model: &str,
+    available_models: &[String],
+) -> String {
+    let material = format!(
+        "sigil-application-model-selection-v1\n{}\n{}\n{}",
+        provider_name,
+        current_model,
+        available_models.join("\n"),
+    );
+    format!("{:x}", Sha256::digest(material.as_bytes()))
+}
+
 /// Reopens one existing durable V2 session without creating a missing path.
 ///
 /// Callers must first establish their own workspace/catalog authorization for `session_path`.
@@ -1132,10 +1154,17 @@ pub fn application_run_context_view(
         &workspace_root,
         session.entries(),
     )?;
+    let available_models = application_model_options(session.provider_name(), session.model_name());
+    let model_selection_binding = application_model_selection_binding(
+        session.provider_name(),
+        session.model_name(),
+        &available_models,
+    );
     Ok(ApplicationRunContextView {
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
-        available_models: application_model_options(session.provider_name(), session.model_name()),
+        available_models,
+        model_selection_binding,
         default_permission_mode: root_config.permission.mode,
         available_reasoning_efforts,
         default_reasoning_effort,
@@ -1539,6 +1568,7 @@ fn prepare_application_run_blocking(
         &workspace_root,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
+    admit_application_model_selection(&request, &mut session)?;
     root_config.agent.provider = session.provider_name().to_owned();
     root_config.agent.model = session.model_name().to_owned();
     admit_application_reasoning_effort(&request, &root_config)?;
@@ -1704,6 +1734,51 @@ fn admit_application_reasoning_effort(
         });
     }
     Ok(())
+}
+
+fn admit_application_model_selection(
+    request: &ApplicationRunRequest,
+    session: &mut Session,
+) -> std::result::Result<(), ApplicationRunPrepareError> {
+    let (requested_model, binding) = match (
+        request.model_name.as_deref(),
+        request.model_selection_binding.as_deref(),
+    ) {
+        (None, None) => return Ok(()),
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: "model selection and capability binding must be supplied together"
+                    .to_owned(),
+            });
+        }
+        (Some(model), Some(binding)) => (model, binding),
+    };
+    let requested_model =
+        crate::normalize_provider_model_alias(session.provider_name(), requested_model)
+            .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
+                message: "application run model must not be empty".to_owned(),
+            })?;
+    let available_models = application_model_options(session.provider_name(), session.model_name());
+    let expected_binding = application_model_selection_binding(
+        session.provider_name(),
+        session.model_name(),
+        &available_models,
+    );
+    if binding != expected_binding {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "model selection capability binding is stale".to_owned(),
+        });
+    }
+    if !available_models.contains(&requested_model) {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: format!(
+                "model {requested_model} is not available for the configured provider"
+            ),
+        });
+    }
+    session
+        .select_model(requested_model)
+        .map_err(ApplicationRunPrepareError::execution)
 }
 
 fn constrain_application_tool_registry(

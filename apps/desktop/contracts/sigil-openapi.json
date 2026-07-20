@@ -719,8 +719,11 @@
           },
           "model_selection": {
             "enum": [
-              "fixed_for_session"
+              "per_run"
             ],
+            "type": "string"
+          },
+          "model_selection_binding": {
             "type": "string"
           },
           "provider_name": {
@@ -738,6 +741,7 @@
           "model_name",
           "available_models",
           "model_selection",
+          "model_selection_binding",
           "default_permission_mode",
           "available_permission_modes",
           "available_reasoning_efforts",
@@ -855,6 +859,18 @@
       },
       "RunStartRequest": {
         "properties": {
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_selection_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "permission_mode": {
             "$ref": "#/components/schemas/PermissionMode"
           },

@@ -402,6 +402,8 @@ pub(crate) async fn desktop_start_run(
             DesktopRunStartRequest {
                 prompt: input.prompt,
                 permission_mode: input.permission_mode,
+                model_name: input.model_name,
+                model_selection_binding: input.model_selection_binding,
                 reasoning_effort: input.reasoning_effort,
                 reasoning_effort_binding: input.reasoning_effort_binding,
                 skill_binding: input.skill_binding.map(|binding| {

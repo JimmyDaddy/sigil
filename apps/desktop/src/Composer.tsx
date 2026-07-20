@@ -17,7 +17,7 @@ export function Composer({
   composerRef,
   runContext,
   runContextBusy,
-  modelChanging,
+  selectedModelName,
   permissionMode,
   reasoningEffort,
   requestedSkill,
@@ -37,7 +37,7 @@ export function Composer({
   composerRef: RefObject<HTMLTextAreaElement | null>;
   runContext?: RunContext;
   runContextBusy: boolean;
-  modelChanging: boolean;
+  selectedModelName?: string;
   permissionMode: PermissionMode;
   reasoningEffort?: ReasoningEffort;
   requestedSkill?: SkillCatalogEntry;
@@ -164,7 +164,8 @@ export function Composer({
           onNotice(t("unsupportedModel", { value: argument }), true);
           return false;
         }
-        return model === runContext?.modelName ? true : onModelChange(model);
+        if (model !== selectedModelName) onModelChange(model);
+        return true;
       }
       case "open_agent_workbench":
         onOpenAgentWorkbench(argument);
@@ -181,7 +182,7 @@ export function Composer({
     setActiveSuggestion(0);
     requestAnimationFrame(() => composerRef.current?.focus());
   };
-  const modelName = runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
+  const modelName = selectedModelName ?? runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
   const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
 
@@ -265,8 +266,8 @@ export function Composer({
                   containerClassName="composer-model-field"
                   className="composer-model-select"
                   ref={modelSelectRef}
-                  value={runContext?.modelName ?? ""}
-                  disabled={active || runContextBusy || modelChanging || models.length < 2}
+                  value={selectedModelName ?? runContext?.modelName ?? ""}
+                  disabled={active || runContextBusy || models.length < 2}
                   onChange={(event) => onModelChange(event.target.value)}
                 >
                   {models.length === 0 ? <option value="">{modelName}</option> : models.map((model) => (

@@ -22,10 +22,10 @@ use super::{
     ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
     ApplicationSessionLeaseManager, ApplicationTranscriptRole,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    admit_application_reasoning_effort, admit_application_skill_binding,
-    application_run_context_view, application_run_input, application_session_transcript_page,
-    application_terminal_projection, application_verification_view,
-    attach_application_request_context, bind_application_session,
+    admit_application_model_selection, admit_application_reasoning_effort,
+    admit_application_skill_binding, application_run_context_view, application_run_input,
+    application_session_transcript_page, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, default_application_session_path,
     optional_eager_mcp_warning, record_application_preparation_cancellation,
@@ -374,6 +374,7 @@ model = "deepseek-v4-flash"
         sigil_kernel::PermissionMode::Manual
     );
     assert_eq!(empty.available_models.len(), 2);
+    assert!(!empty.model_selection_binding.is_empty());
     assert_eq!(
         empty.available_reasoning_efforts,
         vec![
@@ -438,6 +439,48 @@ model = "deepseek-v4-flash"
         )
         .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn run_model_selection_keeps_the_session_and_rejects_stale_capabilities() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/model-switch.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let mut request =
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "run-model");
+    request.model_name = Some("deepseek-v4-pro".to_owned());
+    request.model_selection_binding = Some(context.model_selection_binding.clone());
+
+    admit_application_model_selection(&request, &mut session)?;
+
+    assert_eq!(session.session_scope_id(), binding.session_scope_id);
+    assert_eq!(session.model_name(), "deepseek-v4-pro");
+    let mut stale = request;
+    stale.model_name = Some("deepseek-v4-flash".to_owned());
+    assert!(matches!(
+        admit_application_model_selection(&stale, &mut session),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
     Ok(())
 }
 

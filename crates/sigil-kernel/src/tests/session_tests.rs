@@ -4604,6 +4604,38 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
 }
 
 #[test]
+fn model_selection_is_durable_and_cuts_off_native_continuation_material() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
+        provider_name: "deepseek".to_owned(),
+        response_id: "response-flash".to_owned(),
+        continuation_cursor: None,
+    }))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "reasoning".to_owned(),
+            message_id: Some("message-flash".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"flash"}),
+        },
+    ))?;
+
+    session.select_model("deepseek-v4-pro")?;
+
+    assert_eq!(session.model_name(), "deepseek-v4-pro");
+    assert!(session.latest_response_handle("deepseek").is_none());
+    assert!(session.continuation_states("deepseek").is_empty());
+    let store = JsonlSessionStore::new(&path)?;
+    let restored = Session::load_from_store("other", "other", store)?;
+    assert_eq!(restored.provider_name(), "deepseek");
+    assert_eq!(restored.model_name(), "deepseek-v4-pro");
+    Ok(())
+}
+
+#[test]
 fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {

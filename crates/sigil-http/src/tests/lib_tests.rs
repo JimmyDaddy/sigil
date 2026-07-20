@@ -663,6 +663,8 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "hello from desktop".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            model_name: None,
+            model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -828,7 +830,8 @@ async fn local_server_projects_typed_run_context() {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
         available_models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
-        model_selection: HttpModelSelectionPolicy::FixedForSession,
+        model_selection: HttpModelSelectionPolicy::PerRun,
+        model_selection_binding: "model-binding".to_owned(),
         default_permission_mode: HttpPermissionMode::Manual,
         available_permission_modes: vec![
             HttpPermissionMode::ReadOnly,
@@ -860,7 +863,8 @@ async fn local_server_projects_typed_run_context() {
     assert_eq!(status, 200);
     assert_eq!(body["model_name"], "deepseek-v4-flash");
     assert_eq!(body["available_models"][1], "deepseek-v4-pro");
-    assert_eq!(body["model_selection"], "fixed_for_session");
+    assert_eq!(body["model_selection"], "per_run");
+    assert_eq!(body["model_selection_binding"], "model-binding");
     assert_eq!(body["default_permission_mode"], "manual");
     assert_eq!(body["available_permission_modes"][2], "auto-edit");
     assert_eq!(body["available_reasoning_efforts"][3], "max");
@@ -1034,6 +1038,8 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "approval needed".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            model_name: None,
+            model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -1119,6 +1125,8 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         HttpRunStartRequest {
             prompt: "run desktop smoke".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            model_name: None,
+            model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -2703,6 +2711,8 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: None,
+                model_name: None,
+                model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -3531,6 +3541,8 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
         prompt: "hello".to_owned(),
         permission_mode: Some(HttpPermissionMode::ReadOnly),
+        model_name: None,
+        model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
@@ -3642,6 +3654,8 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
     HttpRunStartRequest {
         prompt: prompt.to_owned(),
         permission_mode: Some(permission_mode),
+        model_name: None,
+        model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,

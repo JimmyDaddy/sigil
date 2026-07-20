@@ -1058,7 +1058,8 @@ export interface components {
             last_prompt_tokens?: number | null;
             model_name: string;
             /** @enum {string} */
-            model_selection: "fixed_for_session";
+            model_selection: "per_run";
+            model_selection_binding: string;
             provider_name: string;
             reasoning_effort_binding?: string | null;
         };
@@ -1087,6 +1088,8 @@ export interface components {
             session_id: string;
         };
         RunStartRequest: {
+            model_name?: string | null;
+            model_selection_binding?: string | null;
             permission_mode: components["schemas"]["PermissionMode"];
             prompt: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;

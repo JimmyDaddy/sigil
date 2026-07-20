@@ -18,6 +18,10 @@ pub struct HttpRunDriverStart {
     pub run: HttpRunSnapshot,
     /// Full prompt body. The preview is carried separately on the run snapshot.
     pub prompt: String,
+    /// Optional model selected from the exact run-context capability set.
+    pub model_name: Option<String>,
+    /// Opaque model-selection binding supplied with an explicit selection.
+    pub model_selection_binding: Option<String>,
     /// Opaque exact provider/model effort binding.
     pub reasoning_effort_binding: Option<String>,
     /// Exact inline-skill binding selected from the current run context.

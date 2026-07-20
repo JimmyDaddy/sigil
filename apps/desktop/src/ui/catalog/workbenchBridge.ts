@@ -143,7 +143,8 @@ const runContext: RunContext = {
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
   availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
-  modelSelection: "fixed_for_session",
+  modelSelection: "per_run",
+  modelSelectionBinding: "catalog-model-binding",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
   availableReasoningEfforts: ["low", "medium", "high", "max"],
@@ -231,6 +232,8 @@ export function createCatalogWorkbenchBridge(
       sessionId,
       _prompt,
       permissionMode,
+      _modelName,
+      _modelSelectionBinding,
       reasoningEffort,
     ) => ({
       id: "catalog-run-new",

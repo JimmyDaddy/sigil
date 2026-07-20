@@ -29,7 +29,8 @@ fn run_context_decodes_exact_typed_server_contract() {
     let context: crate::DesktopRunContextView = serde_json::from_value(serde_json::json!({
         "provider_name": "deepseek",
         "model_name": "deepseek-v4-flash",
-        "model_selection": "fixed_for_session",
+        "model_selection": "per_run",
+        "model_selection_binding": "model-binding",
         "available_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "default_permission_mode": "manual",
         "available_permission_modes": ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -56,7 +57,7 @@ fn run_context_decodes_exact_typed_server_contract() {
     );
     assert_eq!(
         context.model_selection,
-        crate::DesktopModelSelectionPolicy::FixedForSession
+        crate::DesktopModelSelectionPolicy::PerRun
     );
 }
 

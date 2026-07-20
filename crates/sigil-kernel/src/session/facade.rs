@@ -447,6 +447,25 @@ impl Session {
         &self.model_name
     }
 
+    /// Selects the provider model used by subsequent runs without forking the durable session.
+    ///
+    /// The selection is append-only. Provider-native continuation material written before this
+    /// boundary is intentionally excluded from future requests because it may be model-specific.
+    pub fn select_model(&mut self, model_name: impl Into<String>) -> Result<()> {
+        let model_name = model_name.into();
+        if model_name.trim().is_empty() {
+            bail!("session model selection must not be empty");
+        }
+        if model_name == self.model_name {
+            return Ok(());
+        }
+        self.append_control(ControlEntry::SessionModelSelected {
+            model_name: model_name.clone(),
+        })?;
+        self.model_name = model_name;
+        Ok(())
+    }
+
     /// Returns the in-memory provider-visible message projection.
     ///
     /// Store-backed V2 context projection is fallible and therefore intentionally exposed through
@@ -525,7 +544,7 @@ impl Session {
     pub fn continuation_states(&self, provider_name: &str) -> Vec<ProviderContinuationState> {
         let mut latest_by_key: HashMap<(String, Option<String>), ProviderContinuationState> =
             HashMap::new();
-        for entry in &self.entries {
+        for entry in self.entries_after_latest_model_selection() {
             if let SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(state)) = entry
                 && state.provider_name == provider_name
             {
@@ -539,14 +558,27 @@ impl Session {
     }
 
     pub fn latest_response_handle(&self, provider_name: &str) -> Option<ResponseHandle> {
-        self.entries.iter().rev().find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::ResponseHandleTracked(handle))
-                if handle.provider_name == provider_name =>
-            {
-                Some(handle.clone())
-            }
-            _ => None,
-        })
+        self.entries_after_latest_model_selection()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ResponseHandleTracked(handle))
+                    if handle.provider_name == provider_name =>
+                {
+                    Some(handle.clone())
+                }
+                _ => None,
+            })
+    }
+
+    fn entries_after_latest_model_selection(&self) -> &[SessionLogEntry] {
+        let boundary = self.entries.iter().rposition(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
+            )
+        });
+        boundary.map_or(&self.entries, |index| &self.entries[index + 1..])
     }
 
     pub fn latest_prefix_snapshot(&self) -> Option<PrefixSnapshot> {

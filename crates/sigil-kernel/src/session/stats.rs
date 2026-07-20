@@ -177,14 +177,31 @@ pub(super) fn json_top_level_keys(value: &serde_json::Value) -> Vec<String> {
 pub(super) fn session_identity_from_entries(
     entries: &[SessionLogEntry],
 ) -> Option<(String, String)> {
-    entries.iter().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            provider_name,
-            model_name,
-        }) => Some((provider_name.clone(), model_name.clone())),
-        SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
-            Some((snapshot.provider_name.clone(), snapshot.model_name.clone()))
+    let mut identity = None;
+    let mut identity_is_explicit = false;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name,
+                model_name,
+            }) if !identity_is_explicit => {
+                identity = Some((provider_name.clone(), model_name.clone()));
+                identity_is_explicit = true;
+            }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
+                if identity_is_explicit =>
+            {
+                if let Some((_, current_model)) = identity.as_mut() {
+                    *current_model = model_name.clone();
+                }
+            }
+            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot))
+                if identity.is_none() =>
+            {
+                identity = Some((snapshot.provider_name.clone(), snapshot.model_name.clone()));
+            }
+            _ => {}
         }
-        _ => None,
-    })
+    }
+    identity
 }
