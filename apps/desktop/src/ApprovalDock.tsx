@@ -2,6 +2,7 @@ import { useEffect, useRef, type RefObject } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import type { TimelineApproval } from "./types";
+import { Button } from "./ui/primitives";
 
 export function ApprovalDock({
   approval,
@@ -62,8 +63,8 @@ export function ApprovalDock({
       <small>“Approve once” applies only to this exact request. It cannot undo file, shell, or remote side effects that already happened.</small>
       {expired ? <div className="approval-expired" role="alert">This decision expired. Reopen the conversation to refresh the run state.</div> : null}
       <div className="approval-actions">
-        <button className="quiet-button danger-button" type="button" disabled={busy || expired} onClick={() => onDecision(false)}>Deny</button>
-        <button className="primary-button" type="button" disabled={busy || expired} onClick={() => onDecision(true)}>Approve once</button>
+        <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision(false)}>Deny</Button>
+        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision(true)}>Approve once</Button>
       </div>
     </section>
   );

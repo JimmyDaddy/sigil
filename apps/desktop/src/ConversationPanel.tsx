@@ -14,8 +14,8 @@ import type {
   TranscriptMessage,
   VerificationSummary,
 } from "./types";
-import { useFocusBoundary } from "./useFocusBoundary";
 import { useMediaQuery } from "./useMediaQuery";
+import { Button, Drawer } from "./ui/primitives";
 import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
@@ -57,29 +57,19 @@ export function ConversationPanel({
   const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const compactInspector = useMediaQuery("(max-width: 1100px)");
+  const reviewIsDrawer = useMediaQuery("(max-width: 1279px)");
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const inspectorRef = useRef<HTMLElement>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
-  const dismissInspector = useCallback(() => setInspectorOpen(false), []);
-
-  useFocusBoundary({
-    active: compactInspector && inspectorOpen,
-    containerRef: inspectorRef,
-    returnFocusRef: inspectorTriggerRef,
-    onDismiss: dismissInspector,
-  });
-
   useEffect(() => {
-    if (!compactInspector) setInspectorOpen(false);
-  }, [compactInspector]);
+    if (!reviewIsDrawer || verification === undefined) setInspectorOpen(false);
+  }, [reviewIsDrawer, verification]);
 
   useEffect(() => {
     setRun(undefined);
@@ -93,6 +83,7 @@ export function ConversationPanel({
     setAttachmentGap(false);
     setRunNotice(undefined);
     setRunAnnouncement("");
+    setInspectorOpen(false);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
@@ -353,27 +344,32 @@ export function ConversationPanel({
   };
 
   return (
-    <div className="conversation-layout">
+    <div className={`conversation-layout ${verification !== undefined && !reviewIsDrawer ? "conversation-layout-with-review" : ""}`}>
       <section className="conversation-panel" aria-labelledby="conversation-title">
       <header className="conversation-header">
         <div>
           <p className="eyebrow">Active conversation</p>
-          <h2 id="conversation-title">{session.label ?? "Untitled conversation"}</h2>
+          <span className="conversation-title-row">
+            <h2 id="conversation-title">{session.label ?? "Untitled conversation"}</h2>
+            <small>{session.runCount} recorded run{session.runCount === 1 ? "" : "s"}</small>
+          </span>
         </div>
         <div className="conversation-header-actions">
           <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
             {streamStatus?.state ?? "ready"}
           </span>
-          <button
-            className="pane-toggle inspector-toggle"
-            ref={inspectorTriggerRef}
-            type="button"
-            aria-controls="verification-inspector"
-            aria-expanded={inspectorOpen}
-            onClick={() => setInspectorOpen((open) => !open)}
-          >
-            Review
-          </button>
+          {verification !== undefined && reviewIsDrawer ? (
+            <Button
+              className="inspector-toggle"
+              ref={inspectorTriggerRef}
+              type="button"
+              aria-controls="verification-inspector"
+              aria-expanded={inspectorOpen}
+              onClick={() => setInspectorOpen(true)}
+            >
+              Review
+            </Button>
+          ) : null}
         </div>
       </header>
 
@@ -404,14 +400,14 @@ export function ConversationPanel({
         ) : null}
         {nextBefore !== undefined ? (
           <div className="transcript-pagination">
-            <button
-              className="quiet-button"
+            <Button
+              variant="quiet"
               type="button"
               disabled={transcriptBusy}
               onClick={() => void loadEarlier()}
             >
               {transcriptBusy ? "Loading earlier messages…" : `Load earlier messages (${Math.max(0, transcriptTotal - transcript.length)} remaining)`}
-            </button>
+            </Button>
           </div>
         ) : null}
         {transcriptError ? (
@@ -456,26 +452,28 @@ export function ConversationPanel({
       />
       </section>
 
-      {compactInspector && inspectorOpen ? (
-        <button className="pane-backdrop inspector-backdrop" type="button" aria-label="Close verification inspector" onClick={dismissInspector} />
+      {verification !== undefined && !reviewIsDrawer ? (
+        <aside id="verification-inspector" className="inspector-pane" aria-label="Verification">
+          <header className="inspector-header">
+            <p className="eyebrow">Review</p>
+            <h2>Verification</h2>
+            <p>Evidence and recommended checks for this conversation.</p>
+          </header>
+          <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
+        </aside>
       ) : null}
-      <aside
-        id="verification-inspector"
-        className={`inspector-pane ${inspectorOpen ? "pane-open" : ""}`}
-        ref={inspectorRef}
-        aria-labelledby="inspector-title"
-        aria-hidden={compactInspector && !inspectorOpen ? true : undefined}
-        inert={compactInspector && !inspectorOpen ? true : undefined}
-        tabIndex={-1}
-      >
-        <button className="drawer-close" type="button" onClick={dismissInspector} data-initial-focus>Close review</button>
-        <header className="inspector-header">
-          <p className="eyebrow">Review</p>
-          <h2 id="inspector-title">Verification</h2>
-          <p>Evidence and recommended checks for this conversation.</p>
-        </header>
-        <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
-      </aside>
+      {verification !== undefined && reviewIsDrawer ? (
+        <Drawer
+          id="verification-inspector"
+          open={inspectorOpen}
+          title="Verification"
+          description="Evidence and recommended checks for this conversation."
+          returnFocusRef={inspectorTriggerRef}
+          onOpenChange={setInspectorOpen}
+        >
+          <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
+        </Drawer>
+      ) : null}
     </div>
   );
 }

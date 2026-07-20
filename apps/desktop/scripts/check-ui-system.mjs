@@ -113,6 +113,9 @@ for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".
   if (/(?:#[0-9a-f]{3,8}\b|\brgba?\s*\()/i.test(source)) {
     fail(`raw color outside reference/forced-color foundations: ${relative(desktopRoot, path)}`);
   }
+  if (/--(?:color-|space-[1-6]\b|radius-(?:sm|md|lg|pill)\b|shadow-(?:dock|modal)\b|z-(?:topbar|popover|backdrop|drawer|modal)\b|motion-fast\b|control-height\b|focus-ring\b)/.test(source)) {
+    fail(`retired R46.2 token alias remains: ${relative(desktopRoot, path)}`);
+  }
 }
 
 const references = declarations(readFileSync(referencePath, "utf8"));
@@ -187,6 +190,9 @@ if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s
 }
 
 const sourceFiles = walk(srcRoot).filter((path) => [".ts", ".tsx"].includes(extname(path)) && !path.endsWith(".test.tsx"));
+if (sourceFiles.some((path) => path.endsWith("useFocusBoundary.ts"))) {
+  fail("legacy focus boundary remains after Drawer migration");
+}
 for (const path of sourceFiles) {
   const source = readFileSync(path, "utf8");
   const relativePath = relative(srcRoot, path);

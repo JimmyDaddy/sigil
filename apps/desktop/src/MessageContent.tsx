@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
 
 import { writeClipboard } from "./clipboard";
+import { Button } from "./ui/primitives";
 
 interface MessageContentProps {
   text: string;
@@ -17,14 +18,15 @@ export function MessageContent({ text }: MessageContentProps) {
   const blocks = parseBlocks(text);
   return (
     <div className="message-content">
-      <button
+      <Button
         className="content-copy"
+        variant="quiet"
         type="button"
         onClick={() => void writeClipboard(text).then(setCopied)}
         aria-label="Copy message"
       >
         {copied ? "Copied" : "Copy"}
-      </button>
+      </Button>
       {blocks.map((block, index) => {
         const key = `${block.kind}:${index}`;
         if (block.kind === "code") {
@@ -49,9 +51,9 @@ export function MessageContent({ text }: MessageContentProps) {
 function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button type="button" onClick={() => void writeClipboard(text).then(setCopied)} aria-label={label}>
+    <Button className="inline-copy" variant="quiet" type="button" onClick={() => void writeClipboard(text).then(setCopied)} aria-label={label}>
       {copied ? "Copied" : "Copy"}
-    </button>
+    </Button>
   );
 }
 

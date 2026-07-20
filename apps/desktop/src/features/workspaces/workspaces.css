@@ -1,18 +1,18 @@
 @layer features {
   .workspace-switcher { min-width: 0; }
   .workspace-switcher > .sg-popover-trigger { min-width: 160px; max-width: 280px; }
-  .workspace-switcher-label { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .workspace-switcher-label { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); }
   .workspace-switcher-label .sg-status-indicator { min-width: 0; }
   .workspace-switcher-label .sg-status-indicator > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .workspace-switcher-panel { display: grid; gap: var(--space-3); }
-  .workspace-switcher-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+  .workspace-switcher-panel { display: grid; gap: var(--sg-sys-space-3); }
+  .workspace-switcher-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sg-sys-space-3); }
   .workspace-switcher-heading small, .workspace-recent-group > strong { color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
   .workspace-switcher-empty { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
   .workspace-switcher-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-  .workspace-switcher-list li { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
+  .workspace-switcher-list li { display: flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-1); }
   .workspace-switcher-row { min-width: 0; flex: 1; justify-content: flex-start; overflow: hidden; }
   .workspace-switcher-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .workspace-switcher-row[aria-current="page"] { color: var(--sg-sys-color-on-primary-container); background: var(--sg-sys-color-primary-container); }
   .workspace-switcher-list .sg-icon-button { width: 32px; min-width: 32px; min-height: 32px; }
-  .workspace-recent-group { display: grid; gap: var(--space-1); padding-top: var(--space-2); border-top: 1px solid var(--sg-sys-color-outline); }
+  .workspace-recent-group { display: grid; gap: var(--sg-sys-space-1); padding-top: var(--sg-sys-space-2); border-top: 1px solid var(--sg-sys-color-outline); }
 }

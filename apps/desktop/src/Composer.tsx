@@ -1,5 +1,7 @@
 import { useState, type RefObject } from "react";
 
+import { Button, TextArea } from "./ui/primitives";
+
 const MAX_DRAFT_BYTES = 256 * 1024;
 
 export function Composer({
@@ -30,9 +32,10 @@ export function Composer({
   };
   return (
     <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-      <label htmlFor="desktop-prompt">Message Sigil</label>
-      <textarea
+      <TextArea
         id="desktop-prompt"
+        label="Message Sigil"
+        description={active ? "Draft saved on this device. Send it after the active run finishes." : "Enter to send · Shift+Enter for a new line · Drafts stay on this device"}
         ref={composerRef}
         value={prompt}
         onChange={(event) => {
@@ -41,7 +44,6 @@ export function Composer({
         }}
         placeholder="Describe the change or question…"
         rows={4}
-        aria-describedby="composer-hint"
         onKeyDown={(event) => {
           if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
           event.preventDefault();
@@ -49,11 +51,8 @@ export function Composer({
         }}
       />
       <div className="composer-actions">
-        <small id="composer-hint">{active ? "Draft saved on this device. Send it after the active run finishes." : "Enter to send · Shift+Enter for a new line · Drafts stay on this device"}</small>
-        <div>
-          {active ? <button className="quiet-button danger-button" type="button" disabled={controlBusy} onClick={onCancel}>Cancel run</button> : null}
-          <button className="primary-button" type="submit" disabled={prompt.trim() === "" || active || submitting}>{submitting ? "Starting…" : "Run"}</button>
-        </div>
+        {active ? <Button variant="danger" type="button" disabled={controlBusy} onClick={onCancel}>Cancel run</Button> : null}
+        <Button variant="primary" type="submit" busy={submitting} disabled={prompt.trim() === "" || active}>{submitting ? "Starting…" : "Run"}</Button>
       </div>
     </form>
   );

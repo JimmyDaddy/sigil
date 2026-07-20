@@ -446,10 +446,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
             </div>
           ) : (
             <div className="conversation-surface">
-              <div className="selected-session">
-                <div><p className="eyebrow">{activeWorkspace.displayName}</p><strong>{selectedSession.label ?? "Untitled conversation"}</strong></div>
-                <small>{selectedSession.runCount} recorded run{selectedSession.runCount === 1 ? "" : "s"}</small>
-              </div>
               <ConversationPanel bridge={bridge} workspaceId={activeWorkspace.id} session={selectedSession} />
             </div>
           )}

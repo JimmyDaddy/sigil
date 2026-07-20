@@ -22,6 +22,7 @@ const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia")
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   if (originalMatchMedia === undefined) delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
   else Object.defineProperty(window, "matchMedia", originalMatchMedia);
 });
@@ -189,8 +190,8 @@ describe("desktop coding-agent components", () => {
     const output = Array.from({ length: 245 }, (_, index) => `line ${index + 1}`).join("\n");
     render(<ToolCard tool={{ key: "tool", toolName: "shell", text: output, status: "succeeded" }} />);
     expect(screen.getByText("5 output lines omitted from this view.")).toBeTruthy();
-    expect(screen.getByText("duration not recorded")).toBeTruthy();
-    expect(screen.getByText("risk not classified")).toBeTruthy();
+    expect(screen.queryByText("duration not recorded")).toBeNull();
+    expect(screen.queryByText("risk not classified")).toBeNull();
   });
 });
 
@@ -335,9 +336,12 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("New conversation ready.")).toBeTruthy();
     expect(screen.getByText("0 recorded runs")).toBeTruthy();
+    expect(screen.getAllByRole("heading", { name: "New conversation" })).toHaveLength(1);
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Conversation workspace" })).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: "Verification" })).toBeTruthy();
+    expect(screen.queryByRole("complementary", { name: "Verification" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review" })).toBeNull();
+    expect(document.querySelector(".conversation-layout-with-review")).toBeNull();
     expect(screen.queryByText(/private bearer|TUI-first|stay in Rust/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
@@ -682,7 +686,7 @@ describe("desktop workspace and history shell", () => {
     expect(confirmations).toEqual([false, false, true]);
   });
 
-  it("uses focus-managed navigation and review drawers at compact widths", async () => {
+  it("uses primitive navigation and contextual review drawers without remounting the conversation", async () => {
     const restoreMedia = installMediaQueries((query) => query.includes("max-width"));
     const user = userEvent.setup();
     const bridge = bridgeWith({
@@ -690,6 +694,15 @@ describe("desktop workspace and history shell", () => {
         protocolVersion: 1,
         workspaces: [workspace],
         recentWorkspaces: [],
+      }),
+      verification: async () => ({
+        taskId: "task-compact",
+        stepId: "verify-compact",
+        scopeKind: "task",
+        scopeId: "task-compact",
+        verdict: "passed",
+        status: "passed",
+        evidence: {},
       }),
     });
     render(<App bridge={bridge} />);
@@ -707,15 +720,24 @@ describe("desktop workspace and history shell", () => {
     expect(document.activeElement).toBe(navigationTrigger);
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const inspector = document.querySelector("#verification-inspector") as HTMLElement;
-    expect(inspector.getAttribute("aria-hidden")).toBe("true");
-    const reviewTrigger = screen.getByRole("button", { name: "Review" });
+    expect(document.querySelector("#verification-inspector")).toBeNull();
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    timeline.scrollTop = 72;
+    await user.type(composer, "Preserve this draft");
+    const reviewTrigger = await screen.findByRole("button", { name: "Review" });
     await user.click(reviewTrigger);
-    expect(inspector.getAttribute("aria-hidden")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close review" }));
+    const inspector = screen.getByRole("dialog", { name: "Verification" });
+    expect(inspector.id).toBe("verification-inspector");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close Verification" }));
     fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
     expect(document.activeElement).toBe(reviewTrigger);
-    expect(screen.getByRole("log", { name: "Conversation timeline" }).getAttribute("aria-live")).toBe("off");
+    expect(screen.getByRole("log", { name: "Conversation timeline" })).toBe(timeline);
+    expect(timeline.scrollTop).toBe(72);
+    expect(screen.getByLabelText("Message Sigil")).toBe(composer);
+    expect(composer.value).toBe("Preserve this draft");
+    expect(timeline.getAttribute("aria-live")).toBe("off");
 
     cleanup();
     restoreMedia();
@@ -1045,6 +1067,8 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("2 tests failed")).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Verification" })).toBeTruthy();
+    expect(document.querySelector(".conversation-layout-with-review")).not.toBeNull();
     expect((screen.getByText("Evidence details").closest("details") as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByText("receipt-1")).toBeTruthy();
     expect(screen.getByText("changeset-1")).toBeTruthy();

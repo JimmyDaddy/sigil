@@ -1,3 +1,5 @@
+import { Button } from "./ui/primitives";
+
 export function ErrorCard({
   title,
   message,
@@ -15,7 +17,7 @@ export function ErrorCard({
     <section className="error-card" role="alert">
       <div><strong>{title}</strong><p>{message}</p></div>
       {actionLabel !== undefined && onAction !== undefined ? (
-        <button className="quiet-button" type="button" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+        <Button variant="quiet" type="button" disabled={actionDisabled} onClick={onAction}>{actionLabel}</Button>
       ) : null}
     </section>
   );

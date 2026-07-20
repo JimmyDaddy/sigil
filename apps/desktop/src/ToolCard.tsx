@@ -20,8 +20,8 @@ export function ToolCard({ tool }: { tool: ToolView }) {
       <summary>
         <span className="tool-name">{tool.toolName}</span>
         <span>{tool.status ?? "recorded"}</span>
-        <span>{tool.duration ?? "duration not recorded"}</span>
-        <span>{tool.risk ?? "risk not classified"}</span>
+        {tool.duration === undefined ? null : <span>{tool.duration}</span>}
+        {tool.risk === undefined ? null : <span>{tool.risk}</span>}
       </summary>
       <div className="tool-card-body">
         {isUnifiedDiff(tool.text) ? (

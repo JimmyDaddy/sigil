@@ -1,5 +1,5 @@
 @layer patterns {
-  .sg-status-indicator { display: inline-flex; min-width: 0; align-items: center; gap: var(--space-2); color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
+  .sg-status-indicator { display: inline-flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-2); color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
   .sg-status-indicator > span:first-child { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid currentColor; border-radius: 50%; background: currentColor; }
   .sg-status-success { color: var(--sg-domain-color-on-success); }
   .sg-status-warning { color: var(--sg-domain-color-on-warning); }

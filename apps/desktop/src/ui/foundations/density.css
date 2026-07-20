@@ -15,16 +15,4 @@
   --sg-sys-session-row-height: 60px;
   --sg-sys-navigation-width: 264px;
   --sg-sys-review-width: 344px;
-
-  /* R46.2 migration aliases. Remove after R46.6. */
-  --space-1: var(--sg-sys-space-1);
-  --space-2: var(--sg-sys-space-2);
-  --space-3: var(--sg-sys-space-3);
-  --space-4: var(--sg-sys-space-4);
-  --space-5: var(--sg-sys-space-5);
-  --space-6: var(--sg-sys-space-6);
-  --radius-sm: var(--sg-sys-radius-sm);
-  --radius-md: var(--sg-sys-radius-md);
-  --radius-lg: var(--sg-sys-radius-lg);
-  --radius-pill: var(--sg-sys-radius-full);
 }
