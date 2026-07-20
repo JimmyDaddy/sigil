@@ -1,6 +1,6 @@
 # RFC-0047 Desktop Workbench UX Reset V1
 
-状态：active / R47.0-R47.6 complete / R47.7 ready
+状态：completed / R47.0-R47.7 complete
 
 创建日期：2026-07-20
 
@@ -110,3 +110,16 @@ R47.0 -> R47.1 -> R47.2 -> R47.3 -> R47.4 -> R47.5 -> R47.6 -> R47.7
 - 不在本 RFC 中增加 remote daemon、多用户、generic filesystem/window capability 或编辑器内核。
 - 不改变 TUI-first 定位，不要求桌面端复制 TUI 的所有低频命令。
 - 不以 screenshot diff 代替 keyboard、AX、protocol 和真实运行验证。
+
+## 8. Completion evidence
+
+R47.7 在 2026-07-20 完成。完整 workbench fixture 使用真实 `App`、session rail、conversation、composer 与
+supporting drawer，而不是重新实现的静态 mock；fixture 通过独立 iframe 获得真实 viewport、media query 和
+`matchMedia` 环境。审计覆盖 complete/active/tool-failure/verification 状态、light/dark、1280、900、899、320 px
+以及 200% zoom，并修复了 system theme 图标语义、workspace selector/popover 截断、verification failure 图标和
+rerun affordance。
+
+最终 `./scripts/check-touched.sh --tier full --scope base --base 52286fdf` 通过 desktop contract/UI/TypeScript、
+39 个 frontend tests、production build、全 workspace Rust tests、Rustfmt 与 strict Clippy。macOS `.app` 重新打包，
+bundled runtime 版本/架构与当前 commit 一致，`codesign --verify --deep --strict` 通过；当前 dev 原生 WebView 的
+1280×820 no-workspace/popover 状态也完成截图走查。completion audit 未发现剩余 P1/P2。
