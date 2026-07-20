@@ -9,6 +9,9 @@ const stylesPath = join(srcRoot, "styles.css");
 const referencePath = join(foundations, "reference.css");
 const themesPath = join(foundations, "themes.css");
 const densityPath = join(foundations, "density.css");
+const motionPath = join(foundations, "motion.css");
+const forcedColorsPath = join(foundations, "forced-colors.css");
+const resetPath = join(foundations, "reset.css");
 const packagePath = join(desktopRoot, "package.json");
 const indexPath = join(desktopRoot, "index.html");
 const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
@@ -187,6 +190,31 @@ if (!densitySource.includes("--sg-sys-session-row-height: 60px")) {
 const fixtureSource = readFileSync(join(srcRoot, "ui", "catalog", "fixtures.ts"), "utf8");
 if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s\S]*minimumFullyVisibleRows1280x720:\s*5/.test(fixtureSource)) {
   fail("thirty-session catalog fixture does not freeze the five-row 1280x720 density contract");
+}
+if (!/id:\s*["']session-catalog-100["'][\s\S]*sessions:\s*sessionEntries\(100\)/.test(fixtureSource)) {
+  fail("hundred-session scrolling fixture is missing");
+}
+for (const marker of ["degraded-catalog", "running-tool-approval", "reconnect-gap", "verification-failed-diff", "long-copy", "missing-optional-metadata"]) {
+  if (!fixtureSource.includes(`id: "${marker}"`)) fail(`adaptive domain fixture is missing: ${marker}`);
+}
+if (!readFileSync(motionPath, "utf8").includes("@media (prefers-reduced-motion: reduce)")) {
+  fail("reduced-motion override is missing");
+}
+const forcedColorsSource = readFileSync(forcedColorsPath, "utf8");
+for (const marker of ["@media (forced-colors: active)", "--sg-sys-color-primary-container", "--sg-sys-color-error-container", "--sg-sys-shadow-modal: none"]) {
+  if (!forcedColorsSource.includes(marker)) fail(`forced-colors role coverage is missing: ${marker}`);
+}
+const resetSource = readFileSync(resetPath, "utf8");
+if (!/body\s*\{[^}]*min-width:\s*320px[^}]*overflow:\s*hidden/.test(resetSource)) {
+  fail("320px no-document-scroll root contract is missing");
+}
+if (!styles.includes("@media (max-width: 1279px)") || !styles.includes("@media (max-width: 839px)")) {
+  fail("expanded/medium/compact breakpoint contract is missing");
+}
+for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".css")) {
+  if (/url\(\s*["']?https?:/i.test(readFileSync(path, "utf8"))) {
+    fail(`remote CSS asset is forbidden: ${relative(desktopRoot, path)}`);
+  }
 }
 
 const sourceFiles = walk(srcRoot).filter((path) => [".ts", ".tsx"].includes(extname(path)) && !path.endsWith(".test.tsx"));

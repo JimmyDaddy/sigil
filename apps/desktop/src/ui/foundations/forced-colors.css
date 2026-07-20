@@ -9,6 +9,7 @@
 @media (forced-colors: active) {
   :root {
     --sg-sys-color-canvas: Canvas;
+    --sg-sys-color-canvas-glow: transparent;
     --sg-sys-color-surface: Canvas;
     --sg-sys-color-surface-container-low: Canvas;
     --sg-sys-color-surface-container: Canvas;
@@ -23,6 +24,12 @@
     --sg-sys-color-primary: LinkText;
     --sg-sys-color-primary-strong: LinkText;
     --sg-sys-color-on-primary: Canvas;
+    --sg-sys-color-primary-container: Canvas;
+    --sg-sys-color-on-primary-container: LinkText;
+    --sg-sys-color-error: CanvasText;
+    --sg-sys-color-on-error: Canvas;
+    --sg-sys-color-error-container: Canvas;
+    --sg-sys-color-on-error-container: CanvasText;
     --sg-domain-color-success: Canvas;
     --sg-domain-color-on-success: CanvasText;
     --sg-domain-color-warning: Canvas;
@@ -31,7 +38,11 @@
     --sg-domain-color-on-danger: CanvasText;
     --sg-domain-color-info: Canvas;
     --sg-domain-color-on-info: CanvasText;
+    --sg-sys-color-overlay: transparent;
+    --sg-sys-color-backdrop: transparent;
     --sg-sys-color-focus: Highlight;
+    --sg-sys-shadow-dock: none;
+    --sg-sys-shadow-modal: none;
   }
 
   .status-dot,
