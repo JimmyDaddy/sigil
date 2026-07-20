@@ -72,8 +72,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // `main` webview exists.
             let mut window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Sigil")
-                .inner_size(1280.0, 820.0)
-                .min_inner_size(900.0, 640.0)
+                .inner_size(1440.0, 900.0)
+                .min_inner_size(1100.0, 720.0)
                 .theme(theme_preference.native_theme())
                 .initialization_script(initialization_script(theme_preference));
             if let Some(geometry) = window_state.initial_geometry(&displays) {
@@ -118,6 +118,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::Focused(false),
+            ..
+        } if label == "main" => persist_window_state(app_handle),
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { .. },
             ..
         } if label == "main" => persist_window_state(app_handle),
         RunEvent::WindowEvent {

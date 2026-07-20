@@ -365,7 +365,8 @@ describe("desktop workspace and history shell", () => {
     })]);
   });
 
-  it("renders the honest empty and recent-workspace states after native bootstrap", async () => {
+  it("restores the most recent workspace after native bootstrap", async () => {
+    const openRecentWorkspace = vi.fn(async () => workspace);
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 1,
@@ -374,20 +375,13 @@ describe("desktop workspace and history shell", () => {
           { id: workspace.id, displayName: "sigil", isOpen: false },
         ],
       }),
+      openRecentWorkspace,
     });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
-    expect(screen.getByText("Workspaces")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "Open workspace" })).toHaveLength(1);
-    expect(screen.queryByRole("complementary", { name: "Conversation navigation" })).toBeNull();
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Switch workspace" }));
-    expect(screen.getByText("Recent")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "sigil" }));
-    await waitFor(() => {
-      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Switch workspace: sigil" }));
-    });
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(openRecentWorkspace).toHaveBeenCalledWith(workspace.id);
+    expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
   });
 
   it("surfaces the actionable native error when a recent workspace cannot reopen", async () => {
@@ -404,16 +398,23 @@ describe("desktop workspace and history shell", () => {
         message: "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
       }),
     });
-    const user = userEvent.setup();
     render(<App bridge={bridge} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
-    await user.click(screen.getByRole("button", { name: "Switch workspace" }));
-    await user.click(screen.getByRole("button", { name: "sigil" }));
-
     expect((await screen.findByRole("alert")).textContent).toContain(
       "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
     );
+  });
+
+  it("resizes and persists the desktop conversation sidebar", async () => {
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 1, workspaces: [workspace], recentWorkspaces: [] }),
+    })} />);
+
+    const separator = await screen.findByRole("separator", { name: "Resize conversation sidebar" });
+    fireEvent.keyDown(separator, { key: "ArrowRight" });
+    expect(separator.getAttribute("aria-valuenow")).toBe("336");
+    expect(window.localStorage.getItem("sigil.desktop.navigation-width.v1")).toBe("336");
   });
 
   it("opens a workspace, creates a conversation, and closes the owned server", async () => {

@@ -78,6 +78,7 @@
 .desktop-stage-empty { grid-template-columns: minmax(0, 1fr); }
 
 .navigation-pane {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -86,6 +87,33 @@
   border-right: 1px solid var(--sg-sys-color-outline);
   background: var(--sg-sys-color-canvas);
   background: color-mix(in srgb, var(--sg-sys-color-canvas) 72%, transparent);
+}
+
+.navigation-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  outline: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+.navigation-resize-handle::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  content: "";
+  background: transparent;
+  transition: background var(--sg-sys-motion-fast), box-shadow var(--sg-sys-motion-fast);
+}
+.navigation-resize-handle:hover::after,
+.navigation-resize-handle:focus-visible::after {
+  background: var(--sg-sys-color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sg-sys-color-primary) 18%, transparent);
 }
 
 .eyebrow {
@@ -113,10 +141,6 @@
 .confirmation-actions { display: flex; justify-content: flex-end; gap: var(--sg-sys-space-2); margin-top: 6px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-
-@media (max-width: 1279px) {
-  .desktop-stage { grid-template-columns: 248px minmax(0, 1fr); }
-}
 
 @media (max-width: 899px) {
   .topbar { padding: 10px var(--sg-sys-space-3); }

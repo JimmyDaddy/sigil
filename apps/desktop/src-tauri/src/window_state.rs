@@ -9,8 +9,8 @@ use thiserror::Error;
 
 const WINDOW_STATE_SCHEMA_VERSION: u16 = 1;
 const MAX_WINDOW_STATE_FILE_BYTES: u64 = 4 * 1024;
-const MIN_WINDOW_WIDTH: u32 = 900;
-const MIN_WINDOW_HEIGHT: u32 = 640;
+const MIN_WINDOW_WIDTH: u32 = 1_100;
+const MIN_WINDOW_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

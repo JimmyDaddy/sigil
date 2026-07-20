@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
 import { AppearanceToggle } from "./appearance/AppearanceToggle";
@@ -47,6 +47,10 @@ const EMPTY_CATALOG: CatalogPage = {
   truncatedSourceCount: 0,
   entries: [],
 };
+const NAVIGATION_WIDTH_STORAGE_KEY = "sigil.desktop.navigation-width.v1";
+const DEFAULT_NAVIGATION_WIDTH = 320;
+const MIN_NAVIGATION_WIDTH = 280;
+const MAX_NAVIGATION_WIDTH = 480;
 
 export function App({ bridge = desktopBridge }: AppProps) {
   return (
@@ -80,6 +84,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [pendingSessionDelete, setPendingSessionDelete] = useState<CatalogEntry>();
   const [sessionManagementError, setSessionManagementError] = useState<string>();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [navigationWidth, setNavigationWidth] = useState(readNavigationWidth);
   const compactNavigation = useMediaQuery("(max-width: 899px)");
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
@@ -127,6 +132,26 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     try {
       const bootstrap = await bridge.bootstrap();
       applyBootstrap(bootstrap);
+      const readyWorkspace = bootstrap.workspaces.find((workspace) => workspace.state === "ready");
+      const mostRecentWorkspace = bootstrap.recentWorkspaces[0];
+      if (readyWorkspace === undefined && mostRecentWorkspace !== undefined) {
+        try {
+          const workspace = await bridge.openRecentWorkspace(mostRecentWorkspace.id);
+          setWorkspaces([workspace]);
+          setRecentWorkspaces((current) => [
+            { id: workspace.id, displayName: workspace.displayName, isOpen: true },
+            ...current.filter((candidate) => candidate.id !== workspace.id),
+          ]);
+          setActiveWorkspaceId(workspace.id);
+          setLoadState("ready");
+          setMessage(`${workspace.displayName} was restored.`);
+          return;
+        } catch (error) {
+          setLoadState("error");
+          setMessage(errorMessage(error) ?? "The last workspace could not be restored. Choose it again to continue.");
+          return;
+        }
+      }
       setLoadState("ready");
       setMessage(
         bootstrap.workspaces.length === 0
@@ -495,7 +520,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         </div>
       </header>
 
-      <main id="main" className={`desktop-stage${activeWorkspace === undefined ? " desktop-stage-empty" : ""}`}>
+      <main
+        id="main"
+        className={`desktop-stage${activeWorkspace === undefined ? " desktop-stage-empty" : ""}`}
+        style={{ "--sg-sys-navigation-width": `${navigationWidth}px` } as CSSProperties}
+      >
         {activeWorkspace === undefined ? null : compactNavigation ? (
           <Drawer
             id="desktop-navigation"
@@ -510,6 +539,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         ) : (
           <aside id="desktop-navigation" className="navigation-pane" aria-label="Conversation navigation">
             {navigationContent}
+            <NavigationResizeHandle width={navigationWidth} onWidthChange={setNavigationWidth} />
           </aside>
         )}
 
@@ -640,6 +670,93 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       </Dialog>
     </div>
   );
+}
+
+function NavigationResizeHandle({
+  width,
+  onWidthChange,
+}: {
+  readonly width: number;
+  readonly onWidthChange: (width: number) => void;
+}) {
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = width;
+    handle.setPointerCapture(event.pointerId);
+    const move = (moveEvent: PointerEvent) => {
+      onWidthChange(clampNavigationWidth(startWidth + moveEvent.clientX - startX));
+    };
+    const finish = (upEvent: PointerEvent) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
+      persistNavigationWidth(clampNavigationWidth(startWidth + upEvent.clientX - startX));
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+  };
+
+  const setAndPersist = (nextWidth: number) => {
+    const bounded = clampNavigationWidth(nextWidth);
+    onWidthChange(bounded);
+    persistNavigationWidth(bounded);
+  };
+
+  return (
+    <div
+      className="navigation-resize-handle"
+      role="separator"
+      aria-label="Resize conversation sidebar"
+      aria-orientation="vertical"
+      aria-valuemin={MIN_NAVIGATION_WIDTH}
+      aria-valuemax={MAX_NAVIGATION_WIDTH}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={startResize}
+      onDoubleClick={() => setAndPersist(DEFAULT_NAVIGATION_WIDTH)}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          setAndPersist(width - 16);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          setAndPersist(width + 16);
+        } else if (event.key === "Home") {
+          event.preventDefault();
+          setAndPersist(MIN_NAVIGATION_WIDTH);
+        } else if (event.key === "End") {
+          event.preventDefault();
+          setAndPersist(MAX_NAVIGATION_WIDTH);
+        }
+      }}
+    />
+  );
+}
+
+function readNavigationWidth(): number {
+  try {
+    const value = Number(window.localStorage.getItem(NAVIGATION_WIDTH_STORAGE_KEY));
+    return Number.isFinite(value) && value > 0
+      ? clampNavigationWidth(value)
+      : DEFAULT_NAVIGATION_WIDTH;
+  } catch {
+    return DEFAULT_NAVIGATION_WIDTH;
+  }
+}
+
+function persistNavigationWidth(width: number) {
+  try {
+    window.localStorage.setItem(NAVIGATION_WIDTH_STORAGE_KEY, String(width));
+  } catch {
+    // Presentation preferences may be unavailable in hardened webviews.
+  }
+}
+
+function clampNavigationWidth(width: number): number {
+  return Math.min(MAX_NAVIGATION_WIDTH, Math.max(MIN_NAVIGATION_WIDTH, Math.round(width)));
 }
 
 function errorCode(error: unknown): string | undefined {
