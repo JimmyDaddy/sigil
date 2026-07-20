@@ -1,0 +1,121 @@
+import { useState, type RefObject } from "react";
+
+import type { RecentWorkspaceSummary, WorkspaceSummary } from "../../types";
+import { StatusIndicator } from "../../ui/feedback";
+import { Icon } from "../../ui/icons";
+import { Button, IconButton, Popover } from "../../ui/primitives";
+
+interface WorkspaceSwitcherProps {
+  readonly workspaces: readonly WorkspaceSummary[];
+  readonly recentWorkspaces: readonly RecentWorkspaceSummary[];
+  readonly activeWorkspaceId?: string;
+  readonly busy: boolean;
+  readonly onSelect: (workspaceId: string) => void;
+  readonly onOpenRecent: (recent: RecentWorkspaceSummary) => void;
+  readonly onChoose: () => void;
+  readonly onClose: (workspaceId: string) => void;
+  readonly triggerRef?: RefObject<HTMLButtonElement | null>;
+}
+
+export function WorkspaceSwitcher({
+  workspaces,
+  recentWorkspaces,
+  activeWorkspaceId,
+  busy,
+  onSelect,
+  onOpenRecent,
+  onChoose,
+  onClose,
+  triggerRef,
+}: WorkspaceSwitcherProps) {
+  const [open, setOpen] = useState(false);
+  const active = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+  const closedRecent = recentWorkspaces.filter((recent) => !recent.isOpen);
+  const choose = () => {
+    setOpen(false);
+    onChoose();
+  };
+  return (
+    <Popover
+      className="workspace-switcher"
+      label={
+        <span className="workspace-switcher-label">
+          <StatusIndicator
+            label={active?.displayName ?? "Open workspace"}
+            tone={active?.state === "ready" ? "success" : active === undefined ? "neutral" : "danger"}
+          />
+          <span aria-hidden="true">⌄</span>
+        </span>
+      }
+      accessibleLabel={`Switch workspace${active === undefined ? "" : `: ${active.displayName}`}`}
+      open={open}
+      onOpenChange={setOpen}
+      triggerRef={triggerRef}
+    >
+      <div className="workspace-switcher-panel">
+        <div className="workspace-switcher-heading">
+          <strong>Workspaces</strong>
+          <small>{workspaces.length} open</small>
+        </div>
+        {workspaces.length === 0 ? (
+          <p className="workspace-switcher-empty">No workspace is open.</p>
+        ) : (
+          <ul className="workspace-switcher-list">
+            {workspaces.map((workspace) => (
+              <li key={workspace.id}>
+                <Button
+                  className="workspace-switcher-row"
+                  type="button"
+                  variant="quiet"
+                  aria-current={workspace.id === activeWorkspaceId ? "page" : undefined}
+                  onClick={() => {
+                    onSelect(workspace.id);
+                    setOpen(false);
+                  }}
+                >
+                  <StatusIndicator
+                    label={workspace.displayName}
+                    tone={workspace.state === "ready" ? "success" : "danger"}
+                  />
+                </Button>
+                <IconButton
+                  aria-label={`Close ${workspace.displayName}`}
+                  icon={<Icon name="close" />}
+                  onClick={() => {
+                    onClose(workspace.id);
+                    setOpen(false);
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        {closedRecent.length > 0 ? (
+          <div className="workspace-recent-group">
+            <strong>Recent</strong>
+            <ul className="workspace-switcher-list">
+              {closedRecent.map((recent) => (
+                <li key={recent.id}>
+                  <Button
+                    className="workspace-switcher-row"
+                    type="button"
+                    variant="quiet"
+                    onClick={() => {
+                      onOpenRecent(recent);
+                      setOpen(false);
+                    }}
+                  >
+                    {recent.displayName}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <Button type="button" variant="primary" busy={busy} leadingIcon={<Icon name="add" />} onClick={choose}>
+          Open workspace
+        </Button>
+      </div>
+    </Popover>
+  );
+}

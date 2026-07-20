@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 export type ButtonVariant = "primary" | "secondary" | "quiet" | "danger";
 
@@ -8,7 +8,7 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   readonly leadingIcon?: ReactNode;
 }
 
-export function Button({
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({
   variant = "secondary",
   busy = false,
   leadingIcon,
@@ -16,10 +16,11 @@ export function Button({
   disabled,
   children,
   ...props
-}: ButtonProps) {
+}: ButtonProps, ref) {
   return (
     <button
       className={`sg-button sg-button-${variant} ${className}`.trim()}
+      ref={ref}
       disabled={disabled || busy}
       aria-busy={busy || undefined}
       {...props}
@@ -28,4 +29,4 @@ export function Button({
       <span>{children}</span>
     </button>
   );
-}
+});

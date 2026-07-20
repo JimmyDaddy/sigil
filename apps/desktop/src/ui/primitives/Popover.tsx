@@ -7,6 +7,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 import { focusInitial } from "./focus";
@@ -20,6 +21,7 @@ export interface PopoverProps {
   readonly onOpenChange?: (open: boolean) => void;
   readonly triggerPopup?: "dialog" | "menu";
   readonly panelRole?: "dialog" | "presentation";
+  readonly triggerRef?: RefObject<HTMLButtonElement | null>;
 }
 
 export function Popover({
@@ -31,11 +33,13 @@ export function Popover({
   onOpenChange,
   triggerPopup = "dialog",
   panelRole = "dialog",
+  triggerRef: externalTriggerRef,
 }: PopoverProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
   const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const localTriggerRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = externalTriggerRef ?? localTriggerRef;
   const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const updateOpen = (next: boolean) => {

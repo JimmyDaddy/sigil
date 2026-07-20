@@ -1,6 +1,6 @@
 # RFC-0046 Desktop Material-derived Design System and Theme Preferences V1
 
-状态：active / R46.0-R46.2、R46.4 complete，R46.3 implementation complete / native gate pending，R46.5 gated
+状态：active / R46.0-R46.2、R46.4-R46.5 complete，R46.3 implementation complete / native gate pending，R46.6 ready
 
 创建日期：2026-07-20
 
@@ -728,3 +728,20 @@ Primitive tests 覆盖 label/help/error、中文 composition、disabled/busy、d
 Arrow/Home/End/typeahead/disabled/select、dialog initial/final focus、Tab trap、Esc/restore、nested topmost ownership 与 drawer。共 28 个
 frontend tests 通过，UI system gate 同时检查 third-party import、raw SVG、带明确 R46.5/R46.6 截止点的 raw interactive ledger，
 typecheck 和 production build 通过；catalog marker 仍不可从 production entrypoint 到达。
+
+## 22. R46.5 result
+
+R46.5 已完成 workspace chrome 与 compact session rail 迁移。Workspace identity 现在只由 top app bar 的
+`WorkspaceSwitcher` 承载；open/recent/select/close/status 均进入同一 contextual popover，navigation rail 不再重复 workspace section
+或 workspace 名称。正常 ready 状态不再占据底部 status bar，只有启动、工作、错误与 workspace health 异常显示全局状态；普通消息仍保留
+screen-reader live region。Active-run close 继续走 destructive confirmation，取消后焦点恢复到仍存在的 workspace selector，而不是已卸载的
+popover action。
+
+会话导航改为单一整行 `SessionRow` action，删除重复 full-width `Open`；搜索常驻，provider/state/pinned 进入 filter popover，只有非零
+active filter 显示 summary。Catalog 的零异常不再产生 notice，非零 degraded counts 才出现可展开紧凑摘要。`839px` 以下使用同一
+repo-owned Drawer，`aria-controls` 指向真实 surface，Esc/焦点恢复与 expanded rail 使用相同内容 owner。Dev catalog 现含真实 30-row
+EN/ZH fixture，并冻结 60px row 与 1280×720 至少 5 个完整 row 的密度 contract。
+
+验证通过：29 个 frontend tests、TypeScript typecheck、UI system/import/raw-interactive/density gate、Vite production build 与
+`git diff --check`。Renderer DTO、bridge、capability、OpenAPI 与 runtime contract 均未改变；R46.3 的 native host evidence 仍按第 20 节
+保持 pending，不由本片的 presentation validation 冒充通过。

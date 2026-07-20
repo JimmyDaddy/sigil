@@ -8,6 +8,7 @@ const foundations = join(srcRoot, "ui", "foundations");
 const stylesPath = join(srcRoot, "styles.css");
 const referencePath = join(foundations, "reference.css");
 const themesPath = join(foundations, "themes.css");
+const densityPath = join(foundations, "density.css");
 const packagePath = join(desktopRoot, "package.json");
 const indexPath = join(desktopRoot, "index.html");
 const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
@@ -174,6 +175,15 @@ for (const forbidden of ["localStorage", "sessionStorage", "fetch(", "invoke(", 
 }
 if (!themeSource.includes(':root[data-theme="light"]')) {
   fail("light theme must be selected by the pre-paint data-theme contract");
+}
+
+const densitySource = readFileSync(densityPath, "utf8");
+if (!densitySource.includes("--sg-sys-session-row-height: 60px")) {
+  fail("session row density must remain bounded to 60px for the 1280x720 catalog contract");
+}
+const fixtureSource = readFileSync(join(srcRoot, "ui", "catalog", "fixtures.ts"), "utf8");
+if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s\S]*minimumFullyVisibleRows1280x720:\s*5/.test(fixtureSource)) {
+  fail("thirty-session catalog fixture does not freeze the five-row 1280x720 density contract");
 }
 
 const sourceFiles = walk(srcRoot).filter((path) => [".ts", ".tsx"].includes(extname(path)) && !path.endsWith(".test.tsx"));

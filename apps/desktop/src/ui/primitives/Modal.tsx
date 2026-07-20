@@ -12,6 +12,7 @@ import { focusableElements, focusInitial } from "./focus";
 const modalStack: HTMLElement[] = [];
 
 interface ModalProps {
+  readonly id?: string;
   readonly open: boolean;
   readonly title: string;
   readonly description?: string;
@@ -25,6 +26,7 @@ interface ModalProps {
 }
 
 export function Modal({
+  id,
   open,
   title,
   description,
@@ -117,6 +119,7 @@ export function Modal({
         onPointerDown={destructive ? undefined : () => onOpenChange(false)}
       />
       <section
+        id={id}
         className={`sg-modal-surface sg-modal-surface-${kind} sg-modal-side-${side}`}
         ref={surfaceRef}
         tabIndex={-1}

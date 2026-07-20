@@ -13,13 +13,14 @@ interface FieldFrameProps {
   readonly description?: string;
   readonly error?: string;
   readonly children: ReactNode;
+  readonly labelHidden?: boolean;
 }
 
-function FieldFrame({ id, label, description, error, children }: FieldFrameProps) {
+function FieldFrame({ id, label, description, error, children, labelHidden = false }: FieldFrameProps) {
   const messageId = `${id}-message`;
   return (
     <div className={`sg-field ${error === undefined ? "" : "sg-field-error"}`}>
-      <label className="sg-field-label" htmlFor={id}>{label}</label>
+      <label className={labelHidden ? "sr-only" : "sg-field-label"} htmlFor={id}>{label}</label>
       {children}
       {description !== undefined || error !== undefined ? (
         <small id={messageId}>{error ?? description}</small>
@@ -32,15 +33,16 @@ interface SharedFieldProps {
   readonly label: string;
   readonly description?: string;
   readonly error?: string;
+  readonly labelHidden?: boolean;
 }
 
 export const TextField = forwardRef<HTMLInputElement, SharedFieldProps & InputHTMLAttributes<HTMLInputElement>>(
-  function TextField({ label, description, error, id: suppliedId, className = "", ...props }, ref) {
+  function TextField({ label, description, error, labelHidden, id: suppliedId, className = "", ...props }, ref) {
     const generatedId = useId();
     const id = suppliedId ?? generatedId;
     const describedBy = description !== undefined || error !== undefined ? `${id}-message` : undefined;
     return (
-      <FieldFrame id={id} label={label} description={description} error={error}>
+      <FieldFrame id={id} label={label} description={description} error={error} labelHidden={labelHidden}>
         <input
           ref={ref}
           id={id}
@@ -55,12 +57,12 @@ export const TextField = forwardRef<HTMLInputElement, SharedFieldProps & InputHT
 );
 
 export const TextArea = forwardRef<HTMLTextAreaElement, SharedFieldProps & TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  function TextArea({ label, description, error, id: suppliedId, className = "", ...props }, ref) {
+  function TextArea({ label, description, error, labelHidden, id: suppliedId, className = "", ...props }, ref) {
     const generatedId = useId();
     const id = suppliedId ?? generatedId;
     const describedBy = description !== undefined || error !== undefined ? `${id}-message` : undefined;
     return (
-      <FieldFrame id={id} label={label} description={description} error={error}>
+      <FieldFrame id={id} label={label} description={description} error={error} labelHidden={labelHidden}>
         <textarea
           ref={ref}
           id={id}
@@ -75,12 +77,12 @@ export const TextArea = forwardRef<HTMLTextAreaElement, SharedFieldProps & Texta
 );
 
 export const Select = forwardRef<HTMLSelectElement, SharedFieldProps & SelectHTMLAttributes<HTMLSelectElement>>(
-  function Select({ label, description, error, id: suppliedId, className = "", children, ...props }, ref) {
+  function Select({ label, description, error, labelHidden, id: suppliedId, className = "", children, ...props }, ref) {
     const generatedId = useId();
     const id = suppliedId ?? generatedId;
     const describedBy = description !== undefined || error !== undefined ? `${id}-message` : undefined;
     return (
-      <FieldFrame id={id} label={label} description={description} error={error}>
+      <FieldFrame id={id} label={label} description={description} error={error} labelHidden={labelHidden}>
         <select
           ref={ref}
           id={id}

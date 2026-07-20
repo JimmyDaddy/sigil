@@ -310,8 +310,10 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("No workspace is open.")).toBeTruthy();
-    expect(screen.getByText("Reopen")).toBeTruthy();
     expect(screen.getByText("Choose a workspace to begin.")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
+    expect(screen.getByText("Recent")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "sigil" })).toBeTruthy();
   });
 
   it("opens a workspace, creates a conversation, and closes the owned server", async () => {
@@ -333,11 +335,12 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("New conversation ready.")).toBeTruthy();
     expect(screen.getByText("0 recorded runs")).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: "Workspace and conversations" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Conversation workspace" })).toBeTruthy();
     expect(screen.getByRole("complementary", { name: "Verification" })).toBeTruthy();
     expect(screen.queryByText(/private bearer|TUI-first|stay in Rust/i)).toBeNull();
 
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
     await user.click(screen.getByRole("button", { name: "Close sigil" }));
     expect(await screen.findByText("Workspace closed.")).toBeTruthy();
     expect(closeRequest).toBe(workspace.id);
@@ -399,9 +402,9 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("Legacy session")).toBeTruthy();
     expect(cursors).toEqual([undefined, "cursor-2"]);
-    expect(screen.getAllByText("Unavailable")).toHaveLength(2);
+    expect(screen.getAllByText("Unavailable")).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /First session/ }));
     await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
   });
 
@@ -488,7 +491,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("History with messages")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /History with messages/ }));
     expect(await screen.findByText("cargo test passed")).toBeTruthy();
     expect(screen.getByText("The change is complete.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /Load earlier messages/ }));
@@ -586,7 +589,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("Active session")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /Active session/ }));
     expect(await screen.findByText("Resume this work")).toBeTruthy();
     expect(screen.getByText(/Some live details were not retained/)).toBeTruthy();
     expect(screen.getByText("Review the resumed edit")).toBeTruthy();
@@ -624,9 +627,11 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText("Keep this conversation")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /Keep this conversation/ }));
     expect(await screen.findByRole("heading", { name: "Durable session" })).toBeTruthy();
-    await user.type(screen.getByRole("textbox", { name: "Filter by provider" }), "deepseek");
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+    await user.type(screen.getByRole("textbox", { name: "Provider" }), "deepseek");
+    expect(screen.getByText("1 active filter")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Durable session" })).toBeTruthy();
   });
 
@@ -653,6 +658,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByText("Conversations");
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
     const closeButton = screen.getByRole("button", { name: "Close sigil" });
     await user.click(closeButton);
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
@@ -666,9 +672,11 @@ describe("desktop workspace and history shell", () => {
     expect(document.activeElement).toBe(keepRunning);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(document.activeElement).toBe(closeButton);
+    const workspaceTrigger = screen.getByRole("button", { name: "Switch workspace: sigil" });
+    expect(document.activeElement).toBe(workspaceTrigger);
 
-    await user.click(closeButton);
+    await user.click(workspaceTrigger);
+    await user.click(screen.getByRole("button", { name: "Close sigil" }));
     await user.click(screen.getByRole("button", { name: "Close workspace and interrupt runs" }));
     expect(await screen.findByText("Workspace closed.")).toBeTruthy();
     expect(confirmations).toEqual([false, false, true]);
@@ -686,15 +694,16 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
-    const navigation = document.querySelector("#desktop-navigation") as HTMLElement;
-    expect(navigation.getAttribute("aria-hidden")).toBe("true");
-    expect(navigation.hasAttribute("inert")).toBe(true);
+    await screen.findByRole("button", { name: "Browse" });
+    expect(document.querySelector("#desktop-navigation")).toBeNull();
     const navigationTrigger = screen.getByRole("button", { name: "Browse" });
     await user.click(navigationTrigger);
-    expect(navigation.getAttribute("aria-hidden")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close navigation" }));
+    const navigation = screen.getByRole("dialog", { name: "Browse conversations" });
+    expect(navigation.id).toBe("desktop-navigation");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close Browse conversations" }));
+    expect(await screen.findByText("No matching conversation.")).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Browse conversations" })).toBeNull();
     expect(document.activeElement).toBe(navigationTrigger);
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
@@ -759,7 +768,8 @@ describe("desktop workspace and history shell", () => {
     await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
     await user.click(screen.getByRole("button", { name: "Run" }));
     expect(await screen.findByText("Run started. Live updates are connected.")).toBeTruthy();
-    expect(document.querySelector(".statusbar")?.textContent).toContain("Sigil is ready.");
+    expect(document.querySelector(".statusbar")).toBeNull();
+    expect(document.querySelector(".app-shell > .sr-only")?.textContent).toContain("Sigil is ready.");
     await waitFor(() => expect(eventListener).toBeDefined());
 
     const base = {
