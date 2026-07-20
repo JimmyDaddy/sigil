@@ -1,6 +1,6 @@
 # RFC-0049 Desktop Skills and Agents Workbench V1
 
-状态：planned
+状态：active / R49.0-R49.1 complete; R49.2-R49.3 partial
 
 创建日期：2026-07-20
 

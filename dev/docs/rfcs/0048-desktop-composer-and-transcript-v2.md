@@ -1,6 +1,6 @@
 # RFC-0048 Desktop Composer and Transcript V2
 
-状态：active / R48.0 complete; R48.1 next
+状态：active / R48.0-R48.4 complete; R48.5 acceptance in progress
 
 创建日期：2026-07-20
 
