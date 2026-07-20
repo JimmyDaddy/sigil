@@ -1,14 +1,9 @@
 @layer features {
 .conversation-layout { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: minmax(0, 1fr); gap: var(--sg-sys-space-3); }
-.conversation-layout-with-review { grid-template-columns: minmax(0, 1fr) minmax(280px, var(--sg-sys-review-width)); }
 .conversation-panel { display: grid; gap: 14px; min-width: 0; margin-top: var(--sg-sys-space-3); padding: 12px var(--sg-sys-space-4) var(--sg-sys-space-3); background: var(--sg-sys-color-canvas); }
 .conversation-layout > .conversation-panel { display: flex; min-height: 0; flex-direction: column; margin: 0; }
 .conversation-layout .timeline { min-height: 0; max-height: none; flex: 1; }
 .run-notice { padding: 8px 10px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container); font-size: 12px; line-height: 1.45; }
-.inspector-pane { min-width: 0; min-height: 0; padding: var(--sg-sys-space-4); overflow-y: auto; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-lg); background: var(--sg-sys-color-surface); overscroll-behavior: contain; }
-.inspector-header { padding: 2px 2px 14px; border-bottom: 1px solid var(--sg-sys-color-outline); }
-.inspector-header h2 { margin: 0; font-size: 18px; }
-.inspector-header > p:last-child { margin: 6px 0 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; line-height: 1.45; }
 .inspector-empty { display: grid; gap: 6px; margin-top: 18px; padding: 14px; border: 1px dashed var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface-variant); }
 .inspector-empty p { margin: 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; line-height: 1.5; }
 .conversation-header, .conversation-header > div, .timeline-row header { display: flex; align-items: center; }
@@ -19,6 +14,10 @@
 .conversation-title-row { display: flex; min-width: 0; align-items: baseline; gap: var(--sg-sys-space-2); }
 .conversation-title-row small { flex: 0 0 auto; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
 .conversation-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--sg-sys-space-2); }
+.review-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
+.review-passed { color: var(--sg-domain-color-on-success); }
+.review-failed, .review-missing, .review-inconclusive { color: var(--sg-domain-color-on-danger); }
+.review-pending, .review-stale { color: var(--sg-domain-color-on-warning); }
 .stream-chip { padding: 4px 8px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-high); font: 600 10px/1.4 ui-monospace, "SFMono-Regular", monospace; text-transform: uppercase; }
 .stream-live, .stream-terminal { color: var(--sg-domain-color-on-success); border-color: var(--sg-domain-color-on-success); }
 .stream-reconnecting { color: var(--sg-domain-color-on-warning); border-color: var(--sg-domain-color-on-warning); }
@@ -134,7 +133,7 @@
 .error-card { display: flex; max-width: 100%; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-danger); border-radius: 9px; color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
 .error-card p { margin: 3px 0 0; color: var(--sg-domain-color-on-danger); font-size: 12px; line-height: 1.45; }
 
-.approval-dock { display: grid; position: sticky; z-index: 3; bottom: 0; flex: 0 0 auto; gap: 11px; padding: var(--sg-sys-space-4); border: 1px solid var(--sg-domain-color-on-warning); border-radius: var(--sg-sys-radius-lg); background: var(--sg-domain-color-warning); box-shadow: var(--sg-sys-elevation-dock); }
+.approval-dock { display: grid; position: sticky; z-index: 3; bottom: 0; max-height: min(62vh, 520px); flex: 0 0 auto; gap: 11px; padding: var(--sg-sys-space-4); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-domain-color-on-warning); border-radius: var(--sg-sys-radius-lg); background: var(--sg-domain-color-warning); box-shadow: var(--sg-sys-elevation-dock); }
 .approval-dock > header { display: flex; justify-content: space-between; gap: var(--sg-sys-space-4); align-items: flex-start; }
 .approval-dock h3, .approval-dock p { margin: 0; }
 .approval-dock > p, .approval-dock > small { color: var(--sg-sys-color-on-surface-variant); line-height: 1.5; }

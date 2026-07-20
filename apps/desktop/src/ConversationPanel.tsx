@@ -16,8 +16,8 @@ import type {
   TranscriptMessage,
   VerificationSummary,
 } from "./types";
-import { useMediaQuery } from "./useMediaQuery";
-import { Button, Drawer } from "./ui/primitives";
+import { Icon } from "./ui/icons";
+import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
@@ -63,7 +63,6 @@ export function ConversationPanel({
   const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const reviewIsDrawer = useMediaQuery("(max-width: 1279px)");
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
@@ -73,10 +72,6 @@ export function ConversationPanel({
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
-  useEffect(() => {
-    if (!reviewIsDrawer || verification === undefined) setInspectorOpen(false);
-  }, [reviewIsDrawer, verification]);
-
   useEffect(() => {
     setRun(undefined);
     setRunContext(undefined);
@@ -264,6 +259,10 @@ export function ConversationPanel({
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
 
+  useEffect(() => {
+    if (pendingApproval?.approval !== undefined) setInspectorOpen(false);
+  }, [pendingApproval?.approval]);
+
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (timeline === null) return;
@@ -379,7 +378,7 @@ export function ConversationPanel({
   };
 
   return (
-    <div className={`conversation-layout ${verification !== undefined && !reviewIsDrawer ? "conversation-layout-with-review" : ""}`}>
+    <div className="conversation-layout">
       <section className="conversation-panel" aria-labelledby="conversation-title">
       <header className="conversation-header">
         <div>
@@ -392,17 +391,24 @@ export function ConversationPanel({
           <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
             {streamStatus?.state ?? "ready"}
           </span>
-          {verification !== undefined && reviewIsDrawer ? (
-            <Button
-              className="inspector-toggle"
-              ref={inspectorTriggerRef}
-              type="button"
-              aria-controls="verification-inspector"
-              aria-expanded={inspectorOpen}
-              onClick={() => setInspectorOpen(true)}
+          {verification !== undefined ? (
+            <Tooltip
+              label={pendingApproval?.approval !== undefined
+                ? "Resolve approval before opening verification"
+                : `Verification · ${verification.status}`}
             >
-              Review
-            </Button>
+              <IconButton
+                className={`review-trigger review-${verification.verdict}`}
+                ref={inspectorTriggerRef}
+                type="button"
+                aria-label={`Open verification: ${verification.status}`}
+                aria-controls="verification-inspector"
+                aria-expanded={inspectorOpen}
+                disabled={pendingApproval?.approval !== undefined}
+                icon={<Icon name="check" />}
+                onClick={() => setInspectorOpen(true)}
+              />
+            </Tooltip>
           ) : null}
         </div>
       </header>
@@ -490,17 +496,7 @@ export function ConversationPanel({
       />
       </section>
 
-      {verification !== undefined && !reviewIsDrawer ? (
-        <aside id="verification-inspector" className="inspector-pane" aria-label="Verification">
-          <header className="inspector-header">
-            <p className="eyebrow">Review</p>
-            <h2>Verification</h2>
-            <p>Evidence and recommended checks for this conversation.</p>
-          </header>
-          <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
-        </aside>
-      ) : null}
-      {verification !== undefined && reviewIsDrawer ? (
+      {verification !== undefined ? (
         <Drawer
           id="verification-inspector"
           open={inspectorOpen}

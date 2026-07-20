@@ -1,6 +1,6 @@
 # RFC-0047 Desktop Workbench UX Reset V1
 
-状态：active / R47.0-R47.5 complete / R47.6 ready
+状态：active / R47.0-R47.6 complete / R47.7 ready
 
 创建日期：2026-07-20
 

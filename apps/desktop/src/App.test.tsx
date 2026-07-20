@@ -400,7 +400,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Conversation workspace" })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: "Verification" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Review" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Open verification:/ })).toBeNull();
     expect(document.querySelector(".conversation-layout-with-review")).toBeNull();
     expect(screen.queryByText(/private bearer|TUI-first|stay in Rust/i)).toBeNull();
 
@@ -786,7 +786,7 @@ describe("desktop workspace and history shell", () => {
     const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
     timeline.scrollTop = 72;
     await user.type(composer, "Preserve this draft");
-    const reviewTrigger = await screen.findByRole("button", { name: "Review" });
+    const reviewTrigger = await screen.findByRole("button", { name: "Open verification: passed" });
     await user.click(reviewTrigger);
     const inspector = screen.getByRole("dialog", { name: "Verification" });
     expect(inspector.id).toBe("verification-inspector");
@@ -1054,6 +1054,15 @@ describe("desktop workspace and history shell", () => {
         cancelledRun = runId;
         return { id: runId, sessionId, status: "cancel_requested", approvalMode: "ask", streamSequence: 4 };
       },
+      verification: async () => ({
+        taskId: "task-approval",
+        stepId: "verify-approval",
+        scopeKind: "task",
+        scopeId: "task-approval",
+        verdict: "passed",
+        status: "passed",
+        evidence: {},
+      }),
     });
     render(<App bridge={bridge} />);
 
@@ -1062,6 +1071,8 @@ describe("desktop workspace and history shell", () => {
     await user.type(screen.getByLabelText("Message Sigil"), "Edit a file");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(eventListener).toBeDefined());
+    await user.click(await screen.findByRole("button", { name: "Open verification: passed" }));
+    expect(screen.getByRole("dialog", { name: "Verification" })).toBeTruthy();
     act(() => {
       eventListener?.({
         workspaceId: workspace.id,
@@ -1091,6 +1102,8 @@ describe("desktop workspace and history shell", () => {
 
     const approvalTitle = await screen.findByText("Edit one file");
     const approvalDock = approvalTitle.closest("section") as HTMLElement;
+    expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open verification: passed" }).hasAttribute("disabled")).toBe(true);
     expect(document.activeElement).toBe(approvalDock);
     fireEvent.keyDown(approvalDock, { key: "Escape" });
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
@@ -1163,9 +1176,11 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByText("2 tests failed")).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: "Verification" })).toBeTruthy();
-    expect(document.querySelector(".conversation-layout-with-review")).not.toBeNull();
+    const reviewTrigger = await screen.findByRole("button", { name: "Open verification: check failed" });
+    expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
+    await user.click(reviewTrigger);
+    expect(await screen.findByRole("dialog", { name: "Verification" })).toBeTruthy();
+    expect(screen.getByText("2 tests failed")).toBeTruthy();
     expect((screen.getByText("Evidence details").closest("details") as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByText("receipt-1")).toBeTruthy();
     expect(screen.getByText("changeset-1")).toBeTruthy();
