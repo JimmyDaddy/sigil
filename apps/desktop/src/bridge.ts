@@ -10,6 +10,8 @@ import type {
   SessionOpenInput,
   SessionDeleteInput,
   SessionMutationSummary,
+  SessionQuarantineInput,
+  SessionQuarantineSummary,
   SessionRenameInput,
   SessionSummary,
   RunStreamStatus,
@@ -42,6 +44,10 @@ export interface DesktopBridge {
   ): Promise<SessionSummary>;
   renameSession(workspaceId: string, input: SessionRenameInput): Promise<SessionMutationSummary>;
   deleteSession(workspaceId: string, input: SessionDeleteInput): Promise<SessionMutationSummary>;
+  quarantineSession(
+    workspaceId: string,
+    input: SessionQuarantineInput,
+  ): Promise<SessionQuarantineSummary>;
   transcript(
     workspaceId: string,
     sessionId: string,
@@ -100,6 +106,8 @@ export const desktopBridge: DesktopBridge = {
     invoke<SessionMutationSummary>("desktop_rename_session", { workspaceId, input }),
   deleteSession: (workspaceId, input) =>
     invoke<SessionMutationSummary>("desktop_delete_session", { workspaceId, input }),
+  quarantineSession: (workspaceId, input) =>
+    invoke<SessionQuarantineSummary>("desktop_quarantine_session", { workspaceId, input }),
   transcript: (workspaceId, sessionId, request) =>
     invoke<TranscriptPage>("desktop_transcript", {
       workspaceId,

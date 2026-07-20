@@ -433,6 +433,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session-catalog/quarantine": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Quarantine one exact invalid local session source
+         * @description Revalidates the invalid source metadata under a maintenance lease, then moves it into the local quarantine directory without exposing a filesystem path.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionQuarantineRequest"];
+                };
+            };
+            responses: {
+                /** @description Committed quarantine receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionQuarantineReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/session-catalog/rename": {
         parameters: {
             query?: never;
@@ -1074,6 +1122,20 @@ export interface components {
             label?: string | null;
             session_id: string;
             session_ref: string;
+        };
+        SessionQuarantineReceipt: {
+            operation_id: string;
+            /** Format: uint64 */
+            projection_generation?: number | null;
+            quarantine_name: string;
+            session_ref: string;
+        };
+        SessionQuarantineRequest: {
+            session_ref: string;
+            /** Format: uint64 */
+            source_bytes: number;
+            /** Format: uint64 */
+            source_modified_at_unix_ms: number;
         };
         SessionRenameRequest: {
             display_name: string;

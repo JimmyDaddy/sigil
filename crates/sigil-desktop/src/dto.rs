@@ -44,6 +44,15 @@ pub struct DesktopSessionDeleteRequest {
     pub session_id: String,
 }
 
+/// Exact invalid source fingerprint selected for native-shell quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionQuarantineRequest {
+    pub session_ref: String,
+    pub source_bytes: u64,
+    pub source_modified_at_unix_ms: u64,
+}
+
 /// Bounded receipt for a committed durable catalog mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -51,6 +60,17 @@ pub struct DesktopSessionMutationReceipt {
     pub session_ref: String,
     pub session_id: String,
     pub operation_id: String,
+    #[serde(default)]
+    pub projection_generation: Option<u64>,
+}
+
+/// Bounded receipt for one invalid source moved out of the active catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionQuarantineReceipt {
+    pub session_ref: String,
+    pub operation_id: String,
+    pub quarantine_name: String,
     #[serde(default)]
     pub projection_generation: Option<u64>,
 }

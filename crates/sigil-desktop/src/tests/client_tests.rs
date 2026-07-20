@@ -70,6 +70,29 @@ fn session_management_contract_is_exact_and_path_free() {
     .expect("receipt should decode");
     assert_eq!(receipt.projection_generation, Some(2));
     assert!(!format!("{receipt:?}").contains('/'));
+
+    let quarantine = DesktopSessionQuarantineRequest {
+        session_ref: "broken.jsonl".to_owned(),
+        source_bytes: 17,
+        source_modified_at_unix_ms: 42,
+    };
+    assert_eq!(
+        serde_json::to_value(quarantine).expect("quarantine should encode"),
+        serde_json::json!({
+            "session_ref": "broken.jsonl",
+            "source_bytes": 17,
+            "source_modified_at_unix_ms": 42
+        })
+    );
+    let quarantine_receipt =
+        serde_json::from_value::<DesktopSessionQuarantineReceipt>(serde_json::json!({
+            "session_ref": "broken.jsonl",
+            "operation_id": "session-quarantine:1",
+            "quarantine_name": "1--broken.jsonl",
+            "projection_generation": 3
+        }))
+        .expect("quarantine receipt should decode");
+    assert_eq!(quarantine_receipt.projection_generation, Some(3));
 }
 
 #[tokio::test]

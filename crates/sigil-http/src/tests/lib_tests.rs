@@ -598,6 +598,49 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(status, 200);
     assert_eq!(deleted_page["entries"].as_array().map(Vec::len), Some(0));
 
+    let invalid_source = sessions.join("broken.jsonl");
+    fs::write(&invalid_source, b"not a session stream\n").expect("invalid source should write");
+    let (status, invalid_page) = http_raw_request(
+        address,
+        http_get("/session-catalog?state=invalid", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(invalid_page["entries"].as_array().map(Vec::len), Some(1));
+    let quarantine_body = json!({
+        "session_ref": invalid_page["entries"][0]["session_ref"],
+        "source_bytes": invalid_page["entries"][0]["source_bytes"],
+        "source_modified_at_unix_ms": invalid_page["entries"][0]["source_modified_at_unix_ms"]
+    })
+    .to_string();
+    let (status, quarantined) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/quarantine",
+            Some("secret-token"),
+            &quarantine_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(quarantined["session_ref"], "broken.jsonl");
+    assert!(
+        quarantined["operation_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session-quarantine:"))
+    );
+    assert!(!invalid_source.exists());
+    assert!(
+        sessions
+            .join(".quarantine")
+            .join(
+                quarantined["quarantine_name"]
+                    .as_str()
+                    .expect("quarantine name")
+            )
+            .exists()
+    );
+
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
         .await

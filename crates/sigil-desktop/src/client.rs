@@ -13,6 +13,7 @@ use crate::{
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
         DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
+        DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
         DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
         DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
         DesktopVerificationRerunRequest, DesktopVerificationView,
@@ -138,6 +139,19 @@ impl DesktopHttpClient {
     ) -> Result<DesktopSessionMutationReceipt, DesktopClientError> {
         self.post_json(
             self.route(["session-catalog", "delete"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Moves one exact invalid source out of the active catalog after server revalidation.
+    pub async fn quarantine_session(
+        &self,
+        request: DesktopSessionQuarantineRequest,
+    ) -> Result<DesktopSessionQuarantineReceipt, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "quarantine"])?,
             &request,
             StatusCode::OK,
         )

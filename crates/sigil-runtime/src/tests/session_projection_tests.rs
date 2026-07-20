@@ -537,6 +537,43 @@ fn catalog_mutations_rename_and_delete_exact_durable_identity() -> Result<()> {
 }
 
 #[test]
+fn invalid_catalog_source_can_only_be_quarantined_with_exact_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("broken.jsonl");
+    fs::write(&source, b"not a session stream\n")?;
+    projection.rebuild()?;
+    let entry = projection.list_workspace_entries()?.remove(0);
+    assert_eq!(entry.source_state, LocalSessionCatalogState::Invalid);
+
+    assert!(matches!(
+        projection.quarantine_invalid_source(
+            "broken.jsonl",
+            entry.source_bytes + 1,
+            entry.source_modified_at_unix_ms,
+        ),
+        Err(LocalSessionMutationError::IdentityChanged)
+    ));
+    let receipt = projection.quarantine_invalid_source(
+        "broken.jsonl",
+        entry.source_bytes,
+        entry.source_modified_at_unix_ms,
+    )?;
+
+    assert!(!source.exists());
+    assert!(
+        lifecycle
+            .session_dir
+            .join(".quarantine")
+            .join(receipt.quarantine_name)
+            .exists()
+    );
+    assert!(projection.list_workspace_entries()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn projection_counts_duplicate_session_identity_without_overwriting_rows() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

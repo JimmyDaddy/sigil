@@ -8,9 +8,9 @@ use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
     DesktopClientError, DesktopLaunchError, DesktopLaunchRequest, DesktopRunCancelRequest,
     DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionDeleteRequest, DesktopSessionOpenRequest, DesktopSessionRenameRequest,
-    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopSessionDeleteRequest, DesktopSessionOpenRequest, DesktopSessionQuarantineRequest,
+    DesktopSessionRenameRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
+    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -25,9 +25,9 @@ use crate::{
         DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
         DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
         DesktopSessionDeleteInput, DesktopSessionMutationSummary, DesktopSessionOpenInput,
-        DesktopSessionRenameInput, DesktopSessionSummary, DesktopTranscriptPage,
-        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection,
+        DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
+        DesktopSessionSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -672,6 +672,35 @@ pub(crate) async fn desktop_delete_session(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_quarantine_session(
+    workspace_id: String,
+    input: DesktopSessionQuarantineInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionQuarantineSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_ref(&input.session_ref)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .quarantine_session(DesktopSessionQuarantineRequest {
+            session_ref: input.session_ref,
+            source_bytes: input.source_bytes,
+            source_modified_at_unix_ms: input.source_modified_at_unix_ms,
+        })
+        .await
+        .map(|receipt| DesktopSessionQuarantineSummary {
+            session_ref: receipt.session_ref,
+            quarantine_name: receipt.quarantine_name,
+            projection_generation: receipt.projection_generation,
+        })
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_transcript(
     workspace_id: String,
     session_id: String,
@@ -781,13 +810,23 @@ fn validate_session_reference(
     session_ref: &str,
     session_id: &str,
 ) -> Result<(), DesktopCommandError> {
+    validate_session_ref(session_ref)?;
+    if session_id.is_empty() || session_id.len() > 512 || session_id.chars().any(char::is_control) {
+        return Err(DesktopCommandError::new(
+            "session_reference_invalid",
+            "The conversation reference is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_ref(session_ref: &str) -> Result<(), DesktopCommandError> {
     if session_ref.is_empty()
-        || session_ref.len() > 512
+        || session_ref.len() > 128
         || session_ref.contains('/')
         || session_ref.contains('\\')
-        || session_id.is_empty()
-        || session_id.len() > 512
-        || session_id.chars().any(char::is_control)
+        || !session_ref.ends_with(".jsonl")
+        || session_ref.chars().any(char::is_control)
     {
         return Err(DesktopCommandError::new(
             "session_reference_invalid",

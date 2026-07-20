@@ -81,6 +81,7 @@ struct DesktopCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     source_state: DesktopCatalogState,
+    source_bytes: u64,
     source_modified_at_unix_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_name: Option<String>,
@@ -124,11 +125,28 @@ pub(crate) struct DesktopSessionDeleteInput {
     pub(crate) session_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionQuarantineInput {
+    pub(crate) session_ref: String,
+    pub(crate) source_bytes: u64,
+    pub(crate) source_modified_at_unix_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionMutationSummary {
     pub(crate) session_ref: String,
     pub(crate) session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_generation: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionQuarantineSummary {
+    pub(crate) session_ref: String,
+    pub(crate) quarantine_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) projection_generation: Option<u64>,
 }
@@ -367,6 +385,7 @@ impl From<DesktopSessionCatalogEntry> for DesktopCatalogEntry {
             session_ref: value.session_ref,
             session_id: value.session_id,
             source_state: value.source_state.into(),
+            source_bytes: value.source_bytes,
             source_modified_at_unix_ms: value.source_modified_at_unix_ms,
             provider_name: value.provider_name,
             model_name: value.model_name,

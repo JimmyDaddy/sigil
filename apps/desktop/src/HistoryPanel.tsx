@@ -1,3 +1,5 @@
+import type { MouseEvent } from "react";
+
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
 import { ErrorCard } from "./ErrorCard";
 import { Icon } from "./ui/icons";
@@ -19,6 +21,7 @@ export function HistoryContent({
   onOpen,
   onRename,
   onDelete,
+  onQuarantine,
   selectedSessionId,
 }: {
   state: HistoryState;
@@ -28,6 +31,7 @@ export function HistoryContent({
   onOpen: (entry: CatalogEntry) => void;
   onRename: (entry: CatalogEntry) => void;
   onDelete: (entry: CatalogEntry) => void;
+  onQuarantine: (entry: CatalogEntry) => void;
   selectedSessionId?: string;
 }) {
   if (state === "loading") {
@@ -87,6 +91,7 @@ export function HistoryContent({
                 {group.entries.map((entry) => {
                   const canOpen = entry.sourceState === "ready" && entry.sessionId !== undefined;
                   const providerContext = [entry.providerName, entry.modelName].filter(Boolean).join(" · ");
+                  const managementLabel = entry.title ?? entry.sessionRef;
                   const content = (
                     <>
                       <span className="session-row-title">
@@ -102,7 +107,7 @@ export function HistoryContent({
                   return (
                     <li key={`${entry.sessionRef}:${entry.sessionId ?? entry.sourceState}`}>
                       {canOpen ? (
-                        <div className="session-row-shell">
+                        <div className="session-row-shell" onContextMenu={openContextMenu}>
                           <Button
                             className="session-row"
                             type="button"
@@ -110,11 +115,15 @@ export function HistoryContent({
                             aria-current={entry.sessionId === selectedSessionId ? "page" : undefined}
                             title={providerContext || undefined}
                             onClick={() => onOpen(entry)}
+                            onDoubleClick={(event) => {
+                              event.preventDefault();
+                              onRename(entry);
+                            }}
                           >
                             {content}
                           </Button>
                           <Menu
-                            accessibleLabel={`Manage ${entry.title ?? "untitled conversation"}`}
+                            accessibleLabel={`Manage ${managementLabel}`}
                             label={<Icon name="more" />}
                           >
                             <MenuItem onSelect={() => onRename(entry)}>Rename</MenuItem>
@@ -124,7 +133,20 @@ export function HistoryContent({
                           </Menu>
                         </div>
                       ) : (
-                        <div className="session-row session-row-unavailable" aria-disabled="true" title={providerContext || undefined}>{content}</div>
+                        <div className="session-row-shell" onContextMenu={openContextMenu}>
+                          <div className="session-row session-row-unavailable" aria-disabled="true" title={providerContext || undefined}>{content}</div>
+                          <Menu
+                            accessibleLabel={`Manage ${managementLabel}`}
+                            label={<Icon name="more" />}
+                          >
+                            <MenuItem
+                              disabled={entry.sourceState !== "invalid"}
+                              onSelect={() => onQuarantine(entry)}
+                            >
+                              {entry.sourceState === "invalid" ? "Move invalid source to quarantine" : "No safe action available"}
+                            </MenuItem>
+                          </Menu>
+                        </div>
                       )}
                     </li>
                   );
@@ -141,6 +163,12 @@ export function HistoryContent({
       ) : null}
     </div>
   );
+}
+
+function openContextMenu(event: MouseEvent<HTMLDivElement>) {
+  event.preventDefault();
+  const trigger = event.currentTarget.querySelector<HTMLButtonElement>(".sg-menu .sg-popover-trigger");
+  if (trigger?.getAttribute("aria-expanded") !== "true") trigger?.click();
 }
 
 type HistoryGroup = {

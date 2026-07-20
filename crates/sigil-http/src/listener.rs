@@ -26,7 +26,8 @@ use crate::{
     dto::{
         HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
         HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionMutationReceipt,
-        HttpSessionOpenRequest, HttpSessionRenameRequest, HttpVerificationRerunRequest,
+        HttpSessionOpenRequest, HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest,
+        HttpSessionRenameRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -527,6 +528,31 @@ fn route_http_request(
                 guard.finish(true);
                 json_response(200, json!(HttpSessionMutationReceipt::from(receipt)))
             }
+            Err(error) => session_mutation_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/quarantine" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionQuarantineRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session quarantine body",
+            );
+        };
+        return match session_catalog.quarantine_invalid_source(
+            &body.session_ref,
+            body.source_bytes,
+            body.source_modified_at_unix_ms,
+        ) {
+            Ok(receipt) => json_response(200, json!(HttpSessionQuarantineReceipt::from(receipt))),
             Err(error) => session_mutation_error_response(error),
         };
     }

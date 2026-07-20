@@ -251,6 +251,24 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/session-catalog/quarantine": {
+                "post": {
+                    "summary": "Quarantine one exact invalid local session source",
+                    "description": "Revalidates the invalid source metadata under a maintenance lease, then moves it into the local quarantine directory without exposing a filesystem path.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionQuarantineRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Committed quarantine receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionQuarantineReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}": {
                 "get": {
                     "summary": "Get a local session handle",
@@ -600,6 +618,16 @@ pub fn http_openapi_document() -> Value {
                         "session_id": { "type": "string", "maxLength": 512 }
                     }
                 },
+                "SessionQuarantineRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "source_bytes", "source_modified_at_unix_ms"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
+                        "source_bytes": { "type": "integer", "format": "uint64" },
+                        "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" }
+                    }
+                },
                 "SessionMutationReceipt": {
                     "type": "object",
                     "additionalProperties": false,
@@ -608,6 +636,17 @@ pub fn http_openapi_document() -> Value {
                         "session_ref": { "type": "string" },
                         "session_id": { "type": "string" },
                         "operation_id": { "type": "string" },
+                        "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "SessionQuarantineReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "operation_id", "quarantine_name"],
+                    "properties": {
+                        "session_ref": { "type": "string" },
+                        "operation_id": { "type": "string" },
+                        "quarantine_name": { "type": "string" },
                         "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
                     }
                 },

@@ -239,6 +239,17 @@ pub struct SessionCatalogMutationReceipt {
     pub projection_generation: Option<u64>,
 }
 
+/// Receipt for moving one exact invalid source out of the active catalog scan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCatalogQuarantineReceipt {
+    pub session_ref: String,
+    pub operation_id: String,
+    pub quarantine_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
 /// Workspace-bound owner of the rebuildable global SQLite session catalog.
 #[derive(Debug, Clone)]
 pub struct SessionCatalogProjectionService {
@@ -386,6 +397,85 @@ impl SessionCatalogProjectionService {
             session_ref: session_ref.as_path().to_string_lossy().into_owned(),
             session_id: session_id.to_owned(),
             operation_id: output.operation_id,
+            projection_generation,
+        })
+    }
+
+    /// Moves one exact invalid source into the local quarantine directory and refreshes SQLite.
+    ///
+    /// The source metadata is revalidated under the session-maintenance lease before the atomic
+    /// rename. Ready, oversized, scan-limited, and legacy sources are never accepted by this
+    /// recovery operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable mutation error when the reference is unsafe, the source is no longer
+    /// invalid, its metadata changed, or the quarantine directory cannot be used safely.
+    pub fn quarantine_invalid_source(
+        &self,
+        session_ref: &str,
+        expected_source_bytes: u64,
+        expected_modified_at_unix_ms: u64,
+    ) -> Result<SessionCatalogQuarantineReceipt, LocalSessionMutationError> {
+        let session_ref = exact_session_ref(session_ref)?;
+        self.reconcile()
+            .map_err(|source| LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(source),
+            })?;
+        let session_ref_text = session_ref.as_path().to_string_lossy().into_owned();
+        let entry = self
+            .list_workspace_entries()
+            .map_err(|source| LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(source),
+            })?
+            .into_iter()
+            .find(|entry| entry.session_ref == session_ref_text)
+            .ok_or(LocalSessionMutationError::NotFound)?;
+        if entry.source_state != LocalSessionCatalogState::Invalid || entry.session_id.is_some() {
+            return Err(LocalSessionMutationError::NotReady);
+        }
+        if entry.source_bytes != expected_source_bytes
+            || entry.source_modified_at_unix_ms != expected_modified_at_unix_ms
+        {
+            return Err(LocalSessionMutationError::IdentityChanged);
+        }
+
+        let _lease = self
+            .lifecycle
+            .acquire_maintenance_lease()
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        let session_dir = canonical_real_directory(&self.lifecycle.session_dir)?;
+        let source_path = session_ref.resolve(&session_dir);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
+            _ => LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(error),
+            },
+        })?;
+        if metadata.len() != expected_source_bytes
+            || modified_at_unix_ms(&metadata) != expected_modified_at_unix_ms
+        {
+            return Err(LocalSessionMutationError::IdentityChanged);
+        }
+
+        let quarantine_dir = session_dir.join(".quarantine");
+        ensure_real_quarantine_directory(&quarantine_dir)?;
+        let operation_id = format!("session-quarantine:{}", uuid::Uuid::new_v4());
+        let quarantine_name = format!(
+            "{}--{}",
+            operation_id.trim_start_matches("session-quarantine:"),
+            session_ref_text
+        );
+        fs::rename(&source_path, quarantine_dir.join(&quarantine_name)).map_err(|source| {
+            LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(source),
+            }
+        })?;
+        let projection_generation = self.reconcile().ok().map(|report| report.generation);
+        Ok(SessionCatalogQuarantineReceipt {
+            session_ref: session_ref_text,
+            operation_id,
+            quarantine_name,
             projection_generation,
         })
     }
@@ -848,6 +938,45 @@ fn exact_session_id(value: &str) -> Result<(), LocalSessionMutationError> {
     {
         return Err(LocalSessionMutationError::InvalidRequest);
     }
+    Ok(())
+}
+
+fn canonical_real_directory(path: &Path) -> Result<PathBuf, LocalSessionMutationError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|source| LocalSessionMutationError::Unavailable {
+            source: anyhow::Error::new(source),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LocalSessionMutationError::NotReady);
+    }
+    fs::canonicalize(path).map_err(|source| LocalSessionMutationError::Unavailable {
+        source: anyhow::Error::new(source),
+    })
+}
+
+fn ensure_real_quarantine_directory(path: &Path) -> Result<(), LocalSessionMutationError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(LocalSessionMutationError::NotReady);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|source| LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(source),
+            })?;
+        }
+        Err(source) => {
+            return Err(LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(source),
+            });
+        }
+    }
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+        LocalSessionMutationError::Unavailable {
+            source: anyhow::Error::new(source),
+        }
+    })?;
     Ok(())
 }
 

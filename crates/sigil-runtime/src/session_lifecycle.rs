@@ -35,7 +35,7 @@ pub use projection::{
     SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
     SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
     SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,
-    SessionCatalogProjectionService,
+    SessionCatalogProjectionService, SessionCatalogQuarantineReceipt,
 };
 
 use journal::LocalSessionLifecycleJournal;

@@ -92,6 +92,11 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       sessionId: input.sessionId,
       projectionGeneration: 2,
     }),
+    quarantineSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      quarantineName: `quarantined--${input.sessionRef}`,
+      projectionGeneration: 2,
+    }),
     transcript: async () => ({
       totalMessages: 0,
       messages: [],
@@ -471,6 +476,7 @@ describe("desktop workspace and history shell", () => {
                   sessionRef: "first.jsonl",
                   sessionId: "durable-first",
                   sourceState: "ready",
+                  sourceBytes: 1024,
                   sourceModifiedAtUnixMs: 1_784_419_200_000,
                   providerName: "deepseek",
                   modelName: "deepseek-chat",
@@ -489,6 +495,7 @@ describe("desktop workspace and history shell", () => {
                 {
                   sessionRef: "legacy.jsonl",
                   sourceState: "unsupported_legacy",
+                  sourceBytes: 256,
                   sourceModifiedAtUnixMs: 1_784_419_100_000,
                   title: "Legacy session",
                   userMessageCount: 0,
@@ -528,6 +535,7 @@ describe("desktop workspace and history shell", () => {
             sessionRef: "history.jsonl",
             sessionId: "durable-history",
             sourceState: "ready",
+            sourceBytes: 1024,
             sourceModifiedAtUnixMs: 1_784_419_200_000,
             title: "History with messages",
             userMessageCount: 2,
@@ -648,6 +656,7 @@ describe("desktop workspace and history shell", () => {
           sessionRef: "active.jsonl",
           sessionId: "durable-active",
           sourceState: "ready",
+          sourceBytes: 1024,
           sourceModifiedAtUnixMs: 1_784_419_200_000,
           title: "Active session",
           userMessageCount: 1,
@@ -720,6 +729,7 @@ describe("desktop workspace and history shell", () => {
           sessionRef: "keep.jsonl",
           sessionId: "durable-keep",
           sourceState: "ready",
+          sourceBytes: 1024,
           sourceModifiedAtUnixMs: 1_784_419_200_000,
           title: "Keep this conversation",
           userMessageCount: 1,
@@ -763,6 +773,7 @@ describe("desktop workspace and history shell", () => {
           sessionRef: "managed.jsonl",
           sessionId: "durable-managed",
           sourceState: "ready",
+          sourceBytes: 1024,
           sourceModifiedAtUnixMs: 1_784_419_200_000,
           title: "Managed conversation",
           userMessageCount: 1,
@@ -778,7 +789,12 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByText("Managed conversation");
-    await user.click(screen.getByRole("button", { name: "Manage Managed conversation" }));
+    const managedRow = screen.getByRole("button", { name: /^Managed conversation/ });
+    await user.dblClick(managedRow);
+    expect(screen.getByRole("dialog", { name: "Rename conversation" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.contextMenu(managedRow);
     await user.click(screen.getByRole("menuitem", { name: "Rename" }));
     const name = screen.getByRole("textbox", { name: "Conversation name" });
     await user.clear(name);
@@ -799,6 +815,74 @@ describe("desktop workspace and history shell", () => {
       sessionRef: "managed.jsonl",
       sessionId: "durable-managed",
     }));
+  });
+
+  it("quarantines an invalid source from its context menu after confirmation", async () => {
+    const quarantineSession = vi.fn(async (_workspaceId, input: { sessionRef: string }) => ({
+      sessionRef: input.sessionRef,
+      quarantineName: `quarantined--${input.sessionRef}`,
+      projectionGeneration: 2,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        degradedSourceCount: 1,
+        entries: [{
+          sessionRef: "broken.jsonl",
+          sourceState: "invalid",
+          sourceBytes: 17,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Broken source",
+          userMessageCount: 0,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      quarantineSession,
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const unavailableRow = await screen.findByText("Broken source");
+    fireEvent.contextMenu(unavailableRow);
+    await user.click(screen.getByRole("menuitem", { name: "Move invalid source to quarantine" }));
+    expect(screen.getByRole("alertdialog", { name: "Quarantine invalid conversation source?" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Move to quarantine" }));
+    await waitFor(() => expect(quarantineSession).toHaveBeenCalledWith(workspace.id, {
+      sessionRef: "broken.jsonl",
+      sourceBytes: 17,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+    }));
+  });
+
+  it("restores the unfiltered conversation list as soon as search text is cleared", async () => {
+    const queries: Array<string | undefined> = [];
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async (_workspaceId, request) => {
+        queries.push(request.query);
+        return emptyCatalog;
+      },
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const search = await screen.findByRole("textbox", { name: "Search conversations" });
+    await user.type(search, "needle");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(queries.at(-1)).toBe("needle"));
+    await user.clear(search);
+    await waitFor(() => expect(queries.at(-1)).toBeUndefined());
   });
 
   it("requires explicit confirmation before closing a workspace with active runs", async () => {
@@ -905,8 +989,9 @@ describe("desktop workspace and history shell", () => {
     restoreMedia();
   });
 
-  it("shows a stale pagination recovery instead of mixing generations", async () => {
+  it("automatically restarts stale pagination instead of mixing generations", async () => {
     const user = userEvent.setup();
+    let firstPageRequests = 0;
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 1,
@@ -915,6 +1000,7 @@ describe("desktop workspace and history shell", () => {
       }),
       catalog: async (_workspaceId, request) => {
         if (request.cursor !== undefined) throw { code: "catalog_stale" };
+        firstPageRequests += 1;
         return { ...emptyCatalog, nextCursor: "stale-cursor" };
       },
     });
@@ -922,8 +1008,9 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("History changed while paging.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Refresh conversations" })).toBeTruthy();
+    expect(await screen.findByText("Conversation history refreshed because the list changed.")).toBeTruthy();
+    expect(firstPageRequests).toBe(2);
+    expect(screen.queryByText("History changed while paging.")).toBeNull();
   });
 
   it("runs a prompt and merges streamed and durable completion into one assistant reply", async () => {

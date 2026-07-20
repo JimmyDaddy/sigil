@@ -36,6 +36,7 @@ const catalog: CatalogPage = {
       sessionRef: "catalog-session-complete.jsonl",
       sessionId: session.id,
       sourceState: "ready",
+      sourceBytes: 1024,
       sourceModifiedAtUnixMs: 1_784_419_180_000,
       providerName: "deepseek",
       modelName: "deepseek-v4-flash",
@@ -209,6 +210,11 @@ export function createCatalogWorkbenchBridge(
     deleteSession: async (_workspaceId, input) => ({
       sessionRef: input.sessionRef,
       sessionId: input.sessionId,
+      projectionGeneration: 2,
+    }),
+    quarantineSession: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      quarantineName: `quarantined--${input.sessionRef}`,
       projectionGeneration: 2,
     }),
     transcript: async () => transcript,

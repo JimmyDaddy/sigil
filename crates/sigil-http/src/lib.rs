@@ -36,10 +36,10 @@ pub use dto::{
     HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
     HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo, HttpSessionBinding,
     HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionMutationReceipt,
-    HttpSessionOpenRequest, HttpSessionRenameRequest, HttpSessionSnapshot,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpSessionOpenRequest, HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest,
+    HttpSessionRenameRequest, HttpSessionSnapshot, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

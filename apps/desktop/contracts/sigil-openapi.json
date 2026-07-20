@@ -921,6 +921,57 @@
         ],
         "type": "object"
       },
+      "SessionQuarantineReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "projection_generation": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quarantine_name": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "operation_id",
+          "quarantine_name"
+        ],
+        "type": "object"
+      },
+      "SessionQuarantineRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "session_ref": {
+            "maxLength": 128,
+            "pattern": "^[^/\\\\]+\\.jsonl$",
+            "type": "string"
+          },
+          "source_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "source_modified_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_ref",
+          "source_bytes",
+          "source_modified_at_unix_ms"
+        ],
+        "type": "object"
+      },
       "SessionRenameRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1797,6 +1848,49 @@
           }
         },
         "summary": "Delete one exact durable conversation"
+      }
+    },
+    "/session-catalog/quarantine": {
+      "post": {
+        "description": "Revalidates the invalid source metadata under a maintenance lease, then moves it into the local quarantine directory without exposing a filesystem path.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionQuarantineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionQuarantineReceipt"
+                }
+              }
+            },
+            "description": "Committed quarantine receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Quarantine one exact invalid local session source"
       }
     },
     "/session-catalog/rename": {

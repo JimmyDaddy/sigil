@@ -143,6 +143,15 @@ pub struct HttpSessionDeleteRequest {
     pub session_id: String,
 }
 
+/// Exact invalid catalog source fingerprint selected for quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionQuarantineRequest {
+    pub session_ref: String,
+    pub source_bytes: u64,
+    pub source_modified_at_unix_ms: u64,
+}
+
 /// Bounded receipt for a committed durable catalog mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,6 +169,28 @@ impl From<sigil_runtime::SessionCatalogMutationReceipt> for HttpSessionMutationR
             session_ref: receipt.session_ref,
             session_id: receipt.session_id,
             operation_id: receipt.operation_id,
+            projection_generation: receipt.projection_generation,
+        }
+    }
+}
+
+/// Bounded receipt for an invalid source moved out of the active catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionQuarantineReceipt {
+    pub session_ref: String,
+    pub operation_id: String,
+    pub quarantine_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
+impl From<sigil_runtime::SessionCatalogQuarantineReceipt> for HttpSessionQuarantineReceipt {
+    fn from(receipt: sigil_runtime::SessionCatalogQuarantineReceipt) -> Self {
+        Self {
+            session_ref: receipt.session_ref,
+            operation_id: receipt.operation_id,
+            quarantine_name: receipt.quarantine_name,
             projection_generation: receipt.projection_generation,
         }
     }

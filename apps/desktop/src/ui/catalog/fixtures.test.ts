@@ -63,6 +63,7 @@ describe("desktop UI catalog contract", () => {
         onOpen: vi.fn(),
         onRename: vi.fn(),
         onDelete: vi.fn(),
+        onQuarantine: vi.fn(),
       }),
     );
 
@@ -107,6 +108,7 @@ describe("desktop UI catalog contract", () => {
         onOpen: vi.fn(),
         onRename: vi.fn(),
         onDelete: vi.fn(),
+        onQuarantine: vi.fn(),
       }),
     );
 

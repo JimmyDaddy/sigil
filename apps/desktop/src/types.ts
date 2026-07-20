@@ -47,6 +47,7 @@ export interface CatalogEntry {
   sessionRef: string;
   sessionId?: string;
   sourceState: CatalogSourceState;
+  sourceBytes: number;
   sourceModifiedAtUnixMs: number;
   providerName?: string;
   modelName?: string;
@@ -92,9 +93,21 @@ export interface SessionDeleteInput {
   sessionId: string;
 }
 
+export interface SessionQuarantineInput {
+  sessionRef: string;
+  sourceBytes: number;
+  sourceModifiedAtUnixMs: number;
+}
+
 export interface SessionMutationSummary {
   sessionRef: string;
   sessionId: string;
+  projectionGeneration?: number;
+}
+
+export interface SessionQuarantineSummary {
+  sessionRef: string;
+  quarantineName: string;
   projectionGeneration?: number;
 }
 

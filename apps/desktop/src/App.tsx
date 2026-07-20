@@ -82,6 +82,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
   const [pendingSessionDelete, setPendingSessionDelete] = useState<CatalogEntry>();
+  const [pendingSessionQuarantine, setPendingSessionQuarantine] = useState<CatalogEntry>();
   const [sessionManagementError, setSessionManagementError] = useState<string>();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [navigationWidth, setNavigationWidth] = useState(readNavigationWidth);
@@ -217,7 +218,19 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         );
         setHistoryState("ready");
       } catch (error) {
-        setHistoryState(errorCode(error) === "catalog_stale" ? "stale" : "error");
+        if (append && errorCode(error) === "catalog_stale") {
+          try {
+            const page = await bridge.catalog(workspaceId, catalogRequest());
+            setCatalog(page);
+            setHistoryState("ready");
+            setSessionMessage("Conversation history refreshed because the list changed.");
+            return;
+          } catch {
+            setHistoryState("error");
+            return;
+          }
+        }
+        setHistoryState("error");
       }
     },
     [bridge, catalogRequest],
@@ -426,6 +439,26 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
+  const quarantineSession = async () => {
+    if (activeWorkspaceId === undefined || pendingSessionQuarantine === undefined) return;
+    setSessionActionState("working");
+    setSessionManagementError(undefined);
+    try {
+      await bridge.quarantineSession(activeWorkspaceId, {
+        sessionRef: pendingSessionQuarantine.sessionRef,
+        sourceBytes: pendingSessionQuarantine.sourceBytes,
+        sourceModifiedAtUnixMs: pendingSessionQuarantine.sourceModifiedAtUnixMs,
+      });
+      setPendingSessionQuarantine(undefined);
+      setSessionActionState("idle");
+      setSessionMessage("Invalid conversation source moved to quarantine.");
+      await loadHistory(activeWorkspaceId);
+    } catch (error) {
+      setSessionActionState("error");
+      setSessionManagementError(errorMessage(error) ?? "The invalid source could not be quarantined safely.");
+    }
+  };
+
   const navigationContent = activeWorkspace === undefined ? null : (
     <SessionRail
       historyState={historyState}
@@ -437,7 +470,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       providerFilter={providerFilter}
       sourceFilter={sourceFilter}
       pinnedOnly={pinnedOnly}
-      onSearchDraftChange={setSearchDraft}
+      onSearchDraftChange={(value) => {
+        setSearchDraft(value);
+        if (value.trim() === "" && searchQuery !== "") setSearchQuery("");
+      }}
       onSearch={() => setSearchQuery(searchDraft)}
       onProviderFilterChange={setProviderFilter}
       onSourceFilterChange={setSourceFilter}
@@ -461,6 +497,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setSessionActionState("idle");
         setSessionManagementError(undefined);
         setPendingSessionDelete(entry);
+      }}
+      onQuarantine={(entry) => {
+        setSessionActionState("idle");
+        setSessionManagementError(undefined);
+        setPendingSessionQuarantine(entry);
       }}
     />
   );
@@ -637,6 +678,37 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 setSessionManagementError(undefined);
               }}>Keep conversation</Button>
               <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void deleteSession()}>Delete permanently</Button>
+            </div>
+          </>
+        )}
+      </Dialog>
+
+      <Dialog
+        open={pendingSessionQuarantine !== undefined}
+        title="Quarantine invalid conversation source?"
+        description={pendingSessionQuarantine?.sessionRef}
+        destructive
+        onOpenChange={(open) => {
+          if (!open && sessionActionState !== "working") {
+            setPendingSessionQuarantine(undefined);
+            setSessionActionState("idle");
+            setSessionManagementError(undefined);
+          }
+        }}
+      >
+        {pendingSessionQuarantine === undefined ? null : (
+          <>
+            <p className="destructive-explanation">
+              Sigil will revalidate this malformed source and move it out of the active conversation list. It is kept in the local quarantine directory for manual recovery.
+            </p>
+            {sessionManagementError === undefined ? null : <p role="alert">{sessionManagementError}</p>}
+            <div className="confirmation-actions">
+              <Button type="button" data-initial-focus disabled={sessionActionState === "working"} onClick={() => {
+                setPendingSessionQuarantine(undefined);
+                setSessionActionState("idle");
+                setSessionManagementError(undefined);
+              }}>Keep source</Button>
+              <Button type="button" variant="danger" busy={sessionActionState === "working"} onClick={() => void quarantineSession()}>Move to quarantine</Button>
             </div>
           </>
         )}

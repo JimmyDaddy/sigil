@@ -62,6 +62,7 @@ function sessionEntries(count: number): CatalogEntry[] {
     sessionRef: `catalog-session-${index + 1}.jsonl`,
     sessionId: `catalog-session-${index + 1}`,
     sourceState: "ready",
+    sourceBytes: 1024,
     sourceModifiedAtUnixMs: 1_784_419_200_000 - index * 60_000,
     providerName: index % 2 === 0 ? "deepseek" : "openai",
     modelName: index % 2 === 0 ? "deepseek-chat" : "gpt-5",
@@ -108,6 +109,7 @@ export const catalogFixtures: readonly CatalogFixture[] = [
       {
         sessionRef: "legacy.jsonl",
         sourceState: "unsupported_legacy",
+        sourceBytes: 256,
         sourceModifiedAtUnixMs: 1_784_419_100_000,
         title: "Unavailable legacy source",
         userMessageCount: 0,
@@ -118,6 +120,7 @@ export const catalogFixtures: readonly CatalogFixture[] = [
       {
         sessionRef: "oversized.jsonl",
         sourceState: "oversized",
+        sourceBytes: 128 * 1024 * 1024,
         sourceModifiedAtUnixMs: 1_784_419_000_000,
         title: "Oversized conversation",
         userMessageCount: 120,

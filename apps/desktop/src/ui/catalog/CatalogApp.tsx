@@ -141,6 +141,7 @@ function FixtureSurface({
             onOpen={() => undefined}
             onRename={() => undefined}
             onDelete={() => undefined}
+            onQuarantine={() => undefined}
           />
         </section>
       ) : null}
