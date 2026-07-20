@@ -69,4 +69,22 @@ describe("extension workbench", () => {
     expect(screen.getByText("A supervised owner is required.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start agent" }).hasAttribute("disabled")).toBe(true);
   });
+
+  it("opens directly on a filtered agent requested by the composer", () => {
+    render(
+      <LocaleProvider>
+        <ExtensionWorkbench
+          catalog={catalog}
+          runActive={false}
+          initialKind="agents"
+          initialQuery="expl"
+          onUseSkill={() => undefined}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.getByRole("tab", { name: "Agents 1" }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("expl");
+    expect(screen.getByText("@explore")).toBeTruthy();
+  });
 });

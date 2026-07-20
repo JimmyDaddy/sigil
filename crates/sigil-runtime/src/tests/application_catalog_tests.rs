@@ -14,3 +14,16 @@ fn shared_command_tokens_are_unique_and_well_formed() {
         }
     }
 }
+
+#[test]
+fn agent_command_opens_the_shared_agent_workbench() {
+    let command = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/agent")
+        .expect("agent command");
+
+    assert_eq!(
+        command.client_action,
+        Some(crate::ApplicationClientAction::OpenAgentWorkbench)
+    );
+}

@@ -9,15 +9,19 @@ type ExtensionKind = "skills" | "agents";
 export function ExtensionWorkbench({
   catalog,
   runActive,
+  initialKind = "skills",
+  initialQuery = "",
   onUseSkill,
 }: {
   catalog: ExtensionCatalog;
   runActive: boolean;
+  initialKind?: ExtensionKind;
+  initialQuery?: string;
   onUseSkill: (skill: SkillCatalogEntry) => void;
 }) {
   const { t } = useLocale();
-  const [kind, setKind] = useState<ExtensionKind>("skills");
-  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<ExtensionKind>(initialKind);
+  const [query, setQuery] = useState(initialQuery);
   const items = useMemo(
     () => filterExtensions(kind === "skills" ? catalog.skills : catalog.agents, query),
     [catalog.agents, catalog.skills, kind, query],

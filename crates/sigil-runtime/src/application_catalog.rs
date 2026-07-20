@@ -153,7 +153,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "open the agent workbench",
         argument_hint: Some("[profile]"),
         completes_with_space: true,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenAgentWorkbench),
     },
 ];
 

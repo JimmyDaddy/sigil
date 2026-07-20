@@ -76,6 +76,8 @@ export function ConversationPanel({
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [extensionWorkbenchOpen, setExtensionWorkbenchOpen] = useState(false);
+  const [extensionWorkbenchKind, setExtensionWorkbenchKind] = useState<"skills" | "agents">("skills");
+  const [extensionWorkbenchQuery, setExtensionWorkbenchQuery] = useState("");
   const [requestedSkill, setRequestedSkill] = useState<SkillCatalogEntry>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
@@ -106,6 +108,8 @@ export function ConversationPanel({
     setRunAnnouncement("");
     setInspectorOpen(false);
     setExtensionWorkbenchOpen(false);
+    setExtensionWorkbenchKind("skills");
+    setExtensionWorkbenchQuery("");
     setRequestedSkill(undefined);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
@@ -432,7 +436,11 @@ export function ConversationPanel({
               aria-controls="extension-workbench"
               aria-expanded={extensionWorkbenchOpen}
               icon={<Icon name="extensions" />}
-              onClick={() => setExtensionWorkbenchOpen(true)}
+              onClick={() => {
+                setExtensionWorkbenchKind("skills");
+                setExtensionWorkbenchQuery("");
+                setExtensionWorkbenchOpen(true);
+              }}
             />
           </Tooltip>
           {verification !== undefined ? (
@@ -547,6 +555,11 @@ export function ConversationPanel({
         onPermissionModeChange={setPermissionMode}
         onReasoningEffortChange={setReasoningEffort}
         onNewSession={onNewSession}
+        onOpenAgentWorkbench={(query) => {
+          setExtensionWorkbenchKind("agents");
+          setExtensionWorkbenchQuery(query);
+          setExtensionWorkbenchOpen(true);
+        }}
         onNotice={onNotice}
         onSubmit={submit}
         onCancel={() => void cancel()}
@@ -579,6 +592,8 @@ export function ConversationPanel({
           <ExtensionWorkbench
             catalog={runContext.extensionCatalog}
             runActive={active}
+            initialKind={extensionWorkbenchKind}
+            initialQuery={extensionWorkbenchQuery}
             onUseSkill={(skill) => {
               setRequestedSkill({ ...skill });
               setExtensionWorkbenchOpen(false);

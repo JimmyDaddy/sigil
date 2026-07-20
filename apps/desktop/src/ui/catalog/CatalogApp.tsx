@@ -166,6 +166,7 @@ function FixtureSurface({
             requestedSkill={undefined}
             onModelChange={() => Promise.resolve(true)}
             onNewSession={() => Promise.resolve(true)}
+            onOpenAgentWorkbench={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}
             onReasoningEffortChange={setReasoningEffort}

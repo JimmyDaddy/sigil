@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -46,6 +46,16 @@ const context: RunContext = {
         clientAction: "new_session",
         available: true,
       },
+      {
+        canonical: "/agent",
+        aliases: [],
+        label: "Agents",
+        description: "open the agent workbench",
+        argumentHint: "[profile]",
+        completesWithSpace: true,
+        clientAction: "open_agent_workbench",
+        available: true,
+      },
     ],
     skills: [
       {
@@ -84,10 +94,12 @@ const context: RunContext = {
 function renderComposer(overrides: {
   onSubmit?: (prompt: string, binding?: SkillBinding) => Promise<boolean>;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
+  onOpenAgentWorkbench?: (query: string) => void;
   onNotice?: (message: string, error?: boolean) => void;
 } = {}) {
   const onSubmit = overrides.onSubmit ?? vi.fn(async (_prompt: string, _binding?: SkillBinding) => true);
   const onReasoningEffortChange = overrides.onReasoningEffortChange ?? vi.fn((_effort: ReasoningEffort) => undefined);
+  const onOpenAgentWorkbench = overrides.onOpenAgentWorkbench ?? vi.fn((_query: string) => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   render(
     <LocaleProvider>
@@ -106,13 +118,14 @@ function renderComposer(overrides: {
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
         onNewSession={async () => true}
+        onOpenAgentWorkbench={onOpenAgentWorkbench}
         onNotice={onNotice}
         onSubmit={onSubmit}
         onCancel={() => undefined}
       />
     </LocaleProvider>,
   );
-  return { onSubmit, onReasoningEffortChange, onNotice };
+  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onNotice };
 }
 
 describe("structured composer", () => {
@@ -144,6 +157,19 @@ describe("structured composer", () => {
 
     expect(onReasoningEffortChange).toHaveBeenCalledWith("high");
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("opens and filters the agent workbench from the slash command", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenAgentWorkbench } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "/agent plan");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenAgentWorkbench).toHaveBeenCalledWith("plan");
+    expect(onSubmit).not.toHaveBeenCalled();
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });
 
   it("shows unavailable agents without dispatching a run", async () => {

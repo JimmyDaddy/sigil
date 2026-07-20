@@ -25,6 +25,7 @@ export function Composer({
   onPermissionModeChange,
   onReasoningEffortChange,
   onNewSession,
+  onOpenAgentWorkbench,
   onNotice,
   onSubmit,
   onCancel,
@@ -44,6 +45,7 @@ export function Composer({
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
   onNewSession: () => Promise<boolean>;
+  onOpenAgentWorkbench: (query: string) => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding) => Promise<boolean>;
   onCancel: () => void;
@@ -164,6 +166,9 @@ export function Composer({
         }
         return model === runContext?.modelName ? true : onModelChange(model);
       }
+      case "open_agent_workbench":
+        onOpenAgentWorkbench(argument);
+        return true;
       default:
         onNotice(suggestion.unavailableReason ?? t("commandUnavailable"), true);
         return false;
