@@ -26,22 +26,22 @@ use tokio::{
 
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
-    HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
-    HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig,
-    HttpAuthError, HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource,
-    HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
-    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
+    HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
+    HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError, HttpAuthValidator,
+    HttpCommandEnvelope, HttpContextWindowSource, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpLiveEventBus,
+    HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval,
+    HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
+    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpReasoningEffort,
+    HttpRegistryError, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 #[test]
@@ -665,6 +665,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
             permission_mode: Some(HttpPermissionMode::Manual),
             reasoning_effort: None,
             reasoning_effort_binding: None,
+            skill_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -846,6 +847,7 @@ async fn local_server_projects_typed_run_context() {
         context_window_tokens: Some(128_000),
         last_prompt_tokens: Some(4_096),
         context_window_source: HttpContextWindowSource::Provider,
+        extension_catalog: HttpApplicationExtensionCatalog::default(),
     });
     let path = format!("/sessions/{session_id}/run-context");
 
@@ -1034,6 +1036,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
             permission_mode: Some(HttpPermissionMode::Manual),
             reasoning_effort: None,
             reasoning_effort_binding: None,
+            skill_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1118,6 +1121,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
             permission_mode: Some(HttpPermissionMode::Manual),
             reasoning_effort: None,
             reasoning_effort_binding: None,
+            skill_binding: None,
         },
     );
     let start_body = serde_json::to_string(&start_command).expect("start command should serialize");
@@ -2701,6 +2705,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
                 permission_mode: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
+                skill_binding: None,
             }
         ),
         Err(HttpRegistryError::MissingPermissionMode)
@@ -3528,6 +3533,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
         permission_mode: Some(HttpPermissionMode::ReadOnly),
         reasoning_effort: None,
         reasoning_effort_binding: None,
+        skill_binding: None,
     };
     assert_eq!(
         serde_json::to_value(&start).expect("start request should serialize"),
@@ -3638,6 +3644,7 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
         permission_mode: Some(permission_mode),
         reasoning_effort: None,
         reasoning_effort_binding: None,
+        skill_binding: None,
     }
 }
 

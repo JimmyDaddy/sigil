@@ -472,6 +472,7 @@ impl HttpSessionRunRegistry {
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
         let reasoning_effort = request.reasoning_effort;
         let reasoning_effort_binding = request.reasoning_effort_binding;
+        let skill_binding = request.skill_binding;
         let prompt = request.prompt;
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
@@ -528,6 +529,7 @@ impl HttpSessionRunRegistry {
             run: run_snapshot,
             prompt,
             reasoning_effort_binding,
+            skill_binding,
         };
         match catch_unwind(AssertUnwindSafe(|| self.driver.start_run(start))) {
             Ok(Ok(())) => {}

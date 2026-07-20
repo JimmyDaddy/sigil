@@ -25,8 +25,10 @@ use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpContextWindowSource,
-    HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
+    HTTP_APPROVAL_POLICY_VERSION, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
+    HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
+    HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry, HttpApprovalDecisionRecord,
+    HttpContextWindowSource, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
     HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpRunContextView, HttpRunDriver,
     HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
@@ -450,6 +452,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     ) -> Result<HttpRunContextView, HttpRunDriverError> {
         let view = application_run_context_view(
             &self.options.config_path,
+            &self.options.launch_cwd,
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
         )
@@ -479,6 +482,79 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 sigil_runtime::ContextWindowSource::Provider => HttpContextWindowSource::Provider,
                 sigil_runtime::ContextWindowSource::Config => HttpContextWindowSource::Config,
                 sigil_runtime::ContextWindowSource::None => HttpContextWindowSource::Unavailable,
+            },
+            extension_catalog: HttpApplicationExtensionCatalog {
+                commands: view
+                    .extension_catalog
+                    .commands
+                    .into_iter()
+                    .map(|entry| HttpApplicationCommandCatalogEntry {
+                        canonical: entry.canonical,
+                        aliases: entry.aliases,
+                        label: entry.label,
+                        description: entry.description,
+                        argument_hint: entry.argument_hint,
+                        completes_with_space: entry.completes_with_space,
+                        client_action: entry.client_action.map(|action| match action {
+                            sigil_runtime::ApplicationClientAction::NewSession => {
+                                HttpApplicationClientAction::NewSession
+                            }
+                            sigil_runtime::ApplicationClientAction::FocusEffort => {
+                                HttpApplicationClientAction::FocusEffort
+                            }
+                            sigil_runtime::ApplicationClientAction::FocusModel => {
+                                HttpApplicationClientAction::FocusModel
+                            }
+                            sigil_runtime::ApplicationClientAction::OpenSessionPicker => {
+                                HttpApplicationClientAction::OpenSessionPicker
+                            }
+                            sigil_runtime::ApplicationClientAction::OpenAgentWorkbench => {
+                                HttpApplicationClientAction::OpenAgentWorkbench
+                            }
+                        }),
+                        available: entry.available,
+                        unavailable_reason: entry.unavailable_reason,
+                    })
+                    .collect(),
+                skills: view
+                    .extension_catalog
+                    .skills
+                    .into_iter()
+                    .map(|entry| HttpApplicationSkillCatalogEntry {
+                        id: entry.id,
+                        invocation_token: entry.invocation_token,
+                        name: entry.name,
+                        description: entry.description,
+                        source: entry.source,
+                        run_mode: entry.run_mode,
+                        trust: entry.trust,
+                        available: entry.available,
+                        unavailable_reason: entry.unavailable_reason,
+                        binding: entry.binding.map(|binding| HttpApplicationSkillBinding {
+                            skill_id: binding.skill_id,
+                            skill_sha256: binding.skill_sha256,
+                            index_fingerprint: binding.index_fingerprint,
+                        }),
+                    })
+                    .collect(),
+                agents: view
+                    .extension_catalog
+                    .agents
+                    .into_iter()
+                    .map(|entry| HttpApplicationAgentCatalogEntry {
+                        id: entry.id,
+                        invocation_token: entry.invocation_token,
+                        description: entry.description,
+                        source: entry.source,
+                        kind: entry.kind,
+                        trust: entry.trust,
+                        enabled: entry.enabled,
+                        user_invocable: entry.user_invocable,
+                        available: entry.available,
+                        unavailable_reason: entry.unavailable_reason,
+                        snapshot_id: entry.snapshot_id,
+                    })
+                    .collect(),
             },
         })
     }
@@ -567,6 +643,13 @@ impl HttpRunSupervisor {
             permission_mode: Some(self.start.run.permission_mode.into()),
             reasoning_effort: self.start.run.reasoning_effort.map(Into::into),
             reasoning_effort_binding: self.start.reasoning_effort_binding.clone(),
+            skill_binding: self.start.skill_binding.clone().map(|binding| {
+                sigil_runtime::ApplicationSkillBinding {
+                    skill_id: binding.skill_id,
+                    skill_sha256: binding.skill_sha256,
+                    index_fingerprint: binding.index_fingerprint,
+                }
+            }),
             constraints: None,
         };
         let services = self.services.clone();

@@ -914,6 +914,54 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ApplicationAgentCatalogEntry: {
+            available: boolean;
+            description: string;
+            enabled: boolean;
+            id: string;
+            invocation_token: string;
+            kind: string;
+            snapshot_id?: string | null;
+            source: string;
+            trust: string;
+            unavailable_reason?: string | null;
+            user_invocable: boolean;
+        };
+        /** @enum {string} */
+        ApplicationClientAction: "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench";
+        ApplicationCommandCatalogEntry: {
+            aliases: string[];
+            argument_hint?: string | null;
+            available: boolean;
+            canonical: string;
+            client_action?: components["schemas"]["ApplicationClientAction"] | null;
+            completes_with_space: boolean;
+            description: string;
+            label: string;
+            unavailable_reason?: string | null;
+        };
+        ApplicationExtensionCatalog: {
+            agents: components["schemas"]["ApplicationAgentCatalogEntry"][];
+            commands: components["schemas"]["ApplicationCommandCatalogEntry"][];
+            skills: components["schemas"]["ApplicationSkillCatalogEntry"][];
+        };
+        ApplicationSkillBinding: {
+            index_fingerprint: string;
+            skill_id: string;
+            skill_sha256: string;
+        };
+        ApplicationSkillCatalogEntry: {
+            available: boolean;
+            binding?: components["schemas"]["ApplicationSkillBinding"] | null;
+            description: string;
+            id: string;
+            invocation_token: string;
+            name: string;
+            run_mode: string;
+            source: string;
+            trust: string;
+            unavailable_reason?: string | null;
+        };
         ApprovalCommandReceipt: {
             call_id: string;
             client_id: string;
@@ -1005,6 +1053,7 @@ export interface components {
             context_window_tokens?: number | null;
             default_permission_mode: components["schemas"]["PermissionMode"];
             default_reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+            extension_catalog: components["schemas"]["ApplicationExtensionCatalog"];
             /** Format: uint64 */
             last_prompt_tokens?: number | null;
             model_name: string;
@@ -1042,6 +1091,7 @@ export interface components {
             prompt: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             reasoning_effort_binding?: string | null;
+            skill_binding?: components["schemas"]["ApplicationSkillBinding"] | null;
         };
         /** @enum {string} */
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";

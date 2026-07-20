@@ -22,9 +22,10 @@ use super::{
     ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
     ApplicationSessionLeaseManager, ApplicationTranscriptRole,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    admit_application_reasoning_effort, application_run_context_view, application_run_input,
-    application_session_transcript_page, application_terminal_projection,
-    application_verification_view, attach_application_request_context, bind_application_session,
+    admit_application_reasoning_effort, admit_application_skill_binding,
+    application_run_context_view, application_run_input, application_session_transcript_page,
+    application_terminal_projection, application_verification_view,
+    attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, default_application_session_path,
     optional_eager_mcp_warning, record_application_preparation_cancellation,
@@ -288,6 +289,7 @@ model = "deepseek-v4-flash"
     )?;
     let context = application_run_context_view(
         &config_path,
+        temp.path(),
         &binding.session_log_path,
         &binding.session_scope_id,
     )?;
@@ -361,6 +363,7 @@ model = "deepseek-v4-flash"
 
     let empty = application_run_context_view(
         &config_path,
+        temp.path(),
         &binding.session_log_path,
         &binding.session_scope_id,
     )?;
@@ -388,6 +391,24 @@ model = "deepseek-v4-flash"
         crate::ContextWindowSource::Provider
     );
     assert_eq!(empty.last_prompt_tokens, None);
+    assert_eq!(
+        empty.extension_catalog.commands.len(),
+        crate::APPLICATION_COMMANDS.len()
+    );
+    assert!(
+        empty
+            .extension_catalog
+            .commands
+            .iter()
+            .any(|command| command.canonical == "/new" && command.available)
+    );
+    assert!(
+        empty
+            .extension_catalog
+            .agents
+            .iter()
+            .all(|agent| !agent.available && agent.unavailable_reason.is_some())
+    );
 
     JsonlSessionStore::new(&binding.session_log_path)?.append(&SessionLogEntry::Control(
         ControlEntry::UsageSnapshot(UsageStats {
@@ -403,14 +424,104 @@ model = "deepseek-v4-flash"
     ))?;
     let used = application_run_context_view(
         &config_path,
+        temp.path(),
         &binding.session_log_path,
         &binding.session_scope_id,
     )?;
     assert_eq!(used.last_prompt_tokens, Some(42_000));
     assert!(
-        application_run_context_view(&config_path, &binding.session_log_path, "wrong-scope")
-            .is_err()
+        application_run_context_view(
+            &config_path,
+            temp.path(),
+            &binding.session_log_path,
+            "wrong-scope",
+        )
+        .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn exact_inline_skill_binding_loads_transient_context_and_audit_entry() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let skill_path = temp.path().join(".sigil/skills/review/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().expect("skill parent"))?;
+    std::fs::write(
+        &skill_path,
+        r#"---
+id: review
+name: Review
+description: Review the selected code.
+trust: trusted
+run-as: inline
+user-invocable: true
+---
+
+# Review instructions
+Inspect the requested code and report concrete findings.
+"#,
+    )?;
+
+    let root_config = RootConfig::load(&config_path)?;
+    let report = crate::discover_skill_index(temp.path(), &root_config.skills)?;
+    let descriptor = report
+        .snapshot
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.id == "review")
+        .expect("review skill should be discovered");
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "review src/lib.rs",
+        "run-skill",
+    );
+    request.skill_binding = Some(crate::ApplicationSkillBinding {
+        skill_id: descriptor.id.clone(),
+        skill_sha256: descriptor.sha256.clone(),
+        index_fingerprint: report.snapshot.fingerprint.clone(),
+    });
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+
+    let loaded =
+        admit_application_skill_binding(&request, &root_config, temp.path(), &mut session)?
+            .expect("exact binding should load");
+
+    assert_eq!(loaded.descriptor.id, "review");
+    assert!(
+        loaded
+            .transient_context
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Review instructions"))
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SkillLoaded(loaded))
+            if loaded.skill_id == "review" && loaded.run_id.as_deref() == Some("run-skill")
+    )));
+
+    request
+        .skill_binding
+        .as_mut()
+        .expect("binding should exist")
+        .index_fingerprint = "stale".to_owned();
+    assert!(matches!(
+        admit_application_skill_binding(&request, &root_config, temp.path(), &mut session,),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
     Ok(())
 }
 

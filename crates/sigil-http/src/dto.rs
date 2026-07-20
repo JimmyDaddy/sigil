@@ -312,6 +312,9 @@ pub struct HttpRunStartRequest {
     /// Opaque run-context binding required with an explicit reasoning effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_binding: Option<String>,
+    /// Exact catalog binding for one user-invoked inline skill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_binding: Option<HttpApplicationSkillBinding>,
 }
 
 /// Request body for cancelling one run.
@@ -363,6 +366,90 @@ pub enum HttpContextWindowSource {
     Unavailable,
 }
 
+/// Client-owned action behind an available application command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpApplicationClientAction {
+    NewSession,
+    FocusEffort,
+    FocusModel,
+    OpenSessionPicker,
+    OpenAgentWorkbench,
+}
+
+/// One bounded slash-command catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationCommandCatalogEntry {
+    pub canonical: String,
+    pub aliases: Vec<String>,
+    pub label: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    pub completes_with_space: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_action: Option<HttpApplicationClientAction>,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+/// Exact digest binding required to invoke one inline skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationSkillBinding {
+    pub skill_id: String,
+    pub skill_sha256: String,
+    pub index_fingerprint: String,
+}
+
+/// One path-free skill catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationSkillCatalogEntry {
+    pub id: String,
+    pub invocation_token: String,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub run_mode: String,
+    pub trust: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<HttpApplicationSkillBinding>,
+}
+
+/// One path-free agent profile catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationAgentCatalogEntry {
+    pub id: String,
+    pub invocation_token: String,
+    pub description: String,
+    pub source: String,
+    pub kind: String,
+    pub trust: String,
+    pub enabled: bool,
+    pub user_invocable: bool,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+}
+
+/// Bounded extension metadata used by graphical application clients.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationExtensionCatalog {
+    pub commands: Vec<HttpApplicationCommandCatalogEntry>,
+    pub skills: Vec<HttpApplicationSkillCatalogEntry>,
+    pub agents: Vec<HttpApplicationAgentCatalogEntry>,
+}
+
 /// Typed facts used to configure and explain the next run in one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -395,6 +482,8 @@ pub struct HttpRunContextView {
     pub last_prompt_tokens: Option<u64>,
     /// Source used to resolve `context_window_tokens`.
     pub context_window_source: HttpContextWindowSource,
+    /// Bounded command, skill, and agent metadata for this workspace and session.
+    pub extension_catalog: HttpApplicationExtensionCatalog,
 }
 
 impl HttpPermissionMode {

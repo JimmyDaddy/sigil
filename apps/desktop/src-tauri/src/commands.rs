@@ -404,6 +404,13 @@ pub(crate) async fn desktop_start_run(
                 permission_mode: input.permission_mode,
                 reasoning_effort: input.reasoning_effort,
                 reasoning_effort_binding: input.reasoning_effort_binding,
+                skill_binding: input.skill_binding.map(|binding| {
+                    sigil_desktop::DesktopApplicationSkillBinding {
+                        skill_id: binding.skill_id,
+                        skill_sha256: binding.skill_sha256,
+                        index_fingerprint: binding.index_fingerprint,
+                    }
+                }),
             },
         )
         .await

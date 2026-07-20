@@ -89,6 +89,234 @@
       }
     },
     "schemas": {
+      "ApplicationAgentCatalogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invocation_token": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "trust": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_invocable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "invocation_token",
+          "description",
+          "source",
+          "kind",
+          "trust",
+          "enabled",
+          "user_invocable",
+          "available"
+        ],
+        "type": "object"
+      },
+      "ApplicationClientAction": {
+        "enum": [
+          "new_session",
+          "focus_effort",
+          "focus_model",
+          "open_session_picker",
+          "open_agent_workbench"
+        ],
+        "type": "string"
+      },
+      "ApplicationCommandCatalogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "argument_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "canonical": {
+            "type": "string"
+          },
+          "client_action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationClientAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completes_with_space": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "canonical",
+          "aliases",
+          "label",
+          "description",
+          "completes_with_space",
+          "available"
+        ],
+        "type": "object"
+      },
+      "ApplicationExtensionCatalog": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationAgentCatalogEntry"
+            },
+            "type": "array"
+          },
+          "commands": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationCommandCatalogEntry"
+            },
+            "type": "array"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationSkillCatalogEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "commands",
+          "skills",
+          "agents"
+        ],
+        "type": "object"
+      },
+      "ApplicationSkillBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "index_fingerprint": {
+            "type": "string"
+          },
+          "skill_id": {
+            "type": "string"
+          },
+          "skill_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "skill_id",
+          "skill_sha256",
+          "index_fingerprint"
+        ],
+        "type": "object"
+      },
+      "ApplicationSkillCatalogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationSkillBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invocation_token": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "run_mode": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "trust": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "invocation_token",
+          "name",
+          "description",
+          "source",
+          "run_mode",
+          "trust",
+          "available"
+        ],
+        "type": "object"
+      },
       "ApprovalCommandReceipt": {
         "properties": {
           "call_id": {
@@ -476,6 +704,9 @@
               }
             ]
           },
+          "extension_catalog": {
+            "$ref": "#/components/schemas/ApplicationExtensionCatalog"
+          },
           "last_prompt_tokens": {
             "format": "uint64",
             "type": [
@@ -510,7 +741,8 @@
           "default_permission_mode",
           "available_permission_modes",
           "available_reasoning_efforts",
-          "context_window_source"
+          "context_window_source",
+          "extension_catalog"
         ],
         "type": "object"
       },
@@ -643,6 +875,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "skill_binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationSkillBinding"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },

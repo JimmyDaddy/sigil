@@ -29,7 +29,10 @@ pub use driver::{
     HttpRunDriverStart, HttpSessionOpenBindingError,
 };
 pub use dto::{
-    HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
+    HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION,
+    HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
+    HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
+    HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry, HttpApprovalCommandReceipt,
     HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
     HttpContextWindowSource, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
     HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView,

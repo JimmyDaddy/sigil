@@ -1,10 +1,6 @@
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SlashCommandSpec {
-    pub(crate) canonical: &'static str,
-    pub(crate) aliases: &'static [&'static str],
-    pub(crate) description: &'static str,
-    pub(crate) completes_with_space: bool,
-}
+pub(crate) use sigil_runtime::{
+    APPLICATION_COMMANDS as SLASH_COMMANDS, ApplicationCommandSpec as SlashCommandSpec,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedSlashCommand {
@@ -27,87 +23,6 @@ pub(crate) struct SlashArgumentOption {
     pub(crate) description: &'static str,
     pub(crate) keywords: &'static [&'static str],
 }
-
-pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
-    SlashCommandSpec {
-        canonical: "/compact",
-        aliases: &[],
-        description: "preview V2 context compaction",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/config",
-        aliases: &[],
-        description: "edit config",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/doctor",
-        aliases: &[],
-        description: "run local diagnostics",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/feedback",
-        aliases: &[],
-        description: "review and export a private support report",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/effort",
-        aliases: &["/e"],
-        description: "set effort <low|medium|high|max>",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/model",
-        aliases: &["/m"],
-        description: "switch model <flash|pro|id>",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/new",
-        aliases: &[],
-        description: "start a fresh session",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/plan",
-        aliases: &[],
-        description: "enter plan mode or run one plan prompt",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/task",
-        aliases: &[],
-        description: "start or continue a durable task",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/quit",
-        aliases: &["/q", "/exit"],
-        description: "quit TUI",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/queue",
-        aliases: &[],
-        description: "advanced follow-up controls",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/resume",
-        aliases: &[],
-        description: "choose a saved session",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/agent",
-        aliases: &[],
-        description: "switch or rename visible agent",
-        completes_with_space: true,
-    },
-];
 
 pub(crate) const KNOWN_MODEL_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 

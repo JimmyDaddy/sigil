@@ -152,6 +152,7 @@ const runContext: RunContext = {
   contextWindowTokens: 1_000_000,
   lastPromptTokens: 42_000,
   contextWindowSource: "provider",
+  extensionCatalog: { commands: [], skills: [], agents: [] },
 };
 
 const verification: VerificationSummary = {

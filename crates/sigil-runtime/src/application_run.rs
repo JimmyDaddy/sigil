@@ -207,6 +207,8 @@ pub struct ApplicationRunContextView {
     pub last_prompt_tokens: Option<u64>,
     /// Source used to resolve the effective context window.
     pub context_window_source: crate::ContextWindowSource,
+    /// Bounded command, skill, and agent metadata for application clients.
+    pub extension_catalog: crate::ApplicationExtensionCatalogView,
 }
 
 /// Input required to prepare one application run.
@@ -230,6 +232,8 @@ pub struct ApplicationRunRequest {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Opaque binding returned with the run-context effort capability.
     pub reasoning_effort_binding: Option<String>,
+    /// Exact catalog binding for one user-invoked inline skill.
+    pub skill_binding: Option<crate::ApplicationSkillBinding>,
     /// Optional adapter-owned hard constraints applied before provider dispatch.
     pub constraints: Option<ApplicationRunConstraints>,
 }
@@ -264,6 +268,7 @@ impl ApplicationRunRequest {
             permission_mode: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
+            skill_binding: None,
             constraints: None,
         }
     }
@@ -844,6 +849,7 @@ pub async fn prepare_application_run(
         interaction,
         redactor,
         tool_scope,
+        skill_descriptor,
     } = prepared;
     let surface =
         build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
@@ -901,6 +907,9 @@ pub async fn prepare_application_run(
             }
             warnings.push(optional_eager_mcp_warning(&redactor, &server_name, &error));
         }
+    }
+    if let Some(skill_descriptor) = skill_descriptor.as_ref() {
+        registry = crate::build_skill_tool_registry(&registry, skill_descriptor).into_registry();
     }
     if let Some(scope) = tool_scope {
         registry = constrain_application_tool_registry(registry, &scope)
@@ -1071,6 +1080,7 @@ pub fn bind_existing_application_session(
 /// scope differs from the adapter binding being queried.
 pub fn application_run_context_view(
     config_path: &Path,
+    launch_cwd: &Path,
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<ApplicationRunContextView> {
@@ -1115,6 +1125,13 @@ pub fn application_run_context_view(
         session.model_name(),
         &available_reasoning_efforts,
     );
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let extension_catalog = crate::application_extension_catalog_view(
+        &root_config,
+        &workspace_root,
+        session.entries(),
+    )?;
     Ok(ApplicationRunContextView {
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
@@ -1126,6 +1143,7 @@ pub fn application_run_context_view(
         context_window_tokens: resolved.tokens,
         last_prompt_tokens,
         context_window_source: resolved.source,
+        extension_catalog,
     })
 }
 
@@ -1476,6 +1494,7 @@ struct BlockingApplicationRunPreparation {
     interaction: ApplicationRunInteraction,
     redactor: sigil_kernel::SecretRedactor,
     tool_scope: Option<ToolRegistryScope>,
+    skill_descriptor: Option<sigil_kernel::SkillDescriptor>,
 }
 
 fn prepare_application_run_blocking(
@@ -1523,6 +1542,8 @@ fn prepare_application_run_blocking(
     root_config.agent.provider = session.provider_name().to_owned();
     root_config.agent.model = session.model_name().to_owned();
     admit_application_reasoning_effort(&request, &root_config)?;
+    let loaded_skill =
+        admit_application_skill_binding(&request, &root_config, &workspace_root, &mut session)?;
     let provider =
         crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     attach_session_url_capability_store(&mut session)
@@ -1553,6 +1574,11 @@ fn prepare_application_run_blocking(
     let mut input = AgentRunInput::user(request.prompt.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone());
+    if let Some(loaded_skill) = loaded_skill.as_ref() {
+        input
+            .transient_context
+            .push(loaded_skill.transient_context.clone());
+    }
     if let Some(constraints) = request.constraints.as_ref() {
         input = input.with_max_output_tokens(constraints.max_output_tokens);
     }
@@ -1579,7 +1605,62 @@ fn prepare_application_run_blocking(
         tool_scope: request
             .constraints
             .map(|constraints| constraints.tool_scope),
+        skill_descriptor: loaded_skill.map(|loaded| loaded.descriptor),
     })
+}
+
+fn admit_application_skill_binding(
+    request: &ApplicationRunRequest,
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session: &mut Session,
+) -> std::result::Result<Option<crate::LoadedSkillContext>, ApplicationRunPrepareError> {
+    let Some(binding) = request.skill_binding.as_ref() else {
+        return Ok(None);
+    };
+    let user_config_dir = sigil_kernel::default_user_config_dir().ok();
+    let report = crate::discover_skill_index_with_user_dir(
+        workspace_root,
+        user_config_dir.as_deref(),
+        &root_config.skills,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    if report.snapshot.fingerprint != binding.index_fingerprint {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "skill catalog binding is stale".to_owned(),
+        });
+    }
+    let Some(descriptor) = report
+        .snapshot
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.id == binding.skill_id)
+    else {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "bound skill is no longer present".to_owned(),
+        });
+    };
+    if descriptor.sha256 != binding.skill_sha256 {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "skill content binding is stale".to_owned(),
+        });
+    }
+    if descriptor.run_as != sigil_kernel::SkillRunMode::Inline {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "child-session skills require a supervised application owner".to_owned(),
+        });
+    }
+    let loaded = crate::load_user_invoked_skill(
+        workspace_root,
+        &report.snapshot,
+        &binding.skill_id,
+        Some(request.run_id.clone()),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    session
+        .append_control(ControlEntry::SkillLoaded(loaded.entry.clone()))
+        .map_err(ApplicationRunPrepareError::execution)?;
+    Ok(Some(loaded))
 }
 
 fn admit_application_reasoning_effort(

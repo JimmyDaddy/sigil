@@ -792,7 +792,8 @@ pub fn http_openapi_document() -> Value {
                         "prompt": { "type": "string" },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
-                        "reasoning_effort_binding": { "type": ["string", "null"] }
+                        "reasoning_effort_binding": { "type": ["string", "null"] },
+                        "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] }
                     }
                 },
                 "PermissionMode": {
@@ -806,7 +807,7 @@ pub fn http_openapi_document() -> Value {
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source"],
+                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
                     "properties": {
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
@@ -833,7 +834,83 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
-                        "context_window_source": { "type": "string", "enum": ["provider", "config", "unavailable"] }
+                        "context_window_source": { "type": "string", "enum": ["provider", "config", "unavailable"] },
+                        "extension_catalog": { "$ref": "#/components/schemas/ApplicationExtensionCatalog" }
+                    }
+                },
+                "ApplicationExtensionCatalog": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["commands", "skills", "agents"],
+                    "properties": {
+                        "commands": { "type": "array", "items": { "$ref": "#/components/schemas/ApplicationCommandCatalogEntry" } },
+                        "skills": { "type": "array", "items": { "$ref": "#/components/schemas/ApplicationSkillCatalogEntry" } },
+                        "agents": { "type": "array", "items": { "$ref": "#/components/schemas/ApplicationAgentCatalogEntry" } }
+                    }
+                },
+                "ApplicationClientAction": {
+                    "type": "string",
+                    "enum": ["new_session", "focus_effort", "focus_model", "open_session_picker", "open_agent_workbench"]
+                },
+                "ApplicationCommandCatalogEntry": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["canonical", "aliases", "label", "description", "completes_with_space", "available"],
+                    "properties": {
+                        "canonical": { "type": "string" },
+                        "aliases": { "type": "array", "items": { "type": "string" } },
+                        "label": { "type": "string" },
+                        "description": { "type": "string" },
+                        "argument_hint": { "type": ["string", "null"] },
+                        "completes_with_space": { "type": "boolean" },
+                        "client_action": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationClientAction" }, { "type": "null" }] },
+                        "available": { "type": "boolean" },
+                        "unavailable_reason": { "type": ["string", "null"] }
+                    }
+                },
+                "ApplicationSkillBinding": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["skill_id", "skill_sha256", "index_fingerprint"],
+                    "properties": {
+                        "skill_id": { "type": "string" },
+                        "skill_sha256": { "type": "string" },
+                        "index_fingerprint": { "type": "string" }
+                    }
+                },
+                "ApplicationSkillCatalogEntry": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "invocation_token", "name", "description", "source", "run_mode", "trust", "available"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "invocation_token": { "type": "string" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "source": { "type": "string" },
+                        "run_mode": { "type": "string" },
+                        "trust": { "type": "string" },
+                        "available": { "type": "boolean" },
+                        "unavailable_reason": { "type": ["string", "null"] },
+                        "binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] }
+                    }
+                },
+                "ApplicationAgentCatalogEntry": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "invocation_token", "description", "source", "kind", "trust", "enabled", "user_invocable", "available"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "invocation_token": { "type": "string" },
+                        "description": { "type": "string" },
+                        "source": { "type": "string" },
+                        "kind": { "type": "string" },
+                        "trust": { "type": "string" },
+                        "enabled": { "type": "boolean" },
+                        "user_invocable": { "type": "boolean" },
+                        "available": { "type": "boolean" },
+                        "unavailable_reason": { "type": ["string", "null"] },
+                        "snapshot_id": { "type": ["string", "null"] }
                     }
                 },
                 "RunStartCommandReceipt": {

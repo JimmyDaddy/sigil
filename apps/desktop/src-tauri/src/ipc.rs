@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
-    DesktopApprovalDecisionRecord, DesktopContextWindowSource, DesktopModelSelectionPolicy,
-    DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
-    DesktopRunStatus, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
-    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
-    DesktopSessionTranscriptPage, DesktopTimelineEvent, DesktopTranscriptAssistantKind,
-    DesktopTranscriptRole, DesktopVerificationAction, DesktopVerificationCheckStatus,
-    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
-    DesktopVerificationView, DesktopWorkspaceSummary,
+    DesktopApplicationClientAction, DesktopApprovalDecisionRecord, DesktopContextWindowSource,
+    DesktopModelSelectionPolicy, DesktopPermissionMode, DesktopReasoningEffort,
+    DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogEntry,
+    DesktopSessionCatalogPage, DesktopSessionCatalogState, DesktopSessionSnapshot,
+    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage, DesktopTimelineEvent,
+    DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
+    DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
+    DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::{
@@ -210,6 +210,15 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) permission_mode: DesktopPermissionMode,
     pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
     pub(crate) reasoning_effort_binding: Option<String>,
+    pub(crate) skill_binding: Option<DesktopSkillBindingInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSkillBindingInput {
+    pub(crate) skill_id: String,
+    pub(crate) skill_sha256: String,
+    pub(crate) index_fingerprint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +259,75 @@ pub(crate) struct DesktopRunContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_prompt_tokens: Option<u64>,
     pub(crate) context_window_source: &'static str,
+    pub(crate) extension_catalog: DesktopExtensionCatalog,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopExtensionCatalog {
+    pub(crate) commands: Vec<DesktopCommandCatalogEntry>,
+    pub(crate) skills: Vec<DesktopSkillCatalogEntry>,
+    pub(crate) agents: Vec<DesktopAgentCatalogEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCommandCatalogEntry {
+    pub(crate) canonical: String,
+    pub(crate) aliases: Vec<String>,
+    pub(crate) label: String,
+    pub(crate) description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) argument_hint: Option<String>,
+    pub(crate) completes_with_space: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_action: Option<&'static str>,
+    pub(crate) available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSkillBinding {
+    pub(crate) skill_id: String,
+    pub(crate) skill_sha256: String,
+    pub(crate) index_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSkillCatalogEntry {
+    pub(crate) id: String,
+    pub(crate) invocation_token: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) source: String,
+    pub(crate) run_mode: String,
+    pub(crate) trust: String,
+    pub(crate) available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unavailable_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) binding: Option<DesktopSkillBinding>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentCatalogEntry {
+    pub(crate) id: String,
+    pub(crate) invocation_token: String,
+    pub(crate) description: String,
+    pub(crate) source: String,
+    pub(crate) kind: String,
+    pub(crate) trust: String,
+    pub(crate) enabled: bool,
+    pub(crate) user_invocable: bool,
+    pub(crate) available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unavailable_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -486,6 +564,63 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
 
 impl From<DesktopRunContextView> for DesktopRunContext {
     fn from(value: DesktopRunContextView) -> Self {
+        let extension_catalog = DesktopExtensionCatalog {
+            commands: value
+                .extension_catalog
+                .commands
+                .into_iter()
+                .map(|entry| DesktopCommandCatalogEntry {
+                    canonical: entry.canonical,
+                    aliases: entry.aliases,
+                    label: entry.label,
+                    description: entry.description,
+                    argument_hint: entry.argument_hint,
+                    completes_with_space: entry.completes_with_space,
+                    client_action: entry.client_action.map(application_client_action_label),
+                    available: entry.available,
+                    unavailable_reason: entry.unavailable_reason,
+                })
+                .collect(),
+            skills: value
+                .extension_catalog
+                .skills
+                .into_iter()
+                .map(|entry| DesktopSkillCatalogEntry {
+                    id: entry.id,
+                    invocation_token: entry.invocation_token,
+                    name: entry.name,
+                    description: entry.description,
+                    source: entry.source,
+                    run_mode: entry.run_mode,
+                    trust: entry.trust,
+                    available: entry.available,
+                    unavailable_reason: entry.unavailable_reason,
+                    binding: entry.binding.map(|binding| DesktopSkillBinding {
+                        skill_id: binding.skill_id,
+                        skill_sha256: binding.skill_sha256,
+                        index_fingerprint: binding.index_fingerprint,
+                    }),
+                })
+                .collect(),
+            agents: value
+                .extension_catalog
+                .agents
+                .into_iter()
+                .map(|entry| DesktopAgentCatalogEntry {
+                    id: entry.id,
+                    invocation_token: entry.invocation_token,
+                    description: entry.description,
+                    source: entry.source,
+                    kind: entry.kind,
+                    trust: entry.trust,
+                    enabled: entry.enabled,
+                    user_invocable: entry.user_invocable,
+                    available: entry.available,
+                    unavailable_reason: entry.unavailable_reason,
+                    snapshot_id: entry.snapshot_id,
+                })
+                .collect(),
+        };
         Self {
             provider_name: value.provider_name,
             model_name: value.model_name,
@@ -513,7 +648,18 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 DesktopContextWindowSource::Config => "config",
                 DesktopContextWindowSource::Unavailable => "unavailable",
             },
+            extension_catalog,
         }
+    }
+}
+
+fn application_client_action_label(value: DesktopApplicationClientAction) -> &'static str {
+    match value {
+        DesktopApplicationClientAction::NewSession => "new_session",
+        DesktopApplicationClientAction::FocusEffort => "focus_effort",
+        DesktopApplicationClientAction::FocusModel => "focus_model",
+        DesktopApplicationClientAction::OpenSessionPicker => "open_session_picker",
+        DesktopApplicationClientAction::OpenAgentWorkbench => "open_agent_workbench",
     }
 }
 

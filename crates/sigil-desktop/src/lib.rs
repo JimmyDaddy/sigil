@@ -15,6 +15,9 @@ mod secret;
 
 pub use client::{DesktopClientError, DesktopHttpClient, DesktopRunEventStream};
 pub use dto::{
+    DesktopApplicationAgentCatalogEntry, DesktopApplicationClientAction,
+    DesktopApplicationCommandCatalogEntry, DesktopApplicationExtensionCatalog,
+    DesktopApplicationSkillBinding, DesktopApplicationSkillCatalogEntry,
     DesktopApprovalCommandReceipt, DesktopApprovalDecision, DesktopApprovalDecisionRecord,
     DesktopApprovalDecisionRequest, DesktopApprovalRecordedDecision, DesktopCatalogQuery,
     DesktopCommandEnvelope, DesktopContextWindowSource, DesktopModelSelectionPolicy,

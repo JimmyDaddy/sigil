@@ -191,6 +191,7 @@ export const catalogFixtures: readonly CatalogFixture[] = [
         contextWindowTokens: 1_000_000,
         lastPromptTokens: 42_000,
         contextWindowSource: "provider",
+        extensionCatalog: { commands: [], skills: [], agents: [] },
       },
     },
   },

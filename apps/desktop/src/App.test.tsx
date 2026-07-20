@@ -115,6 +115,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       contextWindowTokens: 128_000,
       lastPromptTokens: 4_096,
       contextWindowSource: "provider",
+      extensionCatalog: { commands: [], skills: [], agents: [] },
     }),
     startRun: async (_workspaceId, sessionId) => ({
       id: "run-1",

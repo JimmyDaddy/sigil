@@ -4,9 +4,9 @@ use sigil_kernel::SessionRef;
 use thiserror::Error as ThisError;
 
 use crate::dto::{
-    HttpApprovalDecisionRecord, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
-    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpApplicationSkillBinding, HttpApprovalDecisionRecord, HttpRunContextView, HttpRunSnapshot,
+    HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -20,6 +20,8 @@ pub struct HttpRunDriverStart {
     pub prompt: String,
     /// Opaque exact provider/model effort binding.
     pub reasoning_effort_binding: Option<String>,
+    /// Exact inline-skill binding selected from the current run context.
+    pub skill_binding: Option<HttpApplicationSkillBinding>,
 }
 
 /// Cancel context delivered to the HTTP run driver.

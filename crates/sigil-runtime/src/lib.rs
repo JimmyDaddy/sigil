@@ -54,6 +54,10 @@ pub(crate) mod test_env;
 #[path = "tests/reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;
 
+#[cfg(test)]
+#[path = "tests/application_catalog_tests.rs"]
+mod application_catalog_tests;
+
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
@@ -64,6 +68,7 @@ mod run_options; // shared run options and scoped tool registry views.
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
+pub mod application_catalog;
 pub mod application_run;
 pub mod context;
 pub mod context_window;
@@ -116,6 +121,11 @@ pub use agent_tools::{
     SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread, register_agent_tools,
     register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
+};
+pub use application_catalog::{
+    APPLICATION_COMMANDS, ApplicationAgentCatalogEntry, ApplicationClientAction,
+    ApplicationCommandCatalogEntry, ApplicationCommandSpec, ApplicationExtensionCatalogView,
+    ApplicationSkillBinding, ApplicationSkillCatalogEntry, application_extension_catalog_view,
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,

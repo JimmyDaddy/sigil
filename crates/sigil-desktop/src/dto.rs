@@ -269,6 +269,84 @@ pub enum DesktopContextWindowSource {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopApplicationClientAction {
+    NewSession,
+    FocusEffort,
+    FocusModel,
+    OpenSessionPicker,
+    OpenAgentWorkbench,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationCommandCatalogEntry {
+    pub canonical: String,
+    pub aliases: Vec<String>,
+    pub label: String,
+    pub description: String,
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+    pub completes_with_space: bool,
+    #[serde(default)]
+    pub client_action: Option<DesktopApplicationClientAction>,
+    pub available: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationSkillBinding {
+    pub skill_id: String,
+    pub skill_sha256: String,
+    pub index_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationSkillCatalogEntry {
+    pub id: String,
+    pub invocation_token: String,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub run_mode: String,
+    pub trust: String,
+    pub available: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub binding: Option<DesktopApplicationSkillBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationAgentCatalogEntry {
+    pub id: String,
+    pub invocation_token: String,
+    pub description: String,
+    pub source: String,
+    pub kind: String,
+    pub trust: String,
+    pub enabled: bool,
+    pub user_invocable: bool,
+    pub available: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationExtensionCatalog {
+    pub commands: Vec<DesktopApplicationCommandCatalogEntry>,
+    pub skills: Vec<DesktopApplicationSkillCatalogEntry>,
+    pub agents: Vec<DesktopApplicationAgentCatalogEntry>,
+}
+
 /// Reasoning effort supported by one exact provider/model capability binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -299,6 +377,7 @@ pub struct DesktopRunContextView {
     #[serde(default)]
     pub last_prompt_tokens: Option<u64>,
     pub context_window_source: DesktopContextWindowSource,
+    pub extension_catalog: DesktopApplicationExtensionCatalog,
 }
 
 /// Request payload for starting one run.
@@ -311,6 +390,8 @@ pub struct DesktopRunStartRequest {
     pub reasoning_effort: Option<DesktopReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_binding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_binding: Option<DesktopApplicationSkillBinding>,
 }
 
 /// Request payload for cooperative cancellation.

@@ -38,7 +38,12 @@ fn run_context_decodes_exact_typed_server_contract() {
         "reasoning_effort_binding": "effort-binding",
         "context_window_tokens": 1_000_000,
         "last_prompt_tokens": 42_000,
-        "context_window_source": "provider"
+        "context_window_source": "provider",
+        "extension_catalog": {
+            "commands": [],
+            "skills": [],
+            "agents": []
+        }
     }))
     .expect("run context should decode");
 

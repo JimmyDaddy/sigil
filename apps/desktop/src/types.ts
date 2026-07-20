@@ -155,6 +155,63 @@ export type RunStatus =
 
 export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
+export type ApplicationClientAction =
+  | "new_session"
+  | "focus_effort"
+  | "focus_model"
+  | "open_session_picker"
+  | "open_agent_workbench";
+
+export interface CommandCatalogEntry {
+  canonical: string;
+  aliases: string[];
+  label: string;
+  description: string;
+  argumentHint?: string;
+  completesWithSpace: boolean;
+  clientAction?: ApplicationClientAction;
+  available: boolean;
+  unavailableReason?: string;
+}
+
+export interface SkillBinding {
+  skillId: string;
+  skillSha256: string;
+  indexFingerprint: string;
+}
+
+export interface SkillCatalogEntry {
+  id: string;
+  invocationToken: string;
+  name: string;
+  description: string;
+  source: string;
+  runMode: string;
+  trust: string;
+  available: boolean;
+  unavailableReason?: string;
+  binding?: SkillBinding;
+}
+
+export interface AgentCatalogEntry {
+  id: string;
+  invocationToken: string;
+  description: string;
+  source: string;
+  kind: string;
+  trust: string;
+  enabled: boolean;
+  userInvocable: boolean;
+  available: boolean;
+  unavailableReason?: string;
+  snapshotId?: string;
+}
+
+export interface ExtensionCatalog {
+  commands: CommandCatalogEntry[];
+  skills: SkillCatalogEntry[];
+  agents: AgentCatalogEntry[];
+}
 
 export interface RunContext {
   providerName: string;
@@ -169,6 +226,7 @@ export interface RunContext {
   contextWindowTokens?: number;
   lastPromptTokens?: number;
   contextWindowSource: "provider" | "config" | "unavailable";
+  extensionCatalog: ExtensionCatalog;
 }
 
 export interface RunSummary {
