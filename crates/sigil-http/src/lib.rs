@@ -32,14 +32,15 @@ pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
     HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
     HttpContextWindowSource, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
-    HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot,
-    HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-    HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo, HttpSessionBinding,
-    HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionMutationReceipt,
-    HttpSessionOpenRequest, HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest,
-    HttpSessionRenameRequest, HttpSessionSnapshot, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView,
+    HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
+    HttpRunTerminalOutcome, HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionDeleteRequest,
+    HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
+    HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpSessionSnapshot,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

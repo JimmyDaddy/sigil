@@ -29,6 +29,7 @@ fn receipt(command_id: &str) -> HttpRunStartCommandReceipt {
             session_id: "session-1".to_owned(),
             status: HttpRunStatus::Running,
             permission_mode: HttpPermissionMode::ReadOnly,
+            reasoning_effort: None,
             prompt_preview: HTTP_DURABLE_COMMAND_PROMPT_OMISSION.to_owned(),
             pending_approval_call_ids: Vec::new(),
             stream_sequence: 1,

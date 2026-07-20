@@ -11,6 +11,7 @@ mod prefix;
 mod pricing;
 mod provider;
 mod reasoning;
+mod reasoning_effort;
 mod request;
 mod response;
 mod retry;
@@ -38,6 +39,11 @@ pub use fim::DeepSeekFimCompletionRequest;
 pub use prefix::DeepSeekPrefixCompletionRequest;
 pub use pricing::context_window_tokens as deepseek_context_window_tokens;
 pub use provider::DeepSeekProvider;
+pub use reasoning_effort::deepseek_reasoning_efforts;
+
+#[cfg(test)]
+#[path = "tests/reasoning_effort_tests.rs"]
+mod reasoning_effort_tests;
 
 #[cfg(test)]
 #[path = "tests/test_env.rs"]

@@ -26,9 +26,9 @@ use crate::{
     },
     dto::{
         HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
-        HttpPendingApproval, HttpPermissionMode, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
-        HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
-        HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
+        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
+        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
+        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
         HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
         HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
@@ -470,6 +470,8 @@ impl HttpSessionRunRegistry {
         let permission_mode = request
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
+        let reasoning_effort = request.reasoning_effort;
+        let reasoning_effort_binding = request.reasoning_effort_binding;
         let prompt = request.prompt;
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
@@ -510,6 +512,7 @@ impl HttpSessionRunRegistry {
                 run_id.clone(),
                 session_id.to_owned(),
                 permission_mode,
+                reasoning_effort,
                 prompt_preview(&prompt),
             );
             session.run_ids.push(run_id.clone());
@@ -524,6 +527,7 @@ impl HttpSessionRunRegistry {
             session: session_snapshot,
             run: run_snapshot,
             prompt,
+            reasoning_effort_binding,
         };
         match catch_unwind(AssertUnwindSafe(|| self.driver.start_run(start))) {
             Ok(Ok(())) => {}
@@ -1948,6 +1952,7 @@ struct HttpRunState {
     previous_status: Option<HttpRunStatus>,
     cancel_operation: Option<Arc<HttpCancelOperation>>,
     permission_mode: HttpPermissionMode,
+    reasoning_effort: Option<HttpReasoningEffort>,
     prompt_preview: String,
     pending_approvals: BTreeMap<String, HttpPendingApproval>,
     in_flight_approvals: BTreeMap<String, HttpPendingApproval>,
@@ -1960,6 +1965,7 @@ impl HttpRunState {
         id: String,
         session_id: String,
         permission_mode: HttpPermissionMode,
+        reasoning_effort: Option<HttpReasoningEffort>,
         prompt_preview: String,
     ) -> Self {
         Self {
@@ -1969,6 +1975,7 @@ impl HttpRunState {
             previous_status: None,
             cancel_operation: None,
             permission_mode,
+            reasoning_effort,
             prompt_preview,
             pending_approvals: BTreeMap::new(),
             in_flight_approvals: BTreeMap::new(),
@@ -1983,6 +1990,7 @@ impl HttpRunState {
             session_id: self.session_id.clone(),
             status: self.status,
             permission_mode: self.permission_mode,
+            reasoning_effort: self.reasoning_effort,
             prompt_preview: self.prompt_preview.clone(),
             pending_approval_call_ids: self.pending_approvals.keys().cloned().collect(),
             stream_sequence: self.stream_sequence,

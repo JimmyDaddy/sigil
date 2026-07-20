@@ -33,14 +33,15 @@ use super::{
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
     HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
-    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
-    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
-    HttpSseEvent, HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpProtocolVersionError, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[test]
@@ -662,6 +663,8 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "hello from desktop".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -832,6 +835,14 @@ async fn local_server_projects_typed_run_context() {
             HttpPermissionMode::AutoEdit,
             HttpPermissionMode::DangerFullAccess,
         ],
+        available_reasoning_efforts: vec![
+            HttpReasoningEffort::Low,
+            HttpReasoningEffort::Medium,
+            HttpReasoningEffort::High,
+            HttpReasoningEffort::Max,
+        ],
+        default_reasoning_effort: Some(HttpReasoningEffort::Max),
+        reasoning_effort_binding: Some("effort-binding".to_owned()),
         context_window_tokens: Some(128_000),
         last_prompt_tokens: Some(4_096),
         context_window_source: HttpContextWindowSource::Provider,
@@ -850,6 +861,9 @@ async fn local_server_projects_typed_run_context() {
     assert_eq!(body["model_selection"], "fixed_for_session");
     assert_eq!(body["default_permission_mode"], "manual");
     assert_eq!(body["available_permission_modes"][2], "auto-edit");
+    assert_eq!(body["available_reasoning_efforts"][3], "max");
+    assert_eq!(body["default_reasoning_effort"], "max");
+    assert_eq!(body["reasoning_effort_binding"], "effort-binding");
     assert_eq!(body["context_window_tokens"], 128_000);
     assert_eq!(body["last_prompt_tokens"], 4_096);
     assert_eq!(body["context_window_source"], "provider");
@@ -1018,6 +1032,8 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "approval needed".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1100,6 +1116,8 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         HttpRunStartRequest {
             prompt: "run desktop smoke".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
         },
     );
     let start_body = serde_json::to_string(&start_command).expect("start command should serialize");
@@ -2681,6 +2699,8 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
             }
         ),
         Err(HttpRegistryError::MissingPermissionMode)
@@ -2699,8 +2719,11 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     );
     let prompt = format!("{}{}", "x".repeat(120), "tail");
 
+    let mut request = run_start(&prompt, HttpPermissionMode::Manual);
+    request.reasoning_effort = Some(HttpReasoningEffort::High);
+    request.reasoning_effort_binding = Some("effort-binding".to_owned());
     let run = registry
-        .start_run(&session.id, run_start(&prompt, HttpPermissionMode::Manual))
+        .start_run(&session.id, request)
         .expect("driver should accept run");
 
     assert_eq!(run.id, "http-run-1");
@@ -2722,6 +2745,14 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     assert_eq!(starts[0].session.id, session.id);
     assert_eq!(starts[0].run.status, HttpRunStatus::Starting);
     assert_eq!(starts[0].prompt, prompt);
+    assert_eq!(
+        starts[0].run.reasoning_effort,
+        Some(HttpReasoningEffort::High)
+    );
+    assert_eq!(
+        starts[0].reasoning_effort_binding.as_deref(),
+        Some("effort-binding")
+    );
 }
 
 #[test]
@@ -3495,6 +3526,8 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
         prompt: "hello".to_owned(),
         permission_mode: Some(HttpPermissionMode::ReadOnly),
+        reasoning_effort: None,
+        reasoning_effort_binding: None,
     };
     assert_eq!(
         serde_json::to_value(&start).expect("start request should serialize"),
@@ -3603,6 +3636,8 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
     HttpRunStartRequest {
         prompt: prompt.to_owned(),
         permission_mode: Some(permission_mode),
+        reasoning_effort: None,
+        reasoning_effort_binding: None,
     }
 }
 

@@ -108,6 +108,7 @@ function FixtureSurface({
 }) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [permissionMode, setPermissionMode] = useState<"read-only" | "manual" | "auto-edit" | "danger-full-access">("manual");
+  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "max">("max");
   const counts = fixture.degradedCounts;
   if (fixture.fullWorkbench) {
     return (
@@ -161,8 +162,10 @@ function FixtureSurface({
             runContextBusy={false}
             modelChanging={false}
             permissionMode={permissionMode}
+            reasoningEffort={reasoningEffort}
             onModelChange={() => undefined}
             onPermissionModeChange={setPermissionMode}
+            onReasoningEffortChange={setReasoningEffort}
             onSubmit={async () => false}
             onCancel={() => undefined}
           />

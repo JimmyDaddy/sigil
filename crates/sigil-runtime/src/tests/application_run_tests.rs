@@ -9,19 +9,20 @@ use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
     AssistantMessageKind, AutoApproveHandler, ControlEntry, DisclosurePresentationError,
     DisclosurePresentationReceipt, EgressDisclosurePresenter, JsonlSessionStore, ModelMessage,
-    PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, RunCancellationOwner,
-    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, TaskId, TaskStepId,
-    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
+    RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
+    TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, UsageStats,
 };
 
 use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
-    ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
-    ApplicationTranscriptRole, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
-    PublicApplicationEventBridge, application_run_context_view, application_run_input,
+    ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
+    ApplicationSessionLeaseManager, ApplicationTranscriptRole,
+    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
+    admit_application_reasoning_effort, application_run_context_view, application_run_input,
     application_session_transcript_page, application_terminal_projection,
     application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
@@ -370,6 +371,17 @@ model = "deepseek-v4-flash"
         sigil_kernel::PermissionMode::Manual
     );
     assert_eq!(empty.available_models.len(), 2);
+    assert_eq!(
+        empty.available_reasoning_efforts,
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]
+    );
+    assert_eq!(empty.default_reasoning_effort, Some(ReasoningEffort::Max));
+    assert!(empty.reasoning_effort_binding.is_some());
     assert_eq!(empty.context_window_tokens, Some(1_000_000));
     assert_eq!(
         empty.context_window_source,
@@ -399,6 +411,51 @@ model = "deepseek-v4-flash"
         application_run_context_view(&config_path, &binding.session_log_path, "wrong-scope")
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn explicit_reasoning_effort_requires_exact_current_binding() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let config = RootConfig::load(&config_path)?;
+    let supported = crate::reasoning_effort::supported_reasoning_efforts(
+        &config.agent.provider,
+        &config.agent.model,
+    );
+    let binding = crate::reasoning_effort::reasoning_effort_binding(
+        &config.agent.provider,
+        &config.agent.model,
+        &supported,
+    )
+    .expect("default model supports reasoning effort");
+    let mut request =
+        ApplicationRunRequest::non_interactive("sigil.toml", ".", "hello", "run-effort");
+    request.reasoning_effort = Some(ReasoningEffort::High);
+    request.reasoning_effort_binding = Some(binding);
+    assert!(admit_application_reasoning_effort(&request, &config).is_ok());
+
+    request.reasoning_effort_binding = Some("stale".to_owned());
+    assert!(matches!(
+        admit_application_reasoning_effort(&request, &config),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+
+    request.reasoning_effort = None;
+    assert!(matches!(
+        admit_application_reasoning_effort(&request, &config),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
     Ok(())
 }
 

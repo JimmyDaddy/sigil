@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopApprovalDecisionRecord, DesktopContextWindowSource, DesktopModelSelectionPolicy,
-    DesktopPermissionMode, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
-    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
-    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
-    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationRerunRequest,
-    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
-    DesktopWorkspaceSummary,
+    DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
+    DesktopRunStatus, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
+    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
+    DesktopSessionTranscriptPage, DesktopTimelineEvent, DesktopTranscriptAssistantKind,
+    DesktopTranscriptRole, DesktopVerificationAction, DesktopVerificationCheckStatus,
+    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
+    DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::{
@@ -202,6 +202,8 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
     pub(crate) permission_mode: DesktopPermissionMode,
+    pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
+    pub(crate) reasoning_effort_binding: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +220,8 @@ pub(crate) struct DesktopRunSummary {
     pub(crate) session_id: String,
     pub(crate) status: &'static str,
     pub(crate) permission_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_effort: Option<&'static str>,
     pub(crate) stream_sequence: u64,
 }
 
@@ -230,6 +234,11 @@ pub(crate) struct DesktopRunContext {
     pub(crate) model_selection: &'static str,
     pub(crate) default_permission_mode: &'static str,
     pub(crate) available_permission_modes: Vec<&'static str>,
+    pub(crate) available_reasoning_efforts: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_effort_binding: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) context_window_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -463,6 +472,7 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
                 DesktopRunStatus::Interrupted => "interrupted",
             },
             permission_mode: permission_mode_label(value.permission_mode),
+            reasoning_effort: value.reasoning_effort.map(reasoning_effort_label),
             stream_sequence: value.stream_sequence,
         }
     }
@@ -483,6 +493,13 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 .into_iter()
                 .map(permission_mode_label)
                 .collect(),
+            available_reasoning_efforts: value
+                .available_reasoning_efforts
+                .into_iter()
+                .map(reasoning_effort_label)
+                .collect(),
+            default_reasoning_effort: value.default_reasoning_effort.map(reasoning_effort_label),
+            reasoning_effort_binding: value.reasoning_effort_binding,
             context_window_tokens: value.context_window_tokens,
             last_prompt_tokens: value.last_prompt_tokens,
             context_window_source: match value.context_window_source {
@@ -500,6 +517,15 @@ fn permission_mode_label(value: DesktopPermissionMode) -> &'static str {
         DesktopPermissionMode::Manual => "manual",
         DesktopPermissionMode::AutoEdit => "auto-edit",
         DesktopPermissionMode::DangerFullAccess => "danger-full-access",
+    }
+}
+
+fn reasoning_effort_label(value: DesktopReasoningEffort) -> &'static str {
+    match value {
+        DesktopReasoningEffort::Low => "low",
+        DesktopReasoningEffort::Medium => "medium",
+        DesktopReasoningEffort::High => "high",
+        DesktopReasoningEffort::Max => "max",
     }
 }
 

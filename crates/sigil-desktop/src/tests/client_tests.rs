@@ -33,6 +33,9 @@ fn run_context_decodes_exact_typed_server_contract() {
         "available_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "default_permission_mode": "manual",
         "available_permission_modes": ["read-only", "manual", "auto-edit", "danger-full-access"],
+        "available_reasoning_efforts": ["low", "medium", "high", "max"],
+        "default_reasoning_effort": "max",
+        "reasoning_effort_binding": "effort-binding",
         "context_window_tokens": 1_000_000,
         "last_prompt_tokens": 42_000,
         "context_window_source": "provider"
@@ -41,6 +44,11 @@ fn run_context_decodes_exact_typed_server_contract() {
 
     assert_eq!(context.model_name, "deepseek-v4-flash");
     assert_eq!(context.last_prompt_tokens, Some(42_000));
+    assert_eq!(context.available_reasoning_efforts.len(), 4);
+    assert_eq!(
+        context.reasoning_effort_binding.as_deref(),
+        Some("effort-binding")
+    );
     assert_eq!(
         context.model_selection,
         crate::DesktopModelSelectionPolicy::FixedForSession

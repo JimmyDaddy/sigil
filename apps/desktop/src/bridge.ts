@@ -17,6 +17,7 @@ import type {
   RunStreamStatus,
   RunAttachment,
   PermissionMode,
+  ReasoningEffort,
   RunContext,
   RunSummary,
   TimelineEvent,
@@ -59,6 +60,8 @@ export interface DesktopBridge {
     sessionId: string,
     prompt: string,
     permissionMode: PermissionMode,
+    reasoningEffort?: ReasoningEffort,
+    reasoningEffortBinding?: string,
   ): Promise<RunSummary>;
   attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
@@ -116,10 +119,10 @@ export const desktopBridge: DesktopBridge = {
     }),
   runContext: (workspaceId, sessionId) =>
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
-  startRun: (workspaceId, sessionId, prompt, permissionMode) =>
+  startRun: (workspaceId, sessionId, prompt, permissionMode, reasoningEffort, reasoningEffortBinding) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
-      input: { sessionId, prompt, permissionMode },
+      input: { sessionId, prompt, permissionMode, reasoningEffort, reasoningEffortBinding },
     }),
   attachRun: (workspaceId, sessionId, runId) =>
     invoke<RunAttachment>("desktop_attach_run", {

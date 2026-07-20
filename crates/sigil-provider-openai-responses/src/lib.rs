@@ -12,6 +12,7 @@ mod errors;
 mod mapper;
 mod models;
 mod provider;
+mod reasoning_effort;
 mod request;
 mod stream;
 
@@ -24,7 +25,12 @@ pub use provider::{
     OPENAI_RESPONSES_PORTABLE_TARGET_CONTEXT_WINDOW_TOKENS, OPENAI_RESPONSES_PORTABLE_TARGET_MODEL,
     OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS, OpenAiResponsesProvider,
 };
+pub use reasoning_effort::openai_responses_reasoning_efforts;
 pub use request::OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND;
+
+#[cfg(test)]
+#[path = "tests/reasoning_effort_tests.rs"]
+mod reasoning_effort_tests;
 
 #[cfg(test)]
 pub(crate) mod test_env {

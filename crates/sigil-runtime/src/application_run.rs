@@ -12,13 +12,13 @@ use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
     AssistantMessageKind, ControlEntry, EgressDisclosurePresenter, EventHandler, InteractionMode,
     JsonlSessionStore, McpServerStartup, MessageRole, MutationEventRecorder, NoopEventHandler,
-    PermissionMode, PublicRunEvent, PublicRunEventKind, RootConfig, RunCancellationFinalizedEntry,
-    RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
-    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
-    RunQuiescenceOutcome, RunTaskGuard, Session, SessionLogEntry, TaskVerificationRerunRequest,
-    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
-    resolve_workspace_root, safe_persistence_text, verification_product_view,
-    workspace_trust_from_entries,
+    PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
+    SessionLogEntry, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
+    WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -195,6 +195,12 @@ pub struct ApplicationRunContextView {
     pub available_models: Vec<String>,
     /// Configured permission mode used when a client does not override one run.
     pub default_permission_mode: PermissionMode,
+    /// Exact reasoning-effort values implemented for this durable provider and model.
+    pub available_reasoning_efforts: Vec<ReasoningEffort>,
+    /// Configured default when it belongs to `available_reasoning_efforts`.
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    /// Opaque exact-provider/model capability binding echoed by an explicit run selection.
+    pub reasoning_effort_binding: Option<String>,
     /// Effective context window when provider metadata or configuration proves one.
     pub context_window_tokens: Option<u32>,
     /// Prompt tokens recorded by the latest durable usage snapshot.
@@ -220,6 +226,10 @@ pub struct ApplicationRunRequest {
     pub interaction: ApplicationRunInteraction,
     /// Optional user-selected permission mode for this run.
     pub permission_mode: Option<PermissionMode>,
+    /// Optional exact effort selected for this run.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Opaque binding returned with the run-context effort capability.
+    pub reasoning_effort_binding: Option<String>,
     /// Optional adapter-owned hard constraints applied before provider dispatch.
     pub constraints: Option<ApplicationRunConstraints>,
 }
@@ -252,6 +262,8 @@ impl ApplicationRunRequest {
             session_path: None,
             interaction: ApplicationRunInteraction::NonInteractive,
             permission_mode: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
             constraints: None,
         }
     }
@@ -1065,13 +1077,15 @@ pub fn application_run_context_view(
     if expected_session_scope_id.is_empty() {
         bail!("expected run-context session scope must not be empty");
     }
-    let root_config = RootConfig::load(config_path)?;
+    let mut root_config = RootConfig::load(config_path)?;
     let store = JsonlSessionStore::new(session_path)?;
     let session =
         Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)?;
     if session.session_scope_id() != expected_session_scope_id {
         bail!("durable run-context session scope does not match the bound session");
     }
+    root_config.agent.provider = session.provider_name().to_owned();
+    root_config.agent.model = session.model_name().to_owned();
     let resolved = crate::resolve_context_window_tokens(
         session.provider_name(),
         session.model_name(),
@@ -1090,11 +1104,25 @@ pub fn application_run_context_view(
     } else {
         None
     };
+    let available_reasoning_efforts = crate::reasoning_effort::supported_reasoning_efforts(
+        session.provider_name(),
+        session.model_name(),
+    );
+    let default_reasoning_effort =
+        crate::reasoning_effort::configured_default_reasoning_effort(&root_config);
+    let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
+        session.provider_name(),
+        session.model_name(),
+        &available_reasoning_efforts,
+    );
     Ok(ApplicationRunContextView {
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
         available_models: application_model_options(session.provider_name(), session.model_name()),
         default_permission_mode: root_config.permission.mode,
+        available_reasoning_efforts,
+        default_reasoning_effort,
+        reasoning_effort_binding,
         context_window_tokens: resolved.tokens,
         last_prompt_tokens,
         context_window_source: resolved.source,
@@ -1474,6 +1502,7 @@ fn prepare_application_run_blocking(
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let requested_session_path = request
         .session_path
+        .clone()
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
     let session_store = JsonlSessionStore::new(&requested_session_path)
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -1493,6 +1522,7 @@ fn prepare_application_run_blocking(
     .map_err(ApplicationRunPrepareError::execution)?;
     root_config.agent.provider = session.provider_name().to_owned();
     root_config.agent.model = session.model_name().to_owned();
+    admit_application_reasoning_effort(&request, &root_config)?;
     let provider =
         crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     attach_session_url_capability_store(&mut session)
@@ -1513,6 +1543,9 @@ fn prepare_application_run_blocking(
     );
     if let Some(permission_mode) = request.permission_mode {
         options.permission_config.mode = permission_mode;
+    }
+    if let Some(reasoning_effort) = request.reasoning_effort {
+        options.reasoning_effort = Some(reasoning_effort);
     }
     if let Some(constraints) = request.constraints.as_ref() {
         options.max_turns = Some(constraints.max_turns);
@@ -1547,6 +1580,49 @@ fn prepare_application_run_blocking(
             .constraints
             .map(|constraints| constraints.tool_scope),
     })
+}
+
+fn admit_application_reasoning_effort(
+    request: &ApplicationRunRequest,
+    root_config: &RootConfig,
+) -> std::result::Result<(), ApplicationRunPrepareError> {
+    match (
+        request.reasoning_effort.as_ref(),
+        request.reasoning_effort_binding.as_deref(),
+    ) {
+        (None, None) => return Ok(()),
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: "reasoning effort and capability binding must be supplied together"
+                    .to_owned(),
+            });
+        }
+        (Some(_), Some(_)) => {}
+    }
+    let supported = crate::reasoning_effort::supported_reasoning_efforts(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+    );
+    let expected_binding = crate::reasoning_effort::reasoning_effort_binding(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        &supported,
+    );
+    if expected_binding.as_deref() != request.reasoning_effort_binding.as_deref() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "reasoning effort capability binding is stale".to_owned(),
+        });
+    }
+    if request
+        .reasoning_effort
+        .as_ref()
+        .is_none_or(|effort| !supported.contains(effort))
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "reasoning effort is unavailable for the bound provider and model".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn constrain_application_tool_registry(

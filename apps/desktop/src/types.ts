@@ -154,6 +154,7 @@ export type RunStatus =
   | "interrupted";
 
 export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
+export type ReasoningEffort = "low" | "medium" | "high" | "max";
 
 export interface RunContext {
   providerName: string;
@@ -162,6 +163,9 @@ export interface RunContext {
   modelSelection: "fixed_for_session";
   defaultPermissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
+  availableReasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+  reasoningEffortBinding?: string;
   contextWindowTokens?: number;
   lastPromptTokens?: number;
   contextWindowSource: "provider" | "config" | "unavailable";
@@ -172,6 +176,7 @@ export interface RunSummary {
   sessionId: string;
   status: RunStatus;
   permissionMode: PermissionMode;
+  reasoningEffort?: ReasoningEffort;
   streamSequence: number;
 }
 

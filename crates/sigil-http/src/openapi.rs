@@ -790,17 +790,23 @@ pub fn http_openapi_document() -> Value {
                     "required": ["prompt", "permission_mode"],
                     "properties": {
                         "prompt": { "type": "string" },
-                        "permission_mode": { "$ref": "#/components/schemas/PermissionMode" }
+                        "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
+                        "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
+                        "reasoning_effort_binding": { "type": ["string", "null"] }
                     }
                 },
                 "PermissionMode": {
                     "type": "string",
                     "enum": ["read-only", "manual", "auto-edit", "danger-full-access"]
                 },
+                "ReasoningEffort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "max"]
+                },
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "context_window_source"],
+                    "required": ["provider_name", "model_name", "available_models", "model_selection", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source"],
                     "properties": {
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
@@ -818,6 +824,13 @@ pub fn http_openapi_document() -> Value {
                             "uniqueItems": true,
                             "items": { "$ref": "#/components/schemas/PermissionMode" }
                         },
+                        "available_reasoning_efforts": {
+                            "type": "array",
+                            "uniqueItems": true,
+                            "items": { "$ref": "#/components/schemas/ReasoningEffort" }
+                        },
+                        "default_reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
+                        "reasoning_effort_binding": { "type": ["string", "null"] },
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
                         "context_window_source": { "type": "string", "enum": ["provider", "config", "unavailable"] }
@@ -875,6 +888,7 @@ pub fn http_openapi_document() -> Value {
                         "session_id": { "type": "string" },
                         "status": { "$ref": "#/components/schemas/RunStatus" },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
+                        "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "prompt_preview": { "type": "string" },
                         "stream_sequence": { "type": "integer", "format": "uint64" },
                         "pending_approval_call_ids": { "type": "array", "items": { "type": "string" } }

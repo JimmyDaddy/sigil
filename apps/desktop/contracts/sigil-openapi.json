@@ -344,6 +344,15 @@
         ],
         "type": "string"
       },
+      "ReasoningEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "type": "string"
+      },
       "RunCancelCommand": {
         "allOf": [
           {
@@ -432,6 +441,13 @@
             "type": "array",
             "uniqueItems": true
           },
+          "available_reasoning_efforts": {
+            "items": {
+              "$ref": "#/components/schemas/ReasoningEffort"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "context_window_source": {
             "enum": [
               "provider",
@@ -449,6 +465,16 @@
           },
           "default_permission_mode": {
             "$ref": "#/components/schemas/PermissionMode"
+          },
+          "default_reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_prompt_tokens": {
             "format": "uint64",
@@ -468,6 +494,12 @@
           },
           "provider_name": {
             "type": "string"
+          },
+          "reasoning_effort_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -477,6 +509,7 @@
           "model_selection",
           "default_permission_mode",
           "available_permission_modes",
+          "available_reasoning_efforts",
           "context_window_source"
         ],
         "type": "object"
@@ -497,6 +530,16 @@
           },
           "prompt_preview": {
             "type": "string"
+          },
+          "reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "type": "string"
@@ -585,6 +628,22 @@
           },
           "prompt": {
             "type": "string"
+          },
+          "reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning_effort_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

@@ -306,6 +306,12 @@ pub struct HttpRunStartRequest {
     /// Explicit user-facing permission mode for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<HttpPermissionMode>,
+    /// Explicit exact-provider/model reasoning effort selected for the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<HttpReasoningEffort>,
+    /// Opaque run-context binding required with an explicit reasoning effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_binding: Option<String>,
 }
 
 /// Request body for cancelling one run.
@@ -325,6 +331,16 @@ pub enum HttpPermissionMode {
     Manual,
     AutoEdit,
     DangerFullAccess,
+}
+
+/// Reasoning effort accepted by the shared application run contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
 }
 
 /// Model-selection policy for one durable session.
@@ -363,6 +379,14 @@ pub struct HttpRunContextView {
     pub default_permission_mode: HttpPermissionMode,
     /// Complete bounded set of permission modes accepted by run start.
     pub available_permission_modes: Vec<HttpPermissionMode>,
+    /// Exact values supported by this durable provider and model.
+    pub available_reasoning_efforts: Vec<HttpReasoningEffort>,
+    /// Configured default when it belongs to the exact support set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<HttpReasoningEffort>,
+    /// Opaque provider/model capability binding echoed with an explicit run selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_binding: Option<String>,
     /// Effective context limit when one is provable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u32>,
@@ -404,6 +428,28 @@ impl From<sigil_kernel::PermissionMode> for HttpPermissionMode {
             sigil_kernel::PermissionMode::Manual => Self::Manual,
             sigil_kernel::PermissionMode::AutoEdit => Self::AutoEdit,
             sigil_kernel::PermissionMode::DangerFullAccess => Self::DangerFullAccess,
+        }
+    }
+}
+
+impl From<HttpReasoningEffort> for sigil_kernel::ReasoningEffort {
+    fn from(value: HttpReasoningEffort) -> Self {
+        match value {
+            HttpReasoningEffort::Low => Self::Low,
+            HttpReasoningEffort::Medium => Self::Medium,
+            HttpReasoningEffort::High => Self::High,
+            HttpReasoningEffort::Max => Self::Max,
+        }
+    }
+}
+
+impl From<sigil_kernel::ReasoningEffort> for HttpReasoningEffort {
+    fn from(value: sigil_kernel::ReasoningEffort) -> Self {
+        match value {
+            sigil_kernel::ReasoningEffort::Low => Self::Low,
+            sigil_kernel::ReasoningEffort::Medium => Self::Medium,
+            sigil_kernel::ReasoningEffort::High => Self::High,
+            sigil_kernel::ReasoningEffort::Max => Self::Max,
         }
     }
 }
@@ -488,6 +534,9 @@ pub struct HttpRunSnapshot {
     pub status: HttpRunStatus,
     /// Explicit permission mode provided when the run started.
     pub permission_mode: HttpPermissionMode,
+    /// Explicit reasoning effort bound to this run, when the provider supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<HttpReasoningEffort>,
     /// Bounded prompt preview for adapter clients.
     pub prompt_preview: String,
     /// Pending approval call ids in deterministic order.

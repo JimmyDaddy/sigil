@@ -108,6 +108,9 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       modelSelection: "fixed_for_session",
       defaultPermissionMode: "manual",
       availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
+      availableReasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
       contextWindowTokens: 128_000,
       lastPromptTokens: 4_096,
       contextWindowSource: "provider",
@@ -1096,17 +1099,28 @@ describe("desktop workspace and history shell", () => {
     expect(prompts).toEqual(["请检查 中文输入，包含粘贴"]);
   });
 
-  it("projects model and context facts and sends the selected permission mode", async () => {
+  it("projects model, effort, and context facts and sends exact run controls", async () => {
     const user = userEvent.setup();
     let selectedMode = "";
+    let selectedEffort = "";
+    let selectedEffortBinding = "";
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
-      startRun: async (_workspaceId, sessionId, _prompt, permissionMode) => {
+      startRun: async (
+        _workspaceId,
+        sessionId,
+        _prompt,
+        permissionMode,
+        reasoningEffort,
+        reasoningEffortBinding,
+      ) => {
         selectedMode = permissionMode;
+        selectedEffort = reasoningEffort ?? "";
+        selectedEffortBinding = reasoningEffortBinding ?? "";
         return {
           id: "run-mode",
           sessionId,
@@ -1123,6 +1137,7 @@ describe("desktop workspace and history shell", () => {
     expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Reasoning effort" }), "high");
     const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
     Object.defineProperty(composer, "scrollHeight", { configurable: true, value: 240 });
     await user.type(composer, "Inspect safely");
@@ -1130,6 +1145,8 @@ describe("desktop workspace and history shell", () => {
     expect(composer.style.overflowY).toBe("auto");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(selectedMode).toBe("read-only");
+    expect(selectedEffort).toBe("high");
+    expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
   it("creates a new durable conversation when the model changes", async () => {

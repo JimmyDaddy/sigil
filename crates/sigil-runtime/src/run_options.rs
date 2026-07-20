@@ -172,23 +172,7 @@ pub(super) fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {
 }
 
 fn default_reasoning_effort(root_config: &RootConfig) -> Option<ReasoningEffort> {
-    let capabilities = provider_capabilities_for_name(&root_config.agent.provider)?;
-    if !capabilities.supports_reasoning_effort {
-        return None;
-    }
-    provider_configured_default_reasoning_effort(root_config).or(Some(ReasoningEffort::Max))
-}
-
-fn provider_configured_default_reasoning_effort(
-    root_config: &RootConfig,
-) -> Option<ReasoningEffort> {
-    match provider_config_key(&root_config.agent.provider) {
-        crate::DEEPSEEK_PROVIDER_KEY => load_deepseek_config(root_config)
-            .ok()
-            .map(|config| config.profile().default_reasoning_effort),
-        crate::OPENAI_RESPONSES_PROVIDER_KEY => Some(ReasoningEffort::High),
-        _ => None,
-    }
+    crate::reasoning_effort::configured_default_reasoning_effort(root_config)
 }
 
 fn configured_allowlist_is_empty(config: &ToolAllowlistConfig) -> bool {

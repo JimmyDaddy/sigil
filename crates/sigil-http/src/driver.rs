@@ -18,6 +18,8 @@ pub struct HttpRunDriverStart {
     pub run: HttpRunSnapshot,
     /// Full prompt body. The preview is carried separately on the run snapshot.
     pub prompt: String,
+    /// Opaque exact provider/model effort binding.
+    pub reasoning_effort_binding: Option<String>,
 }
 
 /// Cancel context delivered to the HTTP run driver.

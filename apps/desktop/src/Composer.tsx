@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState, type CSSProperties, type RefObject } from "react";
 
-import type { PermissionMode, RunContext } from "./types";
+import type { PermissionMode, ReasoningEffort, RunContext } from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
@@ -18,8 +18,10 @@ export function Composer({
   runContextBusy,
   modelChanging,
   permissionMode,
+  reasoningEffort,
   onModelChange,
   onPermissionModeChange,
+  onReasoningEffortChange,
   onSubmit,
   onCancel,
 }: {
@@ -32,8 +34,10 @@ export function Composer({
   runContextBusy: boolean;
   modelChanging: boolean;
   permissionMode: PermissionMode;
+  reasoningEffort?: ReasoningEffort;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
   onSubmit: (prompt: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
@@ -119,6 +123,24 @@ export function Composer({
                 ))}
               </Select>
             </div>
+            {runContext !== undefined && runContext.availableReasoningEfforts.length > 0 ? (
+              <div className="composer-effort">
+                <Select
+                  label={t("reasoningEffort")}
+                  labelHidden
+                  containerClassName="composer-effort-field"
+                  className="composer-effort-select"
+                  value={reasoningEffort ?? ""}
+                  disabled={active || runContextBusy}
+                  onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}
+                >
+                  {reasoningEffort === undefined ? <option value="">{t("effortUnavailable")}</option> : null}
+                  {runContext.availableReasoningEfforts.map((effort) => (
+                    <option key={effort} value={effort}>{reasoningEffortLabel(effort, t)}</option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
           {active ? (
@@ -189,6 +211,18 @@ function permissionModeLabel(mode: PermissionMode, t: ReturnType<typeof useLocal
     case "manual": return t("manual");
     case "auto-edit": return t("autoEdit");
     case "danger-full-access": return t("fullAccess");
+  }
+}
+
+function reasoningEffortLabel(
+  effort: ReasoningEffort,
+  t: ReturnType<typeof useLocale>["t"],
+): string {
+  switch (effort) {
+    case "low": return t("effortLow");
+    case "medium": return t("effortMedium");
+    case "high": return t("effortHigh");
+    case "max": return t("effortMax");
   }
 }
 

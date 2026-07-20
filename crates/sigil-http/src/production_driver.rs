@@ -466,6 +466,13 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 HttpPermissionMode::AutoEdit,
                 HttpPermissionMode::DangerFullAccess,
             ],
+            available_reasoning_efforts: view
+                .available_reasoning_efforts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            default_reasoning_effort: view.default_reasoning_effort.map(Into::into),
+            reasoning_effort_binding: view.reasoning_effort_binding,
             context_window_tokens: view.context_window_tokens,
             last_prompt_tokens: view.last_prompt_tokens,
             context_window_source: match view.context_window_source {
@@ -558,6 +565,8 @@ impl HttpRunSupervisor {
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
             interaction: ApplicationRunInteraction::ExternallyInteractive,
             permission_mode: Some(self.start.run.permission_mode.into()),
+            reasoning_effort: self.start.run.reasoning_effort.map(Into::into),
+            reasoning_effort_binding: self.start.reasoning_effort_binding.clone(),
             constraints: None,
         };
         let services = self.services.clone();

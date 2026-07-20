@@ -359,6 +359,8 @@ pub(crate) async fn desktop_start_run(
             DesktopRunStartRequest {
                 prompt: input.prompt,
                 permission_mode: input.permission_mode,
+                reasoning_effort: input.reasoning_effort,
+                reasoning_effort_binding: input.reasoning_effort_binding,
             },
         )
         .await

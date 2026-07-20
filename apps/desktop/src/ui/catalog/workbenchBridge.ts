@@ -100,6 +100,7 @@ const attachment: RunAttachment = {
     sessionId: session.id,
     status: "running",
     permissionMode: "manual",
+    reasoningEffort: "max",
     streamSequence: 3,
   },
   events: [
@@ -145,6 +146,9 @@ const runContext: RunContext = {
   modelSelection: "fixed_for_session",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
+  availableReasoningEfforts: ["low", "medium", "high", "max"],
+  defaultReasoningEffort: "max",
+  reasoningEffortBinding: "catalog-effort-binding",
   contextWindowTokens: 1_000_000,
   lastPromptTokens: 42_000,
   contextWindowSource: "provider",
@@ -220,11 +224,18 @@ export function createCatalogWorkbenchBridge(
     }),
     transcript: async () => transcript,
     runContext: async () => runContext,
-    startRun: async (_workspaceId, sessionId, _prompt, permissionMode) => ({
+    startRun: async (
+      _workspaceId,
+      sessionId,
+      _prompt,
+      permissionMode,
+      reasoningEffort,
+    ) => ({
       id: "catalog-run-new",
       sessionId,
       status: "running",
       permissionMode,
+      reasoningEffort,
       streamSequence: 0,
     }),
     attachRun: async () => attachment,

@@ -9,6 +9,7 @@ import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
   PermissionMode,
+  ReasoningEffort,
   RunContext,
   RunStreamStatus,
   RunSummary,
@@ -51,6 +52,7 @@ export function ConversationPanel({
   const [runContextBusy, setRunContextBusy] = useState(false);
   const [runContextReload, setRunContextReload] = useState(0);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
   const [modelChanging, setModelChanging] = useState(false);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
@@ -82,6 +84,7 @@ export function ConversationPanel({
     setRunContext(undefined);
     setRunContextBusy(false);
     setPermissionMode("manual");
+    setReasoningEffort(undefined);
     setModelChanging(false);
     setEvents([]);
     setStreamStatus(undefined);
@@ -107,6 +110,9 @@ export function ConversationPanel({
         setRunContext(context);
         setPermissionMode((current) =>
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
+        );
+        setReasoningEffort((current) =>
+          activeRunIdRef.current === undefined ? context.defaultReasoningEffort : current,
         );
       })
       .catch(() => {
@@ -220,6 +226,7 @@ export function ConversationPanel({
         if (disposed) return;
         setRun(attachment.run);
         setPermissionMode(attachment.run.permissionMode);
+        setReasoningEffort(attachment.run.reasoningEffort);
         setEvents((current) =>
           attachment.events.reduce(mergeTimelineEvent, current),
         );
@@ -311,10 +318,18 @@ export function ConversationPanel({
     setSubmitting(true);
     onNotice(t("startingRunNotice"));
     try {
-      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, permissionMode);
+      const started = await bridge.startRun(
+        workspaceId,
+        session.id,
+        nextPrompt,
+        permissionMode,
+        reasoningEffort,
+        reasoningEffort === undefined ? undefined : runContext?.reasoningEffortBinding,
+      );
       activeRunIdRef.current = started.id;
       setRun(started);
       setPermissionMode(started.permissionMode);
+      setReasoningEffort(started.reasoningEffort ?? reasoningEffort);
       onNotice(t("runStarted"));
       return true;
     } catch {
@@ -499,12 +514,14 @@ export function ConversationPanel({
         runContextBusy={runContextBusy}
         modelChanging={modelChanging}
         permissionMode={permissionMode}
+        reasoningEffort={reasoningEffort}
         onModelChange={(modelName) => {
           if (modelName === runContext?.modelName) return;
           setModelChanging(true);
           void onModelChange(modelName).finally(() => setModelChanging(false));
         }}
         onPermissionModeChange={setPermissionMode}
+        onReasoningEffortChange={setReasoningEffort}
         onSubmit={submit}
         onCancel={() => void cancel()}
       />

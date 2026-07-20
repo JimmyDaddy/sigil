@@ -556,6 +556,8 @@ model = "deepseek-v4-flash"
             HttpRunStartRequest {
                 prompt: "wait in preparation".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
             },
         )
         .expect("run should start");
@@ -747,6 +749,8 @@ model = "deepseek-v4-flash"
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
             },
         )
         .expect("owned production supervisor should accept the run");

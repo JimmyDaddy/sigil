@@ -269,6 +269,16 @@ pub enum DesktopContextWindowSource {
     Unavailable,
 }
 
+/// Reasoning effort supported by one exact provider/model capability binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 /// Typed model, permission-mode, and context usage facts for one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -279,6 +289,11 @@ pub struct DesktopRunContextView {
     pub model_selection: DesktopModelSelectionPolicy,
     pub default_permission_mode: DesktopPermissionMode,
     pub available_permission_modes: Vec<DesktopPermissionMode>,
+    pub available_reasoning_efforts: Vec<DesktopReasoningEffort>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<DesktopReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_effort_binding: Option<String>,
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
     #[serde(default)]
@@ -292,6 +307,10 @@ pub struct DesktopRunContextView {
 pub struct DesktopRunStartRequest {
     pub prompt: String,
     pub permission_mode: DesktopPermissionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<DesktopReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_binding: Option<String>,
 }
 
 /// Request payload for cooperative cancellation.
@@ -336,6 +355,8 @@ pub struct DesktopRunSnapshot {
     pub session_id: String,
     pub status: DesktopRunStatus,
     pub permission_mode: DesktopPermissionMode,
+    #[serde(default)]
+    pub reasoning_effort: Option<DesktopReasoningEffort>,
     pub prompt_preview: String,
     #[serde(default)]
     pub pending_approval_call_ids: Vec<String>,

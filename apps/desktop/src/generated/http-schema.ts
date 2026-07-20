@@ -977,6 +977,8 @@ export interface components {
         };
         /** @enum {string} */
         PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
+        /** @enum {string} */
+        ReasoningEffort: "low" | "medium" | "high" | "max";
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
         };
@@ -996,23 +998,27 @@ export interface components {
         RunContextView: {
             available_models: string[];
             available_permission_modes: components["schemas"]["PermissionMode"][];
+            available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
             /** @enum {string} */
             context_window_source: "provider" | "config" | "unavailable";
             /** Format: uint32 */
             context_window_tokens?: number | null;
             default_permission_mode: components["schemas"]["PermissionMode"];
+            default_reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             /** Format: uint64 */
             last_prompt_tokens?: number | null;
             model_name: string;
             /** @enum {string} */
             model_selection: "fixed_for_session";
             provider_name: string;
+            reasoning_effort_binding?: string | null;
         };
         RunSnapshot: {
             id: string;
             pending_approval_call_ids: string[];
             permission_mode: components["schemas"]["PermissionMode"];
             prompt_preview: string;
+            reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             session_id: string;
             status: components["schemas"]["RunStatus"];
             /** Format: uint64 */
@@ -1034,6 +1040,8 @@ export interface components {
         RunStartRequest: {
             permission_mode: components["schemas"]["PermissionMode"];
             prompt: string;
+            reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+            reasoning_effort_binding?: string | null;
         };
         /** @enum {string} */
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";
