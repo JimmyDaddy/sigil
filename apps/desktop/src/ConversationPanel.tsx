@@ -727,7 +727,6 @@ export function reduceTimeline(
           kind: "assistant",
           label: "Sigil",
           text: `${current?.text ?? ""}${event.text ?? ""}`,
-          status: "streaming",
         });
         break;
       }
@@ -737,10 +736,10 @@ export function reduceTimeline(
           kind: "assistant",
           label: "Sigil",
           text: event.text ?? rows.get(assistantKey)?.text ?? "",
-          status: "complete",
         });
         break;
       case "run_finished": {
+        finalizeRunRows(rows, event.runId, t);
         const current = rows.get(assistantKey);
         if (current === undefined || current.text === "") {
           rows.set(assistantKey, {
@@ -748,10 +747,7 @@ export function reduceTimeline(
             kind: "assistant",
             label: "Sigil",
             text: event.text ?? t("runCompleted"),
-            status: "complete",
           });
-        } else {
-          rows.set(assistantKey, { ...current, status: "complete" });
         }
         break;
       }
@@ -794,6 +790,7 @@ export function reduceTimeline(
       }
       case "run_failed":
       case "run_cancelled":
+        finalizeRunRows(rows, event.runId, t);
         rows.set(`${event.runId}:terminal`, {
           key: `${event.runId}:terminal`,
           kind: "error",
@@ -814,6 +811,23 @@ export function reduceTimeline(
     }
   }
   return [...rows.values()];
+}
+
+function finalizeRunRows(
+  rows: Map<string, TimelineRow>,
+  runId: string,
+  t: Translate,
+) {
+  const reasoningKey = `${runId}:reasoning`;
+  const reasoning = rows.get(reasoningKey);
+  if (reasoning !== undefined) {
+    rows.set(reasoningKey, { ...reasoning, label: t("reasoning"), status: undefined });
+  }
+  const progressKey = `${runId}:progress`;
+  const progress = rows.get(progressKey);
+  if (progress !== undefined) {
+    rows.set(progressKey, { ...progress, label: t("progress"), status: undefined });
+  }
 }
 
 function eventKey(event: TimelineEvent): string {

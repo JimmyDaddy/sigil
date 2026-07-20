@@ -24,7 +24,7 @@
 .stream-reconnecting { color: var(--sg-domain-color-on-warning); border-color: var(--sg-domain-color-on-warning); }
 .stream-error { color: var(--sg-domain-color-on-danger); border-color: var(--sg-domain-color-on-danger); }
 
-.timeline { display: grid; gap: 11px; min-height: 180px; max-height: 420px; padding: var(--sg-sys-space-3) clamp(4px, 2vw, 24px); overflow-y: auto; background: transparent; overscroll-behavior: contain; }
+.timeline { display: grid; align-content: start; align-items: start; gap: 11px; min-height: 180px; max-height: 420px; padding: var(--sg-sys-space-3) clamp(4px, 2vw, 24px); overflow-y: auto; background: transparent; overscroll-behavior: contain; }
 .transcript-pagination { display: flex; justify-content: center; padding: 2px 0 5px; }
 .timeline-gap { padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-warning); border-radius: 9px; color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 13px; line-height: 1.45; }
 .timeline-empty { display: grid; min-height: 150px; place-content: center; gap: 7px; color: var(--sg-sys-color-on-surface-subtle); text-align: center; }
@@ -51,6 +51,7 @@
 .message-error { max-width: 100%; border-color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
 .message-disclosure { max-width: 100%; padding: 9px var(--sg-sys-space-3); border-style: dashed; background: var(--sg-sys-color-surface); }
 .message-disclosure > summary { cursor: pointer; }
+.message-disclosure-title { display: inline-flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-2); }
 .message-disclosure[open] > summary { margin-bottom: 9px; }
 .message-content { position: relative; min-width: 0; color: var(--sg-sys-color-on-surface); overflow-wrap: anywhere; line-height: 1.55; }
 .message-content > p { margin: 7px 0 0; white-space: pre-wrap; }

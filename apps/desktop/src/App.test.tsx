@@ -243,11 +243,17 @@ describe("desktop coding-agent components", () => {
     else Object.defineProperty(navigator, "clipboard", originalClipboard);
   });
 
-  it("keeps reasoning collapsed and renders read-only bounded tool and diff surfaces", () => {
+  it("keeps reasoning collapsed and renders read-only bounded tool and diff surfaces", async () => {
+    const user = userEvent.setup();
     const { unmount } = render(
       <Message message={{ key: "reasoning", kind: "reasoning", label: "Working", text: "private scratch", status: "details" }} />,
     );
-    expect((screen.getByText("Working").closest("details") as HTMLDetailsElement).open).toBe(false);
+    const disclosure = screen.getByText("Working").closest("details") as HTMLDetailsElement;
+    expect(disclosure.open).toBe(false);
+    expect(screen.getByText("Show details")).toBeTruthy();
+    await user.click(screen.getByText("Show details"));
+    expect(disclosure.open).toBe(true);
+    expect(screen.getByText("Hide details")).toBeTruthy();
     unmount();
 
     const diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
@@ -406,6 +412,28 @@ describe("desktop workspace and history shell", () => {
       text: "Running cargo test",
       status: "succeeded",
     })]);
+  });
+
+  it("finalizes reasoning labels without duplicating terminal state on the reply", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-terminal",
+      replayable: true,
+    };
+    const rows = reduceTimeline([
+      { ...base, sequence: 1, kind: "run_started", text: "Hello" },
+      { ...base, sequence: 2, kind: "reasoning_delta", text: "Inspecting" },
+      { ...base, sequence: 3, kind: "assistant_message", text: "Hi" },
+      { ...base, sequence: 4, kind: "run_finished", text: "Hi" },
+    ]);
+
+    expect(rows).toEqual([
+      expect.objectContaining({ kind: "user", text: "Hello" }),
+      expect.objectContaining({ kind: "reasoning", label: "Reasoning", text: "Inspecting" }),
+      expect.objectContaining({ kind: "assistant", text: "Hi" }),
+    ]);
+    expect(rows.every((row) => row.status !== "complete")).toBe(true);
   });
 
   it("restores the most recent workspace after native bootstrap", async () => {
@@ -1097,7 +1125,7 @@ describe("desktop workspace and history shell", () => {
     });
 
     expect(screen.getAllByText("Hello")).toHaveLength(1);
-    expect(screen.getByText("complete")).toBeTruthy();
+    expect(screen.queryByText("complete")).toBeNull();
     expect(screen.getByText("terminal")).toBeTruthy();
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
   });

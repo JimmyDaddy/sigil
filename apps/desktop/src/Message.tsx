@@ -1,3 +1,6 @@
+import { useState } from "react";
+
+import { useLocale } from "./i18n";
 import { MessageContent } from "./MessageContent";
 
 export interface MessageView {
@@ -15,10 +18,21 @@ export function Message({
   readonly message: MessageView;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
 }) {
+  const { t } = useLocale();
+  const [disclosureOpen, setDisclosureOpen] = useState(false);
   if (message.kind === "reasoning" || message.kind === "progress") {
     return (
-      <details className={`message-disclosure message-${message.kind}`}>
-        <summary><span>{message.label}</span><small>{message.status ?? "Show details"}</small></summary>
+      <details
+        className={`message-disclosure message-${message.kind}`}
+        onToggle={(event) => setDisclosureOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span className="message-disclosure-title">
+            <span>{message.label}</span>
+            {message.status ? <small>{message.status}</small> : null}
+          </span>
+          <small>{t(disclosureOpen ? "hideDetails" : "showDetails")}</small>
+        </summary>
         <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
       </details>
     );
