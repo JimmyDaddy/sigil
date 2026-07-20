@@ -19,6 +19,7 @@ describe("desktop UI catalog contract", () => {
       "degraded-catalog",
       "running-tool-approval",
       "reconnect-gap",
+      "coding-composer",
       "tool-error-raw-details",
       "verification-failed-diff",
       "long-copy",
@@ -115,6 +116,7 @@ describe("desktop UI catalog contract", () => {
     expect(fixtures.get("running-tool-approval")?.tool?.duration).toBe("184 ms");
     expect(fixtures.get("reconnect-gap")?.streamState).toBe("reconnecting");
     expect(fixtures.get("reconnect-gap")?.attachmentGap).toBe(true);
+    expect(fixtures.get("coding-composer")?.composer?.context.modelName).toBe("deepseek-v4-flash");
     expect(fixtures.get("tool-error-raw-details")?.tool?.status).toBe("error");
     expect(fixtures.get("verification-failed-diff")?.verification?.verdict).toBe("failed");
     expect(isUnifiedDiff(fixtures.get("verification-failed-diff")?.diff ?? "")).toBe(true);

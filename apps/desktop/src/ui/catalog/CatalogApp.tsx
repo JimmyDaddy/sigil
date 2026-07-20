@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { ApprovalDock } from "../../ApprovalDock";
+import { Composer } from "../../Composer";
 import { DiffViewer } from "../../DiffViewer";
 import { HistoryContent } from "../../HistoryPanel";
 import { Message } from "../../Message";
@@ -100,6 +101,7 @@ function CatalogSelect({
 
 function FixtureSurface({ fixture }: { readonly fixture: CatalogFixture }) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [approvalMode, setApprovalMode] = useState<"ask" | "allow_readonly" | "deny">("ask");
   const counts = fixture.degradedCounts;
   return (
     <div className="catalog-fixture-surface">
@@ -129,6 +131,23 @@ function FixtureSurface({ fixture }: { readonly fixture: CatalogFixture }) {
         <div className={`stream-chip stream-${fixture.streamState}`}>{fixture.streamState}</div>
       ) : null}
       {fixture.attachmentGap ? <div className="timeline-gap">Some live details were not retained while reconnecting.</div> : null}
+      {fixture.composer === undefined ? null : (
+        <div className="catalog-composer-surface">
+          <Composer
+            draftKey="sigil:catalog-composer"
+            active={fixture.composer.active}
+            submitting={false}
+            controlBusy={false}
+            composerRef={composerRef}
+            runContext={fixture.composer.context}
+            runContextBusy={false}
+            approvalMode={approvalMode}
+            onApprovalModeChange={setApprovalMode}
+            onSubmit={async () => false}
+            onCancel={() => undefined}
+          />
+        </div>
+      )}
       {fixture.tool === undefined ? null : <ToolCard tool={fixture.tool} />}
       {fixture.approval === undefined ? null : (
         <>

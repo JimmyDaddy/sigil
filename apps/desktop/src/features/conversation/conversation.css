@@ -11,7 +11,7 @@
 .inspector-header > p:last-child { margin: 6px 0 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; line-height: 1.45; }
 .inspector-empty { display: grid; gap: 6px; margin-top: 18px; padding: 14px; border: 1px dashed var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface-variant); }
 .inspector-empty p { margin: 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; line-height: 1.5; }
-.conversation-header, .conversation-header > div, .timeline-row header, .composer-actions { display: flex; align-items: center; }
+.conversation-header, .conversation-header > div, .timeline-row header { display: flex; align-items: center; }
 .conversation-header { justify-content: space-between; gap: var(--sg-sys-space-4); }
 .conversation-header > div { min-width: 0; align-items: baseline; gap: 10px; }
 .conversation-header .eyebrow { margin: 0; }
@@ -106,8 +106,29 @@
 .diff-hunk { color: var(--sg-domain-color-on-info); background: var(--sg-domain-color-info); }
 .diff-header { color: var(--sg-domain-color-on-warning); }
 
-.composer { display: grid; gap: var(--sg-sys-space-2); }
-.composer-actions { justify-content: flex-end; gap: var(--sg-sys-space-2); }
+.composer { position: sticky; z-index: 2; bottom: 0; flex: 0 0 auto; padding-top: 4px; background: linear-gradient(transparent, var(--sg-sys-color-canvas) 12px); container-type: inline-size; }
+.composer-surface { overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: 16px; background: var(--sg-sys-color-surface-container); box-shadow: var(--sg-sys-elevation-dock); transition: border-color var(--sg-sys-motion-fast), box-shadow var(--sg-sys-motion-fast); }
+.composer-surface:focus-within { border-color: var(--sg-sys-color-primary); box-shadow: 0 0 0 1px var(--sg-sys-color-primary), var(--sg-sys-elevation-dock); }
+.composer-input { display: block; width: 100%; min-height: 48px; max-height: 176px; padding: 13px 14px 8px; overflow-y: hidden; resize: none; border: 0; outline: 0; color: var(--sg-sys-color-on-surface); background: transparent; line-height: 1.5; }
+.composer-input-field, .composer-mode-field { gap: 0; }
+.composer-input::placeholder { color: var(--sg-sys-color-on-surface-subtle); }
+.composer-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); padding: 6px 7px 7px 9px; }
+.composer-options { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.composer-chip, .composer-mode { display: inline-flex; min-width: 0; height: 30px; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: transparent; font-size: 11px; }
+.composer-chip { max-width: min(220px, 28vw); padding: 0 8px; }
+.composer-chip:disabled { opacity: 1; }
+.composer-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-chip .sg-icon, .composer-mode .sg-icon { width: 14px; height: 14px; color: var(--sg-sys-color-on-surface-subtle); }
+.composer-mode { padding-left: 8px; border-color: var(--sg-sys-color-outline); background: var(--sg-sys-color-surface-container-low); }
+.composer-mode select { max-width: 98px; height: 28px; padding: 0 24px 0 0; border: 0; outline: 0; color: var(--sg-sys-color-on-surface-variant); background: transparent; cursor: pointer; font-size: 11px; font-weight: 650; }
+.composer-mode:focus-within { border-color: var(--sg-sys-color-primary); }
+.composer-mode select:disabled { cursor: not-allowed; opacity: .65; }
+.context-usage { display: inline-flex; height: 30px; align-items: center; gap: 6px; padding: 0 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-subtle); font: 600 10px/1 ui-monospace, "SFMono-Regular", monospace; }
+.context-track { display: block; width: 34px; height: 4px; overflow: hidden; border-radius: var(--sg-sys-radius-full); background: var(--sg-sys-color-outline); }
+.context-track > span { display: block; width: var(--context-used); height: 100%; border-radius: inherit; background: var(--sg-sys-color-primary); }
+.context-unavailable { white-space: nowrap; }
+.composer-submit { flex: 0 0 auto; width: 34px; min-width: 34px; min-height: 34px; border-radius: 11px; }
+.composer-stop { border-color: var(--sg-sys-color-error); color: var(--sg-sys-color-on-error-container); background: var(--sg-sys-color-error-container); }
 .approval-actions, .verification-actions { display: flex; gap: var(--sg-sys-space-2); align-items: center; }
 
 .error-card { display: flex; max-width: 100%; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-danger); border-radius: 9px; color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
@@ -153,6 +174,17 @@
 .verification-actions { justify-content: flex-end; }
 .verification-actions small { color: var(--sg-sys-color-on-surface-variant); }
 
+@container (max-width: 480px) {
+  .composer-toolbar { align-items: flex-end; padding-left: 7px; }
+  .composer-options { flex-wrap: nowrap; gap: 3px; }
+  .composer-model { width: 108px; max-width: 108px; padding: 0 5px; font-size: 10px; }
+  .composer-mode { gap: 0; padding-left: 5px; }
+  .composer-mode > .sg-icon { display: none; }
+  .composer-mode select { width: 78px; padding-right: 18px; }
+  .context-usage { padding: 0 3px; }
+  .context-track { display: none; }
+}
+
 @media (max-width: 480px) {
   .conversation-panel { gap: 10px; padding: 10px; }
   .conversation-header { align-items: flex-start; }
@@ -162,8 +194,8 @@
   .tool-card { max-width: 100%; }
   .tool-card-meta { display: none; }
   .tool-summary, .tool-details { margin-left: 0; }
-  .composer-actions { align-items: stretch; flex-direction: column; }
-  .composer-actions .sg-button { width: 100%; }
+  .composer-toolbar { align-items: flex-end; }
+  .composer-options { flex-wrap: nowrap; }
   .approval-dock dl, .verification-card dl { grid-template-columns: 1fr; }
   .approval-dock > header, .verification-card > header { display: grid; }
   .approval-actions { align-items: stretch; flex-direction: column-reverse; }

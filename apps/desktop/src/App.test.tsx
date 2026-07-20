@@ -662,7 +662,7 @@ describe("desktop workspace and history shell", () => {
 
     act(() => eventListener?.(activeEvent));
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    await user.click(screen.getByRole("button", { name: "Stop run" }));
     expect(cancelledRun).toBe("run-active");
   });
 
@@ -849,7 +849,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
-    await user.click(screen.getByRole("button", { name: "Run" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText("Run started. Live updates are connected.")).toBeTruthy();
     expect(document.querySelector(".statusbar")).toBeNull();
     expect(document.querySelector(".app-shell > .sr-only")?.textContent).toContain("Sigil is ready.");
@@ -901,9 +901,45 @@ describe("desktop workspace and history shell", () => {
     expect(prompts).toEqual([]);
     fireEvent.compositionEnd(composer);
     await user.paste("，包含粘贴");
-    await user.click(screen.getByRole("button", { name: "Run" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(prompts).toEqual(["请检查 中文输入，包含粘贴"]);
+  });
+
+  it("projects model and context facts and sends the selected approval mode", async () => {
+    const user = userEvent.setup();
+    let selectedMode = "";
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      startRun: async (_workspaceId, sessionId, _prompt, approvalMode) => {
+        selectedMode = approvalMode;
+        return {
+          id: "run-mode",
+          sessionId,
+          status: "running",
+          approvalMode,
+          streamSequence: 0,
+        };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByRole("button", { name: "deepseek-v4-flash" })).toBeTruthy();
+    expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "allow_readonly");
+    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    Object.defineProperty(composer, "scrollHeight", { configurable: true, value: 240 });
+    await user.type(composer, "Inspect safely");
+    expect(composer.style.height).toBe("176px");
+    expect(composer.style.overflowY).toBe("auto");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(selectedMode).toBe("allow_readonly");
   });
 
   it("sends with Enter, keeps active-run input editable, and restores a session draft", async () => {
@@ -1024,7 +1060,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.type(screen.getByLabelText("Message Sigil"), "Edit a file");
-    await user.click(screen.getByRole("button", { name: "Run" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(eventListener).toBeDefined());
     act(() => {
       eventListener?.({
@@ -1074,7 +1110,7 @@ describe("desktop workspace and history shell", () => {
     });
     expect(screen.queryByText("Edit one file")).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
-    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    await user.click(screen.getByRole("button", { name: "Stop run" }));
     expect(cancelledRun).toBe("run-1");
     expect(await screen.findByText("Cancellation requested. Waiting for the run to stop safely.")).toBeTruthy();
   });

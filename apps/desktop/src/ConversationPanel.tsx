@@ -7,6 +7,8 @@ import { ErrorCard } from "./ErrorCard";
 import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
+  RunApprovalMode,
+  RunContext,
   RunStreamStatus,
   RunSummary,
   SessionSummary,
@@ -41,6 +43,10 @@ export function ConversationPanel({
   session,
 }: ConversationPanelProps) {
   const [run, setRun] = useState<RunSummary>();
+  const [runContext, setRunContext] = useState<RunContext>();
+  const [runContextBusy, setRunContextBusy] = useState(false);
+  const [runContextReload, setRunContextReload] = useState(0);
+  const [approvalMode, setApprovalMode] = useState<RunApprovalMode>("ask");
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
@@ -73,6 +79,9 @@ export function ConversationPanel({
 
   useEffect(() => {
     setRun(undefined);
+    setRunContext(undefined);
+    setRunContextBusy(false);
+    setApprovalMode("ask");
     setEvents([]);
     setStreamStatus(undefined);
     setVerification(undefined);
@@ -86,6 +95,29 @@ export function ConversationPanel({
     setInspectorOpen(false);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
+
+  useEffect(() => {
+    let disposed = false;
+    setRunContextBusy(true);
+    void bridge
+      .runContext(workspaceId, session.id)
+      .then((context) => {
+        if (disposed) return;
+        setRunContext(context);
+        setApprovalMode((current) =>
+          activeRunIdRef.current === undefined ? context.defaultApprovalMode : current,
+        );
+      })
+      .catch(() => {
+        if (!disposed) setRunContext(undefined);
+      })
+      .finally(() => {
+        if (!disposed) setRunContextBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, runContextReload, session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -164,6 +196,7 @@ export function ConversationPanel({
         if (status.message !== undefined) onNotice(status.message, status.state === "error");
         if (status.state === "terminal") {
           setRunAnnouncement(status.message ?? "Run finished. Review the final response and verification status.");
+          setRunContextReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
@@ -185,6 +218,7 @@ export function ConversationPanel({
         );
         if (disposed) return;
         setRun(attachment.run);
+        setApprovalMode(attachment.run.approvalMode);
         setEvents((current) =>
           attachment.events.reduce(mergeTimelineEvent, current),
         );
@@ -272,9 +306,10 @@ export function ConversationPanel({
     setSubmitting(true);
     onNotice("Starting the run…");
     try {
-      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, "ask");
+      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, approvalMode);
       activeRunIdRef.current = started.id;
       setRun(started);
+      setApprovalMode(started.approvalMode);
       onNotice("Run started. Live updates are connected.");
       return true;
     } catch {
@@ -446,6 +481,10 @@ export function ConversationPanel({
         submitting={submitting}
         controlBusy={controlBusy}
         composerRef={composerRef}
+        runContext={runContext}
+        runContextBusy={runContextBusy}
+        approvalMode={approvalMode}
+        onApprovalModeChange={setApprovalMode}
         onSubmit={submit}
         onCancel={() => void cancel()}
       />

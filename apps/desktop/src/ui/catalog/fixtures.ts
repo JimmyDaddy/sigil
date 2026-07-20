@@ -1,6 +1,7 @@
 import type { ToolView } from "../../ToolCard";
 import type {
   CatalogEntry,
+  RunContext,
   RunStreamState,
   TimelineApproval,
   VerificationSummary,
@@ -32,6 +33,10 @@ export interface CatalogFixture {
   readonly streamState?: RunStreamState;
   readonly attachmentGap?: boolean;
   readonly longCopy?: string;
+  readonly composer?: {
+    readonly active: boolean;
+    readonly context: RunContext;
+  };
   readonly contrastModes: readonly CatalogContrast[];
   readonly motionModes: readonly CatalogMotion[];
   readonly zoomFactors: readonly (1 | 2)[];
@@ -156,6 +161,24 @@ export const catalogFixtures: readonly CatalogFixture[] = [
     ...environment,
     streamState: "reconnecting",
     attachmentGap: true,
+  },
+  {
+    id: "coding-composer",
+    description: "Sticky coding composer with model, approval mode, context, and send control",
+    ...environment,
+    composer: {
+      active: false,
+      context: {
+        providerName: "deepseek",
+        modelName: "deepseek-v4-flash",
+        modelSelection: "fixed_for_session",
+        defaultApprovalMode: "ask",
+        availableApprovalModes: ["ask", "allow_readonly", "deny"],
+        contextWindowTokens: 1_000_000,
+        lastPromptTokens: 42_000,
+        contextWindowSource: "provider",
+      },
+    },
   },
   {
     id: "tool-error-raw-details",
