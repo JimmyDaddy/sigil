@@ -11,6 +11,8 @@ import type {
   SessionSummary,
   RunStreamStatus,
   RunAttachment,
+  RunApprovalMode,
+  RunContext,
   RunSummary,
   TimelineEvent,
   WorkspaceSelection,
@@ -40,7 +42,13 @@ export interface DesktopBridge {
     sessionId: string,
     request: TranscriptRequest,
   ): Promise<TranscriptPage>;
-  startRun(workspaceId: string, sessionId: string, prompt: string): Promise<RunSummary>;
+  runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
+  startRun(
+    workspaceId: string,
+    sessionId: string,
+    prompt: string,
+    approvalMode: RunApprovalMode,
+  ): Promise<RunSummary>;
   attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
   resolveApproval(
@@ -89,10 +97,12 @@ export const desktopBridge: DesktopBridge = {
       sessionId,
       request,
     }),
-  startRun: (workspaceId, sessionId, prompt) =>
+  runContext: (workspaceId, sessionId) =>
+    invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
+  startRun: (workspaceId, sessionId, prompt, approvalMode) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
-      input: { sessionId, prompt },
+      input: { sessionId, prompt, approvalMode },
     }),
   attachRun: (workspaceId, sessionId, runId) =>
     invoke<RunAttachment>("desktop_attach_run", {

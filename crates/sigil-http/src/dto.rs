@@ -9,7 +9,7 @@ use sigil_kernel::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 3;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 4;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,8 @@ pub struct HttpServerCapabilities {
     pub cancellation: bool,
     /// Durable task verification can be inspected and one exact recommended check rerun.
     pub verification: bool,
+    /// Bound sessions expose typed model, approval-mode, and context-usage facts.
+    pub run_context: bool,
 }
 
 impl HttpServerCapabilities {
@@ -54,6 +56,7 @@ impl HttpServerCapabilities {
             approval: true,
             cancellation: true,
             verification: true,
+            run_context: true,
         }
     }
 }
@@ -253,6 +256,50 @@ pub enum HttpRunApprovalMode {
     AllowReadonly,
     /// Require an explicit approval endpoint decision for gated tool calls.
     Ask,
+}
+
+/// Model-selection policy for one durable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpModelSelectionPolicy {
+    /// The durable session identity fixes the provider and model for all subsequent runs.
+    FixedForSession,
+}
+
+/// Evidence source used to resolve a session context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpContextWindowSource {
+    /// Provider-owned model metadata supplied the limit.
+    Provider,
+    /// User configuration supplied the limit.
+    Config,
+    /// No trustworthy limit is available.
+    Unavailable,
+}
+
+/// Typed facts used to configure and explain the next run in one bound session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpRunContextView {
+    /// Provider identity durably frozen for this session.
+    pub provider_name: String,
+    /// Model identity durably frozen for this session.
+    pub model_name: String,
+    /// Whether the model can change without forking the durable session.
+    pub model_selection: HttpModelSelectionPolicy,
+    /// Default approval mode selected by clients for a new run.
+    pub default_approval_mode: HttpRunApprovalMode,
+    /// Complete bounded set of approval modes accepted by run start.
+    pub available_approval_modes: Vec<HttpRunApprovalMode>,
+    /// Effective context limit when one is provable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+    /// Prompt tokens from the latest durable provider usage snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_tokens: Option<u64>,
+    /// Source used to resolve `context_window_tokens`.
+    pub context_window_source: HttpContextWindowSource,
 }
 
 impl HttpRunApprovalMode {

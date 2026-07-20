@@ -16,21 +16,24 @@ use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
-    application_session_transcript_page, application_verification_view, bind_application_session,
-    bind_existing_application_session, prepare_application_run,
-    record_application_preparation_cancellation, rerun_application_verification,
+    application_run_context_view, application_session_transcript_page,
+    application_verification_view, bind_application_session, bind_existing_application_session,
+    prepare_application_run, record_application_preparation_cancellation,
+    rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
-    HttpPendingApproval, HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
+    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpContextWindowSource,
+    HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
+    HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpRunApprovalMode, HttpRunContextView, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -430,6 +433,36 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 })
                 .collect(),
             next_before: page.next_before,
+        })
+    }
+
+    fn run_context_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<HttpRunContextView, HttpRunDriverError> {
+        let view = application_run_context_view(
+            &self.options.config_path,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
+        Ok(HttpRunContextView {
+            provider_name: view.provider_name,
+            model_name: view.model_name,
+            model_selection: HttpModelSelectionPolicy::FixedForSession,
+            default_approval_mode: HttpRunApprovalMode::Ask,
+            available_approval_modes: vec![
+                HttpRunApprovalMode::Ask,
+                HttpRunApprovalMode::AllowReadonly,
+                HttpRunApprovalMode::Deny,
+            ],
+            context_window_tokens: view.context_window_tokens,
+            last_prompt_tokens: view.last_prompt_tokens,
+            context_window_source: match view.context_window_source {
+                sigil_runtime::ContextWindowSource::Provider => HttpContextWindowSource::Provider,
+                sigil_runtime::ContextWindowSource::Config => HttpContextWindowSource::Config,
+                sigil_runtime::ContextWindowSource::None => HttpContextWindowSource::Unavailable,
+            },
         })
     }
 

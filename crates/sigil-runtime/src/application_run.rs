@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
-    AssistantMessageKind, EgressDisclosurePresenter, EventHandler, InteractionMode,
+    AssistantMessageKind, ControlEntry, EgressDisclosurePresenter, EventHandler, InteractionMode,
     JsonlSessionStore, McpServerStartup, MessageRole, MutationEventRecorder, NoopEventHandler,
     PublicRunEvent, PublicRunEventKind, RootConfig, RunCancellationFinalizedEntry,
     RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
@@ -182,6 +182,21 @@ pub struct ApplicationSessionBinding {
     pub session_scope_id: String,
     /// Canonical durable JSONL path.
     pub session_log_path: PathBuf,
+}
+
+/// Provider-neutral facts needed to configure and explain the next application run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationRunContextView {
+    /// Provider identity durably frozen for this session.
+    pub provider_name: String,
+    /// Model identity durably frozen for this session.
+    pub model_name: String,
+    /// Effective context window when provider metadata or configuration proves one.
+    pub context_window_tokens: Option<u32>,
+    /// Prompt tokens recorded by the latest durable usage snapshot.
+    pub last_prompt_tokens: Option<u64>,
+    /// Source used to resolve the effective context window.
+    pub context_window_source: crate::ContextWindowSource,
 }
 
 /// Input required to prepare one application run.
@@ -978,6 +993,58 @@ pub fn bind_existing_application_session(
     Ok(ApplicationSessionBinding {
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
+    })
+}
+
+/// Projects the current model and bounded context usage for one bound durable session.
+///
+/// The model comes from the durable session identity rather than current configuration. Usage is
+/// absent until the provider has emitted at least one durable usage snapshot, so clients never
+/// need to infer zero usage from missing telemetry.
+///
+/// # Errors
+///
+/// Returns an error when configuration or durable state cannot be decoded, or when the durable
+/// scope differs from the adapter binding being queried.
+pub fn application_run_context_view(
+    config_path: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<ApplicationRunContextView> {
+    if expected_session_scope_id.is_empty() {
+        bail!("expected run-context session scope must not be empty");
+    }
+    let root_config = RootConfig::load(config_path)?;
+    let store = JsonlSessionStore::new(session_path)?;
+    let session =
+        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)?;
+    if session.session_scope_id() != expected_session_scope_id {
+        bail!("durable run-context session scope does not match the bound session");
+    }
+    let resolved = crate::resolve_context_window_tokens(
+        session.provider_name(),
+        session.model_name(),
+        root_config.compaction.context_window_tokens,
+    );
+    let has_usage = session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(_))
+        )
+    });
+    let last_prompt_tokens = if has_usage {
+        session
+            .try_usage_stats_from_durable()?
+            .map(|stats| stats.last_prompt_tokens)
+    } else {
+        None
+    };
+    Ok(ApplicationRunContextView {
+        provider_name: session.provider_name().to_owned(),
+        model_name: session.model_name().to_owned(),
+        context_window_tokens: resolved.tokens,
+        last_prompt_tokens,
+        context_window_source: resolved.source,
     })
 }
 

@@ -6,10 +6,10 @@ use std::{
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopClientError, DesktopLaunchRequest, DesktopRunApprovalMode, DesktopRunCancelRequest,
-    DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionOpenRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopClientError, DesktopLaunchRequest, DesktopRunCancelRequest, DesktopRunStartRequest,
+    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionOpenRequest,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -21,10 +21,11 @@ use crate::{
     ipc::{
         DesktopAppearanceInput, DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary,
         DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunStartInput,
-        DesktopRunSummary, DesktopSessionCreateInput, DesktopSessionOpenInput,
-        DesktopSessionSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
+        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
+        DesktopSessionOpenInput, DesktopSessionSummary, DesktopTranscriptPage,
+        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -355,7 +356,7 @@ pub(crate) async fn desktop_start_run(
             &input.session_id,
             DesktopRunStartRequest {
                 prompt: input.prompt,
-                approval_mode: DesktopRunApprovalMode::Ask,
+                approval_mode: input.approval_mode,
             },
         )
         .await
@@ -373,6 +374,27 @@ pub(crate) async fn desktop_start_run(
         )
         .await;
     Ok(response)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_run_context(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunContext, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .run_context(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
 }
 
 #[tauri::command]

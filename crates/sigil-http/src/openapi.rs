@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::protocol::HTTP_PROTOCOL_VERSION;
+use crate::{HTTP_SERVER_INFO_SCHEMA_VERSION, protocol::HTTP_PROTOCOL_VERSION};
 
 /// OpenAPI version emitted for the MVP desktop/app-server command surface.
 pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
@@ -295,6 +295,22 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/run-context": {
+                "get": {
+                    "summary": "Read typed model, approval-mode, and context usage facts",
+                    "description": "Projects the durable session model identity and latest provider usage without exposing server-private paths or inventing missing context values.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Typed run context for the next run",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunContextView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
             "/sessions/{session_id}/verification": {
                 "get": {
                     "summary": "Project the current task verification recommendation and evidence",
@@ -487,7 +503,7 @@ pub fn http_openapi_document() -> Value {
                     "additionalProperties": false,
                     "required": ["schema_version", "protocol_version", "server_version", "workspace_id", "bind_addr", "authentication", "shutdown_on_stdin_close", "capabilities"],
                     "properties": {
-                        "schema_version": { "type": "integer", "const": 3 },
+                        "schema_version": { "type": "integer", "const": HTTP_SERVER_INFO_SCHEMA_VERSION },
                         "protocol_version": { "type": "integer", "const": HTTP_PROTOCOL_VERSION },
                         "server_version": { "type": "string" },
                         "workspace_id": { "type": "string" },
@@ -500,7 +516,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -509,7 +525,8 @@ pub fn http_openapi_document() -> Value {
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
-                        "verification": { "type": "boolean" }
+                        "verification": { "type": "boolean" },
+                        "run_context": { "type": "boolean" }
                     }
                 },
                 "SessionCreateRequest": {
@@ -673,6 +690,26 @@ pub fn http_openapi_document() -> Value {
                 "RunApprovalMode": {
                     "type": "string",
                     "enum": ["ask", "allow_readonly", "deny"]
+                },
+                "RunContextView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["provider_name", "model_name", "model_selection", "default_approval_mode", "available_approval_modes", "context_window_source"],
+                    "properties": {
+                        "provider_name": { "type": "string" },
+                        "model_name": { "type": "string" },
+                        "model_selection": { "type": "string", "enum": ["fixed_for_session"] },
+                        "default_approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" },
+                        "available_approval_modes": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": { "$ref": "#/components/schemas/RunApprovalMode" }
+                        },
+                        "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
+                        "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
+                        "context_window_source": { "type": "string", "enum": ["provider", "config", "unavailable"] }
+                    }
                 },
                 "RunStartCommandReceipt": {
                     "type": "object",

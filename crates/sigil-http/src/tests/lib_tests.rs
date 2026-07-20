@@ -26,21 +26,21 @@ use tokio::{
 
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
-    HTTP_RUN_EVENT_SSE_NAME, HttpApprovalCommandReceipt, HttpApprovalDecision,
-    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCommandEnvelope, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpLiveEventBus,
-    HttpLiveEventRecvError, HttpLocalServer, HttpPendingApproval, HttpProtocolEvent,
-    HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
-    HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode,
-    HttpRunCancelRequest, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApprovalCommandReceipt,
+    HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig,
+    HttpAuthError, HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource,
+    HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
+    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
+    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError,
+    HttpRunApprovalMode, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 #[test]
@@ -447,6 +447,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.durable_session_reopen);
     assert!(server_info.capabilities.bounded_transcript_replay);
     assert!(server_info.capabilities.verification);
+    assert!(server_info.capabilities.run_context);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -688,6 +689,54 @@ async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "invalid_query");
     }
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_projects_typed_run_context() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "run context"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    driver.set_run_context_view(HttpRunContextView {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        model_selection: HttpModelSelectionPolicy::FixedForSession,
+        default_approval_mode: HttpRunApprovalMode::Ask,
+        available_approval_modes: vec![
+            HttpRunApprovalMode::Ask,
+            HttpRunApprovalMode::AllowReadonly,
+            HttpRunApprovalMode::Deny,
+        ],
+        context_window_tokens: Some(128_000),
+        last_prompt_tokens: Some(4_096),
+        context_window_source: HttpContextWindowSource::Provider,
+    });
+    let path = format!("/sessions/{session_id}/run-context");
+
+    let (status, body) = http_raw_request(address, http_get(&path, None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["model_name"], "deepseek-v4-flash");
+    assert_eq!(body["model_selection"], "fixed_for_session");
+    assert_eq!(body["default_approval_mode"], "ask");
+    assert_eq!(body["available_approval_modes"][1], "allow_readonly");
+    assert_eq!(body["context_window_tokens"], 128_000);
+    assert_eq!(body["last_prompt_tokens"], 4_096);
+    assert_eq!(body["context_window_source"], "provider");
+    assert!(body.get("session_log_path").is_none());
     let _ = shutdown.send(());
 }
 
@@ -1357,13 +1406,21 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["paths"]["/sessions/{session_id}/transcript"]["get"]["responses"]["200"]
             .is_object()
     );
+    assert!(
+        document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
+            .is_object()
+    );
     assert_eq!(
         document["components"]["schemas"]["ServerInfo"]["properties"]["schema_version"]["const"],
-        3
+        HTTP_SERVER_INFO_SCHEMA_VERSION
     );
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["bounded_transcript_replay"]
             ["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["run_context"]["type"],
         "boolean"
     );
     assert!(
@@ -3449,6 +3506,7 @@ struct RecordingRunDriver {
     verification_reruns: Mutex<Vec<HttpVerificationRerunRequest>>,
     transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
     transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
+    run_context_view: Mutex<Option<HttpRunContextView>>,
 }
 
 impl RecordingRunDriver {
@@ -3510,6 +3568,10 @@ impl RecordingRunDriver {
 
     fn transcript_queries(&self) -> Vec<(Option<u64>, usize)> {
         lock(&self.transcript_queries).clone()
+    }
+
+    fn set_run_context_view(&self, view: HttpRunContextView) {
+        *lock(&self.run_context_view) = Some(view);
     }
 }
 
@@ -3592,6 +3654,15 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.transcript_page)
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test transcript page is missing"))
+    }
+
+    fn run_context_view(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<HttpRunContextView, HttpRunDriverError> {
+        lock(&self.run_context_view)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("test run context is missing"))
     }
 
     fn rerun_verification(

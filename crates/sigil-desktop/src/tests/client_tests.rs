@@ -24,6 +24,28 @@ fn typed_client_debug_never_projects_transport_or_bearer_material() {
     assert!(!debug.contains("3210"));
 }
 
+#[test]
+fn run_context_decodes_exact_typed_server_contract() {
+    let context: crate::DesktopRunContextView = serde_json::from_value(serde_json::json!({
+        "provider_name": "deepseek",
+        "model_name": "deepseek-v4-flash",
+        "model_selection": "fixed_for_session",
+        "default_approval_mode": "ask",
+        "available_approval_modes": ["ask", "allow_readonly", "deny"],
+        "context_window_tokens": 1_000_000,
+        "last_prompt_tokens": 42_000,
+        "context_window_source": "provider"
+    }))
+    .expect("run context should decode");
+
+    assert_eq!(context.model_name, "deepseek-v4-flash");
+    assert_eq!(context.last_prompt_tokens, Some(42_000));
+    assert_eq!(
+        context.model_selection,
+        crate::DesktopModelSelectionPolicy::FixedForSession
+    );
+}
+
 #[tokio::test]
 async fn transcript_query_rejects_unbounded_renderer_values_before_transport() {
     let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));

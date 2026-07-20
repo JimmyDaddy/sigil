@@ -123,10 +123,24 @@ export type RunStatus =
   | "cancelled"
   | "interrupted";
 
+export type RunApprovalMode = "ask" | "allow_readonly" | "deny";
+
+export interface RunContext {
+  providerName: string;
+  modelName: string;
+  modelSelection: "fixed_for_session";
+  defaultApprovalMode: RunApprovalMode;
+  availableApprovalModes: RunApprovalMode[];
+  contextWindowTokens?: number;
+  lastPromptTokens?: number;
+  contextWindowSource: "provider" | "config" | "unavailable";
+}
+
 export interface RunSummary {
   id: string;
   sessionId: string;
   status: RunStatus;
+  approvalMode: RunApprovalMode;
   streamSequence: number;
 }
 

@@ -86,10 +86,21 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       totalMessages: 0,
       messages: [],
     }),
+    runContext: async () => ({
+      providerName: "deepseek",
+      modelName: "deepseek-v4-flash",
+      modelSelection: "fixed_for_session",
+      defaultApprovalMode: "ask",
+      availableApprovalModes: ["ask", "allow_readonly", "deny"],
+      contextWindowTokens: 128_000,
+      lastPromptTokens: 4_096,
+      contextWindowSource: "provider",
+    }),
     startRun: async (_workspaceId, sessionId) => ({
       id: "run-1",
       sessionId,
       status: "running",
+      approvalMode: "ask",
       streamSequence: 0,
     }),
     attachRun: async (_workspaceId, sessionId, runId) => ({
@@ -97,6 +108,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         id: runId,
         sessionId,
         status: "running",
+        approvalMode: "ask",
         streamSequence: 0,
       },
       events: [],
@@ -107,6 +119,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       id: runId,
       sessionId,
       status: "cancel_requested",
+      approvalMode: "ask",
       streamSequence: 1,
     }),
     resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => ({
@@ -625,6 +638,7 @@ describe("desktop workspace and history shell", () => {
             id: "run-active",
             sessionId: "http-session-active",
             status: "waiting_for_approval",
+            approvalMode: "ask",
             streamSequence: 2,
           },
           events: [activeEvent, approvalEvent],
@@ -634,7 +648,7 @@ describe("desktop workspace and history shell", () => {
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
-        return { id: runId, sessionId, status: "cancel_requested", streamSequence: 3 };
+        return { id: runId, sessionId, status: "cancel_requested", approvalMode: "ask", streamSequence: 3 };
       },
     });
     render(<App bridge={bridge} />);
@@ -872,7 +886,7 @@ describe("desktop workspace and history shell", () => {
       }),
       startRun: async (_workspaceId, sessionId, prompt) => {
         prompts.push(prompt);
-        return { id: "run-ime", sessionId, status: "running", streamSequence: 0 };
+        return { id: "run-ime", sessionId, status: "running", approvalMode: "ask", streamSequence: 0 };
       },
     });
     render(<App bridge={bridge} />);
@@ -913,7 +927,7 @@ describe("desktop workspace and history shell", () => {
       }),
       startRun: async (_workspaceId, sessionId, prompt) => {
         prompts.push(prompt);
-        return { id: "run-draft", sessionId, status: "running", streamSequence: 0 };
+        return { id: "run-draft", sessionId, status: "running", approvalMode: "ask", streamSequence: 0 };
       },
     });
     const first = render(<App bridge={bridge} />);
@@ -1002,7 +1016,7 @@ describe("desktop workspace and history shell", () => {
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
-        return { id: runId, sessionId, status: "cancel_requested", streamSequence: 4 };
+        return { id: runId, sessionId, status: "cancel_requested", approvalMode: "ask", streamSequence: 4 };
       },
     });
     render(<App bridge={bridge} />);

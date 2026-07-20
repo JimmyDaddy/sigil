@@ -272,7 +272,7 @@ export function ConversationPanel({
     setSubmitting(true);
     onNotice("Starting the run…");
     try {
-      const started = await bridge.startRun(workspaceId, session.id, nextPrompt);
+      const started = await bridge.startRun(workspaceId, session.id, nextPrompt, "ask");
       activeRunIdRef.current = started.id;
       setRun(started);
       onNotice("Run started. Live updates are connected.");

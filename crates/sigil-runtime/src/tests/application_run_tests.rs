@@ -7,13 +7,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
-    AssistantMessageKind, AutoApproveHandler, DisclosurePresentationError,
+    AssistantMessageKind, AutoApproveHandler, ControlEntry, DisclosurePresentationError,
     DisclosurePresentationReceipt, EgressDisclosurePresenter, JsonlSessionStore, ModelMessage,
     PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, RunCancellationOwner,
     RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, TaskId, TaskStepId,
     TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
     ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec,
+    ToolResultMeta, ToolSpec, UsageStats,
 };
 
 use super::{
@@ -21,9 +21,9 @@ use super::{
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
     ApplicationTranscriptRole, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
-    PublicApplicationEventBridge, application_run_input, application_session_transcript_page,
-    application_terminal_projection, application_verification_view,
-    attach_application_request_context, bind_application_session,
+    PublicApplicationEventBridge, application_run_context_view, application_run_input,
+    application_session_transcript_page, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
     bind_existing_application_session, constrain_application_tool_registry,
     default_application_session_path, optional_eager_mcp_warning,
     record_application_preparation_cancellation, rerun_application_verification,
@@ -286,6 +286,62 @@ model = "deepseek-v4-flash"
     let missing = temp.path().join("state/sessions/missing.jsonl");
     assert!(bind_existing_application_session(&config_path, &missing).is_err());
     assert!(!missing.exists());
+    Ok(())
+}
+
+#[test]
+fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/context.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+
+    let empty = application_run_context_view(
+        &config_path,
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(empty.provider_name, "deepseek");
+    assert_eq!(empty.model_name, "deepseek-v4-flash");
+    assert_eq!(empty.context_window_tokens, Some(1_000_000));
+    assert_eq!(
+        empty.context_window_source,
+        crate::ContextWindowSource::Provider
+    );
+    assert_eq!(empty.last_prompt_tokens, None);
+
+    JsonlSessionStore::new(&binding.session_log_path)?.append(&SessionLogEntry::Control(
+        ControlEntry::UsageSnapshot(UsageStats {
+            prompt_tokens: 42_000,
+            completion_tokens: 800,
+            cache_hit_tokens: 30_000,
+            cache_miss_tokens: 12_000,
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_savings: 0.0,
+            system_fingerprint: None,
+        }),
+    ))?;
+    let used = application_run_context_view(
+        &config_path,
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(used.last_prompt_tokens, Some(42_000));
+    assert!(
+        application_run_context_view(&config_path, &binding.session_log_path, "wrong-scope")
+            .is_err()
+    );
     Ok(())
 }
 

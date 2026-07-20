@@ -532,6 +532,19 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/run-context"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.run_context_view(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/verification"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {

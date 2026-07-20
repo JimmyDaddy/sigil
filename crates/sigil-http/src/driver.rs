@@ -4,8 +4,9 @@ use sigil_kernel::SessionRef;
 use thiserror::Error as ThisError;
 
 use crate::dto::{
-    HttpApprovalDecisionRecord, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpApprovalDecisionRecord, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
+    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -118,6 +119,20 @@ pub trait HttpRunDriver: Send + Sync {
     ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
         Err(HttpRunDriverError::new(
             "transcript projection is unavailable",
+        ))
+    }
+
+    /// Projects typed model, approval-mode, and context usage facts for one bound session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable scope validation or projection fails.
+    fn run_context_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpRunContextView, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "run-context projection is unavailable",
         ))
     }
 

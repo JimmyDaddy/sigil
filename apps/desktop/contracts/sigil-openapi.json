@@ -412,6 +412,65 @@
         },
         "type": "object"
       },
+      "RunContextView": {
+        "additionalProperties": false,
+        "properties": {
+          "available_approval_modes": {
+            "items": {
+              "$ref": "#/components/schemas/RunApprovalMode"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "context_window_source": {
+            "enum": [
+              "provider",
+              "config",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          "context_window_tokens": {
+            "format": "uint32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "default_approval_mode": {
+            "$ref": "#/components/schemas/RunApprovalMode"
+          },
+          "last_prompt_tokens": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model_name": {
+            "type": "string"
+          },
+          "model_selection": {
+            "enum": [
+              "fixed_for_session"
+            ],
+            "type": "string"
+          },
+          "provider_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_name",
+          "model_name",
+          "model_selection",
+          "default_approval_mode",
+          "available_approval_modes",
+          "context_window_source"
+        ],
+        "type": "object"
+      },
       "RunSnapshot": {
         "properties": {
           "approval_mode": {
@@ -559,6 +618,9 @@
           "live_events": {
             "type": "boolean"
           },
+          "run_context": {
+            "type": "boolean"
+          },
           "session_catalog": {
             "type": "boolean"
           },
@@ -574,7 +636,8 @@
           "live_events",
           "approval",
           "cancellation",
-          "verification"
+          "verification",
+          "run_context"
         ],
         "type": "object"
       },
@@ -598,7 +661,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "server_version": {
@@ -1742,6 +1805,38 @@
           }
         },
         "summary": "Get a local session handle"
+      }
+    },
+    "/sessions/{session_id}/run-context": {
+      "get": {
+        "description": "Projects the durable session model identity and latest provider usage without exposing server-private paths or inventing missing context values.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunContextView"
+                }
+              }
+            },
+            "description": "Typed run context for the next run"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Read typed model, approval-mode, and context usage facts"
       }
     },
     "/sessions/{session_id}/runs": {

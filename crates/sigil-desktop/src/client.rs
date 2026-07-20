@@ -266,6 +266,18 @@ impl DesktopHttpClient {
         .await
     }
 
+    /// Projects typed model, approval-mode, and context usage facts for one session.
+    pub async fn run_context(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::DesktopRunContextView, DesktopClientError> {
+        self.get_json(
+            self.route(["sessions", session_id, "run-context"])?,
+            StatusCode::OK,
+        )
+        .await
+    }
+
     /// Reruns one exact stale-safe verification recommendation.
     pub async fn rerun_verification(
         &self,

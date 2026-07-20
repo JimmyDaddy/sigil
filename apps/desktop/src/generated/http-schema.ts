@@ -536,6 +536,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/run-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read typed model, approval-mode, and context usage facts
+         * @description Projects the durable session model identity and latest provider usage without exposing server-private paths or inventing missing context values.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Typed run context for the next run */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RunContextView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/runs": {
         parameters: {
             query?: never;
@@ -805,6 +849,20 @@ export interface components {
         RunCancelRequest: {
             reason?: string | null;
         };
+        RunContextView: {
+            available_approval_modes: components["schemas"]["RunApprovalMode"][];
+            /** @enum {string} */
+            context_window_source: "provider" | "config" | "unavailable";
+            /** Format: uint32 */
+            context_window_tokens?: number | null;
+            default_approval_mode: components["schemas"]["RunApprovalMode"];
+            /** Format: uint64 */
+            last_prompt_tokens?: number | null;
+            model_name: string;
+            /** @enum {string} */
+            model_selection: "fixed_for_session";
+            provider_name: string;
+        };
         RunSnapshot: {
             approval_mode: components["schemas"]["RunApprovalMode"];
             id: string;
@@ -841,6 +899,7 @@ export interface components {
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
             live_events: boolean;
+            run_context: boolean;
             session_catalog: boolean;
             verification: boolean;
         };
@@ -852,7 +911,7 @@ export interface components {
             /** @constant */
             protocol_version: 1;
             /** @constant */
-            schema_version: 3;
+            schema_version: 4;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

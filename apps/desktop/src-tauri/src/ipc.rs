@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
-    DesktopApprovalDecisionRecord, DesktopRunSnapshot, DesktopRunStatus,
+    DesktopApprovalDecisionRecord, DesktopContextWindowSource, DesktopModelSelectionPolicy,
+    DesktopRunApprovalMode, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
     DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
@@ -157,6 +158,7 @@ pub(crate) struct DesktopTranscriptMessage {
 pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
+    pub(crate) approval_mode: DesktopRunApprovalMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,7 +174,23 @@ pub(crate) struct DesktopRunSummary {
     pub(crate) id: String,
     pub(crate) session_id: String,
     pub(crate) status: &'static str,
+    pub(crate) approval_mode: &'static str,
     pub(crate) stream_sequence: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRunContext {
+    pub(crate) provider_name: String,
+    pub(crate) model_name: String,
+    pub(crate) model_selection: &'static str,
+    pub(crate) default_approval_mode: &'static str,
+    pub(crate) available_approval_modes: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_prompt_tokens: Option<u64>,
+    pub(crate) context_window_source: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -399,8 +417,42 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
                 DesktopRunStatus::Cancelled => "cancelled",
                 DesktopRunStatus::Interrupted => "interrupted",
             },
+            approval_mode: approval_mode_label(value.approval_mode),
             stream_sequence: value.stream_sequence,
         }
+    }
+}
+
+impl From<DesktopRunContextView> for DesktopRunContext {
+    fn from(value: DesktopRunContextView) -> Self {
+        Self {
+            provider_name: value.provider_name,
+            model_name: value.model_name,
+            model_selection: match value.model_selection {
+                DesktopModelSelectionPolicy::FixedForSession => "fixed_for_session",
+            },
+            default_approval_mode: approval_mode_label(value.default_approval_mode),
+            available_approval_modes: value
+                .available_approval_modes
+                .into_iter()
+                .map(approval_mode_label)
+                .collect(),
+            context_window_tokens: value.context_window_tokens,
+            last_prompt_tokens: value.last_prompt_tokens,
+            context_window_source: match value.context_window_source {
+                DesktopContextWindowSource::Provider => "provider",
+                DesktopContextWindowSource::Config => "config",
+                DesktopContextWindowSource::Unavailable => "unavailable",
+            },
+        }
+    }
+}
+
+fn approval_mode_label(value: DesktopRunApprovalMode) -> &'static str {
+    match value {
+        DesktopRunApprovalMode::Ask => "ask",
+        DesktopRunApprovalMode::AllowReadonly => "allow_readonly",
+        DesktopRunApprovalMode::Deny => "deny",
     }
 }
 

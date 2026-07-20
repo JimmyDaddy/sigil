@@ -201,6 +201,38 @@ pub enum DesktopRunApprovalMode {
     Ask,
 }
 
+/// Model-selection policy projected by the server for one durable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopModelSelectionPolicy {
+    FixedForSession,
+}
+
+/// Evidence source used to resolve a session context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopContextWindowSource {
+    Provider,
+    Config,
+    Unavailable,
+}
+
+/// Typed model, approval-mode, and context usage facts for one bound session.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopRunContextView {
+    pub provider_name: String,
+    pub model_name: String,
+    pub model_selection: DesktopModelSelectionPolicy,
+    pub default_approval_mode: DesktopRunApprovalMode,
+    pub available_approval_modes: Vec<DesktopRunApprovalMode>,
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    #[serde(default)]
+    pub last_prompt_tokens: Option<u64>,
+    pub context_window_source: DesktopContextWindowSource,
+}
+
 /// Request payload for starting one run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

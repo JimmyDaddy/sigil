@@ -396,6 +396,29 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    /// Projects typed run configuration and context usage for an existing adapter session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown, its durable scope drifted, or projection
+    /// cannot complete.
+    pub fn run_context_view(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::HttpRunContextView, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| self.driver.run_context_view(&session)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "run-context view",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "run-context view",
+                run_id: session_id.to_owned(),
+                message: error.message,
+            })
+    }
+
     /// Starts one run inside an existing HTTP adapter session.
     ///
     /// # Errors

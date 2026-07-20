@@ -17,8 +17,9 @@ pub use client::{DesktopClientError, DesktopHttpClient, DesktopRunEventStream};
 pub use dto::{
     DesktopApprovalCommandReceipt, DesktopApprovalDecision, DesktopApprovalDecisionRecord,
     DesktopApprovalDecisionRequest, DesktopApprovalRecordedDecision, DesktopCatalogQuery,
-    DesktopCommandEnvelope, DesktopPendingApproval, DesktopRunApprovalMode,
-    DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
+    DesktopCommandEnvelope, DesktopContextWindowSource, DesktopModelSelectionPolicy,
+    DesktopPendingApproval, DesktopRunApprovalMode, DesktopRunCancelCommandReceipt,
+    DesktopRunCancelRequest, DesktopRunContextView, DesktopRunSnapshot,
     DesktopRunStartCommandReceipt, DesktopRunStartRequest, DesktopRunStatus,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
     DesktopSessionCreateRequest, DesktopSessionListResponse, DesktopSessionOpenRequest,
