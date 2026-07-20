@@ -8,6 +8,7 @@
 @import "./ui/foundations/reset.css" layer(reset);
 @import "./ui/foundations/typography.css" layer(base);
 @import "./ui/foundations/forced-colors.css" layer(utilities);
+@import "./ui/primitives/primitives.css" layer(primitives);
 
 @layer features {
 
@@ -73,41 +74,11 @@
   font-size: 12px;
 }
 
-.appearance-menu { position: relative; flex: 0 0 auto; }
-.appearance-menu > summary {
-  min-width: 44px;
-  min-height: 32px;
-  padding: 7px 10px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  color: var(--color-text-muted);
-  background: var(--color-surface-raised);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  list-style: none;
-}
-.appearance-menu > summary::-webkit-details-marker { display: none; }
-.appearance-menu[open] > summary { color: var(--color-text); border-color: var(--color-accent); background: var(--color-surface-hover); }
-.appearance-popover {
-  position: absolute;
-  z-index: var(--z-popover);
-  top: calc(100% + var(--space-2));
-  right: 0;
-  width: min(280px, calc(100vw - var(--space-6)));
-  padding: var(--space-4);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-lg);
-  color: var(--color-text);
-  background: var(--color-surface-raised);
-  box-shadow: var(--sg-sys-elevation-modal);
-}
-.appearance-popover fieldset { display: grid; gap: var(--space-1); margin: 0; padding: 0; border: 0; }
-.appearance-popover legend { margin-bottom: var(--space-2); font-size: 13px; font-weight: 700; }
-.appearance-popover label { display: flex; min-height: 36px; align-items: center; gap: var(--space-2); padding: 7px 8px; border-radius: var(--radius-sm); cursor: pointer; }
-.appearance-popover label:hover { background: var(--color-surface-hover); }
-.appearance-popover input { accent-color: var(--color-accent); }
-.appearance-popover > small { display: block; margin-top: var(--space-3); color: var(--color-text-subtle); line-height: 1.45; }
+.appearance-menu { flex: 0 0 auto; }
+.appearance-content { padding: var(--space-1); }
+.appearance-content fieldset { display: grid; gap: var(--space-1); margin: 0; padding: 0; border: 0; }
+.appearance-content legend { margin-bottom: var(--space-2); font-size: 13px; font-weight: 700; }
+.appearance-content > small { display: block; margin-top: var(--space-3); color: var(--color-text-subtle); line-height: 1.45; }
 .appearance-error { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-danger); border-radius: var(--radius-md); color: var(--color-danger); background: var(--color-danger-surface); font-size: 12px; line-height: 1.45; }
 .appearance-error button { justify-self: start; padding: 5px 8px; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; cursor: pointer; font-weight: 700; }
 
@@ -436,10 +407,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .status-crashed { color: var(--color-danger); }
 .statusbar { justify-content: flex-start; gap: 10px; border-top: 1px solid var(--color-border); color: var(--color-text-muted); font-size: 13px; }
 
-.modal-backdrop { position: fixed; z-index: var(--z-modal); inset: 0; display: grid; place-items: center; padding: var(--space-6); background: var(--color-overlay); }
-.confirmation-dialog { display: grid; width: min(520px, 100%); max-height: calc(100dvh - 48px); gap: var(--space-3); padding: 22px; overflow-y: auto; border: 1px solid var(--color-danger); border-radius: var(--radius-lg); color: var(--color-text); background: var(--color-surface); box-shadow: var(--shadow-modal); }
-.confirmation-dialog h2, .confirmation-dialog p { margin: 0; }
-.confirmation-dialog > p:not(.eyebrow) { color: var(--color-text-muted); line-height: 1.55; }
+.destructive-explanation { margin: 0; color: var(--color-text-muted); line-height: 1.55; }
 .confirmation-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: 6px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }

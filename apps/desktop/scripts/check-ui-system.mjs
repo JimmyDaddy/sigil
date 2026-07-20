@@ -11,6 +11,7 @@ const themesPath = join(foundations, "themes.css");
 const packagePath = join(desktopRoot, "package.json");
 const indexPath = join(desktopRoot, "index.html");
 const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
+const rawInteractiveAllowlistPath = join(srcRoot, "ui", "raw-interactive-allowlist.json");
 
 function fail(message) {
   throw new Error(`desktop UI system check failed: ${message}`);
@@ -173,6 +174,37 @@ for (const forbidden of ["localStorage", "sessionStorage", "fetch(", "invoke(", 
 }
 if (!themeSource.includes(':root[data-theme="light"]')) {
   fail("light theme must be selected by the pre-paint data-theme contract");
+}
+
+const sourceFiles = walk(srcRoot).filter((path) => [".ts", ".tsx"].includes(extname(path)) && !path.endsWith(".test.tsx"));
+for (const path of sourceFiles) {
+  const source = readFileSync(path, "utf8");
+  const relativePath = relative(srcRoot, path);
+  if (!relativePath.startsWith(`ui${String.raw`/`}primitives${String.raw`/`}`) && /from\s+["'](?:@base-ui\/|@mui\/|@material\/)/.test(source)) {
+    fail(`third-party primitive import outside internal adapter: ${relativePath}`);
+  }
+  if (!relativePath.startsWith(`ui${String.raw`/`}icons${String.raw`/`}`) && /<svg\b/.test(source)) {
+    fail(`raw SVG outside internal icon adapter: ${relativePath}`);
+  }
+}
+
+const rawAllowlist = JSON.parse(readFileSync(rawInteractiveAllowlistPath, "utf8"));
+const rawAllowedFiles = new Map(rawAllowlist.map((entry) => [entry.file, entry]));
+for (const entry of rawAllowlist) {
+  if (typeof entry.reason !== "string" || entry.reason.trim() === "" || !/^R46\.[56]$/.test(entry.removeBy)) {
+    fail(`raw interactive allowlist entry lacks a migration reason/deadline: ${entry.file}`);
+  }
+}
+const rawInteractiveFiles = sourceFiles
+  .filter((path) => !relative(srcRoot, path).startsWith(`ui${String.raw`/`}primitives${String.raw`/`}`))
+  .filter((path) => !relative(srcRoot, path).startsWith(`ui${String.raw`/`}catalog${String.raw`/`}`))
+  .filter((path) => /<(?:button|input|select|textarea)\b/.test(readFileSync(path, "utf8")))
+  .map((path) => relative(srcRoot, path));
+for (const path of rawInteractiveFiles) {
+  if (!rawAllowedFiles.has(path)) fail(`raw interactive element is not in the migration ledger: ${path}`);
+}
+for (const path of rawAllowedFiles.keys()) {
+  if (!rawInteractiveFiles.includes(path)) fail(`stale raw interactive allowlist entry: ${path}`);
 }
 
 console.log(`desktop UI system checks passed (${darkRoles.length} paired theme roles, ${contrastPairs.length * 2} contrast checks)`);

@@ -1,6 +1,6 @@
 # RFC-0046 Desktop Material-derived Design System and Theme Preferences V1
 
-状态：active / R46.0-R46.2 complete，R46.3 implementation complete / native gate pending，R46.4 ready
+状态：active / R46.0-R46.2、R46.4 complete，R46.3 implementation complete / native gate pending，R46.5 gated
 
 创建日期：2026-07-20
 
@@ -715,3 +715,16 @@ inline script、storage/network/bridge/token 能力和 production catalog 泄漏
 macOS 26.3 `dyld::_dyld_start`，与 R46.2 的 existing OpenAPI exporter host failure 相同；进程已清理，Rustfmt 和 source-level
 review通过。该环境 gate 保留到 R46.7/R46.8 的真实 package/CI evidence，在出现实际 native compile/test evidence 前不把
 R46.3 状态写成 complete。
+
+## 21. R46.4 result
+
+R46.4 已按 R46.1 no-go decision 完成 repo-owned internal primitive：Button/IconButton、Field/TextField/TextArea、native Select、
+Checkbox/Radio、Dialog/Drawer、Menu/Popover、Tooltip、Collapsible 和 Toast 均只从 `src/ui/primitives` 暴露；icon path 只存在于
+`src/ui/icons`。Appearance 已迁到 Popover + Radio，真实 active-run workspace close confirmation 已迁到 destructive Dialog，
+同一 surface 不再同时使用 legacy trap 与新 modal owner。剩余 compact navigation/review 的 legacy adapter 已改为复用相同 focus
+helper，并分别由 R46.5/R46.6 的 raw-interactive ledger 管理，避免两套 focus algorithm 漂移。
+
+Primitive tests 覆盖 label/help/error、中文 composition、disabled/busy、disclosure、tooltip/live region、popover outside/Esc、menu
+Arrow/Home/End/typeahead/disabled/select、dialog initial/final focus、Tab trap、Esc/restore、nested topmost ownership 与 drawer。共 28 个
+frontend tests 通过，UI system gate 同时检查 third-party import、raw SVG、带明确 R46.5/R46.6 截止点的 raw interactive ledger，
+typecheck 和 production build 通过；catalog marker 仍不可从 production entrypoint 到达。

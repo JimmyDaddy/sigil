@@ -1,13 +1,6 @@
 import { useEffect, type RefObject } from "react";
 
-const FOCUSABLE = [
-  "button:not([disabled])",
-  "[href]",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
+import { focusableElements, focusInitial } from "./ui/primitives/focus";
 
 export function useFocusBoundary({
   active,
@@ -26,10 +19,7 @@ export function useFocusBoundary({
       ? document.activeElement
       : undefined;
     const container = containerRef.current;
-    const initial = container?.querySelector<HTMLElement>("[data-initial-focus]")
-      ?? container?.querySelector<HTMLElement>(FOCUSABLE)
-      ?? container;
-    initial?.focus();
+    if (container !== null) focusInitial(container);
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -38,8 +28,7 @@ export function useFocusBoundary({
         return;
       }
       if (event.key !== "Tab" || container === null) return;
-      const focusable = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)]
-        .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+      const focusable = focusableElements(container);
       if (focusable.length === 0) {
         event.preventDefault();
         container.focus();

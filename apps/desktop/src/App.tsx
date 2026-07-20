@@ -18,6 +18,7 @@ import type {
 } from "./types";
 import { useFocusBoundary } from "./useFocusBoundary";
 import { useMediaQuery } from "./useMediaQuery";
+import { Button, Dialog } from "./ui/primitives";
 
 interface AppProps {
   bridge?: DesktopBridge;
@@ -71,7 +72,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const compactNavigation = useMediaQuery("(max-width: 760px)");
   const navigationRef = useRef<HTMLElement>(null);
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
-  const confirmationRef = useRef<HTMLElement>(null);
 
   const dismissNavigation = useCallback(() => setNavigationOpen(false), []);
   const dismissWorkspaceClose = useCallback(() => {
@@ -86,11 +86,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     containerRef: navigationRef,
     returnFocusRef: navigationTriggerRef,
     onDismiss: dismissNavigation,
-  });
-  useFocusBoundary({
-    active: pendingWorkspaceClose !== undefined,
-    containerRef: confirmationRef,
-    onDismiss: dismissWorkspaceClose,
   });
 
   useEffect(() => {
@@ -534,43 +529,31 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         {workspaceHealthError ?? message}
       </footer>
 
-      {pendingWorkspaceClose !== undefined ? (
-        <div className="modal-backdrop">
-          <section
-            className="confirmation-dialog"
-            ref={confirmationRef}
-            tabIndex={-1}
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="close-workspace-title"
-            aria-describedby="close-workspace-description"
-          >
-            <p className="eyebrow">Active work</p>
-            <h2 id="close-workspace-title">Close {pendingWorkspaceClose.displayName}?</h2>
-            <p id="close-workspace-description">{pendingWorkspaceClose.message}</p>
-            <p>
+      <Dialog
+        open={pendingWorkspaceClose !== undefined}
+        title={`Close ${pendingWorkspaceClose?.displayName ?? "workspace"}?`}
+        description={pendingWorkspaceClose?.message}
+        destructive
+        onOpenChange={(open) => {
+          if (!open) dismissWorkspaceClose();
+        }}
+      >
+        {pendingWorkspaceClose === undefined ? null : (
+          <>
+            <p className="destructive-explanation">
               Closing stops the local runtime and interrupts its active runs. File, shell, and remote side effects that already happened are not undone.
             </p>
             <div className="confirmation-actions">
-              <button
-                className="quiet-button"
-                type="button"
-                data-initial-focus
-                onClick={dismissWorkspaceClose}
-              >
+              <Button type="button" data-initial-focus onClick={dismissWorkspaceClose}>
                 Keep running
-              </button>
-              <button
-                className="primary-button danger-button"
-                type="button"
-                onClick={() => void closeWorkspace(pendingWorkspaceClose.id, true)}
-              >
+              </Button>
+              <Button type="button" variant="danger" onClick={() => void closeWorkspace(pendingWorkspaceClose.id, true)}>
                 Close workspace and interrupt runs
-              </button>
+              </Button>
             </div>
-          </section>
-        </div>
-      ) : null}
+          </>
+        )}
+      </Dialog>
     </div>
   );
 }

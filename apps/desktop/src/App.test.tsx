@@ -262,7 +262,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No workspace is open.");
     fireEvent.keyDown(window, { key: ",", metaKey: true });
     await waitFor(() => {
-      expect((screen.getByText("Appearance").closest("details") as HTMLDetailsElement).open).toBe(true);
+      expect(screen.getByRole("button", { name: "Appearance" }).getAttribute("aria-expanded")).toBe("true");
     });
     act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
     expect(document.documentElement.dataset.themePreference).toBe("system");

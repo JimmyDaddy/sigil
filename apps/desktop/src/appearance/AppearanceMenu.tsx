@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 
 import type { ThemePreference } from "./contract";
 import { useAppearance } from "./ThemeProvider";
+import { Button, Popover, Radio } from "../ui/primitives";
 
 const choices: readonly { value: ThemePreference; label: string }[] = [
   { value: "system", label: "Follow system" },
@@ -11,17 +12,15 @@ const choices: readonly { value: ThemePreference; label: string }[] = [
 
 export function AppearanceMenu() {
   const appearance = useAppearance();
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     const openAppearance = (event: KeyboardEvent) => {
       if (event.key !== "," || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
-      const details = detailsRef.current;
-      if (details === null) return;
-      details.open = true;
+      setOpen(true);
       window.requestAnimationFrame(() => {
-        details.querySelector<HTMLInputElement>("input:checked")?.focus();
+        document.querySelector<HTMLInputElement>("input[name='desktop-theme']:checked")?.focus();
       });
     };
     window.addEventListener("keydown", openAppearance);
@@ -29,22 +28,24 @@ export function AppearanceMenu() {
   }, []);
 
   return (
-    <details className="appearance-menu" ref={detailsRef}>
-      <summary>Appearance</summary>
-      <div className="appearance-popover">
+    <Popover
+      className="appearance-menu"
+      label="Appearance"
+      open={open}
+      onOpenChange={setOpen}
+    >
+      <div className="appearance-content">
         <fieldset disabled={appearance.status === "saving"}>
           <legend>Theme</legend>
           {choices.map((choice) => (
-            <label key={choice.value}>
-              <input
-                type="radio"
-                name="desktop-theme"
-                value={choice.value}
-                checked={appearance.preference === choice.value}
-                onChange={() => void appearance.setPreference(choice.value)}
-              />
-              <span>{choice.label}</span>
-            </label>
+            <Radio
+              key={choice.value}
+              label={choice.label}
+              name="desktop-theme"
+              value={choice.value}
+              checked={appearance.preference === choice.value}
+              onChange={() => void appearance.setPreference(choice.value)}
+            />
           ))}
         </fieldset>
         <small>
@@ -55,10 +56,10 @@ export function AppearanceMenu() {
         {appearance.error !== undefined ? (
           <div className="appearance-error" role="alert">
             <span>{appearance.error}</span>
-            <button type="button" onClick={() => void appearance.retry()}>Retry</button>
+            <Button type="button" variant="danger" onClick={() => void appearance.retry()}>Retry</Button>
           </div>
         ) : null}
       </div>
-    </details>
+    </Popover>
   );
 }

@@ -1,0 +1,11 @@
+[
+  { "file": "App.tsx", "removeBy": "R46.5", "reason": "workspace and session chrome migrates as one presentation slice" },
+  { "file": "HistoryPanel.tsx", "removeBy": "R46.5", "reason": "session row action migrates with compact rail" },
+  { "file": "ApprovalDock.tsx", "removeBy": "R46.6", "reason": "approval hierarchy migrates with coding-agent surfaces" },
+  { "file": "Composer.tsx", "removeBy": "R46.6", "reason": "IME-sensitive textarea migrates only with composer regression coverage" },
+  { "file": "ConversationPanel.tsx", "removeBy": "R46.6", "reason": "review drawer and run controls migrate with conversation continuity" },
+  { "file": "DiffViewer.tsx", "removeBy": "R46.6", "reason": "copy action migrates with review surfaces" },
+  { "file": "ErrorCard.tsx", "removeBy": "R46.6", "reason": "feedback action migrates with shared alert pattern" },
+  { "file": "MessageContent.tsx", "removeBy": "R46.6", "reason": "bounded copy actions migrate with message surfaces" },
+  { "file": "VerificationInspector.tsx", "removeBy": "R46.6", "reason": "verification controls migrate with contextual review" }
+]
