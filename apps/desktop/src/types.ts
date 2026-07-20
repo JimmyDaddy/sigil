@@ -205,6 +205,12 @@ export interface AgentCatalogEntry {
   available: boolean;
   unavailableReason?: string;
   snapshotId?: string;
+  binding?: AgentBinding;
+}
+
+export interface AgentBinding {
+  profileId: string;
+  snapshotId: string;
 }
 
 export interface ExtensionCatalog {

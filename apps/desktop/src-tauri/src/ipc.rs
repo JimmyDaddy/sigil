@@ -213,6 +213,7 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
     pub(crate) reasoning_effort_binding: Option<String>,
     pub(crate) skill_binding: Option<DesktopSkillBindingInput>,
+    pub(crate) agent_binding: Option<DesktopAgentBindingInput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,6 +222,13 @@ pub(crate) struct DesktopSkillBindingInput {
     pub(crate) skill_id: String,
     pub(crate) skill_sha256: String,
     pub(crate) index_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopAgentBindingInput {
+    pub(crate) profile_id: String,
+    pub(crate) snapshot_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +339,15 @@ pub(crate) struct DesktopAgentCatalogEntry {
     pub(crate) unavailable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) binding: Option<DesktopAgentBindingSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentBindingSummary {
+    pub(crate) profile_id: String,
+    pub(crate) snapshot_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -621,6 +638,10 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                     available: entry.available,
                     unavailable_reason: entry.unavailable_reason,
                     snapshot_id: entry.snapshot_id,
+                    binding: entry.binding.map(|binding| DesktopAgentBindingSummary {
+                        profile_id: binding.profile_id,
+                        snapshot_id: binding.snapshot_id,
+                    }),
                 })
                 .collect(),
         };

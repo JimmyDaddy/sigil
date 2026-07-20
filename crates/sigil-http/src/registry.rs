@@ -475,6 +475,7 @@ impl HttpSessionRunRegistry {
         let reasoning_effort = request.reasoning_effort;
         let reasoning_effort_binding = request.reasoning_effort_binding;
         let skill_binding = request.skill_binding;
+        let agent_binding = request.agent_binding;
         let prompt = request.prompt;
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
@@ -534,6 +535,7 @@ impl HttpSessionRunRegistry {
             model_selection_binding,
             reasoning_effort_binding,
             skill_binding,
+            agent_binding,
         };
         match catch_unwind(AssertUnwindSafe(|| self.driver.start_run(start))) {
             Ok(Ok(())) => {}

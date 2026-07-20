@@ -554,6 +554,12 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         available: entry.available,
                         unavailable_reason: entry.unavailable_reason,
                         snapshot_id: entry.snapshot_id,
+                        binding: entry
+                            .binding
+                            .map(|binding| crate::HttpApplicationAgentBinding {
+                                profile_id: binding.profile_id,
+                                snapshot_id: binding.snapshot_id,
+                            }),
                     })
                     .collect(),
             },
@@ -651,6 +657,12 @@ impl HttpRunSupervisor {
                     skill_id: binding.skill_id,
                     skill_sha256: binding.skill_sha256,
                     index_fingerprint: binding.index_fingerprint,
+                }
+            }),
+            agent_binding: self.start.agent_binding.clone().map(|binding| {
+                sigil_runtime::ApplicationAgentBinding {
+                    profile_id: binding.profile_id,
+                    snapshot_id: binding.snapshot_id,
                 }
             }),
             constraints: None,

@@ -1,7 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
-import type { PermissionMode, ReasoningEffort, RunContext, SkillBinding, SkillCatalogEntry } from "./types";
+import type {
+  AgentBinding,
+  AgentCatalogEntry,
+  PermissionMode,
+  ReasoningEffort,
+  RunContext,
+  SkillBinding,
+  SkillCatalogEntry,
+} from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { Button, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
@@ -21,10 +29,12 @@ export function Composer({
   permissionMode,
   reasoningEffort,
   requestedSkill,
+  requestedAgent,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
   onNewSession,
+  onOpenSessionPicker,
   onOpenAgentWorkbench,
   onNotice,
   onSubmit,
@@ -41,18 +51,21 @@ export function Composer({
   permissionMode: PermissionMode;
   reasoningEffort?: ReasoningEffort;
   requestedSkill?: SkillCatalogEntry;
+  requestedAgent?: AgentCatalogEntry;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
   onNewSession: () => Promise<boolean>;
+  onOpenSessionPicker: (query: string) => void;
   onOpenAgentWorkbench: (query: string) => void;
   onNotice: (message: string, error?: boolean) => void;
-  onSubmit: (prompt: string, skillBinding?: SkillBinding) => Promise<boolean>;
+  onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onCancel: () => void;
 }) {
   const { t } = useLocale();
   const [prompt, setPrompt] = useState(() => readDraft(draftKey));
   const [selectedSkill, setSelectedSkill] = useState<SkillCatalogEntry>();
+  const [selectedAgent, setSelectedAgent] = useState<AgentCatalogEntry>();
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const modelSelectRef = useRef<HTMLSelectElement>(null);
@@ -60,8 +73,15 @@ export function Composer({
   useEffect(() => {
     if (requestedSkill === undefined) return;
     setSelectedSkill(requestedSkill);
+    setSelectedAgent(undefined);
     requestAnimationFrame(() => composerRef.current?.focus());
   }, [composerRef, requestedSkill]);
+  useEffect(() => {
+    if (requestedAgent === undefined) return;
+    setSelectedAgent(requestedAgent);
+    setSelectedSkill(undefined);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [composerRef, requestedAgent]);
   const suggestionQuery = leadingInvocationToken(prompt);
   const suggestions = useMemo(
     () => buildSuggestions(runContext, suggestionQuery, selectedSkill),
@@ -88,29 +108,40 @@ export function Composer({
       if (await executeCommand(command.suggestion, command.argument)) clearComposer();
       return;
     }
-    const directSkill = selectedSkill === undefined ? resolveSkill(runContext, nextPrompt) : undefined;
+    const directSkill = selectedSkill === undefined && selectedAgent === undefined
+      ? resolveSkill(runContext, nextPrompt)
+      : undefined;
     const skill = selectedSkill ?? directSkill?.skill;
     if (directSkill !== undefined) nextPrompt = directSkill.prompt;
+    const directAgent = selectedAgent === undefined && skill === undefined
+      ? resolveAgent(runContext, nextPrompt)
+      : undefined;
+    const agent = selectedAgent ?? directAgent?.agent;
+    if (directAgent !== undefined) nextPrompt = directAgent.prompt;
     if (nextPrompt === "") {
-      onNotice(t("skillNeedsPrompt"), true);
+      onNotice(t(agent === undefined ? "skillNeedsPrompt" : "agentNeedsPrompt"), true);
       return;
     }
     if (skill !== undefined && (!skill.available || skill.binding === undefined)) {
       onNotice(skill.unavailableReason ?? t("extensionUnavailable"), true);
       return;
     }
-    if (nextPrompt.startsWith("@")) {
-      const agent = resolveAgent(runContext, nextPrompt);
-      onNotice(agent?.unavailableReason ?? t("agentExecutionUnavailable"), true);
+    if (nextPrompt.startsWith("@") && agent === undefined) {
+      onNotice(t("agentExecutionUnavailable"), true);
       return;
     }
-    if (await onSubmit(nextPrompt, skill?.binding)) {
+    if (agent !== undefined && (!agent.available || agent.binding === undefined)) {
+      onNotice(agent.unavailableReason ?? t("agentExecutionUnavailable"), true);
+      return;
+    }
+    if (await onSubmit(nextPrompt, skill?.binding, agent?.binding)) {
       clearComposer();
     }
   };
   const clearComposer = () => {
       setPrompt("");
       setSelectedSkill(undefined);
+      setSelectedAgent(undefined);
       writeDraft(draftKey, "");
   };
   const selectSuggestion = (suggestion: ComposerSuggestion) => {
@@ -122,12 +153,18 @@ export function Composer({
       const skill = runContext?.extensionCatalog.skills.find((entry) => entry.id === suggestion.id);
       if (skill !== undefined) {
         setSelectedSkill(skill);
+        setSelectedAgent(undefined);
         replacePrompt(remainingPromptAfterToken(prompt));
       }
       return;
     }
     if (suggestion.kind === "agent") {
-      onNotice(suggestion.unavailableReason ?? t("agentExecutionUnavailable"), true);
+      const agent = runContext?.extensionCatalog.agents.find((entry) => entry.id === suggestion.id);
+      if (agent !== undefined) {
+        setSelectedAgent(agent);
+        setSelectedSkill(undefined);
+        replacePrompt(remainingPromptAfterToken(prompt));
+      }
       return;
     }
     if (suggestion.completesWithSpace) {
@@ -168,7 +205,24 @@ export function Composer({
         return true;
       }
       case "open_agent_workbench":
+        if (suggestion.id === "/plan") {
+          const plan = runContext?.extensionCatalog.agents.find((agent) => agent.id === "plan");
+          if (plan === undefined || !plan.available || plan.binding === undefined) {
+            onNotice(plan?.unavailableReason ?? t("agentExecutionUnavailable"), true);
+            return false;
+          }
+          setSelectedAgent(plan);
+          setSelectedSkill(undefined);
+          if (argument === "") {
+            replacePrompt("");
+            return false;
+          }
+          return onSubmit(argument, undefined, plan.binding);
+        }
         onOpenAgentWorkbench(argument);
+        return true;
+      case "open_session_picker":
+        onOpenSessionPicker(argument);
         return true;
       default:
         onNotice(suggestion.unavailableReason ?? t("commandUnavailable"), true);
@@ -198,19 +252,34 @@ export function Composer({
         />
       ) : null}
       <div className="composer-surface">
-        {selectedSkill !== undefined ? (
+        {selectedSkill !== undefined || selectedAgent !== undefined ? (
           <div className="composer-bindings" aria-label={t("activeExtensions")}>
-            <Button
-              className="composer-binding binding-skill"
-              variant="quiet"
-              type="button"
-              onClick={() => setSelectedSkill(undefined)}
-              aria-label={t("removeSkill", { name: selectedSkill.name })}
-            >
-              <span>{selectedSkill.invocationToken}</span>
-              <small>{selectedSkill.name}</small>
-              <span aria-hidden="true">×</span>
-            </Button>
+            {selectedSkill !== undefined ? (
+              <Button
+                className="composer-binding binding-skill"
+                variant="quiet"
+                type="button"
+                onClick={() => setSelectedSkill(undefined)}
+                aria-label={t("removeSkill", { name: selectedSkill.name })}
+              >
+                <span>{selectedSkill.invocationToken}</span>
+                <small>{selectedSkill.name}</small>
+                <span aria-hidden="true">×</span>
+              </Button>
+            ) : null}
+            {selectedAgent !== undefined ? (
+              <Button
+                className="composer-binding binding-agent"
+                variant="quiet"
+                type="button"
+                onClick={() => setSelectedAgent(undefined)}
+                aria-label={t("removeAgent", { name: selectedAgent.id })}
+              >
+                <span>{selectedAgent.invocationToken}</span>
+                <small>{selectedAgent.description}</small>
+                <span aria-hidden="true">×</span>
+              </Button>
+            ) : null}
           </div>
         ) : null}
         <TextArea
@@ -365,6 +434,7 @@ function buildSuggestions(
   const query = leading.query.toLocaleLowerCase();
   if (leading.kind === "command") {
     return context.extensionCatalog.commands
+      .filter((entry) => entry.available)
       .filter((entry) =>
         entry.canonical.toLocaleLowerCase().includes(query) ||
         entry.aliases.some((alias) => alias.toLocaleLowerCase().includes(query)),
@@ -399,7 +469,7 @@ function buildSuggestions(
         label: entry.id,
         description: entry.description,
         kind: "agent" as const,
-        available: entry.available,
+        available: entry.available && entry.binding !== undefined,
         unavailableReason: entry.unavailableReason,
       }));
   }
@@ -439,10 +509,11 @@ function resolveSkill(context: RunContext | undefined, prompt: string) {
 }
 
 function resolveAgent(context: RunContext | undefined, prompt: string) {
-  const token = prompt.match(/^@([^\s]+)/u)?.[1];
-  return token === undefined
-    ? undefined
-    : context?.extensionCatalog.agents.find((entry) => entry.id === token);
+  if (context === undefined || !prompt.startsWith("@")) return undefined;
+  const match = prompt.match(/^@([^\s]+)\s+([\s\S]+)$/u);
+  if (match === null) return undefined;
+  const agent = context.extensionCatalog.agents.find((entry) => entry.id === match[1]);
+  return agent === undefined ? undefined : { agent, prompt: match[2].trim() };
 }
 
 function remainingPromptAfterToken(prompt: string): string {

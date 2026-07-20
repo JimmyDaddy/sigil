@@ -12,12 +12,14 @@ export function ExtensionWorkbench({
   initialKind = "skills",
   initialQuery = "",
   onUseSkill,
+  onUseAgent,
 }: {
   catalog: ExtensionCatalog;
   runActive: boolean;
   initialKind?: ExtensionKind;
   initialQuery?: string;
   onUseSkill: (skill: SkillCatalogEntry) => void;
+  onUseAgent: (agent: AgentCatalogEntry) => void;
 }) {
   const { t } = useLocale();
   const [kind, setKind] = useState<ExtensionKind>(initialKind);
@@ -86,6 +88,7 @@ export function ExtensionWorkbench({
           item={selected}
           runActive={runActive}
           onUseSkill={onUseSkill}
+          onUseAgent={onUseAgent}
         />
       </div>
     </div>
@@ -97,11 +100,13 @@ function ExtensionDetail({
   item,
   runActive,
   onUseSkill,
+  onUseAgent,
 }: {
   kind: ExtensionKind;
   item: SkillCatalogEntry | AgentCatalogEntry | undefined;
   runActive: boolean;
   onUseSkill: (skill: SkillCatalogEntry) => void;
+  onUseAgent: (agent: AgentCatalogEntry) => void;
 }) {
   const { t } = useLocale();
   if (item === undefined) return <div className="extension-detail extension-empty">{t("selectExtension")}</div>;
@@ -127,7 +132,14 @@ function ExtensionDetail({
         <p className="extension-unavailable-reason">{item.unavailableReason ?? t("extensionUnavailable")}</p>
       )}
       {skill === undefined ? (
-        <Button type="button" variant="secondary" disabled>{t("startAgent")}</Button>
+        <Button
+          type="button"
+          variant="primary"
+          disabled={agent === undefined || !agent.available || agent.binding === undefined || runActive}
+          onClick={() => agent !== undefined && onUseAgent(agent)}
+        >
+          {runActive ? t("waitForRun") : t("startAgent")}
+        </Button>
       ) : (
         <Button
           type="button"

@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { AppearanceSnapshot, ThemePreference } from "./appearance/contract";
 
 import type {
+  AgentBinding,
   CatalogPage,
   CatalogRequest,
   DesktopBootstrap,
@@ -67,6 +68,7 @@ export interface DesktopBridge {
     reasoningEffort?: ReasoningEffort,
     reasoningEffortBinding?: string,
     skillBinding?: SkillBinding,
+    agentBinding?: AgentBinding,
   ): Promise<RunSummary>;
   attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
@@ -136,6 +138,7 @@ export const desktopBridge: DesktopBridge = {
     reasoningEffort,
     reasoningEffortBinding,
     skillBinding,
+    agentBinding,
   ) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
@@ -148,6 +151,7 @@ export const desktopBridge: DesktopBridge = {
         reasoningEffort,
         reasoningEffortBinding,
         skillBinding,
+        agentBinding,
       },
     }),
   attachRun: (workspaceId, sessionId, runId) =>

@@ -9,11 +9,12 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, AgentRunTerminalReason, ApprovalHandler,
+    Agent, AgentProfileId, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput,
+    AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
     AssistantMessageKind, ControlEntry, EgressDisclosurePresenter, EventHandler, InteractionMode,
-    JsonlSessionStore, McpServerStartup, MessageRole, MutationEventRecorder, NoopEventHandler,
-    PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    JsonlSessionStore, McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder,
+    NoopEventHandler, PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
+    RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
     SessionLogEntry, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
@@ -240,6 +241,8 @@ pub struct ApplicationRunRequest {
     pub reasoning_effort_binding: Option<String>,
     /// Exact catalog binding for one user-invoked inline skill.
     pub skill_binding: Option<crate::ApplicationSkillBinding>,
+    /// Exact catalog binding for one user-invoked supervised agent profile.
+    pub agent_binding: Option<crate::ApplicationAgentBinding>,
     /// Optional adapter-owned hard constraints applied before provider dispatch.
     pub constraints: Option<ApplicationRunConstraints>,
 }
@@ -277,6 +280,7 @@ impl ApplicationRunRequest {
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
+            agent_binding: None,
             constraints: None,
         }
     }
@@ -666,9 +670,8 @@ impl std::error::Error for ApplicationCancellationRequestError {
 
 /// One prepared provider/session/tool application execution.
 pub struct ApplicationRunExecution {
-    agent: Agent<Box<dyn sigil_kernel::Provider>>,
+    kind: ApplicationRunExecutionKind,
     session: Session,
-    input: AgentRunInput,
     options: AgentRunOptions,
     session_id: String,
     run_id: String,
@@ -681,6 +684,17 @@ pub struct ApplicationRunExecution {
     interaction: ApplicationRunInteraction,
     events: ApplicationRunEventSequence,
     _session_lease: Arc<ApplicationSessionLease>,
+}
+
+enum ApplicationRunExecutionKind {
+    Main {
+        agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
+        input: Box<AgentRunInput>,
+    },
+    AgentProfile {
+        runtime: Box<crate::AgentToolRuntime>,
+        profile_id: AgentProfileId,
+    },
 }
 
 /// Provider-neutral terminal classification for one completed application run.
@@ -775,16 +789,34 @@ impl ApplicationRunExecution {
         for warning in std::mem::take(&mut self.warnings) {
             bridge.emit(PublicRunEventKind::Notice { message: warning })?;
         }
-        let run = self
-            .agent
-            .run_with_approval_input(
-                &mut self.session,
-                self.input,
-                self.options,
-                &mut bridge,
-                approval_handler,
-            )
-            .await;
+        let run = match self.kind {
+            ApplicationRunExecutionKind::Main { agent, input } => {
+                agent
+                    .run_with_approval_input(
+                        &mut self.session,
+                        *input,
+                        self.options,
+                        &mut bridge,
+                        approval_handler,
+                    )
+                    .await
+            }
+            ApplicationRunExecutionKind::AgentProfile {
+                mut runtime,
+                profile_id,
+            } => {
+                execute_application_agent_profile(
+                    &mut runtime,
+                    &mut self.session,
+                    profile_id,
+                    self.prompt.clone(),
+                    &self.options,
+                    &mut bridge,
+                    approval_handler,
+                )
+                .await
+            }
+        };
         match run {
             Ok(agent_output) => {
                 let (terminal_status, terminal_event) =
@@ -806,6 +838,82 @@ impl ApplicationRunExecution {
                 Err(error)
             }
         }
+    }
+}
+
+async fn execute_application_agent_profile(
+    runtime: &mut crate::AgentToolRuntime,
+    session: &mut Session,
+    profile_id: AgentProfileId,
+    prompt: String,
+    options: &AgentRunOptions,
+    handler: &mut (dyn EventHandler + Send),
+    approval_handler: &mut (dyn ApprovalHandler + Send),
+) -> Result<AgentRunOutput> {
+    let safe_prompt = safe_persistence_text(&prompt);
+    session.append_user_message(ModelMessage::user(safe_prompt))?;
+    let invocation = runtime
+        .invoke_agent_profile(
+            session,
+            profile_id.clone(),
+            prompt,
+            options,
+            handler,
+            approval_handler,
+        )
+        .await?;
+    if invocation.status != Some(AgentThreadStatus::Completed) {
+        bail!(
+            "agent @{} ended with status {}",
+            profile_id.as_str(),
+            application_agent_status_label(invocation.status)
+        );
+    }
+    let child_result = invocation.result.as_ref().ok_or_else(|| {
+        anyhow!(
+            "agent @{} completed without a durable result",
+            profile_id.as_str()
+        )
+    })?;
+    let child_summary = child_result.summary.trim();
+    if child_summary.is_empty() {
+        bail!(
+            "agent @{} completed with an empty durable result",
+            profile_id.as_str()
+        );
+    }
+    let parent_summary = format!(
+        "Agent @{} completed.\n\n{}",
+        profile_id.as_str(),
+        child_summary
+    );
+    let mut message = ModelMessage::assistant(Some(parent_summary.clone()), Vec::new());
+    message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
+    let final_message_id = message.id.clone();
+    session.append_assistant_message(message.clone())?;
+    handler.handle(RunEvent::AssistantMessage(message))?;
+    Ok(AgentRunOutput {
+        result: AgentRunResult {
+            final_text: parent_summary,
+            tool_calls: 0,
+            final_message_id: Some(final_message_id),
+        },
+        outcome: AgentRunOutcome::default(),
+    })
+}
+
+fn application_agent_status_label(status: Option<AgentThreadStatus>) -> &'static str {
+    match status {
+        Some(AgentThreadStatus::Started) => "started",
+        Some(AgentThreadStatus::Running) => "running",
+        Some(AgentThreadStatus::Blocked) => "blocked",
+        Some(AgentThreadStatus::Completed) => "completed",
+        Some(AgentThreadStatus::Failed) => "failed",
+        Some(AgentThreadStatus::Cancelled) => "cancelled",
+        Some(AgentThreadStatus::Interrupted) => "interrupted",
+        Some(AgentThreadStatus::Closed) => "closed",
+        Some(AgentThreadStatus::Unavailable) => "unavailable",
+        Some(AgentThreadStatus::Unknown) | None => "unknown",
     }
 }
 
@@ -858,6 +966,7 @@ pub async fn prepare_application_run(
         redactor,
         tool_scope,
         skill_descriptor,
+        agent_invocation,
     } = prepared;
     let surface =
         build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
@@ -925,11 +1034,31 @@ pub async fn prepare_application_run(
     }
     let session_id = session.session_scope_id().to_owned();
     let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
+    let kind = if let Some((registry_snapshot, profile_id)) = agent_invocation {
+        let supervisor = crate::AgentSupervisor::new(
+            registry_snapshot,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            provider.capabilities().clone(),
+        );
+        let mut runtime = crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry);
+        sigil_kernel::AgentToolDelegate::set_run_cancellation(
+            &mut runtime,
+            Some(cancellation_handle.clone()),
+        );
+        ApplicationRunExecutionKind::AgentProfile {
+            runtime: Box::new(runtime),
+            profile_id,
+        }
+    } else {
+        ApplicationRunExecutionKind::Main {
+            agent: Box::new(Agent::new(provider, registry)),
+            input: Box::new(input),
+        }
+    };
     Ok(PreparedApplicationRun {
         execution: ApplicationRunExecution {
-            agent: Agent::new(provider, registry),
+            kind,
             session,
-            input,
             options,
             session_id,
             run_id,
@@ -1524,6 +1653,7 @@ struct BlockingApplicationRunPreparation {
     redactor: sigil_kernel::SecretRedactor,
     tool_scope: Option<ToolRegistryScope>,
     skill_descriptor: Option<sigil_kernel::SkillDescriptor>,
+    agent_invocation: Option<(crate::AgentProfileRegistry, AgentProfileId)>,
 }
 
 fn prepare_application_run_blocking(
@@ -1572,8 +1702,19 @@ fn prepare_application_run_blocking(
     root_config.agent.provider = session.provider_name().to_owned();
     root_config.agent.model = session.model_name().to_owned();
     admit_application_reasoning_effort(&request, &root_config)?;
+    if request.skill_binding.is_some() && request.agent_binding.is_some() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "a run cannot invoke an inline skill and an agent profile together".to_owned(),
+        });
+    }
     let loaded_skill =
         admit_application_skill_binding(&request, &root_config, &workspace_root, &mut session)?;
+    let agent_invocation = admit_application_agent_binding(
+        &request,
+        &root_config,
+        &workspace_root,
+        session.entries(),
+    )?;
     let provider =
         crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     attach_session_url_capability_store(&mut session)
@@ -1636,6 +1777,7 @@ fn prepare_application_run_blocking(
             .constraints
             .map(|constraints| constraints.tool_scope),
         skill_descriptor: loaded_skill.map(|loaded| loaded.descriptor),
+        agent_invocation,
     })
 }
 
@@ -1691,6 +1833,61 @@ fn admit_application_skill_binding(
         .append_control(ControlEntry::SkillLoaded(loaded.entry.clone()))
         .map_err(ApplicationRunPrepareError::execution)?;
     Ok(Some(loaded))
+}
+
+fn admit_application_agent_binding(
+    request: &ApplicationRunRequest,
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    entries: &[SessionLogEntry],
+) -> std::result::Result<
+    Option<(crate::AgentProfileRegistry, AgentProfileId)>,
+    ApplicationRunPrepareError,
+> {
+    let Some(binding) = request.agent_binding.as_ref() else {
+        return Ok(None);
+    };
+    let profile_id = AgentProfileId::new(binding.profile_id.clone()).map_err(|_| {
+        ApplicationRunPrepareError::InvalidInvocation {
+            message: "agent profile binding contains an invalid profile id".to_owned(),
+        }
+    })?;
+    let registry = crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+        root_config,
+        workspace_root,
+        entries,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    let profile =
+        registry
+            .get(&profile_id)
+            .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
+                message: "bound agent profile is no longer present".to_owned(),
+            })?;
+    if !profile.effective_enabled() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "bound agent profile is disabled".to_owned(),
+        });
+    }
+    if profile.trust_state != sigil_kernel::AgentTrustState::Trusted {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "bound agent profile is not trusted".to_owned(),
+        });
+    }
+    if !profile.effective_user_invocation_allowed() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "bound agent profile is not user-invocable".to_owned(),
+        });
+    }
+    let snapshot = registry
+        .capture_snapshot(&profile_id)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    if snapshot.snapshot_id.as_str() != binding.snapshot_id {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "agent profile binding is stale".to_owned(),
+        });
+    }
+    Ok(Some((registry, profile_id)))
 }
 
 fn admit_application_reasoning_effort(

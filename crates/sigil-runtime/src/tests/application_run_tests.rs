@@ -22,10 +22,11 @@ use super::{
     ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
     ApplicationSessionLeaseManager, ApplicationTranscriptRole,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    admit_application_model_selection, admit_application_reasoning_effort,
-    admit_application_skill_binding, application_run_context_view, application_run_input,
-    application_session_transcript_page, application_terminal_projection,
-    application_verification_view, attach_application_request_context, bind_application_session,
+    admit_application_agent_binding, admit_application_model_selection,
+    admit_application_reasoning_effort, admit_application_skill_binding,
+    application_run_context_view, application_run_input, application_session_transcript_page,
+    application_terminal_projection, application_verification_view,
+    attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, default_application_session_path,
     optional_eager_mcp_warning, record_application_preparation_cancellation,
@@ -403,13 +404,14 @@ model = "deepseek-v4-flash"
             .iter()
             .any(|command| command.canonical == "/new" && command.available)
     );
-    assert!(
-        empty
-            .extension_catalog
-            .agents
-            .iter()
-            .all(|agent| !agent.available && agent.unavailable_reason.is_some())
-    );
+    assert!(empty.extension_catalog.agents.iter().any(|agent| {
+        agent.available
+            && agent.unavailable_reason.is_none()
+            && agent.binding.as_ref().is_some_and(|binding| {
+                binding.profile_id == agent.id
+                    && agent.snapshot_id.as_deref() == Some(binding.snapshot_id.as_str())
+            })
+    }));
 
     JsonlSessionStore::new(&binding.session_log_path)?.append(&SessionLogEntry::Control(
         ControlEntry::UsageSnapshot(UsageStats {
@@ -563,6 +565,53 @@ Inspect the requested code and report concrete findings.
         .index_fingerprint = "stale".to_owned();
     assert!(matches!(
         admit_application_skill_binding(&request, &root_config, temp.path(), &mut session,),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn exact_agent_binding_admits_current_snapshot_and_rejects_stale_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let root_config = RootConfig::load(&config_path)?;
+    let catalog = crate::application_extension_catalog_view(&root_config, temp.path(), &[])?;
+    let agent = catalog
+        .agents
+        .iter()
+        .find(|agent| agent.available)
+        .expect("a trusted built-in agent should be available");
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "inspect the workspace",
+        "run-agent",
+    );
+    request.agent_binding = agent.binding.clone();
+
+    let (registry, profile_id) =
+        admit_application_agent_binding(&request, &root_config, temp.path(), &[])?
+            .expect("exact binding should admit the agent profile");
+    assert_eq!(profile_id.as_str(), agent.id);
+    assert!(registry.get(&profile_id).is_some());
+
+    request
+        .agent_binding
+        .as_mut()
+        .expect("binding should exist")
+        .snapshot_id = "stale".to_owned();
+    assert!(matches!(
+        admit_application_agent_binding(&request, &root_config, temp.path(), &[]),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
     Ok(())

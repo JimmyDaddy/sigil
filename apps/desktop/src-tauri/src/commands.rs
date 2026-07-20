@@ -413,6 +413,12 @@ pub(crate) async fn desktop_start_run(
                         index_fingerprint: binding.index_fingerprint,
                     }
                 }),
+                agent_binding: input.agent_binding.map(|binding| {
+                    sigil_desktop::DesktopApplicationAgentBinding {
+                        profile_id: binding.profile_id,
+                        snapshot_id: binding.snapshot_id,
+                    }
+                }),
             },
         )
         .await

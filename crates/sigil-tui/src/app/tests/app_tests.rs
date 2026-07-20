@@ -5,7 +5,7 @@ use super::*;
 fn app_uses_provider_supported_default_reasoning_effort() {
     let mut config = test_config();
     config.agent.provider = "openai_responses".to_owned();
-    config.agent.model = "gpt-4.1".to_owned();
+    config.agent.model = "gpt-5".to_owned();
 
     let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 

@@ -89,11 +89,37 @@
       }
     },
     "schemas": {
+      "ApplicationAgentBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
       "ApplicationAgentCatalogEntry": {
         "additionalProperties": false,
         "properties": {
           "available": {
             "type": "boolean"
+          },
+          "binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationAgentBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "description": {
             "type": "string"
@@ -859,6 +885,16 @@
       },
       "RunStartRequest": {
         "properties": {
+          "agent_binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationAgentBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model_name": {
             "type": [
               "string",

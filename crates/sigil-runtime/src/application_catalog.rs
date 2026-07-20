@@ -108,7 +108,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "enter plan mode or run one plan prompt",
         argument_hint: Some("[prompt]"),
         completes_with_space: true,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenAgentWorkbench),
     },
     ApplicationCommandSpec {
         canonical: "/task",
@@ -144,7 +144,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "choose a saved session",
         argument_hint: Some("[query]"),
         completes_with_space: true,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenSessionPicker),
     },
     ApplicationCommandSpec {
         canonical: "/agent",
@@ -162,6 +162,12 @@ pub struct ApplicationSkillBinding {
     pub skill_id: String,
     pub skill_sha256: String,
     pub index_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationAgentBinding {
+    pub profile_id: String,
+    pub snapshot_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +210,7 @@ pub struct ApplicationAgentCatalogEntry {
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub snapshot_id: Option<String>,
+    pub binding: Option<ApplicationAgentBinding>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -215,8 +222,9 @@ pub struct ApplicationExtensionCatalogView {
 
 /// Builds the bounded, path-free extension catalog consumed by application adapters.
 ///
-/// Agent profiles are intentionally discovery-only until the application run owner can supervise
-/// child sessions. Child-session skills are exposed but fail closed for the same reason.
+/// Agent profiles expose an exact snapshot binding only when they are enabled, trusted, and
+/// user-invocable. Child-session skills remain unavailable until their distinct execution contract
+/// is admitted by the application run owner.
 pub fn application_extension_catalog_view(
     root_config: &RootConfig,
     workspace_root: &Path,
@@ -296,6 +304,26 @@ pub fn application_extension_catalog_view(
             let snapshot = registry.capture_snapshot(profile.id()).ok();
             let enabled = profile.effective_enabled();
             let user_invocable = profile.effective_user_invocation_allowed();
+            let unavailable_reason = if !enabled {
+                Some("This agent profile is disabled.".to_owned())
+            } else if profile.trust_state != AgentTrustState::Trusted {
+                Some("Review and trust this agent profile before invoking it.".to_owned())
+            } else if !user_invocable {
+                Some("This agent profile cannot be invoked directly by a user.".to_owned())
+            } else if snapshot.is_none() {
+                Some("The exact agent profile snapshot could not be captured.".to_owned())
+            } else {
+                None
+            };
+            let snapshot_id = snapshot.map(|snapshot| snapshot.snapshot_id.as_str().to_owned());
+            let binding = unavailable_reason
+                .is_none()
+                .then(|| ApplicationAgentBinding {
+                    profile_id: profile.id().as_str().to_owned(),
+                    snapshot_id: snapshot_id
+                        .clone()
+                        .expect("available agent profiles have an exact snapshot"),
+                });
             ApplicationAgentCatalogEntry {
                 id: profile.id().as_str().to_owned(),
                 invocation_token: format!("@{}", profile.id().as_str()),
@@ -305,12 +333,10 @@ pub fn application_extension_catalog_view(
                 trust: agent_trust_label(profile.trust_state).to_owned(),
                 enabled,
                 user_invocable,
-                available: false,
-                unavailable_reason: Some(
-                    "Desktop agent execution requires the supervised child-session owner."
-                        .to_owned(),
-                ),
-                snapshot_id: snapshot.map(|snapshot| snapshot.snapshot_id.as_str().to_owned()),
+                available: unavailable_reason.is_none(),
+                unavailable_reason,
+                snapshot_id,
+                binding,
             }
         })
         .collect();

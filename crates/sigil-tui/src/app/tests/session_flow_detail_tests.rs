@@ -48,6 +48,16 @@ fn session_labels_and_identifiers_truncate_as_expected() {
 }
 
 #[test]
+fn session_model_selection_has_a_stable_audit_line() {
+    assert_eq!(
+        render_control_entry_line(&ControlEntry::SessionModelSelected {
+            model_name: "deepseek-v4-pro".to_owned(),
+        }),
+        "[ctl] session model deepseek-v4-pro"
+    );
+}
+
+#[test]
 fn session_history_marks_legacy_raw_logs_as_unsupported() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session-legacy.jsonl");

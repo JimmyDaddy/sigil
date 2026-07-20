@@ -914,8 +914,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ApplicationAgentBinding: {
+            profile_id: string;
+            snapshot_id: string;
+        };
         ApplicationAgentCatalogEntry: {
             available: boolean;
+            binding?: components["schemas"]["ApplicationAgentBinding"] | null;
             description: string;
             enabled: boolean;
             id: string;
@@ -1088,6 +1093,7 @@ export interface components {
             session_id: string;
         };
         RunStartRequest: {
+            agent_binding?: components["schemas"]["ApplicationAgentBinding"] | null;
             model_name?: string | null;
             model_selection_binding?: string | null;
             permission_mode: components["schemas"]["PermissionMode"];

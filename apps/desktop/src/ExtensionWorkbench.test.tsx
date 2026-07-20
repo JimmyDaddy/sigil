@@ -49,7 +49,12 @@ describe("extension workbench", () => {
     const onUseSkill = vi.fn();
     render(
       <LocaleProvider>
-        <ExtensionWorkbench catalog={catalog} runActive={false} onUseSkill={onUseSkill} />
+        <ExtensionWorkbench
+          catalog={catalog}
+          runActive={false}
+          onUseSkill={onUseSkill}
+          onUseAgent={() => undefined}
+        />
       </LocaleProvider>,
     );
 
@@ -61,7 +66,12 @@ describe("extension workbench", () => {
     const user = userEvent.setup();
     render(
       <LocaleProvider>
-        <ExtensionWorkbench catalog={catalog} runActive={false} onUseSkill={() => undefined} />
+        <ExtensionWorkbench
+          catalog={catalog}
+          runActive={false}
+          onUseSkill={() => undefined}
+          onUseAgent={() => undefined}
+        />
       </LocaleProvider>,
     );
 
@@ -79,6 +89,7 @@ describe("extension workbench", () => {
           initialKind="agents"
           initialQuery="expl"
           onUseSkill={() => undefined}
+          onUseAgent={() => undefined}
         />
       </LocaleProvider>,
     );
@@ -86,5 +97,30 @@ describe("extension workbench", () => {
     expect(screen.getByRole("tab", { name: "Agents 1" }).getAttribute("aria-selected")).toBe("true");
     expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("expl");
     expect(screen.getByText("@explore")).toBeTruthy();
+  });
+
+  it("binds an admitted agent into the composer", async () => {
+    const user = userEvent.setup();
+    const availableAgent = {
+      ...catalog.agents[0],
+      available: true,
+      unavailableReason: undefined,
+      binding: { profileId: "explore", snapshotId: "agent-snapshot" },
+    };
+    const onUseAgent = vi.fn();
+    render(
+      <LocaleProvider>
+        <ExtensionWorkbench
+          catalog={{ ...catalog, agents: [availableAgent] }}
+          runActive={false}
+          initialKind="agents"
+          onUseSkill={() => undefined}
+          onUseAgent={onUseAgent}
+        />
+      </LocaleProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(onUseAgent).toHaveBeenCalledWith(availableAgent);
   });
 });

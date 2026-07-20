@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Composer } from "./Composer";
 import { LocaleProvider } from "./i18n";
-import type { ReasoningEffort, RunContext, SkillBinding } from "./types";
+import type { AgentBinding, ReasoningEffort, RunContext, SkillBinding } from "./types";
 
 afterEach(() => {
   cleanup();
@@ -57,6 +57,35 @@ const context: RunContext = {
         clientAction: "open_agent_workbench",
         available: true,
       },
+      {
+        canonical: "/plan",
+        aliases: [],
+        label: "Plan",
+        description: "enter plan mode or run one plan prompt",
+        argumentHint: "[prompt]",
+        completesWithSpace: true,
+        clientAction: "open_agent_workbench",
+        available: true,
+      },
+      {
+        canonical: "/resume",
+        aliases: [],
+        label: "Open conversation",
+        description: "choose a saved session",
+        argumentHint: "[query]",
+        completesWithSpace: true,
+        clientAction: "open_session_picker",
+        available: true,
+      },
+      {
+        canonical: "/compact",
+        aliases: [],
+        label: "Compact context",
+        description: "preview V2 context compaction",
+        completesWithSpace: false,
+        available: false,
+        unavailableReason: "This command does not yet have a desktop application route.",
+      },
     ],
     skills: [
       {
@@ -85,22 +114,58 @@ const context: RunContext = {
         trust: "trusted",
         enabled: true,
         userInvocable: true,
+        available: true,
+        binding: {
+          profileId: "explore",
+          snapshotId: "agent-snapshot",
+        },
+      },
+      {
+        id: "disabled",
+        invocationToken: "@disabled",
+        description: "Disabled agent.",
+        source: "workspace",
+        kind: "subagent",
+        trust: "trusted",
+        enabled: false,
+        userInvocable: true,
         available: false,
         unavailableReason: "Desktop agent execution requires the supervised child-session owner.",
+      },
+      {
+        id: "plan",
+        invocationToken: "@plan",
+        description: "Planning agent.",
+        source: "system",
+        kind: "primary",
+        trust: "trusted",
+        enabled: true,
+        userInvocable: true,
+        available: true,
+        binding: {
+          profileId: "plan",
+          snapshotId: "plan-snapshot",
+        },
       },
     ],
   },
 };
 
 function renderComposer(overrides: {
-  onSubmit?: (prompt: string, binding?: SkillBinding) => Promise<boolean>;
+  onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
+  onOpenSessionPicker?: (query: string) => void;
   onNotice?: (message: string, error?: boolean) => void;
 } = {}) {
-  const onSubmit = overrides.onSubmit ?? vi.fn(async (_prompt: string, _binding?: SkillBinding) => true);
+  const onSubmit = overrides.onSubmit ?? vi.fn(async (
+    _prompt: string,
+    _skillBinding?: SkillBinding,
+    _agentBinding?: AgentBinding,
+  ) => true);
   const onReasoningEffortChange = overrides.onReasoningEffortChange ?? vi.fn((_effort: ReasoningEffort) => undefined);
   const onOpenAgentWorkbench = overrides.onOpenAgentWorkbench ?? vi.fn((_query: string) => undefined);
+  const onOpenSessionPicker = overrides.onOpenSessionPicker ?? vi.fn((_query: string) => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   render(
     <LocaleProvider>
@@ -119,6 +184,7 @@ function renderComposer(overrides: {
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
         onNewSession={async () => true}
+        onOpenSessionPicker={onOpenSessionPicker}
         onOpenAgentWorkbench={onOpenAgentWorkbench}
         onNotice={onNotice}
         onSubmit={onSubmit}
@@ -126,7 +192,7 @@ function renderComposer(overrides: {
       />
     </LocaleProvider>,
   );
-  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onNotice };
+  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onOpenSessionPicker, onNotice };
 }
 
 describe("structured composer", () => {
@@ -145,6 +211,22 @@ describe("structured composer", () => {
       skillId: "review",
       skillSha256: "skill-sha",
       indexFingerprint: "index-sha",
+    }, undefined);
+  });
+
+  it("selects an exact agent snapshot and submits only the task prompt", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "@expl");
+    await user.click(screen.getByRole("option", { name: /explore/ }));
+    await user.type(input, "inspect src/lib.rs");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("inspect src/lib.rs", undefined, {
+      profileId: "explore",
+      snapshotId: "agent-snapshot",
     });
   });
 
@@ -173,13 +255,41 @@ describe("structured composer", () => {
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });
 
+  it("binds the supervised plan agent from /plan", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "/plan inspect the runtime");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("inspect the runtime", undefined, {
+      profileId: "plan",
+      snapshotId: "plan-snapshot",
+    });
+  });
+
+  it("routes /resume to conversation search and hides unsupported commands", async () => {
+    const user = userEvent.setup();
+    const { onOpenSessionPicker } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "/");
+    expect(screen.queryByRole("option", { name: /Compact context/ })).toBeNull();
+    await user.clear(input);
+    await user.type(input, "/resume typo");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenSessionPicker).toHaveBeenCalledWith("typo");
+  });
+
   it("shows unavailable agents without dispatching a run", async () => {
     const user = userEvent.setup();
     const { onSubmit, onNotice } = renderComposer();
     const input = screen.getByRole("textbox");
 
-    await user.type(input, "@expl");
-    await user.click(screen.getByRole("option", { name: /explore/ }));
+    await user.type(input, "@dis");
+    await user.click(screen.getByRole("option", { name: /disabled/ }));
 
     expect(onNotice).toHaveBeenCalledWith(
       "Desktop agent execution requires the supervised child-session owner.",

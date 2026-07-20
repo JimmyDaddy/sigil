@@ -123,9 +123,10 @@ pub use agent_tools::{
     register_agent_tools_with_workspace_and_entries,
 };
 pub use application_catalog::{
-    APPLICATION_COMMANDS, ApplicationAgentCatalogEntry, ApplicationClientAction,
-    ApplicationCommandCatalogEntry, ApplicationCommandSpec, ApplicationExtensionCatalogView,
-    ApplicationSkillBinding, ApplicationSkillCatalogEntry, application_extension_catalog_view,
+    APPLICATION_COMMANDS, ApplicationAgentBinding, ApplicationAgentCatalogEntry,
+    ApplicationClientAction, ApplicationCommandCatalogEntry, ApplicationCommandSpec,
+    ApplicationExtensionCatalogView, ApplicationSkillBinding, ApplicationSkillCatalogEntry,
+    application_extension_catalog_view,
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,

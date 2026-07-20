@@ -172,10 +172,12 @@
 .composer-submit { flex: 0 0 auto; width: 34px; min-width: 34px; min-height: 34px; border-radius: 11px; }
 .composer-stop { border-color: var(--sg-sys-color-error); color: var(--sg-sys-color-on-error-container); background: var(--sg-sys-color-error-container); }
 
-.extension-workbench { display: grid; min-height: min(620px, 70vh); grid-template-rows: auto auto minmax(0, 1fr); gap: var(--sg-sys-space-3); }
+#extension-workbench.sg-modal-surface-drawer { width: min(920px, calc(100vw - 48px)); }
+#extension-workbench .sg-modal-content { display: flex; min-width: 0; overflow: hidden; }
+.extension-workbench { display: grid; width: 100%; min-width: 0; min-height: min(620px, 70vh); grid-template-rows: auto auto minmax(0, 1fr); gap: var(--sg-sys-space-3); }
 .extension-tabs { display: flex; gap: var(--sg-sys-space-2); }
-.extension-workbench-body { display: grid; min-height: 0; grid-template-columns: minmax(190px, .8fr) minmax(240px, 1.2fr); gap: var(--sg-sys-space-3); }
-.extension-list { display: grid; min-height: 0; align-content: start; gap: 4px; padding-right: 4px; overflow-y: auto; border-right: 1px solid var(--sg-sys-color-outline); }
+.extension-workbench-body { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(260px, .8fr) minmax(360px, 1.2fr); gap: var(--sg-sys-space-3); }
+.extension-list { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 4px; padding-right: 4px; overflow-y: auto; border-right: 1px solid var(--sg-sys-color-outline); }
 .extension-row { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; justify-content: stretch; gap: 8px; padding: 9px; text-align: left; }
 .extension-row > span { display: contents; }
 .extension-row > span > span:first-child { display: grid; min-width: 0; gap: 3px; }

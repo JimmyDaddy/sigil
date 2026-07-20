@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { FormEvent, RefObject } from "react";
 
 import { ErrorCard } from "../../ErrorCard";
 import { HistoryContent, type HistoryState } from "../../HistoryPanel";
@@ -14,6 +14,7 @@ interface SessionRailProps {
   readonly sessionMessage?: string;
   readonly sessionError: boolean;
   readonly searchDraft: string;
+  readonly searchInputRef?: RefObject<HTMLInputElement | null>;
   readonly providerFilter: string;
   readonly sourceFilter: CatalogSourceState | "all";
   readonly pinnedOnly: boolean;
@@ -38,6 +39,7 @@ export function SessionRail({
   sessionMessage,
   sessionError,
   searchDraft,
+  searchInputRef,
   providerFilter,
   sourceFilter,
   pinnedOnly,
@@ -69,6 +71,7 @@ export function SessionRail({
         <TextField
           label={t("searchConversations")}
           labelHidden
+          ref={searchInputRef}
           value={searchDraft}
           onChange={(event) => onSearchDraftChange(event.target.value)}
           placeholder={t("searchConversations")}

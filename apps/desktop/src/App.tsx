@@ -93,6 +93,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [navigationWidth, setNavigationWidth] = useState(readNavigationWidth);
   const compactNavigation = useMediaQuery("(max-width: 899px)");
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const sessionSearchRef = useRef<HTMLInputElement>(null);
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
   const sessionRenameInputRef = useRef<HTMLInputElement>(null);
 
@@ -475,6 +476,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       sessionMessage={sessionMessage}
       sessionError={sessionActionState === "error"}
       searchDraft={searchDraft}
+      searchInputRef={sessionSearchRef}
       providerFilter={providerFilter}
       sourceFilter={sourceFilter}
       pinnedOnly={pinnedOnly}
@@ -621,6 +623,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
                 onNewSession={() => createSession()}
+                onOpenSessionPicker={(query) => {
+                  setSearchDraft(query);
+                  setSearchQuery(query);
+                  if (compactNavigation) setNavigationOpen(true);
+                  requestAnimationFrame(() => sessionSearchRef.current?.focus());
+                }}
               />
             </div>
           )}

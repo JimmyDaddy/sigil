@@ -795,7 +795,8 @@ pub fn http_openapi_document() -> Value {
                         "model_selection_binding": { "type": ["string", "null"] },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "reasoning_effort_binding": { "type": ["string", "null"] },
-                        "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] }
+                        "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] },
+                        "agent_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationAgentBinding" }, { "type": "null" }] }
                     }
                 },
                 "PermissionMode": {
@@ -898,6 +899,15 @@ pub fn http_openapi_document() -> Value {
                         "binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] }
                     }
                 },
+                "ApplicationAgentBinding": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["profile_id", "snapshot_id"],
+                    "properties": {
+                        "profile_id": { "type": "string" },
+                        "snapshot_id": { "type": "string" }
+                    }
+                },
                 "ApplicationAgentCatalogEntry": {
                     "type": "object",
                     "additionalProperties": false,
@@ -913,7 +923,8 @@ pub fn http_openapi_document() -> Value {
                         "user_invocable": { "type": "boolean" },
                         "available": { "type": "boolean" },
                         "unavailable_reason": { "type": ["string", "null"] },
-                        "snapshot_id": { "type": ["string", "null"] }
+                        "snapshot_id": { "type": ["string", "null"] },
+                        "binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationAgentBinding" }, { "type": "null" }] }
                     }
                 },
                 "RunStartCommandReceipt": {

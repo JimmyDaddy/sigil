@@ -65,6 +65,9 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             provider_name,
             model_name,
         } => format!("[ctl] session {provider_name}/{model_name}"),
+        ControlEntry::SessionModelSelected { model_name } => {
+            format!("[ctl] session model {model_name}")
+        }
         ControlEntry::ContinuationStateSaved(state) => format!(
             "[ctl] cont {} msg={}",
             state.state_kind,

@@ -668,6 +668,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
+            agent_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1043,6 +1044,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
+            agent_binding: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1130,6 +1132,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
+            agent_binding: None,
         },
     );
     let start_body = serde_json::to_string(&start_command).expect("start command should serialize");
@@ -2716,6 +2719,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
+                agent_binding: None,
             }
         ),
         Err(HttpRegistryError::MissingPermissionMode)
@@ -3546,6 +3550,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
+        agent_binding: None,
     };
     assert_eq!(
         serde_json::to_value(&start).expect("start request should serialize"),
@@ -3659,6 +3664,7 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
+        agent_binding: None,
     }
 }
 

@@ -632,8 +632,12 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
             sigil_desktop::DesktopRunStartRequest {
                 prompt: "answer from the fixture".to_owned(),
                 permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
+                model_name: None,
+                model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
             },
         )
         .await

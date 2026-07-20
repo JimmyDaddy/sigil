@@ -321,6 +321,9 @@ pub struct HttpRunStartRequest {
     /// Exact catalog binding for one user-invoked inline skill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_binding: Option<HttpApplicationSkillBinding>,
+    /// Exact catalog binding for one user-invoked supervised agent profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_binding: Option<HttpApplicationAgentBinding>,
 }
 
 /// Request body for cancelling one run.
@@ -410,6 +413,14 @@ pub struct HttpApplicationSkillBinding {
     pub index_fingerprint: String,
 }
 
+/// Exact immutable binding for one user-invoked agent profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpApplicationAgentBinding {
+    pub profile_id: String,
+    pub snapshot_id: String,
+}
+
 /// One path-free skill catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -445,6 +456,8 @@ pub struct HttpApplicationAgentCatalogEntry {
     pub unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<HttpApplicationAgentBinding>,
 }
 
 /// Bounded extension metadata used by graphical application clients.

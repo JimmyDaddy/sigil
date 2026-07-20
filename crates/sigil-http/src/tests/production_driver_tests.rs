@@ -561,6 +561,7 @@ model = "deepseek-v4-flash"
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
+                agent_binding: None,
             },
         )
         .expect("run should start");
@@ -757,6 +758,7 @@ model = "deepseek-v4-flash"
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
+                agent_binding: None,
             },
         )
         .expect("owned production supervisor should accept the run");

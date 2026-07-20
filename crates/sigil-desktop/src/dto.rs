@@ -304,6 +304,13 @@ pub struct DesktopApplicationSkillBinding {
     pub index_fingerprint: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationAgentBinding {
+    pub profile_id: String,
+    pub snapshot_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopApplicationSkillCatalogEntry {
@@ -337,6 +344,8 @@ pub struct DesktopApplicationAgentCatalogEntry {
     pub unavailable_reason: Option<String>,
     #[serde(default)]
     pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub binding: Option<DesktopApplicationAgentBinding>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -397,6 +406,8 @@ pub struct DesktopRunStartRequest {
     pub reasoning_effort_binding: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_binding: Option<DesktopApplicationSkillBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_binding: Option<DesktopApplicationAgentBinding>,
 }
 
 /// Request payload for cooperative cancellation.

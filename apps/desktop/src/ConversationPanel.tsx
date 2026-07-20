@@ -9,6 +9,8 @@ import { translateEnglish, useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
+  AgentBinding,
+  AgentCatalogEntry,
   PermissionMode,
   ReasoningEffort,
   RunContext,
@@ -30,6 +32,7 @@ interface ConversationPanelProps {
   workspaceId: string;
   session: SessionSummary;
   onNewSession: () => Promise<boolean>;
+  onOpenSessionPicker: (query: string) => void;
 }
 
 interface TimelineRowBase {
@@ -48,6 +51,7 @@ export function ConversationPanel({
   workspaceId,
   session,
   onNewSession,
+  onOpenSessionPicker,
 }: ConversationPanelProps) {
   const { t } = useLocale();
   const [run, setRun] = useState<RunSummary>();
@@ -77,6 +81,7 @@ export function ConversationPanel({
   const [extensionWorkbenchKind, setExtensionWorkbenchKind] = useState<"skills" | "agents">("skills");
   const [extensionWorkbenchQuery, setExtensionWorkbenchQuery] = useState("");
   const [requestedSkill, setRequestedSkill] = useState<SkillCatalogEntry>();
+  const [requestedAgent, setRequestedAgent] = useState<AgentCatalogEntry>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const prependScrollHeight = useRef<number | undefined>(undefined);
@@ -109,6 +114,7 @@ export function ConversationPanel({
     setExtensionWorkbenchKind("skills");
     setExtensionWorkbenchQuery("");
     setRequestedSkill(undefined);
+    setRequestedAgent(undefined);
     activeRunIdRef.current = undefined;
   }, [session.id, workspaceId]);
 
@@ -326,7 +332,11 @@ export function ConversationPanel({
     }
   };
 
-  const submit = async (nextPrompt: string, skillBinding?: SkillBinding): Promise<boolean> => {
+  const submit = async (
+    nextPrompt: string,
+    skillBinding?: SkillBinding,
+    agentBinding?: AgentBinding,
+  ): Promise<boolean> => {
     if (nextPrompt === "" || active || submitting) return false;
     setSubmitting(true);
     onNotice(t("startingRunNotice"));
@@ -345,6 +355,7 @@ export function ConversationPanel({
           ? undefined
           : runContext?.reasoningEffortBinding,
         skillBinding,
+        agentBinding,
       );
       activeRunIdRef.current = started.id;
       setRun(started);
@@ -553,6 +564,7 @@ export function ConversationPanel({
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
         requestedSkill={requestedSkill}
+        requestedAgent={requestedAgent}
         onModelChange={(modelName) => {
           setSelectedModelName(modelName);
           setReasoningEffort(undefined);
@@ -560,6 +572,7 @@ export function ConversationPanel({
         onPermissionModeChange={setPermissionMode}
         onReasoningEffortChange={setReasoningEffort}
         onNewSession={onNewSession}
+        onOpenSessionPicker={onOpenSessionPicker}
         onOpenAgentWorkbench={(query) => {
           setExtensionWorkbenchKind("agents");
           setExtensionWorkbenchQuery(query);
@@ -601,6 +614,12 @@ export function ConversationPanel({
             initialQuery={extensionWorkbenchQuery}
             onUseSkill={(skill) => {
               setRequestedSkill({ ...skill });
+              setRequestedAgent(undefined);
+              setExtensionWorkbenchOpen(false);
+            }}
+            onUseAgent={(agent) => {
+              setRequestedAgent({ ...agent });
+              setRequestedSkill(undefined);
               setExtensionWorkbenchOpen(false);
             }}
           />

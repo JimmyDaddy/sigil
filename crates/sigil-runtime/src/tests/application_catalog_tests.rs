@@ -27,3 +27,24 @@ fn agent_command_opens_the_shared_agent_workbench() {
         Some(crate::ApplicationClientAction::OpenAgentWorkbench)
     );
 }
+
+#[test]
+fn desktop_equivalent_commands_have_explicit_client_routes() {
+    let plan = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/plan")
+        .expect("plan command");
+    let resume = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/resume")
+        .expect("resume command");
+
+    assert_eq!(
+        plan.client_action,
+        Some(crate::ApplicationClientAction::OpenAgentWorkbench)
+    );
+    assert_eq!(
+        resume.client_action,
+        Some(crate::ApplicationClientAction::OpenSessionPicker)
+    );
+}
