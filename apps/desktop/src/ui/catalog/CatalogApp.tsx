@@ -70,7 +70,7 @@ export function CatalogApp() {
           } as CSSProperties}
         >
           <UiCatalog fixture={fixture}>
-            <FixtureSurface fixture={fixture} />
+            <FixtureSurface fixture={fixture} theme={theme} />
           </UiCatalog>
         </div>
       </div>
@@ -99,10 +99,25 @@ function CatalogSelect({
   );
 }
 
-function FixtureSurface({ fixture }: { readonly fixture: CatalogFixture }) {
+function FixtureSurface({
+  fixture,
+  theme,
+}: {
+  readonly fixture: CatalogFixture;
+  readonly theme: CatalogTheme;
+}) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [approvalMode, setApprovalMode] = useState<"ask" | "allow_readonly" | "deny">("ask");
   const counts = fixture.degradedCounts;
+  if (fixture.fullWorkbench) {
+    return (
+      <iframe
+        className="catalog-workbench-frame"
+        title="Complete Sigil workbench fixture"
+        src={`/catalog-workbench.html?theme=${theme}`}
+      />
+    );
+  }
   return (
     <div className="catalog-fixture-surface">
       {fixture.id === "no-workspace" ? (

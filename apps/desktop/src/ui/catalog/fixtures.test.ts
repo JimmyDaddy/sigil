@@ -1,12 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { groupEntries, HistoryContent } from "../../HistoryPanel";
+import { App } from "../../App";
 import { ToolCard } from "../../ToolCard";
 import { isUnifiedDiff } from "../../DiffViewer";
 import { CatalogApp } from "./CatalogApp";
 import { catalogFixtures, UI_CATALOG_MARKER } from "./fixtures";
+import { createCatalogWorkbenchBridge } from "./workbenchBridge";
+
+afterEach(cleanup);
 
 describe("desktop UI catalog contract", () => {
   it("covers every theme and adaptive viewport without entering production", () => {
@@ -17,6 +22,7 @@ describe("desktop UI catalog contract", () => {
       "session-catalog-30",
       "session-catalog-100",
       "degraded-catalog",
+      "workbench-complete",
       "running-tool-approval",
       "reconnect-gap",
       "coding-composer",
@@ -111,6 +117,7 @@ describe("desktop UI catalog contract", () => {
     expect(fixtures.get("empty-catalog")?.sessions).toEqual([]);
     expect(fixtures.get("session-catalog-100")?.sessions).toHaveLength(100);
     expect(fixtures.get("degraded-catalog")?.degradedCounts).toEqual({ unavailable: 2, changed: 1, truncated: 1 });
+    expect(fixtures.get("workbench-complete")?.fullWorkbench).toBe(true);
     expect(fixtures.get("running-tool-approval")?.streamState).toBe("live");
     expect(fixtures.get("running-tool-approval")?.approval?.risk).toBe("high");
     expect(fixtures.get("running-tool-approval")?.tool?.duration).toBe("184 ms");
@@ -143,5 +150,32 @@ describe("desktop UI catalog contract", () => {
     fireEvent.change(screen.getByLabelText("Zoom"), { target: { value: "2" } });
     expect(document.documentElement.dataset.theme).toBe("light");
     expect(screen.getByText(/320px viewport · 200% zoom/)).toBeTruthy();
+  });
+
+  it("renders the real application workbench from a capability-free fixture bridge", async () => {
+    const user = userEvent.setup();
+    render(createElement(App, { bridge: createCatalogWorkbenchBridge("dark") }));
+
+    expect(await screen.findByRole("button", { name: /Review parser recovery and verification/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /Review parser recovery and verification/ }));
+
+    expect(await screen.findByRole("heading", { name: "Review parser recovery and verification" })).toBeTruthy();
+    expect(screen.getByText("deepseek-v4-flash")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop run" })).toBeTruthy();
+    await user.click(await screen.findByRole("button", { name: "Open verification: check failed" }));
+    expect(screen.getByRole("button", { name: "Retry check" }).hasAttribute("disabled")).toBe(true);
+    await waitFor(() => expect(document.querySelectorAll(".app-shell")).toHaveLength(1));
+  });
+
+  it("uses a real nested viewport for complete workbench media queries", () => {
+    render(createElement(CatalogApp));
+    fireEvent.change(screen.getByLabelText("Fixture"), {
+      target: { value: "workbench-complete" },
+    });
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
+
+    const frame = screen.getByTitle("Complete Sigil workbench fixture") as HTMLIFrameElement;
+    expect(frame.src).toContain("/catalog-workbench.html?theme=light");
+    expect(frame.closest("[data-fixture]")?.getAttribute("data-fixture")).toBe("workbench-complete");
   });
 });

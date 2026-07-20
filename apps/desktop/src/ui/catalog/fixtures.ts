@@ -33,6 +33,7 @@ export interface CatalogFixture {
   readonly streamState?: RunStreamState;
   readonly attachmentGap?: boolean;
   readonly longCopy?: string;
+  readonly fullWorkbench?: boolean;
   readonly composer?: {
     readonly active: boolean;
     readonly context: RunContext;
@@ -126,6 +127,12 @@ export const catalogFixtures: readonly CatalogFixture[] = [
       },
     ],
     degradedCounts: { unavailable: 2, changed: 1, truncated: 1 },
+  },
+  {
+    id: "workbench-complete",
+    description: "Complete application workbench with an active run and failed verification",
+    ...environment,
+    fullWorkbench: true,
   },
   {
     id: "running-tool-approval",
