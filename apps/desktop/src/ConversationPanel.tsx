@@ -490,7 +490,7 @@ export function ConversationPanel({
         ) : (
           rows.map((row) => row.kind === "tool"
             ? <ToolCard key={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, status: row.status }} />
-            : <Message key={row.key} message={row} />)
+            : <Message key={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
         )}
       </div>
 

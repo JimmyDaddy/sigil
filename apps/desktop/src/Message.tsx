@@ -8,19 +8,25 @@ export interface MessageView {
   status?: string;
 }
 
-export function Message({ message }: { message: MessageView }) {
+export function Message({
+  message,
+  onOpenExternalUrl,
+}: {
+  readonly message: MessageView;
+  readonly onOpenExternalUrl?: (url: string) => Promise<void>;
+}) {
   if (message.kind === "reasoning" || message.kind === "progress") {
     return (
       <details className={`message-disclosure message-${message.kind}`}>
         <summary><span>{message.label}</span><small>{message.status ?? "Show details"}</small></summary>
-        <MessageContent text={message.text} />
+        <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
       </details>
     );
   }
   return (
     <article className={`message message-${message.kind}`}>
       <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}</header>
-      <MessageContent text={message.text} />
+      <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
     </article>
   );
 }

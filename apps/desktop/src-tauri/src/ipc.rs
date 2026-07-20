@@ -31,6 +31,12 @@ pub(crate) struct DesktopAppearanceInput {
     pub(crate) preference: ThemePreference,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopExternalUrlInput {
+    pub(crate) url: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopWorkspaceSelection {

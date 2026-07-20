@@ -12,8 +12,9 @@ use sigil_desktop::{
     DesktopSessionRenameRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
     DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
-use tauri::{Emitter, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -22,18 +23,20 @@ use crate::{
     ipc::{
         DesktopAppearanceInput, DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary,
         DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
-        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCreateInput,
-        DesktopSessionDeleteInput, DesktopSessionMutationSummary, DesktopSessionOpenInput,
-        DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
-        DesktopSessionSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopExternalUrlInput, DesktopRunAttachInput, DesktopRunAttachment,
+        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
+        DesktopSessionCreateInput, DesktopSessionDeleteInput, DesktopSessionMutationSummary,
+        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
+        DesktopSessionRenameInput, DesktopSessionSummary, DesktopTranscriptPage,
+        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
 };
 
 const DESKTOP_PROTOCOL_VERSION: u16 = 1;
+const MAX_EXTERNAL_URL_BYTES: usize = 2_048;
 
 #[derive(Debug, Error, Serialize)]
 #[error("{message}")]
@@ -50,6 +53,46 @@ impl DesktopCommandError {
             message: message.into(),
         }
     }
+}
+
+#[tauri::command]
+pub(crate) fn desktop_open_external_url(
+    app: AppHandle,
+    input: DesktopExternalUrlInput,
+) -> Result<(), DesktopCommandError> {
+    let url = admit_external_https_url(&input.url)?;
+    app.opener().open_url(url, None::<&str>).map_err(|_| {
+        DesktopCommandError::new(
+            "external_url_unavailable",
+            "The link could not be opened. Copy it and open it in your browser.",
+        )
+    })
+}
+
+fn admit_external_https_url(candidate: &str) -> Result<String, DesktopCommandError> {
+    if candidate.len() > MAX_EXTERNAL_URL_BYTES {
+        return Err(DesktopCommandError::new(
+            "external_url_invalid",
+            "Only a bounded HTTPS link can be opened.",
+        ));
+    }
+    let parsed = tauri::Url::parse(candidate).map_err(|_| {
+        DesktopCommandError::new(
+            "external_url_invalid",
+            "Only a valid HTTPS link can be opened.",
+        )
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(DesktopCommandError::new(
+            "external_url_invalid",
+            "Only an HTTPS link without embedded credentials can be opened.",
+        ));
+    }
+    Ok(parsed.to_string())
 }
 
 #[tauri::command]

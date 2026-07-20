@@ -34,6 +34,7 @@ import type {
 export interface DesktopBridge {
   bootstrap(): Promise<DesktopBootstrap>;
   setAppearance(preference: ThemePreference): Promise<AppearanceSnapshot>;
+  openExternalUrl(url: string): Promise<void>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
@@ -87,6 +88,8 @@ export const desktopBridge: DesktopBridge = {
   bootstrap: () => invoke<DesktopBootstrap>("desktop_bootstrap"),
   setAppearance: (preference) =>
     invoke<AppearanceSnapshot>("desktop_set_appearance", { input: { preference } }),
+  openExternalUrl: (url) =>
+    invoke<void>("desktop_open_external_url", { input: { url } }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>

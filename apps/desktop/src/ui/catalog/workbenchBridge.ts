@@ -201,6 +201,7 @@ export function createCatalogWorkbenchBridge(
       appearance: appearance(preference),
     }),
     setAppearance: async (next) => appearance(next),
+    openExternalUrl: async () => undefined,
     pickWorkspace: async () => ({ cancelled: true }),
     openRecentWorkspace: async () => workspace,
     closeWorkspace: async () => [],

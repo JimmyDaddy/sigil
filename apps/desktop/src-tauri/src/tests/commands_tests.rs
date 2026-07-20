@@ -68,6 +68,31 @@ fn session_management_validation_and_errors_are_actionable() {
 }
 
 #[test]
+fn external_url_admission_accepts_only_bounded_credential_free_https() {
+    assert_eq!(
+        admit_external_https_url("https://example.com/docs?q=rust#install")
+            .expect("HTTPS URL should be admitted"),
+        "https://example.com/docs?q=rust#install"
+    );
+    for candidate in [
+        "http://example.com",
+        "file:///tmp/private",
+        "javascript:alert(1)",
+        "data:text/plain,secret",
+        "https://user:password@example.com/private",
+        "//example.com/path",
+    ] {
+        let error = admit_external_https_url(candidate)
+            .expect_err("non-admitted URL must fail before the opener");
+        assert_eq!(error.code, "external_url_invalid");
+        assert!(!error.message.contains(candidate));
+    }
+    assert!(
+        admit_external_https_url(&format!("https://example.com/{}", "x".repeat(2_048))).is_err()
+    );
+}
+
+#[test]
 fn workspace_display_name_never_returns_its_parent_path() {
     let name = workspace_display_name(Path::new("/private/canary/workspace"))
         .expect("basename should be accepted");

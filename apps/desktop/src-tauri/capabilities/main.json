@@ -7,6 +7,7 @@
   "permissions": [
     "allow-desktop-bootstrap",
     "allow-desktop-appearance",
+    "allow-desktop-external-url",
     "allow-desktop-pick-workspace",
     "allow-desktop-close-workspace",
     "allow-desktop-open-recent-workspace",

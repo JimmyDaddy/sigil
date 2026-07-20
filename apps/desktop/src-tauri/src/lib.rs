@@ -24,10 +24,11 @@ use crate::{
     commands::{
         desktop_attach_run, desktop_bootstrap, desktop_cancel_run, desktop_catalog,
         desktop_close_workspace, desktop_create_session, desktop_delete_session,
-        desktop_open_recent_workspace, desktop_open_session, desktop_pick_workspace,
-        desktop_quarantine_session, desktop_rename_session, desktop_rerun_verification,
-        desktop_resolve_approval, desktop_run_context, desktop_set_appearance, desktop_start_run,
-        desktop_transcript, desktop_verification, resolve_sigil_binary,
+        desktop_open_external_url, desktop_open_recent_workspace, desktop_open_session,
+        desktop_pick_workspace, desktop_quarantine_session, desktop_rename_session,
+        desktop_rerun_verification, desktop_resolve_approval, desktop_run_context,
+        desktop_set_appearance, desktop_start_run, desktop_transcript, desktop_verification,
+        resolve_sigil_binary,
     },
     state::DesktopAppState,
     window_state::{DisplayBounds, WindowGeometry, WindowStateOwner},
@@ -43,6 +44,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let exit_state = Arc::new(AtomicU8::new(EXIT_IDLE));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .setup(move |app| {
             let config_dir = app.path().app_config_dir()?;
             let appearance = AppearanceStore::load(config_dir.join("appearance-v1.json"));
@@ -94,6 +100,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_bootstrap,
+            desktop_open_external_url,
             desktop_pick_workspace,
             desktop_open_recent_workspace,
             desktop_close_workspace,

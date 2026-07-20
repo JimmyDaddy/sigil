@@ -247,6 +247,8 @@ const en = {
   messageUnavailable: "Message content unavailable.",
   copyMessage: "Copy message",
   copyCode: "Copy code",
+  openExternalLink: "Open HTTPS link",
+  linkCopied: "Link copied",
   code: "code",
 } as const;
 
@@ -495,6 +497,8 @@ const zh: Record<MessageKey, string> = {
   messageUnavailable: "消息内容不可用。",
   copyMessage: "复制消息",
   copyCode: "复制代码",
+  openExternalLink: "打开 HTTPS 链接",
+  linkCopied: "链接已复制",
   code: "代码",
 };
 

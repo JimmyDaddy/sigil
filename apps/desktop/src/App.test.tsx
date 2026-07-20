@@ -68,6 +68,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       preference,
       resolvedTheme: preference === "light" ? "light" : "dark",
     }),
+    openExternalUrl: async () => undefined,
     pickWorkspace: async () => ({ cancelled: false, workspace }),
     openRecentWorkspace: async () => workspace,
     closeWorkspace: async () => [],
@@ -181,7 +182,45 @@ function installMediaQueries(matches: (query: string) => boolean): () => void {
 }
 
 describe("desktop coding-agent components", () => {
-  it("renders bounded markdown structure as text without raw HTML or navigation", async () => {
+  it("renders safe GFM and local syntax highlighting without raw HTML or renderer navigation", async () => {
+    const user = userEvent.setup();
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn(async () => undefined);
+    const openExternalUrl = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <MessageContent
+        onOpenExternalUrl={openExternalUrl}
+        text={"# Result\n\n<script>alert(1)</script>\n\n![tracking](https://example.com/pixel.png)\n\n- first `item`\n- **second**\n- [x] verified\n\n~~stale~~ and _ready_.\n\n| Check | State |\n| --- | --- |\n| tests | pass |\n\n[Docs](https://example.com/docs) [blocked](javascript:alert(1))\n\n```rust\nfn main() { println!(\"ready\"); }\n```"}
+      />,
+    );
+
+    expect(document.querySelector("script")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
+    expect(screen.getByRole("list")).toBeTruthy();
+    expect(screen.getByText("item").tagName).toBe("CODE");
+    expect(screen.getByRole("heading", { name: "Result" }).tagName).toBe("H1");
+    expect(screen.getByText("second").tagName).toBe("STRONG");
+    expect(screen.getByText("stale").tagName).toBe("DEL");
+    expect(screen.getByText("ready").tagName).toBe("EM");
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole("table")).toBeTruthy();
+    expect(document.querySelector(".hljs-keyword")?.textContent).toBe("fn");
+    expect(screen.getByText("blocked").closest("a")).toBeNull();
+    await user.click(screen.getByRole("link", { name: "Docs" }));
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("fn main() { println!(\"ready\"); }");
+
+    if (originalClipboard === undefined) delete (navigator as { clipboard?: Clipboard }).clipboard;
+    else Object.defineProperty(navigator, "clipboard", originalClipboard);
+  });
+
+  it("copies an admitted HTTPS link when the native opener is unavailable", async () => {
     const user = userEvent.setup();
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
     const writeText = vi.fn(async () => undefined);
@@ -190,20 +229,14 @@ describe("desktop coding-agent components", () => {
       value: { writeText },
     });
     render(
-      <MessageContent text={"# Result\n\n<script>alert(1)</script>\n\n- first `item`\n- **second**\n\n_Ready to merge._\n\n```rust\ncargo test\n```"} />,
+      <MessageContent
+        text="[Docs](https://example.com/docs)"
+        onOpenExternalUrl={async () => { throw new Error("native opener unavailable"); }}
+      />,
     );
 
-    expect(document.querySelector("script")).toBeNull();
-    expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
-    expect(screen.getByRole("list")).toBeTruthy();
-    expect(screen.getByText("item").tagName).toBe("CODE");
-    expect(screen.getByRole("heading", { name: "Result" }).tagName).toBe("H3");
-    expect(screen.getByText("second").tagName).toBe("STRONG");
-    expect(screen.getByText("Ready to merge.").tagName).toBe("EM");
-    expect(screen.getByText("cargo test").tagName).toBe("CODE");
-    expect(screen.queryByRole("link")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Copy code" }));
-    expect(writeText).toHaveBeenCalledWith("cargo test");
+    await user.click(screen.getByRole("link", { name: "Docs" }));
+    expect(writeText).toHaveBeenCalledWith("https://example.com/docs");
 
     if (originalClipboard === undefined) delete (navigator as { clipboard?: Clipboard }).clipboard;
     else Object.defineProperty(navigator, "clipboard", originalClipboard);

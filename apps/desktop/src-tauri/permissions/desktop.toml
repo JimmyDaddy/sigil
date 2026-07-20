@@ -9,6 +9,11 @@ description = "Allows the main local window to save one bounded application appe
 commands.allow = ["desktop_set_appearance"]
 
 [[permission]]
+identifier = "allow-desktop-external-url"
+description = "Allows the main local window to open one native-validated HTTPS URL without exposing a generic opener capability."
+commands.allow = ["desktop_open_external_url"]
+
+[[permission]]
 identifier = "allow-desktop-pick-workspace"
 description = "Allows the Rust backend to show a native folder picker and open one supervised workspace server."
 commands.allow = ["desktop_pick_workspace"]
