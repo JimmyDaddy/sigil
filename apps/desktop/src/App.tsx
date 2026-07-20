@@ -252,9 +252,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setNavigationOpen(false);
       setLoadState("ready");
       setMessage(`${workspace.displayName} is ready.`);
-    } catch {
+    } catch (error) {
       setLoadState("error");
-      setMessage("The recent workspace could not be reopened.");
+      setMessage(errorMessage(error) ?? "The recent workspace could not be reopened.");
     }
   };
 

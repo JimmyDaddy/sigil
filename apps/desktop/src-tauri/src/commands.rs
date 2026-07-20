@@ -6,10 +6,10 @@ use std::{
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopClientError, DesktopLaunchRequest, DesktopRunCancelRequest, DesktopRunStartRequest,
-    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionOpenRequest,
-    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopClientError, DesktopLaunchError, DesktopLaunchRequest, DesktopRunCancelRequest,
+    DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
+    DesktopSessionOpenRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
+    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -809,21 +809,22 @@ pub(crate) fn resolve_sigil_binary() -> Result<PathBuf, DesktopCommandError> {
             "The bundled Sigil runtime cannot be located.",
         )
     })?;
-    let bundled = parent.join(bundled_sigil_binary_name());
-    if bundled.is_file() {
-        return Ok(bundled);
-    }
-    #[cfg(debug_assertions)]
-    {
-        let developer = parent.join(if cfg!(windows) { "sigil.exe" } else { "sigil" });
-        if developer.is_file() {
-            return Ok(developer);
-        }
+    if let Some(binary) = resolve_sigil_binary_from_directory(parent, cfg!(debug_assertions)) {
+        return Ok(binary);
     }
     Err(DesktopCommandError::new(
         "sigil_binary_unavailable",
         "The bundled Sigil runtime cannot be located.",
     ))
+}
+
+fn resolve_sigil_binary_from_directory(parent: &Path, prefer_developer: bool) -> Option<PathBuf> {
+    let developer = parent.join(if cfg!(windows) { "sigil.exe" } else { "sigil" });
+    if prefer_developer && developer.is_file() {
+        return Some(developer);
+    }
+    let bundled = parent.join(bundled_sigil_binary_name());
+    bundled.is_file().then_some(bundled)
 }
 
 const fn bundled_sigil_binary_name() -> &'static str {
@@ -853,6 +854,12 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
             "workspace_identity_collision",
             "The workspace identity conflicts with another open workspace.",
         ),
+        DesktopWorkspaceManagerError::Launch(DesktopLaunchError::IncompatibleServer(_)) => {
+            DesktopCommandError::new(
+                "workspace_server_incompatible",
+                "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
+            )
+        }
         DesktopWorkspaceManagerError::Launch(_) => DesktopCommandError::new(
             "workspace_server_start_failed",
             "The workspace server could not be started. Confirm that sigil.toml is present and valid.",

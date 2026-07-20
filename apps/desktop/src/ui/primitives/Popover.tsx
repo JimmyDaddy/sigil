@@ -3,8 +3,10 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -41,6 +43,7 @@ export function Popover({
   const localTriggerRef = useRef<HTMLButtonElement>(null);
   const triggerRef = externalTriggerRef ?? localTriggerRef;
   const panelRef = useRef<HTMLDivElement>(null);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>();
   const panelId = useId();
   const panelLabel = accessibleLabel ?? (typeof label === "string" ? label : "Popover");
   const updateOpen = (next: boolean) => {
@@ -66,6 +69,28 @@ export function Popover({
       document.removeEventListener("keydown", handleKey);
     };
   });
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelStyle(undefined);
+      return;
+    }
+    const panel = panelRef.current;
+    if (panel === null) return;
+    const keepInsideViewport = () => {
+      const margin = 12;
+      const bounds = panel.getBoundingClientRect();
+      let offsetX = 0;
+      if (bounds.left < margin) offsetX += margin - bounds.left;
+      if (bounds.right + offsetX > window.innerWidth - margin) {
+        offsetX -= bounds.right + offsetX - (window.innerWidth - margin);
+      }
+      setPanelStyle(offsetX === 0 ? undefined : { transform: `translateX(${offsetX}px)` });
+    };
+    keepInsideViewport();
+    window.addEventListener("resize", keepInsideViewport);
+    return () => window.removeEventListener("resize", keepInsideViewport);
+  }, [open]);
 
   return (
     <div className={`sg-popover ${className}`.trim()} ref={rootRef}>
@@ -95,6 +120,7 @@ export function Popover({
           role={panelRole}
           aria-label={panelRole === "dialog" ? panelLabel : undefined}
           tabIndex={-1}
+          style={panelStyle}
         >
           {children}
         </div>

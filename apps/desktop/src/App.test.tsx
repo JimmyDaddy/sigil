@@ -380,6 +380,32 @@ describe("desktop workspace and history shell", () => {
     });
   });
 
+  it("surfaces the actionable native error when a recent workspace cannot reopen", async () => {
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [],
+        recentWorkspaces: [
+          { id: workspace.id, displayName: "sigil", isOpen: false },
+        ],
+      }),
+      openRecentWorkspace: async () => Promise.reject({
+        code: "workspace_server_incompatible",
+        message: "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
+      }),
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    await user.click(screen.getByRole("button", { name: "Switch workspace" }));
+    await user.click(screen.getByRole("button", { name: "sigil" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
+    );
+  });
+
   it("opens a workspace, creates a conversation, and closes the owned server", async () => {
     const user = userEvent.setup();
     let closeRequest = "";

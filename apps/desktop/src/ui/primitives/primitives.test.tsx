@@ -74,6 +74,31 @@ describe("Sigil UI primitives", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("moves an edge popover back inside the visible viewport", async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      return {
+        x: -52,
+        y: 40,
+        width: 240,
+        height: 180,
+        top: 40,
+        right: 188,
+        bottom: 220,
+        left: -52,
+        toJSON: () => ({}),
+      };
+    });
+    const user = userEvent.setup();
+    render(<Popover label="Edge filters"><span>Visible controls</span></Popover>);
+
+    await user.click(screen.getByRole("button", { name: "Edge filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Edge filters" }).style.transform).toBe("translateX(64px)");
+    });
+    bounds.mockRestore();
+  });
+
   it("implements menu arrow navigation, disabled skipping, and typeahead", async () => {
     const selected = vi.fn();
     render(

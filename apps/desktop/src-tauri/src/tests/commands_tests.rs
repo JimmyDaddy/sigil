@@ -20,6 +20,37 @@ fn bundled_runtime_name_cannot_collide_with_the_desktop_product_name() {
 }
 
 #[test]
+fn debug_binary_resolution_prefers_the_current_developer_runtime() {
+    let temp = tempfile::tempdir().expect("temporary directory should create");
+    let developer = temp
+        .path()
+        .join(if cfg!(windows) { "sigil.exe" } else { "sigil" });
+    let bundled = temp.path().join(bundled_sigil_binary_name());
+    std::fs::write(&developer, b"current").expect("developer runtime should create");
+    std::fs::write(&bundled, b"stale").expect("bundled runtime should create");
+
+    assert_eq!(
+        resolve_sigil_binary_from_directory(temp.path(), true),
+        Some(developer)
+    );
+    assert_eq!(
+        resolve_sigil_binary_from_directory(temp.path(), false),
+        Some(bundled)
+    );
+}
+
+#[test]
+fn incompatible_runtime_projection_is_actionable_and_path_free() {
+    let projected = project_manager_error(DesktopWorkspaceManagerError::Launch(
+        DesktopLaunchError::IncompatibleServer("schema version mismatch"),
+    ));
+
+    assert_eq!(projected.code, "workspace_server_incompatible");
+    assert!(projected.message.contains("out of sync"));
+    assert!(!projected.message.contains('/'));
+}
+
+#[test]
 fn workspace_display_name_never_returns_its_parent_path() {
     let name = workspace_display_name(Path::new("/private/canary/workspace"))
         .expect("basename should be accepted");
