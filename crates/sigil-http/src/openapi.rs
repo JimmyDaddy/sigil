@@ -807,10 +807,25 @@ pub fn http_openapi_document() -> Value {
                     "type": "string",
                     "enum": ["low", "medium", "high", "max"]
                 },
+                "ApplicationModelOption": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["model_name", "available_reasoning_efforts"],
+                    "properties": {
+                        "model_name": { "type": "string" },
+                        "available_reasoning_efforts": {
+                            "type": "array",
+                            "uniqueItems": true,
+                            "items": { "$ref": "#/components/schemas/ReasoningEffort" }
+                        },
+                        "default_reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
+                        "reasoning_effort_binding": { "type": ["string", "null"] }
+                    }
+                },
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "available_models", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
+                    "required": ["provider_name", "model_name", "available_models", "model_options", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
                     "properties": {
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
@@ -819,6 +834,11 @@ pub fn http_openapi_document() -> Value {
                             "minItems": 1,
                             "uniqueItems": true,
                             "items": { "type": "string" }
+                        },
+                        "model_options": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "$ref": "#/components/schemas/ApplicationModelOption" }
                         },
                         "model_selection": { "type": "string", "enum": ["per_run"] },
                         "model_selection_binding": { "type": "string" },

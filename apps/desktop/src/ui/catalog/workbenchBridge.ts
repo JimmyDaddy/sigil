@@ -143,6 +143,20 @@ const runContext: RunContext = {
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
   availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+  modelOptions: [
+    {
+      modelName: "deepseek-v4-flash",
+      availableReasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      reasoningEffortBinding: "catalog-effort-binding",
+    },
+    {
+      modelName: "deepseek-v4-pro",
+      availableReasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      reasoningEffortBinding: "catalog-effort-binding-pro",
+    },
+  ],
   modelSelection: "per_run",
   modelSelectionBinding: "catalog-model-binding",
   defaultPermissionMode: "manual",

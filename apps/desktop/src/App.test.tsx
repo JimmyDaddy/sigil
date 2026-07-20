@@ -106,6 +106,20 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       providerName: "deepseek",
       modelName: "deepseek-v4-flash",
       availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      modelOptions: [
+        {
+          modelName: "deepseek-v4-flash",
+          availableReasoningEfforts: ["low", "medium", "high", "max"],
+          defaultReasoningEffort: "max",
+          reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
+        },
+        {
+          modelName: "deepseek-v4-pro",
+          availableReasoningEfforts: ["low", "medium", "high", "max"],
+          defaultReasoningEffort: "max",
+          reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
+        },
+      ],
       modelSelection: "per_run",
       modelSelectionBinding: "model-binding-deepseek-v4-flash",
       defaultPermissionMode: "manual",
@@ -1217,7 +1231,13 @@ describe("desktop workspace and history shell", () => {
   it("selects a model for the next run without creating another conversation", async () => {
     const user = userEvent.setup();
     const selectedModels: Array<string | undefined> = [];
-    const runSelections: Array<{ sessionId: string; modelName?: string; binding?: string }> = [];
+    const runSelections: Array<{
+      sessionId: string;
+      modelName?: string;
+      binding?: string;
+      effort?: string;
+      effortBinding?: string;
+    }> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -1239,13 +1259,22 @@ describe("desktop workspace and history shell", () => {
         permissionMode,
         modelName,
         modelSelectionBinding,
+        reasoningEffort,
+        reasoningEffortBinding,
       ) => {
-        runSelections.push({ sessionId, modelName, binding: modelSelectionBinding });
+        runSelections.push({
+          sessionId,
+          modelName,
+          binding: modelSelectionBinding,
+          effort: reasoningEffort,
+          effortBinding: reasoningEffortBinding,
+        });
         return {
           id: "run-model-switch",
           sessionId,
           status: "running",
           permissionMode,
+          reasoningEffort,
           streamSequence: 0,
         };
       },
@@ -1258,6 +1287,8 @@ describe("desktop workspace and history shell", () => {
       await screen.findByRole("combobox", { name: "Model" }),
       "deepseek-v4-pro",
     );
+    expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
+    expect(screen.queryByRole("option", { name: "Effort unavailable" })).toBeNull();
     await user.type(screen.getByLabelText("Message Sigil"), "Continue with pro");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
@@ -1266,6 +1297,8 @@ describe("desktop workspace and history shell", () => {
       sessionId: "http-session-1",
       modelName: "deepseek-v4-pro",
       binding: "model-binding-deepseek-v4-flash",
+      effort: "max",
+      effortBinding: "effort-binding-deepseek-v4-pro",
     }]);
   });
 

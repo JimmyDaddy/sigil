@@ -256,6 +256,7 @@ pub(crate) struct DesktopRunContext {
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
     pub(crate) available_models: Vec<String>,
+    pub(crate) model_options: Vec<DesktopModelOption>,
     pub(crate) model_selection: &'static str,
     pub(crate) model_selection_binding: String,
     pub(crate) default_permission_mode: &'static str,
@@ -271,6 +272,17 @@ pub(crate) struct DesktopRunContext {
     pub(crate) last_prompt_tokens: Option<u64>,
     pub(crate) context_window_source: &'static str,
     pub(crate) extension_catalog: DesktopExtensionCatalog,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopModelOption {
+    pub(crate) model_name: String,
+    pub(crate) available_reasoning_efforts: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_effort_binding: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -649,6 +661,22 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             provider_name: value.provider_name,
             model_name: value.model_name,
             available_models: value.available_models,
+            model_options: value
+                .model_options
+                .into_iter()
+                .map(|option| DesktopModelOption {
+                    model_name: option.model_name,
+                    available_reasoning_efforts: option
+                        .available_reasoning_efforts
+                        .into_iter()
+                        .map(reasoning_effort_label)
+                        .collect(),
+                    default_reasoning_effort: option
+                        .default_reasoning_effort
+                        .map(reasoning_effort_label),
+                    reasoning_effort_binding: option.reasoning_effort_binding,
+                })
+                .collect(),
             model_selection: match value.model_selection {
                 DesktopModelSelectionPolicy::PerRun => "per_run",
             },

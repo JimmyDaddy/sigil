@@ -223,6 +223,7 @@ export interface RunContext {
   providerName: string;
   modelName: string;
   availableModels: string[];
+  modelOptions: ModelOption[];
   modelSelection: "per_run";
   modelSelectionBinding: string;
   defaultPermissionMode: PermissionMode;
@@ -234,6 +235,13 @@ export interface RunContext {
   lastPromptTokens?: number;
   contextWindowSource: "provider" | "config" | "unavailable";
   extensionCatalog: ExtensionCatalog;
+}
+
+export interface ModelOption {
+  modelName: string;
+  availableReasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+  reasoningEffortBinding?: string;
 }
 
 export interface RunSummary {

@@ -27,12 +27,12 @@ use tokio::{runtime::Handle, sync::mpsc};
 use crate::{
     HTTP_APPROVAL_POLICY_VERSION, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
-    HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry, HttpApprovalDecisionRecord,
-    HttpContextWindowSource, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
-    HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
+    HttpApprovalDecisionRecord, HttpContextWindowSource, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
+    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
     HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
     HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
     HttpVerificationView,
@@ -461,6 +461,20 @@ impl HttpRunDriver for HttpProductionRunDriver {
             provider_name: view.provider_name,
             model_name: view.model_name,
             available_models: view.available_models,
+            model_options: view
+                .model_options
+                .into_iter()
+                .map(|option| HttpApplicationModelOption {
+                    model_name: option.model_name,
+                    available_reasoning_efforts: option
+                        .available_reasoning_efforts
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    default_reasoning_effort: option.default_reasoning_effort.map(Into::into),
+                    reasoning_effort_binding: option.reasoning_effort_binding,
+                })
+                .collect(),
             model_selection: HttpModelSelectionPolicy::PerRun,
             model_selection_binding: view.model_selection_binding,
             default_permission_mode: view.default_permission_mode.into(),

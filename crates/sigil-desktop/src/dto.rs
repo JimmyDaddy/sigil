@@ -366,6 +366,18 @@ pub enum DesktopReasoningEffort {
     Max,
 }
 
+/// Exact reasoning-effort capabilities for one selectable model.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationModelOption {
+    pub model_name: String,
+    pub available_reasoning_efforts: Vec<DesktopReasoningEffort>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<DesktopReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_effort_binding: Option<String>,
+}
+
 /// Typed model, permission-mode, and context usage facts for one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -373,6 +385,7 @@ pub struct DesktopRunContextView {
     pub provider_name: String,
     pub model_name: String,
     pub available_models: Vec<String>,
+    pub model_options: Vec<DesktopApplicationModelOption>,
     pub model_selection: DesktopModelSelectionPolicy,
     pub model_selection_binding: String,
     pub default_permission_mode: DesktopPermissionMode,

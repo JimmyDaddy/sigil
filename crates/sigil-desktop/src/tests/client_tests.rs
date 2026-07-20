@@ -32,6 +32,20 @@ fn run_context_decodes_exact_typed_server_contract() {
         "model_selection": "per_run",
         "model_selection_binding": "model-binding",
         "available_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "model_options": [
+            {
+                "model_name": "deepseek-v4-flash",
+                "available_reasoning_efforts": ["low", "medium", "high", "max"],
+                "default_reasoning_effort": "max",
+                "reasoning_effort_binding": "effort-binding-flash"
+            },
+            {
+                "model_name": "deepseek-v4-pro",
+                "available_reasoning_efforts": ["low", "medium", "high", "max"],
+                "default_reasoning_effort": "max",
+                "reasoning_effort_binding": "effort-binding-pro"
+            }
+        ],
         "default_permission_mode": "manual",
         "available_permission_modes": ["read-only", "manual", "auto-edit", "danger-full-access"],
         "available_reasoning_efforts": ["low", "medium", "high", "max"],
@@ -51,6 +65,11 @@ fn run_context_decodes_exact_typed_server_contract() {
     assert_eq!(context.model_name, "deepseek-v4-flash");
     assert_eq!(context.last_prompt_tokens, Some(42_000));
     assert_eq!(context.available_reasoning_efforts.len(), 4);
+    assert_eq!(context.model_options.len(), 2);
+    assert_eq!(
+        context.model_options[1].reasoning_effort_binding.as_deref(),
+        Some("effort-binding-pro")
+    );
     assert_eq!(
         context.reasoning_effort_binding.as_deref(),
         Some("effort-binding")

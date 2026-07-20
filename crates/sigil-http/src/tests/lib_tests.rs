@@ -27,9 +27,9 @@ use tokio::{
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
     HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
-    HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
-    HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError, HttpAuthValidator,
-    HttpCommandEnvelope, HttpContextWindowSource, HttpDurableCommandStore,
+    HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
+    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
+    HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource, HttpDurableCommandStore,
     HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpLiveEventBus,
     HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval,
     HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
@@ -831,6 +831,30 @@ async fn local_server_projects_typed_run_context() {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
         available_models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
+        model_options: vec![
+            HttpApplicationModelOption {
+                model_name: "deepseek-v4-flash".to_owned(),
+                available_reasoning_efforts: vec![
+                    HttpReasoningEffort::Low,
+                    HttpReasoningEffort::Medium,
+                    HttpReasoningEffort::High,
+                    HttpReasoningEffort::Max,
+                ],
+                default_reasoning_effort: Some(HttpReasoningEffort::Max),
+                reasoning_effort_binding: Some("effort-binding-flash".to_owned()),
+            },
+            HttpApplicationModelOption {
+                model_name: "deepseek-v4-pro".to_owned(),
+                available_reasoning_efforts: vec![
+                    HttpReasoningEffort::Low,
+                    HttpReasoningEffort::Medium,
+                    HttpReasoningEffort::High,
+                    HttpReasoningEffort::Max,
+                ],
+                default_reasoning_effort: Some(HttpReasoningEffort::Max),
+                reasoning_effort_binding: Some("effort-binding-pro".to_owned()),
+            },
+        ],
         model_selection: HttpModelSelectionPolicy::PerRun,
         model_selection_binding: "model-binding".to_owned(),
         default_permission_mode: HttpPermissionMode::Manual,
@@ -864,6 +888,12 @@ async fn local_server_projects_typed_run_context() {
     assert_eq!(status, 200);
     assert_eq!(body["model_name"], "deepseek-v4-flash");
     assert_eq!(body["available_models"][1], "deepseek-v4-pro");
+    assert_eq!(body["model_options"][1]["model_name"], "deepseek-v4-pro");
+    assert_eq!(body["model_options"][1]["default_reasoning_effort"], "max");
+    assert_eq!(
+        body["model_options"][1]["reasoning_effort_binding"],
+        "effort-binding-pro"
+    );
     assert_eq!(body["model_selection"], "per_run");
     assert_eq!(body["model_selection_binding"], "model-binding");
     assert_eq!(body["default_permission_mode"], "manual");

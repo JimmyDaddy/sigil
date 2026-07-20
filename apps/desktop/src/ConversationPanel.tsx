@@ -131,7 +131,9 @@ export function ConversationPanel({
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
         );
         setReasoningEffort((current) =>
-          activeRunIdRef.current === undefined ? context.defaultReasoningEffort : current,
+          current !== undefined && context.availableReasoningEfforts.includes(current)
+            ? current
+            : context.defaultReasoningEffort,
         );
       })
       .catch(() => {
@@ -343,6 +345,13 @@ export function ConversationPanel({
     try {
       const modelChanged =
         runContext !== undefined && selectedModelName !== runContext.modelName;
+      const selectedModelOption = runContext?.modelOptions.find(
+        (option) => option.modelName === selectedModelName,
+      );
+      const selectedReasoningEffort = reasoningEffort !== undefined &&
+        selectedModelOption?.availableReasoningEfforts.includes(reasoningEffort)
+        ? reasoningEffort
+        : undefined;
       const started = await bridge.startRun(
         workspaceId,
         session.id,
@@ -350,17 +359,17 @@ export function ConversationPanel({
         permissionMode,
         modelChanged ? selectedModelName : undefined,
         modelChanged ? runContext?.modelSelectionBinding : undefined,
-        modelChanged ? undefined : reasoningEffort,
-        modelChanged || reasoningEffort === undefined
+        selectedReasoningEffort,
+        selectedReasoningEffort === undefined
           ? undefined
-          : runContext?.reasoningEffortBinding,
+          : selectedModelOption?.reasoningEffortBinding,
         skillBinding,
         agentBinding,
       );
       activeRunIdRef.current = started.id;
       setRun(started);
       setPermissionMode(started.permissionMode);
-      setReasoningEffort(started.reasoningEffort ?? (modelChanged ? undefined : reasoningEffort));
+      setReasoningEffort(started.reasoningEffort ?? selectedReasoningEffort);
       if (modelChanged) setRunContextReload((current) => current + 1);
       onNotice(t("runStarted"));
       return true;
@@ -567,7 +576,14 @@ export function ConversationPanel({
         requestedAgent={requestedAgent}
         onModelChange={(modelName) => {
           setSelectedModelName(modelName);
-          setReasoningEffort(undefined);
+          const modelOption = runContext?.modelOptions.find(
+            (option) => option.modelName === modelName,
+          );
+          setReasoningEffort((current) =>
+            current !== undefined && modelOption?.availableReasoningEfforts.includes(current)
+              ? current
+              : modelOption?.defaultReasoningEffort,
+          );
         }}
         onPermissionModeChange={setPermissionMode}
         onReasoningEffortChange={setReasoningEffort}

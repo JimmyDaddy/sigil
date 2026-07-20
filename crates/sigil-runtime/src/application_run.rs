@@ -185,6 +185,19 @@ pub struct ApplicationSessionBinding {
     pub session_log_path: PathBuf,
 }
 
+/// Exact reasoning-effort capabilities for one selectable provider model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationModelOptionView {
+    /// Exact provider model accepted by the current session.
+    pub model_name: String,
+    /// Reasoning-effort values implemented for this model.
+    pub available_reasoning_efforts: Vec<ReasoningEffort>,
+    /// Configured default when it belongs to this model's exact support set.
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    /// Opaque provider/model binding required with an explicit effort selection.
+    pub reasoning_effort_binding: Option<String>,
+}
+
 /// Provider-neutral facts needed to configure and explain the next application run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationRunContextView {
@@ -192,8 +205,10 @@ pub struct ApplicationRunContextView {
     pub provider_name: String,
     /// Model identity durably frozen for this session.
     pub model_name: String,
-    /// Models this application surface may bind for a new session with the same provider.
+    /// Models this application surface may bind for the next run with the same provider.
     pub available_models: Vec<String>,
+    /// Exact effort capability projection for every entry in `available_models`.
+    pub model_options: Vec<ApplicationModelOptionView>,
     /// Opaque binding proving the exact current-model and available-model selection set.
     pub model_selection_binding: String,
     /// Configured permission mode used when a client does not override one run.
@@ -1175,6 +1190,36 @@ fn application_model_selection_binding(
     format!("{:x}", Sha256::digest(material.as_bytes()))
 }
 
+fn application_model_option_views(
+    root_config: &RootConfig,
+    provider_name: &str,
+    available_models: &[String],
+) -> Vec<ApplicationModelOptionView> {
+    available_models
+        .iter()
+        .map(|model_name| {
+            let mut model_config = root_config.clone();
+            model_config.agent.provider = provider_name.to_owned();
+            model_config.agent.model = model_name.clone();
+            let available_reasoning_efforts =
+                crate::reasoning_effort::supported_reasoning_efforts(provider_name, model_name);
+            let default_reasoning_effort =
+                crate::reasoning_effort::configured_default_reasoning_effort(&model_config);
+            let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
+                provider_name,
+                model_name,
+                &available_reasoning_efforts,
+            );
+            ApplicationModelOptionView {
+                model_name: model_name.clone(),
+                available_reasoning_efforts,
+                default_reasoning_effort,
+                reasoning_effort_binding,
+            }
+        })
+        .collect()
+}
+
 /// Reopens one existing durable V2 session without creating a missing path.
 ///
 /// Callers must first establish their own workspace/catalog authorization for `session_path`.
@@ -1284,6 +1329,8 @@ pub fn application_run_context_view(
         session.entries(),
     )?;
     let available_models = application_model_options(session.provider_name(), session.model_name());
+    let model_options =
+        application_model_option_views(&root_config, session.provider_name(), &available_models);
     let model_selection_binding = application_model_selection_binding(
         session.provider_name(),
         session.model_name(),
@@ -1293,6 +1340,7 @@ pub fn application_run_context_view(
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
         available_models,
+        model_options,
         model_selection_binding,
         default_permission_mode: root_config.permission.mode,
         available_reasoning_efforts,

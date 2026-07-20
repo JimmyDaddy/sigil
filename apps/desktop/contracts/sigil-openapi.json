@@ -267,6 +267,42 @@
         ],
         "type": "object"
       },
+      "ApplicationModelOption": {
+        "additionalProperties": false,
+        "properties": {
+          "available_reasoning_efforts": {
+            "items": {
+              "$ref": "#/components/schemas/ReasoningEffort"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "default_reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_name": {
+            "type": "string"
+          },
+          "reasoning_effort_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model_name",
+          "available_reasoning_efforts"
+        ],
+        "type": "object"
+      },
       "ApplicationSkillBinding": {
         "additionalProperties": false,
         "properties": {
@@ -743,6 +779,13 @@
           "model_name": {
             "type": "string"
           },
+          "model_options": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationModelOption"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
           "model_selection": {
             "enum": [
               "per_run"
@@ -766,6 +809,7 @@
           "provider_name",
           "model_name",
           "available_models",
+          "model_options",
           "model_selection",
           "model_selection_binding",
           "default_permission_mode",

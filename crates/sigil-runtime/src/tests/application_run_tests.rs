@@ -375,6 +375,23 @@ model = "deepseek-v4-flash"
         sigil_kernel::PermissionMode::Manual
     );
     assert_eq!(empty.available_models.len(), 2);
+    assert_eq!(empty.model_options.len(), 2);
+    let pro = empty
+        .model_options
+        .iter()
+        .find(|option| option.model_name == "deepseek-v4-pro")
+        .expect("pro model option");
+    assert_eq!(pro.default_reasoning_effort, Some(ReasoningEffort::Max));
+    assert_eq!(
+        pro.available_reasoning_efforts,
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]
+    );
+    assert!(pro.reasoning_effort_binding.is_some());
     assert!(!empty.model_selection_binding.is_empty());
     assert_eq!(
         empty.available_reasoning_efforts,
@@ -472,8 +489,18 @@ model = "deepseek-v4-flash"
         ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "run-model");
     request.model_name = Some("deepseek-v4-pro".to_owned());
     request.model_selection_binding = Some(context.model_selection_binding.clone());
+    let pro_option = context
+        .model_options
+        .iter()
+        .find(|option| option.model_name == "deepseek-v4-pro")
+        .expect("pro model option");
+    request.reasoning_effort = pro_option.default_reasoning_effort.clone();
+    request.reasoning_effort_binding = pro_option.reasoning_effort_binding.clone();
 
     admit_application_model_selection(&request, &mut session)?;
+    let mut selected_config = RootConfig::load(&config_path)?;
+    selected_config.agent.model = session.model_name().to_owned();
+    admit_application_reasoning_effort(&request, &selected_config)?;
 
     assert_eq!(session.session_scope_id(), binding.session_scope_id);
     assert_eq!(session.model_name(), "deepseek-v4-pro");

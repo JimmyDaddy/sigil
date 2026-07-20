@@ -184,7 +184,10 @@ export function Composer({
           effortSelectRef.current?.focus();
           return true;
         }
-        if (!runContext?.availableReasoningEfforts.includes(argument as ReasoningEffort)) {
+        const selectedOption = runContext?.modelOptions.find(
+          (option) => option.modelName === (selectedModelName ?? runContext.modelName),
+        );
+        if (!selectedOption?.availableReasoningEfforts.includes(argument as ReasoningEffort)) {
           onNotice(t("unsupportedEffort", { value: argument }), true);
           return false;
         }
@@ -238,6 +241,8 @@ export function Composer({
   };
   const modelName = selectedModelName ?? runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
   const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
+  const modelOption = runContext?.modelOptions.find((option) => option.modelName === modelName);
+  const availableReasoningEfforts = modelOption?.availableReasoningEfforts ?? [];
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
 
   return (
@@ -361,7 +366,7 @@ export function Composer({
                 ))}
               </Select>
             </div>
-            {runContext !== undefined && runContext.availableReasoningEfforts.length > 0 ? (
+            {availableReasoningEfforts.length > 0 ? (
               <div className="composer-effort">
                 <Select
                   label={t("reasoningEffort")}
@@ -374,7 +379,7 @@ export function Composer({
                   onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}
                 >
                   {reasoningEffort === undefined ? <option value="">{t("effortUnavailable")}</option> : null}
-                  {runContext.availableReasoningEfforts.map((effort) => (
+                  {availableReasoningEfforts.map((effort) => (
                     <option key={effort} value={effort}>{reasoningEffortLabel(effort, t)}</option>
                   ))}
                 </Select>

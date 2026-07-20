@@ -950,6 +950,12 @@ export interface components {
             commands: components["schemas"]["ApplicationCommandCatalogEntry"][];
             skills: components["schemas"]["ApplicationSkillCatalogEntry"][];
         };
+        ApplicationModelOption: {
+            available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
+            default_reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+            model_name: string;
+            reasoning_effort_binding?: string | null;
+        };
         ApplicationSkillBinding: {
             index_fingerprint: string;
             skill_id: string;
@@ -1062,6 +1068,7 @@ export interface components {
             /** Format: uint64 */
             last_prompt_tokens?: number | null;
             model_name: string;
+            model_options: components["schemas"]["ApplicationModelOption"][];
             /** @enum {string} */
             model_selection: "per_run";
             model_selection_binding: string;

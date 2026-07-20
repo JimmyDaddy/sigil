@@ -469,6 +469,18 @@ pub struct HttpApplicationExtensionCatalog {
     pub agents: Vec<HttpApplicationAgentCatalogEntry>,
 }
 
+/// Exact reasoning-effort capabilities for one model selectable in the current session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApplicationModelOption {
+    pub model_name: String,
+    pub available_reasoning_efforts: Vec<HttpReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<HttpReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_binding: Option<String>,
+}
+
 /// Typed facts used to configure and explain the next run in one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -479,6 +491,8 @@ pub struct HttpRunContextView {
     pub model_name: String,
     /// Models accepted when creating a new session for this provider.
     pub available_models: Vec<String>,
+    /// Exact effort capabilities for each selectable model.
+    pub model_options: Vec<HttpApplicationModelOption>,
     /// Whether the model can change without forking the durable session.
     pub model_selection: HttpModelSelectionPolicy,
     /// Opaque binding proving the exact current and available model set.
