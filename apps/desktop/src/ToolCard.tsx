@@ -1,4 +1,5 @@
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
+import { HighlightedCode } from "./SafeMarkdown";
 import { Icon, type IconName } from "./ui/icons";
 
 const MAX_VISIBLE_OUTPUT_LINES = 240;
@@ -23,6 +24,14 @@ interface ToolPresentation {
   readonly detailLabel?: string;
   readonly detailKind?: "diff" | "output" | "raw";
   readonly detailText?: string;
+  readonly detailLanguage?: string;
+}
+
+interface StructuredOutput {
+  readonly status?: string;
+  readonly summary: string;
+  readonly output?: string;
+  readonly language?: string;
 }
 
 export function ToolCard({ tool }: { tool: ToolView }) {
@@ -48,13 +57,17 @@ export function ToolCard({ tool }: { tool: ToolView }) {
         <details className="tool-details">
           <summary>
             <span>{presentation.detailLabel}</span>
-            <small>{presentation.detailKind === "raw" ? "JSON" : `${lines.length} line${lines.length === 1 ? "" : "s"}`}</small>
+            <small>{detailMetadata(presentation.detailLanguage, lines.length)}</small>
           </summary>
           <div className="tool-card-body">
             {presentation.detailKind === "diff" ? (
               <DiffViewer diff={presentation.detailText ?? ""} />
             ) : (
-              <pre className="tool-output" aria-label={`${tool.toolName} ${presentation.detailKind === "raw" ? "raw details" : "output"}`}>{output}</pre>
+              <HighlightedCode
+                text={output}
+                language={presentation.detailLanguage}
+                ariaLabel={`${tool.toolName} ${presentation.detailKind === "raw" ? "raw details" : "output"}`}
+              />
             )}
             {omittedLines > 0 ? <small>{omittedLines} output line{omittedLines === 1 ? "" : "s"} omitted from this view.</small> : null}
           </div>
@@ -75,7 +88,9 @@ export function presentTool(tool: ToolView): ToolPresentation {
     ?? (diff ? "File changes are ready to review." : summarizePlainOutput(plainLines, tone));
   const detailKind = diff
     ? "diff" as const
-    : structured !== undefined
+    : structured?.output !== undefined
+      ? "output" as const
+      : structured !== undefined
       ? "raw" as const
       : plainLines.length > 1
         ? "output" as const
@@ -87,11 +102,16 @@ export function presentTool(tool: ToolView): ToolPresentation {
     summary,
     detailKind,
     detailLabel: detailKind === "diff" ? "Review changes" : detailKind === "raw" ? "Raw details" : detailKind === "output" ? "View output" : undefined,
-    detailText: detailKind === undefined ? undefined : tool.text,
+    detailText: detailKind === undefined ? undefined : structured?.output ?? tool.text,
+    detailLanguage: detailKind === "raw"
+      ? "json"
+      : detailKind === "output"
+        ? structured === undefined ? inferContentLanguage(tool.text) : structured.language
+        : undefined,
   };
 }
 
-function parseStructuredOutput(text: string): { readonly status?: string; readonly summary: string } | undefined {
+function parseStructuredOutput(text: string): StructuredOutput | undefined {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
   let parsed: unknown;
@@ -107,13 +127,101 @@ function parseStructuredOutput(text: string): { readonly status?: string; readon
   const details = asRecord(meta?.details);
   const call = asRecord(details?.call);
   const status = stringValue(root.status);
+  const content = stringValue(root.content);
   const summary = firstText(
     stringValue(error?.message),
-    stringValue(root.content),
     stringValue(call?.summary),
     stringValue(details?.summary),
+    content === undefined ? undefined : summarizePlainOutput(content.split("\n"), statusTone(status)),
   ) ?? fallbackSummary(statusTone(status));
-  return { status, summary: boundedSummary(summary) };
+  return {
+    status,
+    summary: boundedSummary(summary),
+    output: error === undefined ? content : undefined,
+    language: inferOutputLanguage(
+      stringValue(details?.language),
+      firstText(stringValue(details?.path), stringValue(call?.path)),
+      content,
+    ),
+  };
+}
+
+function inferOutputLanguage(
+  explicit: string | undefined,
+  path: string | undefined,
+  content: string | undefined,
+): string | undefined {
+  return normalizeLanguage(explicit)
+    ?? languageFromPath(path)
+    ?? inferContentLanguage(content);
+}
+
+function inferContentLanguage(content: string | undefined): string | undefined {
+  if (content === undefined) return undefined;
+  const trimmed = content.trim();
+  if (!((trimmed.startsWith("{") && trimmed.endsWith("}"))
+    || (trimmed.startsWith("[") && trimmed.endsWith("]")))) return undefined;
+  try {
+    JSON.parse(trimmed);
+    return "json";
+  } catch {
+    return undefined;
+  }
+}
+
+function languageFromPath(path: string | undefined): string | undefined {
+  const extension = path?.toLocaleLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+  return normalizeLanguage(extension);
+}
+
+function normalizeLanguage(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLocaleLowerCase();
+  const aliases: Readonly<Record<string, string>> = {
+    c: "c",
+    cc: "cpp",
+    cpp: "cpp",
+    cs: "csharp",
+    css: "css",
+    diff: "diff",
+    go: "go",
+    h: "c",
+    hpp: "cpp",
+    html: "xml",
+    java: "java",
+    js: "javascript",
+    javascript: "javascript",
+    json: "json",
+    jsx: "javascript",
+    kt: "kotlin",
+    kotlin: "kotlin",
+    lua: "lua",
+    md: "markdown",
+    markdown: "markdown",
+    php: "php",
+    py: "python",
+    python: "python",
+    rb: "ruby",
+    rs: "rust",
+    rust: "rust",
+    sh: "bash",
+    shell: "bash",
+    sql: "sql",
+    swift: "swift",
+    toml: "ini",
+    ts: "typescript",
+    tsx: "typescript",
+    typescript: "typescript",
+    xml: "xml",
+    yaml: "yaml",
+    yml: "yaml",
+  };
+  return aliases[normalized];
+}
+
+function detailMetadata(language: string | undefined, lineCount: number): string {
+  const lines = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
+  return language === undefined ? lines : `${humanizeStatus(language)} · ${lines}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -166,7 +274,7 @@ function statusTone(value?: string): ToolTone {
   const status = value?.toLocaleLowerCase() ?? "";
   if (/failed|failure|error|crash|invalid/.test(status)) return "danger";
   if (/denied|cancel|blocked|warning|expired/.test(status)) return "warning";
-  if (/success|succeeded|complete|completed|ready|finished|passed/.test(status)) return "success";
+  if (/^ok$|success|succeeded|complete|completed|ready|finished|passed/.test(status)) return "success";
   if (/running|progress|pending|starting|waiting/.test(status)) return "info";
   return "neutral";
 }

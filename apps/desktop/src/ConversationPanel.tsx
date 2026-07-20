@@ -89,6 +89,7 @@ export function ConversationPanel({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
+  const terminalTranscriptRefreshRunId = useRef<string | undefined>(undefined);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
@@ -116,7 +117,14 @@ export function ConversationPanel({
     setRequestedSkill(undefined);
     setRequestedAgent(undefined);
     activeRunIdRef.current = undefined;
+    terminalTranscriptRefreshRunId.current = undefined;
   }, [session.id, workspaceId]);
+
+  const refreshTerminalTranscript = useCallback((runId: string) => {
+    if (terminalTranscriptRefreshRunId.current === runId) return;
+    terminalTranscriptRefreshRunId.current = runId;
+    setTranscriptReload((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -202,6 +210,7 @@ export function ConversationPanel({
           setRun((current) =>
             current?.id === event.runId ? { ...current, status: terminalStatus } : current,
           );
+          refreshTerminalTranscript(event.runId);
         }
       });
       if (disposed) {
@@ -228,6 +237,7 @@ export function ConversationPanel({
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
+          refreshTerminalTranscript(status.runId);
         }
       });
       if (disposed) {
@@ -259,6 +269,9 @@ export function ConversationPanel({
           message: attachment.streamMessage,
         });
         setAttachmentGap(attachment.hasGap);
+        if (isTerminal(attachment.run.status) || attachment.streamState === "terminal") {
+          refreshTerminalTranscript(attachment.run.id);
+        }
         if (attachment.streamMessage !== undefined) {
           onNotice(
             attachment.streamMessage,
@@ -284,10 +297,10 @@ export function ConversationPanel({
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [bridge, onNotice, session.foregroundRunId, session.id, t, workspaceId]);
+  }, [bridge, onNotice, refreshTerminalTranscript, session.foregroundRunId, session.id, t, workspaceId]);
 
   const rows = useMemo(
-    () => [...reduceTranscript(transcript, t), ...reduceTimeline(events, t)],
+    () => reduceConversationTimeline(transcript, events, t),
     [events, t, transcript],
   );
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
@@ -674,7 +687,7 @@ export function reduceTranscript(
   messages: TranscriptMessage[],
   t: Translate = translateEnglish,
 ): TimelineRow[] {
-  return messages.map((message) => {
+  return [...messages].sort((left, right) => left.ordinal - right.ordinal).map((message) => {
     const attachmentText = message.imageAttachmentCount > 0
       ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
       : "";
@@ -728,6 +741,42 @@ export function reduceTranscript(
       status: status ?? (message.assistantKind === "tool_preamble" ? "tool preamble" : undefined),
     };
   });
+}
+
+export function reduceConversationTimeline(
+  transcript: TranscriptMessage[],
+  events: TimelineEvent[],
+  t: Translate = translateEnglish,
+): TimelineRow[] {
+  const orderedTranscript = [...transcript].sort((left, right) => left.ordinal - right.ordinal);
+  const latestUser = [...orderedTranscript].reverse().find((message) => message.role === "user");
+  const coveredRunIds = new Set<string>();
+  if (latestUser !== undefined) {
+    const runIds = new Set(events.map((event) => event.runId));
+    for (const runId of runIds) {
+      const started = events.find((event) => event.runId === runId && event.kind === "run_started");
+      const finished = [...events].reverse().find(
+        (event) => event.runId === runId && event.kind === "run_finished",
+      );
+      if (
+        started?.text !== latestUser.content ||
+        finished?.text === undefined
+      ) {
+        continue;
+      }
+      const durableFinal = orderedTranscript.find((message) =>
+        message.ordinal > latestUser.ordinal &&
+        message.role === "assistant" &&
+        message.assistantKind === "final_answer" &&
+        message.content === finished.text
+      );
+      if (durableFinal !== undefined) coveredRunIds.add(runId);
+    }
+  }
+  return [
+    ...reduceTranscript(orderedTranscript, t),
+    ...reduceTimeline(events.filter((event) => !coveredRunIds.has(event.runId)), t),
+  ];
 }
 
 export function mergeTimelineEvent(
@@ -839,6 +888,7 @@ export function reduceTimeline(
         });
         break;
       case "notice":
+        if (isAutoAllowedPermissionNotice(event.text)) break;
         rows.set(`${event.runId}:notice:${event.sequence}`, {
           key: `${event.runId}:notice:${event.sequence}`,
           kind: "notice",
@@ -851,6 +901,10 @@ export function reduceTimeline(
     }
   }
   return [...rows.values()];
+}
+
+function isAutoAllowedPermissionNotice(text?: string): boolean {
+  return text?.startsWith("permission ") === true && text.endsWith(" mode=allow");
 }
 
 function finalizeRunRows(

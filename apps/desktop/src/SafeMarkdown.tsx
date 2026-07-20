@@ -18,16 +18,25 @@ const ALLOWED_ELEMENTS = [
 interface SafeMarkdownProps {
   readonly text: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
+  readonly codeBlockVariant?: "message" | "embedded";
+  readonly codeBlockAriaLabel?: string;
 }
 
-export function SafeMarkdown({ text, onOpenExternalUrl }: SafeMarkdownProps) {
+export function SafeMarkdown({
+  text,
+  onOpenExternalUrl,
+  codeBlockVariant = "message",
+  codeBlockAriaLabel,
+}: SafeMarkdownProps) {
   const components: Components = {
     a: ({ href, children }) => (
       <SafeExternalLink href={href} onOpenExternalUrl={onOpenExternalUrl}>
         {children}
       </SafeExternalLink>
     ),
-    pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
+    pre: ({ children }) => codeBlockVariant === "embedded"
+      ? <pre className="tool-output syntax-highlight" aria-label={codeBlockAriaLabel}>{children}</pre>
+      : <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
     code: ({ className, children }) => <code className={className}>{children}</code>,
     table: ({ children }) => <div className="markdown-table-scroll"><table>{children}</table></div>,
   };
@@ -44,6 +53,26 @@ export function SafeMarkdown({ text, onOpenExternalUrl }: SafeMarkdownProps) {
     >
       {text}
     </ReactMarkdown>
+  );
+}
+
+export function HighlightedCode({
+  text,
+  language,
+  ariaLabel,
+}: {
+  readonly text: string;
+  readonly language?: string;
+  readonly ariaLabel: string;
+}) {
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(text) + 1));
+  const info = language?.match(/^[a-z0-9-]{1,32}$/)?.[0] ?? "";
+  return (
+    <SafeMarkdown
+      text={`${fence}${info}\n${text}\n${fence}`}
+      codeBlockVariant="embedded"
+      codeBlockAriaLabel={ariaLabel}
+    />
   );
 }
 
@@ -115,7 +144,7 @@ function MarkdownCodeBlock({ children }: { readonly children: ReactNode }) {
           />
         </Tooltip>
       </header>
-      <pre>{children}</pre>
+      <pre className="syntax-highlight">{children}</pre>
     </div>
   );
 }
@@ -150,4 +179,10 @@ function reactNodeText(node: ReactNode): string {
   if (Array.isArray(node)) return node.map(reactNodeText).join("");
   if (isValidElement<{ children?: ReactNode }>(node)) return reactNodeText(node.props.children);
   return "";
+}
+
+function longestBacktickRun(text: string): number {
+  let longest = 0;
+  for (const match of text.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
+  return longest;
 }

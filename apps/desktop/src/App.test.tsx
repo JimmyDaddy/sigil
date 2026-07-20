@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { AppearanceSnapshot } from "./appearance/contract";
-import { mergeTimelineEvent, reduceTimeline } from "./ConversationPanel";
+import { mergeTimelineEvent, reduceConversationTimeline, reduceTimeline } from "./ConversationPanel";
 import { DiffViewer } from "./DiffViewer";
 import { Message } from "./Message";
 import { MessageContent } from "./MessageContent";
@@ -15,6 +15,7 @@ import type {
   DesktopBootstrap,
   RunStreamStatus,
   TimelineEvent,
+  TranscriptMessage,
   WorkspaceSummary,
 } from "./types";
 
@@ -305,6 +306,32 @@ describe("desktop coding-agent components", () => {
     expect(details.open).toBe(false);
     expect(screen.getByLabelText("write_file raw details").tagName).toBe("PRE");
   });
+
+  it("presents successful structured tool output instead of a recorded placeholder", () => {
+    const text = JSON.stringify({
+      content: "pub fn ready() -> bool { true }\n",
+      meta: { details: { call: { summary: "path=src/lib.rs" }, language: "rust" } },
+      status: "ok",
+    });
+    const tool = { key: "read", toolName: "read_file", text };
+
+    expect(presentTool(tool)).toMatchObject({
+      displayName: "Read file",
+      status: "Ok",
+      tone: "success",
+      summary: "path=src/lib.rs",
+      detailKind: "output",
+      detailText: "pub fn ready() -> bool { true }",
+      detailLanguage: "rust",
+    });
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("path=src/lib.rs")).toBeTruthy();
+    expect(screen.getByText("View output")).toBeTruthy();
+    expect(screen.getByText("Rust · 1 line")).toBeTruthy();
+    expect(screen.getByLabelText("read_file output").querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(screen.queryByText("Tool activity was recorded.")).toBeNull();
+  });
 });
 
 describe("desktop workspace and history shell", () => {
@@ -449,6 +476,87 @@ describe("desktop workspace and history shell", () => {
       expect.objectContaining({ kind: "assistant", text: "Hi" }),
     ]);
     expect(rows.every((row) => row.status !== "complete")).toBe(true);
+  });
+
+  it("hides automatically allowed permission audit notices but keeps actionable policy notices", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-permission",
+      replayable: true,
+    };
+    const rows = reduceTimeline([
+      { ...base, sequence: 1, kind: "notice", text: "permission read_file subject=README.md mode=allow" },
+      { ...base, sequence: 2, kind: "notice", text: "permission write_file subject=README.md mode=ask" },
+      { ...base, sequence: 3, kind: "notice", text: "permission bash subject=- mode=deny" },
+    ]);
+
+    expect(rows.map((row) => row.text)).toEqual([
+      "permission write_file subject=README.md mode=ask",
+      "permission bash subject=- mode=deny",
+    ]);
+  });
+
+  it("uses the chronological durable run instead of appending its terminal replay backwards", () => {
+    const transcript: TranscriptMessage[] = [
+      {
+        ordinal: 4,
+        messageId: "final",
+        role: "assistant",
+        assistantKind: "final_answer",
+        content: "Done",
+        imageAttachmentCount: 0,
+        truncated: false,
+        originalContentBytes: 4,
+      },
+      {
+        ordinal: 2,
+        messageId: "tool",
+        role: "tool",
+        toolName: "read_file",
+        content: "{\"content\":\"body\",\"status\":\"ok\"}",
+        imageAttachmentCount: 0,
+        truncated: false,
+        originalContentBytes: 32,
+      },
+      {
+        ordinal: 1,
+        messageId: "user",
+        role: "user",
+        content: "Inspect",
+        imageAttachmentCount: 0,
+        truncated: false,
+        originalContentBytes: 7,
+      },
+      {
+        ordinal: 3,
+        messageId: "reasoning",
+        role: "assistant",
+        assistantKind: "reasoning_trace",
+        content: "Checking",
+        imageAttachmentCount: 0,
+        truncated: false,
+        originalContentBytes: 8,
+      },
+    ];
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-terminal",
+      replayable: true,
+    };
+    const rows = reduceConversationTimeline(transcript, [
+      { ...base, sequence: 1, kind: "run_started", text: "Inspect" },
+      { ...base, sequence: 2, kind: "tool_result", itemId: "call-1", toolName: "read_file", text: "body", status: "ok" },
+      { ...base, sequence: 3, kind: "run_finished", text: "Done" },
+    ]);
+
+    expect(rows.map((row) => [row.kind, row.text])).toEqual([
+      ["user", "Inspect"],
+      ["tool", "{\"content\":\"body\",\"status\":\"ok\"}"],
+      ["reasoning", "Checking"],
+      ["assistant", "Done"],
+    ]);
   });
 
   it("restores the most recent workspace after native bootstrap", async () => {

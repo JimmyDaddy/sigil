@@ -194,7 +194,7 @@ impl DesktopProtocolEvent {
             ),
             "tool_result" => (
                 DesktopTimelineEventKind::ToolResult,
-                None,
+                nested_string("result", "content"),
                 nested_string("result", "call_id"),
                 tool_result_status(&self.run_event.event),
             ),

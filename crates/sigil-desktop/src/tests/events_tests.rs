@@ -46,6 +46,34 @@ fn timeline_projection_keeps_conversation_text_and_drops_raw_tool_arguments() {
 }
 
 #[test]
+fn tool_result_projection_keeps_bounded_safe_output_for_the_tool_card() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "tool_result",
+            "result": {
+                "call_id": "call-1",
+                "tool_name": "read_file",
+                "content": "{\"content\":\"file body\",\"status\":\"ok\"}",
+                "status": "ok"
+            }
+        }),
+    );
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("tool result should project");
+
+    assert_eq!(timeline.kind, DesktopTimelineEventKind::ToolResult);
+    assert_eq!(timeline.tool_name.as_deref(), Some("read_file"));
+    assert_eq!(
+        timeline.text.as_deref(),
+        Some("{\"content\":\"file body\",\"status\":\"ok\"}")
+    );
+    assert_eq!(timeline.status.as_deref(), Some("ok"));
+}
+
+#[test]
 fn approval_projection_requires_exact_guard_and_bounds_preview() {
     let mut event = envelope(
         DesktopProtocolEventClass::Durable,
