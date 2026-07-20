@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { HistoryContent } from "../../HistoryPanel";
+import { groupEntries, HistoryContent } from "../../HistoryPanel";
 import { ToolCard } from "../../ToolCard";
 import { isUnifiedDiff } from "../../DiffViewer";
 import { CatalogApp } from "./CatalogApp";
@@ -26,7 +26,7 @@ describe("desktop UI catalog contract", () => {
 
     for (const fixture of catalogFixtures) {
       expect(fixture.themes).toEqual(["system", "light", "dark"]);
-      expect(fixture.viewports).toEqual([1280, 900, 840, 839, 760, 320]);
+      expect(fixture.viewports).toEqual([1280, 1024, 900, 899, 760, 320]);
       expect(fixture.contrastModes).toEqual(["normal", "forced-colors"]);
       expect(fixture.motionModes).toEqual(["full", "reduced"]);
       expect(fixture.zoomFactors).toEqual([1, 2]);
@@ -36,7 +36,7 @@ describe("desktop UI catalog contract", () => {
   it("provides a real thirty-row density fixture with whole-row session actions", () => {
     const fixture = catalogFixtures.find(({ id }) => id === "session-catalog-30");
     expect(fixture?.sessions).toHaveLength(30);
-    expect(fixture?.minimumFullyVisibleRows1280x720).toBe(5);
+    expect(fixture?.minimumFullyVisibleRows1280x720).toBe(8);
 
     render(
       createElement(HistoryContent, {
@@ -58,6 +58,50 @@ describe("desktop UI catalog contract", () => {
 
     expect(screen.getAllByRole("button")).toHaveLength(30);
     expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.queryByText("deepseek-chat")).toBeNull();
+  });
+
+  it("groups session navigation by local calendar day without reordering entries", () => {
+    const reference = new Date(2026, 6, 20, 15, 0).getTime();
+    const entries = [
+      { ...catalogFixtures.find(({ id }) => id === "session-catalog-30")!.sessions![0]!, sessionId: "today", sourceModifiedAtUnixMs: new Date(2026, 6, 20, 9, 0).getTime() },
+      { ...catalogFixtures.find(({ id }) => id === "session-catalog-30")!.sessions![1]!, sessionId: "yesterday", sourceModifiedAtUnixMs: new Date(2026, 6, 19, 18, 0).getTime() },
+      { ...catalogFixtures.find(({ id }) => id === "session-catalog-30")!.sessions![2]!, sessionId: "earlier", sourceModifiedAtUnixMs: new Date(2026, 6, 17, 18, 0).getTime() },
+    ];
+
+    expect(groupEntries(entries, reference).map((group) => [group.label, group.entries.map((entry) => entry.sessionId)])).toEqual([
+      ["Today", ["today"]],
+      ["Yesterday", ["yesterday"]],
+      ["Earlier", ["earlier"]],
+    ]);
+  });
+
+  it("keeps degraded source detail behind a compact diagnostic disclosure", () => {
+    const fixture = catalogFixtures.find(({ id }) => id === "degraded-catalog")!;
+    render(
+      createElement(HistoryContent, {
+        state: "ready",
+        page: {
+          workspaceId: "catalog-workspace",
+          generation: 1,
+          reconciledAtUnixMs: 1_784_419_200_000,
+          degradedSourceCount: fixture.degradedCounts!.unavailable,
+          identityConflictCount: fixture.degradedCounts!.changed,
+          truncatedSourceCount: fixture.degradedCounts!.truncated,
+          entries: [...fixture.sessions!],
+        },
+        onRetry: vi.fn(),
+        onLoadMore: vi.fn(),
+        onOpen: vi.fn(),
+      }),
+    );
+
+    expect(screen.queryByText("Some sources need attention")).toBeNull();
+    const disclosure = screen.getByRole("button", { name: "Catalog diagnostics, 4 issues" });
+    fireEvent.click(disclosure);
+    expect(screen.getByRole("dialog", { name: "Catalog diagnostics, 4 issues" })).toBeTruthy();
+    expect(screen.getByText("Too large to inspect")).toBeTruthy();
   });
 
   it("carries the complete adaptive domain-state evidence matrix", () => {

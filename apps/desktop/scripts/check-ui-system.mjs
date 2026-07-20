@@ -189,12 +189,12 @@ if (!themeSource.includes(':root[data-theme="light"]')) {
 }
 
 const densitySource = readFileSync(densityPath, "utf8");
-if (!densitySource.includes("--sg-sys-session-row-height: 60px")) {
-  fail("session row density must remain bounded to 60px for the 1280x720 catalog contract");
+if (!densitySource.includes("--sg-sys-session-row-height: 48px")) {
+  fail("session row density must remain bounded to 48px for the 1280x720 catalog contract");
 }
 const fixtureSource = readFileSync(join(srcRoot, "ui", "catalog", "fixtures.ts"), "utf8");
-if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s\S]*minimumFullyVisibleRows1280x720:\s*5/.test(fixtureSource)) {
-  fail("thirty-session catalog fixture does not freeze the five-row 1280x720 density contract");
+if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s\S]*minimumFullyVisibleRows1280x720:\s*8/.test(fixtureSource)) {
+  fail("thirty-session catalog fixture does not freeze the eight-row 1280x720 density contract");
 }
 if (!/id:\s*["']session-catalog-100["'][\s\S]*sessions:\s*sessionEntries\(100\)/.test(fixtureSource)) {
   fail("hundred-session scrolling fixture is missing");
@@ -213,7 +213,7 @@ const resetSource = readFileSync(resetPath, "utf8");
 if (!/body\s*\{[^}]*min-width:\s*320px[^}]*overflow:\s*hidden/.test(resetSource)) {
   fail("320px no-document-scroll root contract is missing");
 }
-if (!styles.includes("@media (max-width: 1279px)") || !styles.includes("@media (max-width: 839px)")) {
+if (!styles.includes("@media (max-width: 1279px)") || !styles.includes("@media (max-width: 899px)")) {
   fail("expanded/medium/compact breakpoint contract is missing");
 }
 for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".css")) {

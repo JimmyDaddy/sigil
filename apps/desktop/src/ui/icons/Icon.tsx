@@ -1,6 +1,6 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "close" | "filter" | "menu" | "moon" | "more" | "search" | "sun" | "system";
+export type IconName = "add" | "close" | "filter" | "menu" | "moon" | "more" | "pin" | "search" | "sun" | "system" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
@@ -9,9 +9,11 @@ const paths: Record<IconName, string> = {
   menu: "M4 7h16M4 12h16M4 17h16",
   moon: "M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  pin: "m15 4 5 5-3 1.5-3.5 3.5 1 3-1.5 1.5-3.5-3.5L5 19l1.5-5.5L3 10l3.5-3.5 3 1Z",
   search: "m20 20-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z",
   sun: "M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
   system: "M4 5.5h16v11H4zM9 20h6m-3-3.5V20",
+  warning: "M12 4 21 20H3L12 4Zm0 5v5m0 3h.01",
 };
 
 export function Icon({ name, ...props }: { readonly name: IconName } & SVGAttributes<SVGSVGElement>) {

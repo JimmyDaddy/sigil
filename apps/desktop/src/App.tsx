@@ -72,7 +72,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sessionMessage, setSessionMessage] = useState<string>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const compactNavigation = useMediaQuery("(max-width: 839px)");
+  const compactNavigation = useMediaQuery("(max-width: 899px)");
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
 

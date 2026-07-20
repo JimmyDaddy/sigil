@@ -118,7 +118,7 @@
   .desktop-stage { grid-template-columns: 248px minmax(0, 1fr); }
 }
 
-@media (max-width: 839px) {
+@media (max-width: 899px) {
   .topbar { padding: 10px var(--sg-sys-space-3); }
   .navigation-toggle { display: inline-flex; }
   .brand strong { display: none; }

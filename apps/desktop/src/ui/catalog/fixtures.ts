@@ -9,7 +9,7 @@ import type {
 export const UI_CATALOG_MARKER = "sigil-desktop-dev-ui-catalog";
 
 export type CatalogTheme = "system" | "light" | "dark";
-export type CatalogViewport = 1280 | 900 | 840 | 839 | 760 | 320;
+export type CatalogViewport = 1280 | 1024 | 900 | 899 | 760 | 320;
 export type CatalogContrast = "normal" | "forced-colors";
 export type CatalogMotion = "full" | "reduced";
 
@@ -38,7 +38,7 @@ export interface CatalogFixture {
 }
 
 const allThemes = ["system", "light", "dark"] as const;
-const allViewports = [1280, 900, 840, 839, 760, 320] as const;
+const allViewports = [1280, 1024, 900, 899, 760, 320] as const;
 const allContrastModes = ["normal", "forced-colors"] as const;
 const allMotionModes = ["full", "reduced"] as const;
 const allZoomFactors = [1, 2] as const;
@@ -86,7 +86,7 @@ export const catalogFixtures: readonly CatalogFixture[] = [
     description: "Thirty sessions with long English and Chinese titles",
     ...environment,
     sessions: sessionEntries(30),
-    minimumFullyVisibleRows1280x720: 5,
+    minimumFullyVisibleRows1280x720: 8,
   },
   {
     id: "session-catalog-100",

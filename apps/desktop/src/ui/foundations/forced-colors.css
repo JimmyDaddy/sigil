@@ -48,7 +48,7 @@
   .status-dot,
   .risk-badge,
   .verification-badge,
-  .pin-badge,
+  .pin-indicator,
   .source-badge {
     border: 1px solid CanvasText;
     forced-color-adjust: none;
