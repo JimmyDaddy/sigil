@@ -8,7 +8,7 @@ import { mergeTimelineEvent, reduceTimeline } from "./ConversationPanel";
 import { DiffViewer } from "./DiffViewer";
 import { Message } from "./Message";
 import { MessageContent } from "./MessageContent";
-import { ToolCard } from "./ToolCard";
+import { presentTool, ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
@@ -158,13 +158,16 @@ describe("desktop coding-agent components", () => {
       value: { writeText },
     });
     render(
-      <MessageContent text={"<script>alert(1)</script>\n\n- first `item`\n- second\n\n```rust\ncargo test\n```"} />,
+      <MessageContent text={"# Result\n\n<script>alert(1)</script>\n\n- first `item`\n- **second**\n\n_Ready to merge._\n\n```rust\ncargo test\n```"} />,
     );
 
     expect(document.querySelector("script")).toBeNull();
     expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
     expect(screen.getByRole("list")).toBeTruthy();
     expect(screen.getByText("item").tagName).toBe("CODE");
+    expect(screen.getByRole("heading", { name: "Result" }).tagName).toBe("H3");
+    expect(screen.getByText("second").tagName).toBe("STRONG");
+    expect(screen.getByText("Ready to merge.").tagName).toBe("EM");
     expect(screen.getByText("cargo test").tagName).toBe("CODE");
     expect(screen.queryByRole("link")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Copy code" }));
@@ -192,6 +195,28 @@ describe("desktop coding-agent components", () => {
     expect(screen.getByText("5 output lines omitted from this view.")).toBeTruthy();
     expect(screen.queryByText("duration not recorded")).toBeNull();
     expect(screen.queryByText("risk not classified")).toBeNull();
+  });
+
+  it("summarizes structured tool failures and keeps transport JSON collapsed", () => {
+    const text = JSON.stringify({
+      content: "Tool execution was denied in Sigil Desktop.",
+      error: { kind: "approval_denied", message: "Denied in Sigil Desktop", retriable: false },
+      status: "error",
+    });
+    const tool = { key: "denied", toolName: "write_file", text };
+    expect(presentTool(tool)).toMatchObject({
+      displayName: "Write file",
+      status: "Error",
+      tone: "danger",
+      summary: "Denied in Sigil Desktop",
+      detailKind: "raw",
+    });
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("Denied in Sigil Desktop").tagName).toBe("P");
+    const details = screen.getByText("Raw details").closest("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(screen.getByLabelText("write_file raw details").tagName).toBe("PRE");
   });
 });
 
@@ -290,6 +315,29 @@ describe("desktop workspace and history shell", () => {
       mergeTimelineEvent(mergeTimelineEvent([], first), second),
     );
     expect(rows.map((row) => row.text)).toEqual(["First run", "Second run"]);
+  });
+
+  it("groups one tool lifecycle into a single semantic timeline row", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-tool",
+      replayable: true,
+      itemId: "call-1",
+      toolName: "shell",
+    };
+    const rows = reduceTimeline([
+      { ...base, sequence: 1, kind: "tool_started", status: "running" },
+      { ...base, sequence: 2, kind: "tool_progress", text: "Running cargo test", status: "running" },
+      { ...base, sequence: 3, kind: "tool_result", status: "succeeded" },
+    ]);
+
+    expect(rows).toEqual([expect.objectContaining({
+      kind: "tool",
+      label: "shell",
+      text: "Running cargo test",
+      status: "succeeded",
+    })]);
   });
 
   it("renders the honest empty and recent-workspace states after native bootstrap", async () => {

@@ -348,7 +348,6 @@ export function ConversationPanel({
       <section className="conversation-panel" aria-labelledby="conversation-title">
       <header className="conversation-header">
         <div>
-          <p className="eyebrow">Active conversation</p>
           <span className="conversation-title-row">
             <h2 id="conversation-title">{session.label ?? "Untitled conversation"}</h2>
             <small>{session.runCount} recorded run{session.runCount === 1 ? "" : "s"}</small>
@@ -508,7 +507,7 @@ export function reduceTranscript(messages: TranscriptMessage[]): TimelineRow[] {
     const attachmentText = message.imageAttachmentCount > 0
       ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
       : "";
-    const text = (message.content ?? attachmentText) || "No text payload.";
+    const text = (message.content ?? attachmentText) || "";
     const status = message.truncated
       ? `preview · ${message.originalContentBytes} bytes`
       : message.imageAttachmentCount > 0
@@ -638,11 +637,12 @@ export function reduceTimeline(events: TimelineEvent[]): TimelineRow[] {
       case "tool_progress":
       case "tool_result": {
         const key = `${event.runId}:tool:${event.itemId ?? event.sequence}`;
+        const current = rows.get(key);
         rows.set(key, {
           key,
           kind: "tool",
-          label: event.toolName ?? "Tool",
-          text: event.text ?? "Tool activity",
+          label: event.toolName ?? current?.label ?? "Tool",
+          text: event.text ?? current?.text ?? "",
           status: event.status ?? event.kind.replace("tool_", ""),
         });
         break;

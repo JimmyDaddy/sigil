@@ -199,7 +199,7 @@ if (!/id:\s*["']session-catalog-30["'][\s\S]*sessions:\s*sessionEntries\(30\)[\s
 if (!/id:\s*["']session-catalog-100["'][\s\S]*sessions:\s*sessionEntries\(100\)/.test(fixtureSource)) {
   fail("hundred-session scrolling fixture is missing");
 }
-for (const marker of ["degraded-catalog", "running-tool-approval", "reconnect-gap", "verification-failed-diff", "long-copy", "missing-optional-metadata"]) {
+for (const marker of ["degraded-catalog", "running-tool-approval", "reconnect-gap", "tool-error-raw-details", "verification-failed-diff", "long-copy", "missing-optional-metadata"]) {
   if (!fixtureSource.includes(`id: "${marker}"`)) fail(`adaptive domain fixture is missing: ${marker}`);
 }
 if (!readFileSync(motionPath, "utf8").includes("@media (prefers-reduced-motion: reduce)")) {

@@ -158,6 +158,22 @@ export const catalogFixtures: readonly CatalogFixture[] = [
     attachmentGap: true,
   },
   {
+    id: "tool-error-raw-details",
+    description: "Failed write tool with a human summary and collapsed transport details",
+    ...environment,
+    tool: {
+      key: "catalog-tool-denied",
+      toolName: "write_file",
+      text: JSON.stringify({
+        content: "Tool execution was denied in Sigil Desktop.",
+        error: { kind: "approval_denied", message: "Denied in Sigil Desktop", retriable: false },
+        meta: { details: { call: { path: "src/parser.rs", summary: "path=src/parser.rs" } } },
+        status: "error",
+      }),
+      status: "error",
+    },
+  },
+  {
     id: "verification-failed-diff",
     description: "Failed verification with diff and evidence context",
     ...environment,

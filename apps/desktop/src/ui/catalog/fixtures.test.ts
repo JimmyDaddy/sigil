@@ -19,6 +19,7 @@ describe("desktop UI catalog contract", () => {
       "degraded-catalog",
       "running-tool-approval",
       "reconnect-gap",
+      "tool-error-raw-details",
       "verification-failed-diff",
       "long-copy",
       "missing-optional-metadata",
@@ -114,6 +115,7 @@ describe("desktop UI catalog contract", () => {
     expect(fixtures.get("running-tool-approval")?.tool?.duration).toBe("184 ms");
     expect(fixtures.get("reconnect-gap")?.streamState).toBe("reconnecting");
     expect(fixtures.get("reconnect-gap")?.attachmentGap).toBe(true);
+    expect(fixtures.get("tool-error-raw-details")?.tool?.status).toBe("error");
     expect(fixtures.get("verification-failed-diff")?.verification?.verdict).toBe("failed");
     expect(isUnifiedDiff(fixtures.get("verification-failed-diff")?.diff ?? "")).toBe(true);
     expect(fixtures.get("long-copy")?.longCopy).toMatch(/Investigate.*检查/);
@@ -128,7 +130,7 @@ describe("desktop UI catalog contract", () => {
     expect(tool).toBeDefined();
     render(createElement(ToolCard, { tool: tool! }));
     expect(screen.queryByText(/duration not recorded|risk not classified/i)).toBeNull();
-    expect(screen.getByText("shell")).toBeTruthy();
+    expect(screen.getByText("Shell")).toBeTruthy();
   });
 
   it("provides a runnable catalog surface for theme and viewport inspection", () => {

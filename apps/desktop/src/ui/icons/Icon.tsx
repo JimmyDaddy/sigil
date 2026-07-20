@@ -1,10 +1,12 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "close" | "filter" | "menu" | "moon" | "more" | "pin" | "search" | "sun" | "system" | "warning";
+export type IconName = "add" | "check" | "close" | "copy" | "filter" | "menu" | "moon" | "more" | "pin" | "search" | "sun" | "system" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
+  check: "m5 12 4 4L19 6",
   close: "m6 6 12 12M18 6 6 18",
+  copy: "M9 8h10v11H9zM5 15V5h10",
   filter: "M4 6h16M7 12h10m-7 6h4",
   menu: "M4 7h16M4 12h16M4 17h16",
   moon: "M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z",

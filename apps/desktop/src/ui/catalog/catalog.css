@@ -14,7 +14,6 @@ body { min-height: 100%; overflow: auto; }
 .catalog-fixture-surface { display: grid; gap: var(--sg-sys-space-4); padding: var(--sg-sys-space-4); }
 .catalog-session-surface { max-width: var(--sg-sys-navigation-width); max-height: 560px; overflow: auto; }
 .catalog-empty { display: grid; min-height: 180px; place-content: center; gap: var(--sg-sys-space-2); color: var(--sg-sys-color-on-surface-variant); text-align: center; }
-.catalog-long-copy { max-width: 70ch; overflow-wrap: anywhere; line-height: 1.6; }
 [data-primitive-catalog] { display: flex; flex-wrap: wrap; align-items: start; gap: var(--sg-sys-space-3); }
 
 :root[data-catalog-motion="reduced"] *,

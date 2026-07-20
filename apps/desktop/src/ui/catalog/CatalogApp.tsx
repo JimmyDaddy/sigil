@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { ApprovalDock } from "../../ApprovalDock";
 import { DiffViewer } from "../../DiffViewer";
 import { HistoryContent } from "../../HistoryPanel";
+import { Message } from "../../Message";
 import { ToolCard } from "../../ToolCard";
 import { VerificationInspector } from "../../VerificationInspector";
 import { PrimitiveCatalog } from "./PrimitiveCatalog";
@@ -139,7 +140,9 @@ function FixtureSurface({ fixture }: { readonly fixture: CatalogFixture }) {
         <VerificationInspector verification={fixture.verification} busy={false} runActive={false} onRerun={() => undefined} />
       )}
       {fixture.diff === undefined ? null : <DiffViewer diff={fixture.diff} />}
-      {fixture.longCopy === undefined ? null : <p className="catalog-long-copy">{fixture.longCopy}</p>}
+      {fixture.longCopy === undefined ? null : (
+        <Message message={{ key: "catalog-long-copy", kind: "assistant", label: "Sigil", text: fixture.longCopy }} />
+      )}
       {fixture.id === "empty-catalog" || fixture.id === "no-workspace" ? <PrimitiveCatalog /> : null}
     </div>
   );

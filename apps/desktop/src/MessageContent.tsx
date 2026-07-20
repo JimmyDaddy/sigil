@@ -1,7 +1,8 @@
 import { Fragment, useState } from "react";
 
 import { writeClipboard } from "./clipboard";
-import { Button } from "./ui/primitives";
+import { Icon } from "./ui/icons";
+import { IconButton, Tooltip } from "./ui/primitives";
 
 interface MessageContentProps {
   text: string;
@@ -9,24 +10,29 @@ interface MessageContentProps {
 
 type ContentBlock =
   | { kind: "code"; language?: string; text: string }
+  | { kind: "heading"; level: 3 | 4 | 5; text: string }
   | { kind: "list"; ordered: boolean; items: string[] }
   | { kind: "quote"; text: string }
+  | { kind: "rule" }
   | { kind: "paragraph"; text: string };
 
 export function MessageContent({ text }: MessageContentProps) {
   const [copied, setCopied] = useState(false);
   const blocks = parseBlocks(text);
+  if (blocks.length === 0) {
+    return <p className="message-content-empty">Message content unavailable.</p>;
+  }
   return (
     <div className="message-content">
-      <Button
-        className="content-copy"
-        variant="quiet"
-        type="button"
-        onClick={() => void writeClipboard(text).then(setCopied)}
-        aria-label="Copy message"
-      >
-        {copied ? "Copied" : "Copy"}
-      </Button>
+      <Tooltip label={copied ? "Copied" : "Copy message"}>
+        <IconButton
+          className="content-copy"
+          type="button"
+          onClick={() => void writeClipboard(text).then(setCopied)}
+          aria-label="Copy message"
+          icon={<Icon name={copied ? "check" : "copy"} />}
+        />
+      </Tooltip>
       {blocks.map((block, index) => {
         const key = `${block.kind}:${index}`;
         if (block.kind === "code") {
@@ -37,12 +43,17 @@ export function MessageContent({ text }: MessageContentProps) {
             </div>
           );
         }
-        if (block.kind === "quote") return <blockquote key={key}>{inlineCode(block.text)}</blockquote>;
+        if (block.kind === "heading") {
+          const Heading = `h${block.level}` as "h3" | "h4" | "h5";
+          return <Heading key={key}>{inlineMarkup(block.text)}</Heading>;
+        }
+        if (block.kind === "quote") return <blockquote key={key}>{inlineMarkup(block.text)}</blockquote>;
+        if (block.kind === "rule") return <hr key={key} />;
         if (block.kind === "list") {
           const List = block.ordered ? "ol" : "ul";
-          return <List key={key}>{block.items.map((item, itemIndex) => <li key={`${itemIndex}:${item}`}>{inlineCode(item)}</li>)}</List>;
+          return <List key={key}>{block.items.map((item, itemIndex) => <li key={`${itemIndex}:${item}`}>{inlineMarkup(item)}</li>)}</List>;
         }
-        return <p key={key}>{inlineCode(block.text)}</p>;
+        return <p key={key}>{inlineMarkup(block.text)}</p>;
       })}
     </div>
   );
@@ -51,18 +62,30 @@ export function MessageContent({ text }: MessageContentProps) {
 function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <Button className="inline-copy" variant="quiet" type="button" onClick={() => void writeClipboard(text).then(setCopied)} aria-label={label}>
-      {copied ? "Copied" : "Copy"}
-    </Button>
+    <Tooltip label={copied ? "Copied" : label}>
+      <IconButton
+        className="inline-copy"
+        type="button"
+        onClick={() => void writeClipboard(text).then(setCopied)}
+        aria-label={label}
+        icon={<Icon name={copied ? "check" : "copy"} />}
+      />
+    </Tooltip>
   );
 }
 
-function inlineCode(text: string) {
-  return text.split(/(`[^`]+`)/g).map((part, index) =>
-    part.startsWith("`") && part.endsWith("`")
-      ? <code key={`${index}:${part}`}>{part.slice(1, -1)}</code>
-      : <Fragment key={`${index}:${part}`}>{part}</Fragment>,
-  );
+function inlineMarkup(text: string) {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/g).map((part, index) => {
+    const key = `${index}:${part}`;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={key}>{part.slice(1, -1)}</code>;
+    if ((part.startsWith("**") && part.endsWith("**")) || (part.startsWith("__") && part.endsWith("__"))) {
+      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    }
+    if ((part.startsWith("*") && part.endsWith("*")) || (part.startsWith("_") && part.endsWith("_"))) {
+      return <em key={key}>{part.slice(1, -1)}</em>;
+    }
+    return <Fragment key={key}>{part}</Fragment>;
+  });
 }
 
 export function parseBlocks(text: string): ContentBlock[] {
@@ -71,6 +94,17 @@ export function parseBlocks(text: string): ContentBlock[] {
   let index = 0;
   while (index < lines.length) {
     const line = lines[index];
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading !== null) {
+      blocks.push({ kind: "heading", level: Math.min(5, heading[1].length + 2) as 3 | 4 | 5, text: heading[2] });
+      index += 1;
+      continue;
+    }
+    if (/^ {0,3}(?:-{3,}|\*{3,})\s*$/.test(line)) {
+      blocks.push({ kind: "rule" });
+      index += 1;
+      continue;
+    }
     if (line.startsWith("```")) {
       const language = line.slice(3).trim() || undefined;
       const code: string[] = [];
@@ -116,6 +150,8 @@ export function parseBlocks(text: string): ContentBlock[] {
       && lines[index].trim() !== ""
       && !lines[index].startsWith("```")
       && !lines[index].startsWith("> ")
+      && !/^(#{1,3})\s+/.test(lines[index])
+      && !/^ {0,3}(?:-{3,}|\*{3,})\s*$/.test(lines[index])
       && !/^(?:[-*]|\d+\.)\s+/.test(lines[index])
     ) {
       paragraph.push(lines[index]);
@@ -123,5 +159,5 @@ export function parseBlocks(text: string): ContentBlock[] {
     }
     blocks.push({ kind: "paragraph", text: paragraph.join("\n") });
   }
-  return blocks.length === 0 ? [{ kind: "paragraph", text: "No text payload." }] : blocks;
+  return blocks;
 }
