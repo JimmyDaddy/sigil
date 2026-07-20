@@ -1,9 +1,10 @@
-import { useLayoutEffect, useState, type CSSProperties, type RefObject } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
-import type { PermissionMode, ReasoningEffort, RunContext } from "./types";
+import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
+import type { PermissionMode, ReasoningEffort, RunContext, SkillBinding, SkillCatalogEntry } from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
-import { IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
+import { Button, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
 const MAX_COMPOSER_HEIGHT = 176;
@@ -22,6 +23,8 @@ export function Composer({
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
+  onNewSession,
+  onNotice,
   onSubmit,
   onCancel,
 }: {
@@ -38,11 +41,27 @@ export function Composer({
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
-  onSubmit: (prompt: string) => Promise<boolean>;
+  onNewSession: () => Promise<boolean>;
+  onNotice: (message: string, error?: boolean) => void;
+  onSubmit: (prompt: string, skillBinding?: SkillBinding) => Promise<boolean>;
   onCancel: () => void;
 }) {
   const { t } = useLocale();
   const [prompt, setPrompt] = useState(() => readDraft(draftKey));
+  const [selectedSkill, setSelectedSkill] = useState<SkillCatalogEntry>();
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
+  const modelSelectRef = useRef<HTMLSelectElement>(null);
+  const effortSelectRef = useRef<HTMLSelectElement>(null);
+  const suggestionQuery = leadingInvocationToken(prompt);
+  const suggestions = useMemo(
+    () => buildSuggestions(runContext, suggestionQuery, selectedSkill),
+    [runContext, selectedSkill, suggestionQuery],
+  );
+  const suggestionsOpen =
+    suggestionQuery !== undefined &&
+    suggestions.length > 0 &&
+    suggestionsDismissedFor !== suggestionQuery.token;
   useLayoutEffect(() => {
     const input = composerRef.current;
     if (input === null) return;
@@ -53,12 +72,102 @@ export function Composer({
   }, [composerRef, prompt]);
 
   const submit = async () => {
-    const nextPrompt = prompt.trim();
+    let nextPrompt = prompt.trim();
     if (nextPrompt === "" || active || submitting) return;
-    if (await onSubmit(nextPrompt)) {
-      setPrompt("");
-      writeDraft(draftKey, "");
+    const command = resolveCommand(runContext, nextPrompt);
+    if (command !== undefined) {
+      if (await executeCommand(command.suggestion, command.argument)) clearComposer();
+      return;
     }
+    const directSkill = selectedSkill === undefined ? resolveSkill(runContext, nextPrompt) : undefined;
+    const skill = selectedSkill ?? directSkill?.skill;
+    if (directSkill !== undefined) nextPrompt = directSkill.prompt;
+    if (nextPrompt === "") {
+      onNotice(t("skillNeedsPrompt"), true);
+      return;
+    }
+    if (skill !== undefined && (!skill.available || skill.binding === undefined)) {
+      onNotice(skill.unavailableReason ?? t("extensionUnavailable"), true);
+      return;
+    }
+    if (nextPrompt.startsWith("@")) {
+      const agent = resolveAgent(runContext, nextPrompt);
+      onNotice(agent?.unavailableReason ?? t("agentExecutionUnavailable"), true);
+      return;
+    }
+    if (await onSubmit(nextPrompt, skill?.binding)) {
+      clearComposer();
+    }
+  };
+  const clearComposer = () => {
+      setPrompt("");
+      setSelectedSkill(undefined);
+      writeDraft(draftKey, "");
+  };
+  const selectSuggestion = (suggestion: ComposerSuggestion) => {
+    if (!suggestion.available) {
+      onNotice(suggestion.unavailableReason ?? t("extensionUnavailable"), true);
+      return;
+    }
+    if (suggestion.kind === "skill") {
+      const skill = runContext?.extensionCatalog.skills.find((entry) => entry.id === suggestion.id);
+      if (skill !== undefined) {
+        setSelectedSkill(skill);
+        replacePrompt(remainingPromptAfterToken(prompt));
+      }
+      return;
+    }
+    if (suggestion.kind === "agent") {
+      onNotice(suggestion.unavailableReason ?? t("agentExecutionUnavailable"), true);
+      return;
+    }
+    if (suggestion.completesWithSpace) {
+      replacePrompt(`${suggestion.token} `);
+      return;
+    }
+    void executeCommand(suggestion, "").then((completed) => {
+      if (completed) clearComposer();
+    });
+  };
+  const executeCommand = async (suggestion: ComposerSuggestion, argument: string) => {
+    switch (suggestion.clientAction) {
+      case "new_session":
+        return onNewSession();
+      case "focus_effort": {
+        if (argument === "") {
+          effortSelectRef.current?.focus();
+          return true;
+        }
+        if (!runContext?.availableReasoningEfforts.includes(argument as ReasoningEffort)) {
+          onNotice(t("unsupportedEffort", { value: argument }), true);
+          return false;
+        }
+        onReasoningEffortChange(argument as ReasoningEffort);
+        return true;
+      }
+      case "focus_model": {
+        if (argument === "") {
+          modelSelectRef.current?.focus();
+          return true;
+        }
+        const model = runContext?.availableModels.find((candidate) => candidate === argument);
+        if (model === undefined) {
+          onNotice(t("unsupportedModel", { value: argument }), true);
+          return false;
+        }
+        return model === runContext?.modelName ? true : onModelChange(model);
+      }
+      default:
+        onNotice(suggestion.unavailableReason ?? t("commandUnavailable"), true);
+        return false;
+    }
+  };
+  const replacePrompt = (value: string) => {
+    setPrompt(value);
+    writeDraft(draftKey, value);
+    setSuggestionsDismissedFor(undefined);
+    setActiveSuggestion(0);
+    requestAnimationFrame(() => composerRef.current?.focus());
   };
   const modelName = runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
   const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
@@ -66,7 +175,31 @@ export function Composer({
 
   return (
     <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      {suggestionsOpen ? (
+        <ComposerSuggestions
+          suggestions={suggestions}
+          activeIndex={Math.min(activeSuggestion, suggestions.length - 1)}
+          query={suggestionQuery?.query ?? ""}
+          onSelect={selectSuggestion}
+          onActiveIndexChange={setActiveSuggestion}
+        />
+      ) : null}
       <div className="composer-surface">
+        {selectedSkill !== undefined ? (
+          <div className="composer-bindings" aria-label={t("activeExtensions")}>
+            <Button
+              className="composer-binding binding-skill"
+              variant="quiet"
+              type="button"
+              onClick={() => setSelectedSkill(undefined)}
+              aria-label={t("removeSkill", { name: selectedSkill.name })}
+            >
+              <span>{selectedSkill.invocationToken}</span>
+              <small>{selectedSkill.name}</small>
+              <span aria-hidden="true">×</span>
+            </Button>
+          </div>
+        ) : null}
         <TextArea
           id="desktop-prompt"
           className="composer-input"
@@ -77,11 +210,33 @@ export function Composer({
           value={prompt}
           onChange={(event) => {
             setPrompt(event.target.value);
+            setSuggestionsDismissedFor(undefined);
+            setActiveSuggestion(0);
             writeDraft(draftKey, event.target.value);
           }}
           placeholder={active ? t("activePrompt") : t("prompt")}
           rows={1}
           onKeyDown={(event) => {
+            if (suggestionsOpen) {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const delta = event.key === "ArrowDown" ? 1 : -1;
+                setActiveSuggestion((current) =>
+                  (current + delta + suggestions.length) % suggestions.length,
+                );
+                return;
+              }
+              if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+                event.preventDefault();
+                selectSuggestion(suggestions[Math.min(activeSuggestion, suggestions.length - 1)]);
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSuggestionsDismissedFor(suggestionQuery?.token);
+                return;
+              }
+            }
             if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
             event.preventDefault();
             void submit();
@@ -97,6 +252,7 @@ export function Composer({
                   labelHidden
                   containerClassName="composer-model-field"
                   className="composer-model-select"
+                  ref={modelSelectRef}
                   value={runContext?.modelName ?? ""}
                   disabled={active || runContextBusy || modelChanging || models.length < 2}
                   onChange={(event) => onModelChange(event.target.value)}
@@ -130,6 +286,7 @@ export function Composer({
                   labelHidden
                   containerClassName="composer-effort-field"
                   className="composer-effort-select"
+                  ref={effortSelectRef}
                   value={reasoningEffort ?? ""}
                   disabled={active || runContextBusy}
                   onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}
@@ -170,6 +327,113 @@ export function Composer({
       </div>
     </form>
   );
+}
+
+interface LeadingInvocationToken {
+  token: string;
+  query: string;
+  kind: "command" | "skill" | "agent";
+}
+
+function leadingInvocationToken(prompt: string): LeadingInvocationToken | undefined {
+  const match = prompt.match(/^\s*([/$@][^\s]*)$/u);
+  const token = match?.[1];
+  if (token === undefined) return undefined;
+  const kind = token.startsWith("/") ? "command" : token.startsWith("$") ? "skill" : "agent";
+  return { token, query: token, kind };
+}
+
+function buildSuggestions(
+  context: RunContext | undefined,
+  leading: LeadingInvocationToken | undefined,
+  selectedSkill: SkillCatalogEntry | undefined,
+): ComposerSuggestion[] {
+  if (context === undefined || leading === undefined) return [];
+  const query = leading.query.toLocaleLowerCase();
+  if (leading.kind === "command") {
+    return context.extensionCatalog.commands
+      .filter((entry) =>
+        entry.canonical.toLocaleLowerCase().includes(query) ||
+        entry.aliases.some((alias) => alias.toLocaleLowerCase().includes(query)),
+      )
+      .map(commandSuggestion);
+  }
+  if (leading.kind === "skill" && selectedSkill === undefined) {
+    return context.extensionCatalog.skills
+      .filter((entry) =>
+        entry.invocationToken.toLocaleLowerCase().includes(query) ||
+        entry.name.toLocaleLowerCase().includes(query.slice(1)),
+      )
+      .map((entry) => ({
+        id: entry.id,
+        token: entry.invocationToken,
+        label: entry.name,
+        description: entry.description,
+        kind: "skill" as const,
+        available: entry.available && entry.binding !== undefined,
+        unavailableReason: entry.unavailableReason,
+      }));
+  }
+  if (leading.kind === "agent") {
+    return context.extensionCatalog.agents
+      .filter((entry) =>
+        entry.invocationToken.toLocaleLowerCase().includes(query) ||
+        entry.id.toLocaleLowerCase().includes(query.slice(1)),
+      )
+      .map((entry) => ({
+        id: entry.id,
+        token: entry.invocationToken,
+        label: entry.id,
+        description: entry.description,
+        kind: "agent" as const,
+        available: entry.available,
+        unavailableReason: entry.unavailableReason,
+      }));
+  }
+  return [];
+}
+
+function commandSuggestion(entry: RunContext["extensionCatalog"]["commands"][number]): ComposerSuggestion {
+  return {
+    id: entry.canonical,
+    token: entry.canonical,
+    label: entry.label,
+    description: entry.description,
+    kind: "command",
+    available: entry.available,
+    unavailableReason: entry.unavailableReason,
+    completesWithSpace: entry.completesWithSpace,
+    clientAction: entry.clientAction,
+  };
+}
+
+function resolveCommand(context: RunContext | undefined, prompt: string) {
+  if (context === undefined || !prompt.startsWith("/")) return undefined;
+  const [token, ...argumentParts] = prompt.split(/\s+/u);
+  const entry = context.extensionCatalog.commands.find(
+    (candidate) => candidate.canonical === token || candidate.aliases.includes(token),
+  );
+  if (entry === undefined) return undefined;
+  return { suggestion: commandSuggestion(entry), argument: argumentParts.join(" ").trim() };
+}
+
+function resolveSkill(context: RunContext | undefined, prompt: string) {
+  if (context === undefined || !prompt.startsWith("$")) return undefined;
+  const match = prompt.match(/^\$([^\s]+)\s+([\s\S]+)$/u);
+  if (match === null) return undefined;
+  const skill = context.extensionCatalog.skills.find((entry) => entry.id === match[1]);
+  return skill === undefined ? undefined : { skill, prompt: match[2].trim() };
+}
+
+function resolveAgent(context: RunContext | undefined, prompt: string) {
+  const token = prompt.match(/^@([^\s]+)/u)?.[1];
+  return token === undefined
+    ? undefined
+    : context?.extensionCatalog.agents.find((entry) => entry.id === token);
+}
+
+function remainingPromptAfterToken(prompt: string): string {
+  return prompt.replace(/^\s*[/$@][^\s]*\s*/u, "");
 }
 
 function ContextUsage({ context, loading }: { context?: RunContext; loading: boolean }) {

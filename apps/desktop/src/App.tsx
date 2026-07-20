@@ -621,6 +621,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
                 onModelChange={createSession}
+                onNewSession={() => createSession()}
               />
             </div>
           )}

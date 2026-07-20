@@ -14,6 +14,7 @@ import type {
   RunStreamStatus,
   RunSummary,
   SessionSummary,
+  SkillBinding,
   TimelineEvent,
   TranscriptMessage,
   VerificationSummary,
@@ -27,6 +28,7 @@ interface ConversationPanelProps {
   workspaceId: string;
   session: SessionSummary;
   onModelChange: (modelName: string) => Promise<boolean>;
+  onNewSession: () => Promise<boolean>;
 }
 
 interface TimelineRowBase {
@@ -45,6 +47,7 @@ export function ConversationPanel({
   workspaceId,
   session,
   onModelChange,
+  onNewSession,
 }: ConversationPanelProps) {
   const { t } = useLocale();
   const [run, setRun] = useState<RunSummary>();
@@ -313,7 +316,7 @@ export function ConversationPanel({
     }
   };
 
-  const submit = async (nextPrompt: string): Promise<boolean> => {
+  const submit = async (nextPrompt: string, skillBinding?: SkillBinding): Promise<boolean> => {
     if (nextPrompt === "" || active || submitting) return false;
     setSubmitting(true);
     onNotice(t("startingRunNotice"));
@@ -325,6 +328,7 @@ export function ConversationPanel({
         permissionMode,
         reasoningEffort,
         reasoningEffort === undefined ? undefined : runContext?.reasoningEffortBinding,
+        skillBinding,
       );
       activeRunIdRef.current = started.id;
       setRun(started);
@@ -522,6 +526,8 @@ export function ConversationPanel({
         }}
         onPermissionModeChange={setPermissionMode}
         onReasoningEffortChange={setReasoningEffort}
+        onNewSession={onNewSession}
+        onNotice={onNotice}
         onSubmit={submit}
         onCancel={() => void cancel()}
       />
