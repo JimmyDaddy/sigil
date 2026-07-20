@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import type { AppearanceSnapshot } from "./appearance/contract";
 import { mergeTimelineEvent, reduceTimeline } from "./ConversationPanel";
 import { DiffViewer } from "./DiffViewer";
 import { Message } from "./Message";
@@ -11,6 +12,7 @@ import { ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
+  DesktopBootstrap,
   RunStreamStatus,
   TimelineEvent,
   WorkspaceSummary,
@@ -41,12 +43,29 @@ const emptyCatalog: CatalogPage = {
   entries: [],
 };
 
-function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
+const defaultAppearance: AppearanceSnapshot = {
+  preference: "system",
+  resolvedTheme: "dark",
+};
+
+type BridgeOverrides = Omit<Partial<DesktopBridge>, "bootstrap"> & {
+  bootstrap?: () => Promise<Omit<DesktopBootstrap, "appearance"> & {
+    appearance?: AppearanceSnapshot;
+  }>;
+};
+
+function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
+  const { bootstrap, ...remainingOverrides } = overrides;
   return {
     bootstrap: async () => ({
-      protocolVersion: 1,
-      workspaces: [],
-      recentWorkspaces: [],
+      appearance: defaultAppearance,
+      ...(bootstrap === undefined
+        ? { protocolVersion: 1, workspaces: [], recentWorkspaces: [] }
+        : await bootstrap()),
+    }),
+    setAppearance: async (preference) => ({
+      preference,
+      resolvedTheme: preference === "light" ? "light" : "dark",
     }),
     pickWorkspace: async () => ({ cancelled: false, workspace }),
     openRecentWorkspace: async () => workspace,
@@ -102,7 +121,8 @@ function bridgeWith(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     },
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
-    ...overrides,
+    subscribeAppearance: async () => () => undefined,
+    ...remainingOverrides,
   };
 }
 
@@ -175,6 +195,81 @@ describe("desktop coding-agent components", () => {
 });
 
 describe("desktop workspace and history shell", () => {
+  it("persists a theme switch without remounting the active conversation draft", async () => {
+    const user = userEvent.setup();
+    const setAppearance = vi.fn(async () => ({
+      preference: "light" as const,
+      resolvedTheme: "light" as const,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 1,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      setAppearance,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await screen.findByLabelText("Message Sigil") as HTMLTextAreaElement;
+    await user.type(composer, "Keep this draft");
+    await user.click(screen.getByText("Appearance"));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
+    expect(setAppearance).toHaveBeenCalledWith("light");
+    expect(screen.getByLabelText("Message Sigil")).toBe(composer);
+    expect(composer.value).toBe("Keep this draft");
+  });
+
+  it("keeps the proven theme on save failure and exposes a scoped retry", async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    const bridge = bridgeWith({
+      setAppearance: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("store unavailable");
+        return { preference: "light", resolvedTheme: "light" };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No workspace is open.");
+    await user.click(screen.getByText("Appearance"));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("previous appearance is still active");
+    expect((screen.getByRole("radio", { name: "Follow system" }) as HTMLInputElement).checked).toBe(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
+    expect(attempts).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("opens appearance from the platform settings shortcut and follows native updates", async () => {
+    let listener: ((snapshot: AppearanceSnapshot) => void) | undefined;
+    const bridge = bridgeWith({
+      subscribeAppearance: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No workspace is open.");
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    await waitFor(() => {
+      expect((screen.getByText("Appearance").closest("details") as HTMLDetailsElement).open).toBe(true);
+    });
+    act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
+    expect(document.documentElement.dataset.themePreference).toBe("system");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(screen.getByText("System currently resolves to light.")).toBeTruthy();
+  });
+
   it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
     const base = {
       workspaceId: workspace.id,

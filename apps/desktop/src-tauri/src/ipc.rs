@@ -9,7 +9,11 @@ use sigil_desktop::{
     DesktopWorkspaceSummary,
 };
 
-use crate::{recent::RecentWorkspaceSummary, run_streams::DesktopRunStreamState};
+use crate::{
+    appearance::{AppearanceSnapshot, ThemePreference},
+    recent::RecentWorkspaceSummary,
+    run_streams::DesktopRunStreamState,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +21,13 @@ pub(crate) struct DesktopBootstrap {
     pub(crate) protocol_version: u16,
     pub(crate) workspaces: Vec<DesktopWorkspaceSummary>,
     pub(crate) recent_workspaces: Vec<RecentWorkspaceSummary>,
+    pub(crate) appearance: AppearanceSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopAppearanceInput {
+    pub(crate) preference: ThemePreference,
 }
 
 #[derive(Debug, Serialize)]

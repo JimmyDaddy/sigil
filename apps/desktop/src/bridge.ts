@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import type { AppearanceSnapshot, ThemePreference } from "./appearance/contract";
+
 import type {
   CatalogPage,
   CatalogRequest,
@@ -23,6 +25,7 @@ import type {
 
 export interface DesktopBridge {
   bootstrap(): Promise<DesktopBootstrap>;
+  setAppearance(preference: ThemePreference): Promise<AppearanceSnapshot>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
@@ -55,10 +58,13 @@ export interface DesktopBridge {
   ): Promise<VerificationSummary>;
   subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
+  subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
 }
 
 export const desktopBridge: DesktopBridge = {
   bootstrap: () => invoke<DesktopBootstrap>("desktop_bootstrap"),
+  setAppearance: (preference) =>
+    invoke<AppearanceSnapshot>("desktop_set_appearance", { input: { preference } }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>
@@ -123,4 +129,6 @@ export const desktopBridge: DesktopBridge = {
     listen<TimelineEvent>("sigil-run-event", (event) => listener(event.payload)),
   subscribeRunStreamStatus: async (listener) =>
     listen<RunStreamStatus>("sigil-run-stream-status", (event) => listener(event.payload)),
+  subscribeAppearance: async (listener) =>
+    listen<AppearanceSnapshot>("sigil-appearance-changed", (event) => listener(event.payload)),
 };

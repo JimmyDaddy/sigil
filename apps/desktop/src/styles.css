@@ -42,6 +42,7 @@
 }
 
 .topbar { position: relative; z-index: var(--z-topbar); justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--color-border); }
+.topbar-actions { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
 .brand { display: inline-flex; min-width: 0; gap: 11px; align-items: center; color: inherit; text-decoration: none; }
 .brand > span:last-child { display: grid; min-width: 0; gap: 1px; }
 .brand small { color: var(--color-text-subtle); }
@@ -71,6 +72,44 @@
   white-space: nowrap;
   font-size: 12px;
 }
+
+.appearance-menu { position: relative; flex: 0 0 auto; }
+.appearance-menu > summary {
+  min-width: 44px;
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+.appearance-menu > summary::-webkit-details-marker { display: none; }
+.appearance-menu[open] > summary { color: var(--color-text); border-color: var(--color-accent); background: var(--color-surface-hover); }
+.appearance-popover {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + var(--space-2));
+  right: 0;
+  width: min(280px, calc(100vw - var(--space-6)));
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  box-shadow: var(--sg-sys-elevation-modal);
+}
+.appearance-popover fieldset { display: grid; gap: var(--space-1); margin: 0; padding: 0; border: 0; }
+.appearance-popover legend { margin-bottom: var(--space-2); font-size: 13px; font-weight: 700; }
+.appearance-popover label { display: flex; min-height: 36px; align-items: center; gap: var(--space-2); padding: 7px 8px; border-radius: var(--radius-sm); cursor: pointer; }
+.appearance-popover label:hover { background: var(--color-surface-hover); }
+.appearance-popover input { accent-color: var(--color-accent); }
+.appearance-popover > small { display: block; margin-top: var(--space-3); color: var(--color-text-subtle); line-height: 1.45; }
+.appearance-error { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-danger); border-radius: var(--radius-md); color: var(--color-danger); background: var(--color-danger-surface); font-size: 12px; line-height: 1.45; }
+.appearance-error button { justify-self: start; padding: 5px 8px; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; cursor: pointer; font-weight: 700; }
 
 .pane-toggle, .drawer-close {
   display: none;

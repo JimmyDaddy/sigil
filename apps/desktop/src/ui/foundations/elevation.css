@@ -2,6 +2,7 @@
   --sg-sys-elevation-dock: var(--sg-sys-shadow-dock);
   --sg-sys-elevation-modal: var(--sg-sys-shadow-modal);
   --z-topbar: 10;
+  --z-popover: 20;
   --z-backdrop: 40;
   --z-drawer: 50;
   --z-modal: 100;

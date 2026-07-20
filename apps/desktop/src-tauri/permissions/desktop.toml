@@ -4,6 +4,11 @@ description = "Allows the main local window to read secret-free desktop connecti
 commands.allow = ["desktop_bootstrap"]
 
 [[permission]]
+identifier = "allow-desktop-appearance"
+description = "Allows the main local window to save one bounded application appearance enum and synchronize native chrome."
+commands.allow = ["desktop_set_appearance"]
+
+[[permission]]
 identifier = "allow-desktop-pick-workspace"
 description = "Allows the Rust backend to show a native folder picker and open one supervised workspace server."
 commands.allow = ["desktop_pick_workspace"]

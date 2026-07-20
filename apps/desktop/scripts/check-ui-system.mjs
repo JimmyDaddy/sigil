@@ -9,6 +9,8 @@ const stylesPath = join(srcRoot, "styles.css");
 const referencePath = join(foundations, "reference.css");
 const themesPath = join(foundations, "themes.css");
 const packagePath = join(desktopRoot, "package.json");
+const indexPath = join(desktopRoot, "index.html");
+const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
 
 function fail(message) {
   throw new Error(`desktop UI system check failed: ${message}`);
@@ -156,6 +158,21 @@ if ([...graph].some((path) => path.includes(`${join("ui", "catalog")}`))) {
 }
 if (!readFileSync(join(srcRoot, "ui", "catalog", "fixtures.ts"), "utf8").includes("sigil-desktop-dev-ui-catalog")) {
   fail("development UI catalog marker is missing");
+}
+
+const indexSource = readFileSync(indexPath, "utf8");
+if (!indexSource.includes('<script src="/appearance-bootstrap.js"></script>')) {
+  fail("external pre-paint appearance bootstrap is missing");
+}
+if (/<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/i.test(indexSource)) {
+  fail("inline desktop bootstrap scripts are forbidden");
+}
+const appearanceBootstrap = readFileSync(appearanceBootstrapPath, "utf8");
+for (const forbidden of ["localStorage", "sessionStorage", "fetch(", "invoke(", "token", "bearer"]) {
+  if (appearanceBootstrap.includes(forbidden)) fail(`appearance bootstrap contains forbidden capability: ${forbidden}`);
+}
+if (!themeSource.includes(':root[data-theme="light"]')) {
+  fail("light theme must be selected by the pre-paint data-theme contract");
 }
 
 console.log(`desktop UI system checks passed (${darkRoles.length} paired theme roles, ${contrastPairs.length * 2} contrast checks)`);

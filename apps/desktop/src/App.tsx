@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
+import { AppearanceMenu } from "./appearance/AppearanceMenu";
+import { ThemeProvider, useAppearance } from "./appearance/ThemeProvider";
 import { ConversationPanel } from "./ConversationPanel";
 import { ErrorCard } from "./ErrorCard";
 import { HistoryContent, type HistoryState } from "./HistoryPanel";
@@ -39,6 +41,15 @@ const EMPTY_CATALOG: CatalogPage = {
 };
 
 export function App({ bridge = desktopBridge }: AppProps) {
+  return (
+    <ThemeProvider bridge={bridge}>
+      <DesktopApp bridge={bridge} />
+    </ThemeProvider>
+  );
+}
+
+function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
+  const appearance = useAppearance();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
@@ -91,21 +102,25 @@ export function App({ bridge = desktopBridge }: AppProps) {
     [activeWorkspaceId, workspaces],
   );
 
-  const applyBootstrap = useCallback((bootstrap: DesktopBootstrap) => {
-    setWorkspaces(bootstrap.workspaces);
-    setRecentWorkspaces(bootstrap.recentWorkspaces);
-    setActiveWorkspaceId((current) => {
-      if (
-        current !== undefined &&
-        bootstrap.workspaces.some(
-          (workspace) => workspace.id === current && workspace.state === "ready",
-        )
-      ) {
-        return current;
-      }
-      return bootstrap.workspaces.find((workspace) => workspace.state === "ready")?.id;
-    });
-  }, []);
+  const applyBootstrap = useCallback(
+    (bootstrap: DesktopBootstrap) => {
+      appearance.sync(bootstrap.appearance);
+      setWorkspaces(bootstrap.workspaces);
+      setRecentWorkspaces(bootstrap.recentWorkspaces);
+      setActiveWorkspaceId((current) => {
+        if (
+          current !== undefined &&
+          bootstrap.workspaces.some(
+            (workspace) => workspace.id === current && workspace.state === "ready",
+          )
+        ) {
+          return current;
+        }
+        return bootstrap.workspaces.find((workspace) => workspace.state === "ready")?.id;
+      });
+    },
+    [appearance.sync],
+  );
 
   const refresh = useCallback(async () => {
     setLoadState("loading");
@@ -350,7 +365,10 @@ export function App({ bridge = desktopBridge }: AppProps) {
           <span className="brand-mark" aria-hidden="true">S</span>
           <span><strong>Sigil</strong><small>Coding workspace</small></span>
         </a>
-        <span className="workspace-chip">{activeWorkspace?.displayName ?? "No workspace open"}</span>
+        <div className="topbar-actions">
+          <span className="workspace-chip">{activeWorkspace?.displayName ?? "No workspace open"}</span>
+          <AppearanceMenu />
+        </div>
       </header>
 
       <main id="main" className="desktop-stage">

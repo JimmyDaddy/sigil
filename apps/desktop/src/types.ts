@@ -1,3 +1,5 @@
+import type { AppearanceSnapshot } from "./appearance/contract";
+
 export type ConnectionState = "ready" | "exited" | "crashed";
 
 export interface WorkspaceSummary {
@@ -11,6 +13,7 @@ export interface DesktopBootstrap {
   protocolVersion: 1;
   workspaces: WorkspaceSummary[];
   recentWorkspaces: RecentWorkspaceSummary[];
+  appearance: AppearanceSnapshot;
 }
 
 export interface WorkspaceSelection {

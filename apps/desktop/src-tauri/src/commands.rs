@@ -11,19 +11,20 @@ use sigil_desktop::{
     DesktopSessionOpenRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
     DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
-use tauri::State;
+use tauri::{Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    appearance::{AppearanceSnapshot, AppearanceStoreError, ResolvedTheme, ThemePreference},
     ipc::{
-        DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
-        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopRunAttachInput,
-        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunStartInput, DesktopRunSummary,
-        DesktopSessionCreateInput, DesktopSessionOpenInput, DesktopSessionSummary,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
-        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopAppearanceInput, DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary,
+        DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
+        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunStartInput,
+        DesktopRunSummary, DesktopSessionCreateInput, DesktopSessionOpenInput,
+        DesktopSessionSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -50,6 +51,7 @@ impl DesktopCommandError {
 
 #[tauri::command]
 pub(crate) async fn desktop_bootstrap(
+    window: WebviewWindow,
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopBootstrap, DesktopCommandError> {
     let workspaces = state
@@ -69,11 +71,55 @@ pub(crate) async fn desktop_bootstrap(
         .list(&open_workspace_ids)
         .await
         .map_err(project_recent_error)?;
+    let preference = state
+        .appearance
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .preference();
     Ok(DesktopBootstrap {
         protocol_version: DESKTOP_PROTOCOL_VERSION,
         workspaces,
         recent_workspaces,
+        appearance: appearance_snapshot(&window, preference),
     })
+}
+
+#[tauri::command]
+pub(crate) fn desktop_set_appearance(
+    window: WebviewWindow,
+    input: DesktopAppearanceInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<AppearanceSnapshot, DesktopCommandError> {
+    let mut store = state
+        .appearance
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = store.preference();
+    window
+        .set_theme(input.preference.native_theme())
+        .map_err(|_| project_appearance_error(AppearanceStoreError::Unavailable))?;
+    let snapshot = appearance_snapshot(&window, input.preference);
+    if let Err(error) = store.set(input.preference) {
+        let _ = window.set_theme(previous.native_theme());
+        return Err(project_appearance_error(error));
+    }
+    let _ = window.emit(crate::appearance::DESKTOP_APPEARANCE_EVENT_NAME, snapshot);
+    Ok(snapshot)
+}
+
+fn appearance_snapshot(window: &WebviewWindow, preference: ThemePreference) -> AppearanceSnapshot {
+    let resolved_theme = match preference {
+        ThemePreference::Light => ResolvedTheme::Light,
+        ThemePreference::Dark => ResolvedTheme::Dark,
+        ThemePreference::System => window
+            .theme()
+            .map(ResolvedTheme::from)
+            .unwrap_or(ResolvedTheme::Dark),
+    };
+    AppearanceSnapshot {
+        preference,
+        resolved_theme,
+    }
 }
 
 #[tauri::command]
@@ -845,6 +891,13 @@ fn project_recent_error(error: RecentWorkspaceStoreError) -> DesktopCommandError
             "The recent workspace list is unavailable.",
         ),
     }
+}
+
+fn project_appearance_error(_error: AppearanceStoreError) -> DesktopCommandError {
+    DesktopCommandError::new(
+        "appearance_unavailable",
+        "The appearance preference could not be saved. The previous theme is still active.",
+    )
 }
 
 impl From<DesktopCatalogState> for DesktopSessionCatalogState {

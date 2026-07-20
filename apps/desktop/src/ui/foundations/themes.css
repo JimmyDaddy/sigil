@@ -40,8 +40,7 @@
 /* @theme dark-end */
 
 /* @theme light-start */
-@media (prefers-color-scheme: light) {
-  :root {
+:root[data-theme="light"] {
     color-scheme: light;
     --sg-sys-color-canvas: var(--sg-ref-color-light-canvas);
     --sg-sys-color-canvas-glow: var(--sg-ref-color-light-canvas-glow);
@@ -78,7 +77,6 @@
     --sg-sys-color-focus: var(--sg-ref-color-light-focus);
     --sg-sys-shadow-dock: var(--sg-ref-shadow-light-dock);
     --sg-sys-shadow-modal: var(--sg-ref-shadow-light-modal);
-  }
 }
 /* @theme light-end */
 

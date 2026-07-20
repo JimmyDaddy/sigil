@@ -1,3 +1,4 @@
+mod appearance;
 mod commands;
 mod ipc;
 mod recent;
@@ -12,15 +13,19 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::{
+    appearance::{
+        AppearanceSnapshot, AppearanceStore, DESKTOP_APPEARANCE_EVENT_NAME, ResolvedTheme,
+        ThemePreference, initialization_script,
+    },
     commands::{
         desktop_attach_run, desktop_bootstrap, desktop_cancel_run, desktop_catalog,
         desktop_close_workspace, desktop_create_session, desktop_open_recent_workspace,
         desktop_open_session, desktop_pick_workspace, desktop_rerun_verification,
-        desktop_resolve_approval, desktop_start_run, desktop_transcript, desktop_verification,
-        resolve_sigil_binary,
+        desktop_resolve_approval, desktop_set_appearance, desktop_start_run, desktop_transcript,
+        desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
 };
@@ -36,6 +41,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            let config_dir = app.path().app_config_dir()?;
+            let appearance = AppearanceStore::load(config_dir.join("appearance-v1.json"));
+            let theme_preference = appearance.preference();
             // Build the single native window here so development and package
             // overlays cannot diverge on whether the capability-labelled
             // `main` webview exists.
@@ -43,14 +51,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .title("Sigil")
                 .inner_size(1120.0, 760.0)
                 .min_inner_size(320.0, 480.0)
+                .theme(theme_preference.native_theme())
+                .initialization_script(initialization_script(theme_preference))
                 .build()?;
-            let recent_workspaces_path = app
-                .path()
-                .app_config_dir()?
-                .join("recent-workspaces-v1.json");
+            let recent_workspaces_path = config_dir.join("recent-workspaces-v1.json");
             app.manage(DesktopAppState::new(
                 sigil_binary.clone(),
                 recent_workspaces_path,
+                appearance,
             ));
             Ok(())
         })
@@ -68,15 +76,34 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_cancel_run,
             desktop_resolve_approval,
             desktop_verification,
-            desktop_rerun_verification
+            desktop_rerun_verification,
+            desktop_set_appearance
         ])
         .build(tauri::generate_context!())?;
 
-    app.run(move |app_handle, event| {
-        let RunEvent::ExitRequested { api, .. } = event else {
-            return;
-        };
-        match exit_state.load(Ordering::Acquire) {
+    app.run(move |app_handle, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::ThemeChanged(theme),
+            ..
+        } if label == "main" => {
+            let state = app_handle.state::<DesktopAppState>();
+            let preference = state
+                .appearance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .preference();
+            if preference == ThemePreference::System {
+                let _ = app_handle.emit(
+                    DESKTOP_APPEARANCE_EVENT_NAME,
+                    AppearanceSnapshot {
+                        preference,
+                        resolved_theme: ResolvedTheme::from(theme),
+                    },
+                );
+            }
+        }
+        RunEvent::ExitRequested { api, .. } => match exit_state.load(Ordering::Acquire) {
             EXIT_ALLOWED => {}
             EXIT_CLEANING => api.prevent_exit(),
             _ => {
@@ -94,7 +121,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     handle.exit(0);
                 });
             }
-        }
+        },
+        _ => {}
     });
     Ok(())
 }
