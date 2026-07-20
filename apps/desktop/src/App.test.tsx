@@ -559,6 +559,39 @@ describe("desktop workspace and history shell", () => {
     ]);
   });
 
+  it("omits empty durable tool preambles without hiding visible preamble text", () => {
+    const base = {
+      role: "assistant" as const,
+      assistantKind: "tool_preamble" as const,
+      imageAttachmentCount: 0,
+      truncated: false,
+      originalContentBytes: 0,
+    };
+    const rows = reduceConversationTimeline([
+      { ...base, ordinal: 1, messageId: "empty-preamble" },
+      {
+        ...base,
+        ordinal: 2,
+        messageId: "visible-preamble",
+        content: "I will inspect the affected file.",
+        originalContentBytes: 33,
+      },
+      {
+        ...base,
+        ordinal: 3,
+        messageId: "final",
+        assistantKind: "final_answer",
+        content: "Done.",
+        originalContentBytes: 5,
+      },
+    ], []);
+
+    expect(rows.map((row) => [row.status, row.text])).toEqual([
+      ["tool preamble", "I will inspect the affected file."],
+      [undefined, "Done."],
+    ]);
+  });
+
   it("restores the most recent workspace after native bootstrap", async () => {
     const openRecentWorkspace = vi.fn(async () => workspace);
     const bridge = bridgeWith({

@@ -687,60 +687,73 @@ export function reduceTranscript(
   messages: TranscriptMessage[],
   t: Translate = translateEnglish,
 ): TimelineRow[] {
-  return [...messages].sort((left, right) => left.ordinal - right.ordinal).map((message) => {
+  const rows: TimelineRow[] = [];
+  for (const message of [...messages].sort((left, right) => left.ordinal - right.ordinal)) {
     const attachmentText = message.imageAttachmentCount > 0
       ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
       : "";
     const text = (message.content ?? attachmentText) || "";
+    if (
+      message.role === "assistant"
+      && message.assistantKind === "tool_preamble"
+      && text.trim() === ""
+    ) {
+      continue;
+    }
     const status = message.truncated
       ? `preview · ${message.originalContentBytes} bytes`
       : message.imageAttachmentCount > 0
         ? `${message.imageAttachmentCount} attachment${message.imageAttachmentCount === 1 ? "" : "s"}`
         : undefined;
     if (message.role === "user") {
-      return {
+      rows.push({
         key: `history:${message.messageId}`,
         kind: "user",
         label: t("you"),
         text,
         status,
-      };
+      });
+      continue;
     }
     if (message.role === "tool") {
-      return {
+      rows.push({
         key: `history:${message.messageId}`,
         kind: "tool",
         label: message.toolName ?? t("toolResult"),
         text,
         status,
-      };
+      });
+      continue;
     }
     if (message.assistantKind === "reasoning_trace") {
-      return {
+      rows.push({
         key: `history:${message.messageId}`,
         kind: "reasoning",
         label: t("reasoning"),
         text,
         status,
-      };
+      });
+      continue;
     }
     if (message.assistantKind === "progress") {
-      return {
+      rows.push({
         key: `history:${message.messageId}`,
         kind: "progress",
         label: t("progress"),
         text,
         status,
-      };
+      });
+      continue;
     }
-    return {
+    rows.push({
       key: `history:${message.messageId}`,
       kind: "assistant",
       label: "Sigil",
       text,
       status: status ?? (message.assistantKind === "tool_preamble" ? "tool preamble" : undefined),
-    };
-  });
+    });
+  }
+  return rows;
 }
 
 export function reduceConversationTimeline(
