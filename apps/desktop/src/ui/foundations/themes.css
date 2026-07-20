@@ -23,8 +23,8 @@
   --sg-sys-color-on-error: var(--sg-ref-color-dark-error-container);
   --sg-sys-color-error-container: var(--sg-ref-color-dark-error-container);
   --sg-sys-color-on-error-container: var(--sg-ref-color-dark-error);
-  --sg-domain-color-success: var(--sg-ref-color-dark-primary-container);
-  --sg-domain-color-on-success: var(--sg-ref-color-dark-primary);
+  --sg-domain-color-success: var(--sg-ref-color-dark-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-dark-success);
   --sg-domain-color-warning: var(--sg-ref-color-dark-warning-container);
   --sg-domain-color-on-warning: var(--sg-ref-color-dark-warning);
   --sg-domain-color-danger: var(--sg-ref-color-dark-error-container);
@@ -64,8 +64,8 @@
     --sg-sys-color-on-error: var(--sg-ref-color-light-on-primary);
     --sg-sys-color-error-container: var(--sg-ref-color-light-error-container);
     --sg-sys-color-on-error-container: var(--sg-ref-color-light-error);
-    --sg-domain-color-success: var(--sg-ref-color-light-primary-container);
-    --sg-domain-color-on-success: var(--sg-ref-color-light-primary-strong);
+    --sg-domain-color-success: var(--sg-ref-color-light-success-container);
+    --sg-domain-color-on-success: var(--sg-ref-color-light-success);
     --sg-domain-color-warning: var(--sg-ref-color-light-warning-container);
     --sg-domain-color-on-warning: var(--sg-ref-color-light-warning);
     --sg-domain-color-danger: var(--sg-ref-color-light-error-container);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
-import { AppearanceMenu } from "./appearance/AppearanceMenu";
+import { AppearanceToggle } from "./appearance/AppearanceToggle";
 import { ThemeProvider, useAppearance } from "./appearance/ThemeProvider";
 import { ConversationPanel } from "./ConversationPanel";
 import { type HistoryState } from "./HistoryPanel";
@@ -18,8 +18,10 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import { useMediaQuery } from "./useMediaQuery";
-import { Button, Dialog, Drawer } from "./ui/primitives";
+import { Button, Dialog, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { Icon } from "./ui/icons";
+import sigilMarkDark from "../../../assets/logo/sigil-mark-dark-mode.svg";
+import sigilMarkLight from "../../../assets/logo/sigil-mark.svg";
 
 interface AppProps {
   bridge?: DesktopBridge;
@@ -336,15 +338,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
-  const navigationContent = activeWorkspace === undefined ? (
-    <div className="session-rail-empty">
-      <strong>No workspace is open.</strong>
-      <p>Open a project to browse its conversations.</p>
-      <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>
-        Open workspace
-      </Button>
-    </div>
-  ) : (
+  const navigationContent = activeWorkspace === undefined ? null : (
     <SessionRail
       historyState={historyState}
       catalog={catalog}
@@ -376,18 +370,26 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <Button
-          className="pane-toggle navigation-toggle"
-          ref={navigationTriggerRef}
-          type="button"
-          leadingIcon={<Icon name="menu" />}
-          aria-controls="desktop-navigation"
-          aria-expanded={navigationOpen}
-          onClick={() => setNavigationOpen((open) => !open)}
-        >Browse</Button>
+        {activeWorkspace === undefined ? null : (
+          <Tooltip label="Browse conversations">
+            <IconButton
+              className="pane-toggle navigation-toggle"
+              ref={navigationTriggerRef}
+              type="button"
+              icon={<Icon name="menu" />}
+              aria-label="Browse conversations"
+              aria-controls="desktop-navigation"
+              aria-expanded={navigationOpen}
+              onClick={() => setNavigationOpen((open) => !open)}
+            />
+          </Tooltip>
+        )}
         <a className="brand" href="#main" aria-label="Sigil desktop home">
-          <span className="brand-mark" aria-hidden="true">S</span>
-          <span><strong>Sigil</strong><small>Coding workspace</small></span>
+          <span className="brand-mark" aria-hidden="true">
+            <img className="brand-mark-light" src={sigilMarkLight} alt="" />
+            <img className="brand-mark-dark" src={sigilMarkDark} alt="" />
+          </span>
+          <strong>Sigil</strong>
         </a>
         <WorkspaceSwitcher
           workspaces={workspaces}
@@ -405,16 +407,23 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         />
         <div className="topbar-actions">
           {activeWorkspace === undefined ? null : (
-            <Button aria-label="New conversation" type="button" variant="primary" leadingIcon={<Icon name="add" />} disabled={sessionActionState === "working"} onClick={() => void createSession()}>
-              New conversation
-            </Button>
+            <Tooltip label="New conversation">
+              <IconButton
+                className="sg-icon-button-primary"
+                aria-label="New conversation"
+                type="button"
+                icon={<Icon name="add" />}
+                disabled={sessionActionState === "working"}
+                onClick={() => void createSession()}
+              />
+            </Tooltip>
           )}
-          <AppearanceMenu />
+          <AppearanceToggle />
         </div>
       </header>
 
-      <main id="main" className="desktop-stage">
-        {compactNavigation ? (
+      <main id="main" className={`desktop-stage${activeWorkspace === undefined ? " desktop-stage-empty" : ""}`}>
+        {activeWorkspace === undefined ? null : compactNavigation ? (
           <Drawer
             id="desktop-navigation"
             open={navigationOpen}
@@ -434,10 +443,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         <section className="conversation-stage" aria-label="Conversation workspace">
           {activeWorkspace === undefined ? (
             <div className="welcome-state">
-              <p className="eyebrow">Start a task</p>
-              <h1>Open a workspace to begin.</h1>
-              <p>Choose a project, continue a previous conversation, or start a focused coding task.</p>
-              <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>Choose workspace</Button>
+              <span className="welcome-mark" aria-hidden="true">
+                <img className="brand-mark-light" src={sigilMarkLight} alt="" />
+                <img className="brand-mark-dark" src={sigilMarkDark} alt="" />
+              </span>
+              <h1>Open a workspace</h1>
+              <p>Choose a project to start or continue a coding conversation.</p>
+              <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>Open workspace</Button>
             </div>
           ) : selectedSession === undefined ? (
             <div className="conversation-empty">

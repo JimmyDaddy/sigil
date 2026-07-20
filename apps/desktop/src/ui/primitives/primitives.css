@@ -14,6 +14,7 @@
 
   .sg-button { display: inline-flex; min-width: 72px; align-items: center; justify-content: center; gap: var(--sg-sys-space-2); padding: 7px var(--sg-sys-space-3); font-size: 13px; font-weight: 700; }
   .sg-button-primary { border-color: var(--sg-sys-color-primary-strong); color: var(--sg-sys-color-on-primary); background: var(--sg-sys-color-primary); }
+  .sg-icon-button-primary { border-color: var(--sg-sys-color-primary-strong); color: var(--sg-sys-color-on-primary); background: var(--sg-sys-color-primary); }
   .sg-button-quiet { border-color: transparent; color: var(--sg-sys-color-on-surface-variant); background: transparent; }
   .sg-button-danger { border-color: var(--sg-sys-color-error); color: var(--sg-sys-color-on-error-container); background: var(--sg-sys-color-error-container); }
   .sg-button:hover:not(:disabled), .sg-icon-button:hover:not(:disabled), .sg-popover-trigger:hover:not(:disabled), .sg-menu-item:hover:not(:disabled) { filter: brightness(1.06); }

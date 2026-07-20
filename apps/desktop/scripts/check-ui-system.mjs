@@ -242,8 +242,8 @@ for (const path of sourceFiles) {
   }
 }
 
-if (!styles.includes(".navigation-toggle > span, .appearance-trigger-label > span { display: none; }")) {
-  fail("320px topbar does not collapse secondary control labels");
+if (!styles.includes(".brand strong { display: none; }")) {
+  fail("compact topbar does not collapse the secondary brand label");
 }
 
 const rawAllowlist = JSON.parse(readFileSync(rawInteractiveAllowlistPath, "utf8"));

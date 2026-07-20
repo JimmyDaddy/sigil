@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "aria-label"> {
   readonly "aria-label": string;
@@ -6,19 +6,20 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
   readonly selected?: boolean;
 }
 
-export function IconButton({
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton({
   icon,
   selected,
   className = "",
   ...props
-}: IconButtonProps) {
+}: IconButtonProps, ref) {
   return (
     <button
       className={`sg-icon-button ${className}`.trim()}
+      ref={ref}
       aria-pressed={selected}
       {...props}
     >
       {icon}
     </button>
   );
-}
+});

@@ -5,6 +5,7 @@ mod recent;
 mod run_streams;
 mod startup;
 mod state;
+mod window_state;
 
 pub use startup::{clear_startup_failure, record_startup_failure, record_startup_panic};
 
@@ -28,6 +29,7 @@ use crate::{
         desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
+    window_state::{DisplayBounds, WindowGeometry, WindowStateOwner},
 };
 
 const EXIT_IDLE: u8 = 0;
@@ -44,22 +46,49 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let config_dir = app.path().app_config_dir()?;
             let appearance = AppearanceStore::load(config_dir.join("appearance-v1.json"));
             let theme_preference = appearance.preference();
+            let window_state = WindowStateOwner::load(config_dir.join("window-state-v1.json"));
+            let displays = match app.available_monitors() {
+                Ok(monitors) => monitors
+                    .into_iter()
+                    .map(|monitor| {
+                        let area = monitor.work_area();
+                        DisplayBounds {
+                            x: area.position.x,
+                            y: area.position.y,
+                            width: area.size.width,
+                            height: area.size.height,
+                            scale_factor: monitor.scale_factor(),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    eprintln!("sigil desktop: monitor discovery failed: {error}");
+                    Vec::new()
+                }
+            };
             // Build the single native window here so development and package
             // overlays cannot diverge on whether the capability-labelled
             // `main` webview exists.
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            let mut window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Sigil")
-                .inner_size(1120.0, 760.0)
-                .min_inner_size(320.0, 480.0)
+                .inner_size(1280.0, 820.0)
+                .min_inner_size(900.0, 640.0)
                 .theme(theme_preference.native_theme())
-                .initialization_script(initialization_script(theme_preference))
-                .build()?;
+                .initialization_script(initialization_script(theme_preference));
+            if let Some(geometry) = window_state.initial_geometry(&displays) {
+                window_builder = window_builder
+                    .position(geometry.x, geometry.y)
+                    .inner_size(geometry.width, geometry.height)
+                    .maximized(geometry.maximized);
+            }
+            window_builder.build()?;
             let recent_workspaces_path = config_dir.join("recent-workspaces-v1.json");
             app.manage(DesktopAppState::new(
                 sigil_binary.clone(),
                 recent_workspaces_path,
                 appearance,
             ));
+            app.manage(window_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -82,6 +111,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build(tauri::generate_context!())?;
 
     app.run(move |app_handle, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Focused(false),
+            ..
+        } if label == "main" => persist_window_state(app_handle),
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::ThemeChanged(theme),
@@ -107,6 +141,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             EXIT_ALLOWED => {}
             EXIT_CLEANING => api.prevent_exit(),
             _ => {
+                persist_window_state(app_handle);
                 api.prevent_exit();
                 exit_state.store(EXIT_CLEANING, Ordering::Release);
                 let handle = app_handle.clone();
@@ -125,4 +160,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     });
     Ok(())
+}
+
+fn persist_window_state(app_handle: &tauri::AppHandle) {
+    let Some(window) = app_handle.get_webview_window("main") else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    let owner = app_handle.state::<WindowStateOwner>();
+    if let Err(error) = owner.persist(WindowGeometry {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized: window.is_maximized().unwrap_or(false),
+    }) {
+        eprintln!("sigil desktop: {error}");
+    }
 }

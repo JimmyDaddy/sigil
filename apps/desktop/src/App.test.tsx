@@ -216,8 +216,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await screen.findByLabelText("Message Sigil") as HTMLTextAreaElement;
     await user.type(composer, "Keep this draft");
-    await user.click(screen.getByText("Appearance"));
-    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await user.click(screen.getByRole("button", { name: "System theme. Switch to light theme" }));
 
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
     expect(setAppearance).toHaveBeenCalledWith("light");
@@ -237,20 +236,18 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No workspace is open.");
-    await user.click(screen.getByText("Appearance"));
-    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    await user.click(screen.getByRole("button", { name: "System theme. Switch to light theme" }));
     expect((await screen.findByRole("alert")).textContent).toContain("previous appearance is still active");
-    expect((screen.getByRole("radio", { name: "Follow system" }) as HTMLInputElement).checked).toBe(true);
     expect(document.documentElement.dataset.theme).toBe("dark");
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Theme change failed. Retry" }));
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
     expect(attempts).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("opens appearance from the platform settings shortcut and follows native updates", async () => {
+  it("shows the current theme state and follows native updates", async () => {
     let listener: ((snapshot: AppearanceSnapshot) => void) | undefined;
     const bridge = bridgeWith({
       subscribeAppearance: async (next) => {
@@ -260,15 +257,12 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No workspace is open.");
-    fireEvent.keyDown(window, { key: ",", metaKey: true });
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Appearance" }).getAttribute("aria-expanded")).toBe("true");
-    });
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    expect(screen.getByRole("button", { name: "System theme. Switch to light theme" })).toBeTruthy();
     act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
     expect(document.documentElement.dataset.themePreference).toBe("system");
     expect(document.documentElement.dataset.theme).toBe("light");
-    expect(screen.getByText("System currently resolves to light.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "System theme. Switch to light theme" })).toBeTruthy();
   });
 
   it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
@@ -310,8 +304,9 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByText("No workspace is open.")).toBeTruthy();
-    expect(screen.getByText("Choose a workspace to begin.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Open workspace" })).toHaveLength(1);
+    expect(screen.queryByRole("complementary", { name: "Conversation navigation" })).toBeNull();
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Switch workspace" }));
     expect(screen.getByText("Recent")).toBeTruthy();
@@ -332,8 +327,8 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No workspace is open.");
-    await user.click(screen.getAllByRole("button", { name: "Choose workspace" })[0]);
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    await user.click(screen.getByRole("button", { name: "Open workspace" }));
     expect(await screen.findByText("Conversations")).toBeTruthy();
     expect(await screen.findByText("No matching conversation.")).toBeTruthy();
 
@@ -711,9 +706,9 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByRole("button", { name: "Browse" });
+    await screen.findByRole("button", { name: "Browse conversations" });
     expect(document.querySelector("#desktop-navigation")).toBeNull();
-    const navigationTrigger = screen.getByRole("button", { name: "Browse" });
+    const navigationTrigger = screen.getByRole("button", { name: "Browse conversations" });
     await user.click(navigationTrigger);
     const navigation = screen.getByRole("dialog", { name: "Browse conversations" });
     expect(navigation.id).toBe("desktop-navigation");
