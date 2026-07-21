@@ -1370,9 +1370,11 @@ pub fn application_verification_view(
 
 /// Reads one safe, bounded and backwards-pageable user transcript from durable session truth.
 ///
-/// The projection deliberately excludes system/control data, tool arguments, resolved image bytes
-/// and the source path. `before` is an exclusive one-based message ordinal so pagination remains
-/// stable while the append-only stream grows.
+/// The projection deliberately excludes system and unrelated control data, tool arguments,
+/// resolved image bytes and the source path. Durable `reasoning_trace` notes are admitted as
+/// explicitly classified assistant rows so user-visible reasoning survives resume. `before` is an
+/// exclusive one-based message ordinal so pagination remains stable while the append-only stream
+/// grows.
 ///
 /// # Errors
 ///
@@ -1424,6 +1426,35 @@ pub fn application_session_transcript_page(
     let mut tool_names = BTreeMap::new();
     let mut projected = Vec::new();
     for entry in entries {
+        if let SessionLogEntry::Control(control) = &entry {
+            if let Some(trace) = application_transcript_reasoning_trace(control) {
+                let safe_content = safe_persistence_text(trace);
+                let original_content_bytes = safe_content.len();
+                let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
+                let content = truncate_application_transcript_text(
+                    &safe_content,
+                    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+                );
+                let ordinal = u64::try_from(projected.len())
+                    .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
+                    .saturating_add(1);
+                projected.push(ApplicationTranscriptMessage {
+                    ordinal,
+                    message_id: safe_application_transcript_message_id(&format!(
+                        "reasoning-trace:{ordinal}"
+                    )),
+                    role: ApplicationTranscriptRole::Assistant,
+                    content: Some(content),
+                    assistant_kind: Some(AssistantMessageKind::ReasoningTrace),
+                    tool_name: None,
+                    image_attachment_count: 0,
+                    truncated,
+                    original_content_bytes: u64::try_from(original_content_bytes)
+                        .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+                });
+            }
+            continue;
+        }
         let (message, role, expected_role) = match entry {
             SessionLogEntry::User(message) => {
                 (message, ApplicationTranscriptRole::User, MessageRole::User)
@@ -1447,7 +1478,7 @@ pub fn application_session_transcript_page(
             SessionLogEntry::ToolResult(message) => {
                 (message, ApplicationTranscriptRole::Tool, MessageRole::Tool)
             }
-            SessionLogEntry::Control(_) => continue,
+            SessionLogEntry::Control(_) => unreachable!("control entries are handled above"),
         };
         if message.role != expected_role {
             bail!("durable transcript entry role does not match its entry class");
@@ -1517,6 +1548,18 @@ pub fn application_session_transcript_page(
         messages,
         next_before,
     })
+}
+
+fn application_transcript_reasoning_trace(control: &ControlEntry) -> Option<&str> {
+    let ControlEntry::Note { kind, data } = control else {
+        return None;
+    };
+    if kind != "reasoning_trace" {
+        return None;
+    }
+    data.get("text")
+        .and_then(serde_json::Value::as_str)
+        .filter(|trace| !trace.trim().is_empty())
 }
 
 fn truncate_application_transcript_text(value: &str, max_bytes: usize) -> String {

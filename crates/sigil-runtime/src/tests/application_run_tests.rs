@@ -768,6 +768,63 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
+fn transcript_page_projects_durable_reasoning_notes_without_other_control_data() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp
+        .path()
+        .join("state/sessions/reasoning-transcript.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("inspect")))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "reasoning_trace".to_owned(),
+        data: serde_json::json!({ "text": "checking the durable path" }),
+    }))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "internal_only".to_owned(),
+        data: serde_json::json!({ "text": "must not project" }),
+    }))?;
+    store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            Some("done".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+
+    let page = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        10,
+    )?;
+
+    assert_eq!(page.total_messages, 3);
+    assert_eq!(page.messages[1].role, ApplicationTranscriptRole::Assistant);
+    assert_eq!(
+        page.messages[1].assistant_kind,
+        Some(AssistantMessageKind::ReasoningTrace)
+    );
+    assert_eq!(
+        page.messages[1].content.as_deref(),
+        Some("checking the durable path")
+    );
+    assert!(!format!("{page:?}").contains("must not project"));
+    Ok(())
+}
+
+#[test]
 fn transcript_page_truncates_utf8_content_without_breaking_character_boundaries() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
