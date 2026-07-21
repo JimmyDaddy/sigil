@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +14,7 @@ import type {
   CatalogPage,
   DesktopBootstrap,
   RunStreamStatus,
+  SessionSummary,
   TimelineEvent,
   TranscriptMessage,
   WorkspaceSummary,
@@ -739,6 +740,63 @@ describe("desktop workspace and history shell", () => {
 
     await user.click(screen.getByRole("button", { name: /^First session/ }));
     await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
+  });
+
+  it("shows branded conversation loading in the workspace instead of the session rail", async () => {
+    const user = userEvent.setup();
+    let resolveOpen: ((session: SessionSummary) => void) | undefined;
+    let resolveTranscript: ((page: { totalMessages: number; messages: []; }) => void) | undefined;
+    const transcript = vi.fn(() => new Promise<{ totalMessages: number; messages: []; }>((resolve) => {
+      resolveTranscript = resolve;
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "loading.jsonl",
+          sessionId: "durable-loading",
+          sourceState: "ready",
+          sourceBytes: 1024,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Loading state session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: () => new Promise((resolve) => {
+        resolveOpen = resolve;
+      }),
+      transcript,
+    });
+    render(<App bridge={bridge} />);
+
+    const sessionButton = await screen.findByRole("button", { name: /^Loading state session/ });
+    await user.click(sessionButton);
+    const workspaceRegion = screen.getByRole("region", { name: "Conversation workspace" });
+    const navigation = screen.getByRole("complementary", { name: "Conversation navigation" });
+    const loading = await within(workspaceRegion).findByRole("status", { name: "Opening conversation…" });
+    expect(within(workspaceRegion).getByText(/Restoring Loading state session/)).toBeTruthy();
+    expect(within(navigation).queryByText("Opening conversation…")).toBeNull();
+    expect((sessionButton as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveOpen?.({ id: "http-session-loading", label: "Loading state session", runCount: 2 });
+    });
+    await waitFor(() => expect(transcript).toHaveBeenCalledOnce());
+    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+
+    await act(async () => {
+      resolveTranscript?.({ totalMessages: 0, messages: [] });
+    });
+    expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
+    expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
   });
 
   it("opens bounded transcript text and pages older messages in chronological order", async () => {

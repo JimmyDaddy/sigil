@@ -11,6 +11,8 @@ interface SessionRailProps {
   readonly historyState: HistoryState;
   readonly catalog: CatalogPage;
   readonly selectedSessionId?: string;
+  readonly navigationBusy: boolean;
+  readonly openingSessionRef?: string;
   readonly sessionMessage?: string;
   readonly sessionError: boolean;
   readonly searchDraft: string;
@@ -36,6 +38,8 @@ export function SessionRail({
   historyState,
   catalog,
   selectedSessionId,
+  navigationBusy,
+  openingSessionRef,
   sessionMessage,
   sessionError,
   searchDraft,
@@ -113,6 +117,8 @@ export function SessionRail({
           state={historyState}
           page={catalog}
           selectedSessionId={selectedSessionId}
+          navigationBusy={navigationBusy}
+          openingSessionRef={openingSessionRef}
           onRetry={onRetry}
           onLoadMore={onLoadMore}
           onOpen={onOpen}

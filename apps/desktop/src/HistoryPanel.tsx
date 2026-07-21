@@ -24,6 +24,8 @@ export function HistoryContent({
   onDelete,
   onQuarantine,
   selectedSessionId,
+  navigationBusy,
+  openingSessionRef,
 }: {
   state: HistoryState;
   page: CatalogPage;
@@ -34,6 +36,8 @@ export function HistoryContent({
   onDelete: (entry: CatalogEntry) => void;
   onQuarantine: (entry: CatalogEntry) => void;
   selectedSessionId?: string;
+  navigationBusy?: boolean;
+  openingSessionRef?: string;
 }) {
   const { locale, t } = useLocale();
   const previousSessionPress = useRef<
@@ -123,6 +127,8 @@ export function HistoryContent({
                             type="button"
                             variant="quiet"
                             aria-current={entry.sessionId === selectedSessionId ? "page" : undefined}
+                            aria-busy={entry.sessionRef === openingSessionRef || undefined}
+                            disabled={navigationBusy}
                             title={providerContext || undefined}
                             onMouseDown={(event) => {
                               if (event.button !== 0) return;

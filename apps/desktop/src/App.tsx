@@ -21,6 +21,7 @@ import type {
 } from "./types";
 import { useMediaQuery } from "./useMediaQuery";
 import { Button, Dialog, Drawer, IconButton, TextField, Tooltip } from "./ui/primitives";
+import { LoadingState } from "./ui/feedback";
 import { Icon } from "./ui/icons";
 import sigilMarkDark from "../../../assets/logo/sigil-mark-dark-mode.svg";
 import sigilMarkLight from "../../../assets/logo/sigil-mark.svg";
@@ -31,6 +32,9 @@ interface AppProps {
 
 type LoadState = "loading" | "ready" | "working" | "error";
 type SessionActionState = "idle" | "working" | "error";
+type ConversationNavigationState =
+  | { readonly kind: "creating"; readonly targetSessionId?: string }
+  | { readonly kind: "opening"; readonly sessionRef: string; readonly title: string; readonly targetSessionId?: string };
 interface PendingWorkspaceClose {
   id: string;
   displayName: string;
@@ -83,6 +87,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
   const [selectedDurableSessionId, setSelectedDurableSessionId] = useState<string>();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
+  const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
@@ -112,6 +117,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
     [activeWorkspaceId, workspaces],
   );
+
+  const finishConversationNavigation = useCallback((sessionId: string) => {
+    setConversationNavigation((current) =>
+      current?.targetSessionId === sessionId ? undefined : current,
+    );
+  }, []);
 
   const applyBootstrap = useCallback(
     (bootstrap: DesktopBootstrap) => {
@@ -255,6 +266,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setSelectedSession(undefined);
     setSelectedDurableSessionId(undefined);
     setSessionActionState("idle");
+    setConversationNavigation(undefined);
     setSessionMessage(undefined);
   }, [activeWorkspaceId]);
 
@@ -355,12 +367,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const createSession = async (modelName?: string): Promise<boolean> => {
     if (activeWorkspaceId === undefined) return false;
     setSessionActionState("working");
-    setSessionMessage(t("creatingConversation"));
+    setConversationNavigation({ kind: "creating" });
+    setSessionMessage(undefined);
     try {
       const session = await bridge.createSession(
         activeWorkspaceId,
         t("newConversation"),
         modelName,
+      );
+      setConversationNavigation((current) =>
+        current?.kind === "creating" ? { ...current, targetSessionId: session.id } : current,
       );
       setSelectedSession(session);
       setSelectedDurableSessionId(undefined);
@@ -372,6 +388,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     } catch {
       setSessionActionState("error");
       setSessionMessage(t("conversationCreateFailed"));
+      setConversationNavigation(undefined);
       return false;
     }
   };
@@ -379,13 +396,23 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const openSession = async (entry: CatalogEntry) => {
     if (activeWorkspaceId === undefined || entry.sessionId === undefined) return;
     setSessionActionState("working");
-    setSessionMessage(t("openingConversation"));
+    setConversationNavigation({
+      kind: "opening",
+      sessionRef: entry.sessionRef,
+      title: entry.title ?? t("untitledConversation"),
+    });
+    setSessionMessage(undefined);
     try {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef: entry.sessionRef,
         sessionId: entry.sessionId,
         label: entry.title,
       });
+      setConversationNavigation((current) =>
+        current?.kind === "opening" && current.sessionRef === entry.sessionRef
+          ? { ...current, targetSessionId: session.id }
+          : current,
+      );
       setSelectedSession(session);
       setSelectedDurableSessionId(entry.sessionId);
       setNavigationOpen(false);
@@ -394,6 +421,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     } catch {
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
+      setConversationNavigation(undefined);
     }
   };
 
@@ -473,6 +501,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       historyState={historyState}
       catalog={catalog}
       selectedSessionId={selectedDurableSessionId}
+      navigationBusy={conversationNavigation !== undefined}
+      openingSessionRef={conversationNavigation?.kind === "opening" ? conversationNavigation.sessionRef : undefined}
       sessionMessage={sessionMessage}
       sessionError={sessionActionState === "error"}
       searchDraft={searchDraft}
@@ -562,7 +592,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 aria-label={t("newConversation")}
                 type="button"
                 icon={<Icon name="add" />}
-                disabled={sessionActionState === "working"}
+                disabled={sessionActionState === "working" || conversationNavigation !== undefined}
                 onClick={() => void createSession()}
               />
             </Tooltip>
@@ -599,8 +629,14 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           </aside>
         )}
 
-        <section className="conversation-stage" aria-label={t("conversationWorkspace")}>
-          {activeWorkspace === undefined ? (
+        <section
+          className="conversation-stage"
+          aria-label={t("conversationWorkspace")}
+          aria-busy={conversationNavigation !== undefined || undefined}
+        >
+          {activeWorkspace === undefined && (loadState === "loading" || loadState === "working") ? (
+            <LoadingState label={message} />
+          ) : activeWorkspace === undefined ? (
             <div className="welcome-state">
               <span className="welcome-mark" aria-hidden="true">
                 <img className="brand-mark-light" src={sigilMarkLight} alt="" />
@@ -617,11 +653,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               <p>{t("selectConversationDetail")}</p>
             </div>
           ) : (
-            <div className="conversation-surface">
+            <div className="conversation-surface" inert={conversationNavigation !== undefined || undefined}>
               <ConversationPanel
                 bridge={bridge}
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
+                onInitialLoadComplete={finishConversationNavigation}
                 onNewSession={() => createSession()}
                 onOpenSessionPicker={(query) => {
                   setSearchDraft(query);
@@ -632,6 +669,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               />
             </div>
           )}
+          {activeWorkspace !== undefined && conversationNavigation !== undefined ? (
+            <div className="conversation-loading-overlay">
+              <LoadingState
+                label={conversationNavigation.kind === "opening" ? t("openingConversation") : t("creatingConversation")}
+                detail={conversationNavigation.kind === "opening"
+                  ? t("openingConversationDetail", { name: conversationNavigation.title })
+                  : t("creatingConversationDetail")}
+              />
+            </div>
+          ) : null}
         </section>
       </main>
 

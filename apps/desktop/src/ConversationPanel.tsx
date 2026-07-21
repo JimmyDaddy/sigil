@@ -31,6 +31,7 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
+  onInitialLoadComplete?: (sessionId: string) => void;
   onNewSession: () => Promise<boolean>;
   onOpenSessionPicker: (query: string) => void;
 }
@@ -50,6 +51,7 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
+  onInitialLoadComplete,
   onNewSession,
   onOpenSessionPicker,
 }: ConversationPanelProps) {
@@ -90,6 +92,7 @@ export function ConversationPanel({
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
   const terminalTranscriptRefreshRunId = useRef<string | undefined>(undefined);
+  const initialTranscriptSessionId = useRef<string | undefined>(undefined);
   const onNotice = useCallback((message: string, error = false) => {
     setRunNotice({ message, error });
   }, []);
@@ -171,12 +174,18 @@ export function ConversationPanel({
         if (!disposed) setTranscriptError(true);
       })
       .finally(() => {
-        if (!disposed) setTranscriptBusy(false);
+        if (!disposed) {
+          setTranscriptBusy(false);
+          if (initialTranscriptSessionId.current !== session.id) {
+            initialTranscriptSessionId.current = session.id;
+            onInitialLoadComplete?.(session.id);
+          }
+        }
       });
     return () => {
       disposed = true;
     };
-  }, [bridge, session.id, transcriptReload, workspaceId]);
+  }, [bridge, onInitialLoadComplete, session.id, transcriptReload, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
