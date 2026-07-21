@@ -3341,6 +3341,41 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
 }
 
 #[test]
+fn approval_command_rejects_unavailable_session_grant_without_consuming_request() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("bounded approval", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-1", "bash"))
+        .expect("approval should be pending");
+
+    assert_eq!(
+        registry.submit_approval_decision(
+            &run.id,
+            "call-1",
+            approval_decision("call-1", HttpApprovalDecision::ApproveForSession, None),
+        ),
+        Err(HttpRegistryError::ApprovalDecisionUnavailable {
+            run_id: run.id.clone(),
+            call_id: "call-1".to_owned(),
+        })
+    );
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should remain readable")
+            .pending_approval_call_ids,
+        vec!["call-1"]
+    );
+    assert!(driver.approvals().is_empty());
+}
+
+#[test]
 fn approval_command_rejects_expired_request_without_consuming_pending_call() {
     let (registry, driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
@@ -3706,6 +3741,7 @@ fn pending_approval(call_id: &str, tool_name: &str) -> HttpPendingApproval {
         tool_call_hash: tool_call_hash(call_id),
         policy_version: policy_version(),
         expires_at_ms: u64::MAX,
+        session_grant_available: false,
     }
 }
 

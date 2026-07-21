@@ -11,6 +11,7 @@ import { ToolCard } from "./ToolCard";
 import type {
   AgentBinding,
   AgentCatalogEntry,
+  ApprovalAction,
   PermissionMode,
   ReasoningEffort,
   RunContext,
@@ -45,7 +46,7 @@ interface TimelineRowBase {
 
 type TimelineRow =
   | (TimelineRowBase & { kind: MessageView["kind"] })
-  | (TimelineRowBase & { kind: "tool" });
+  | (TimelineRowBase & { kind: "tool"; input?: string });
 
 export function ConversationPanel({
   bridge,
@@ -66,6 +67,7 @@ export function ConversationPanel({
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
+  const [optimisticPrompt, setOptimisticPrompt] = useState<string>();
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
@@ -104,6 +106,7 @@ export function ConversationPanel({
     setReasoningEffort(undefined);
     setSelectedModelName(undefined);
     setEvents([]);
+    setOptimisticPrompt(undefined);
     setStreamStatus(undefined);
     setVerification(undefined);
     setTranscript([]);
@@ -213,9 +216,11 @@ export function ConversationPanel({
         }
         if (activeRunIdRef.current === undefined) activeRunIdRef.current = event.runId;
         if (activeRunIdRef.current !== event.runId) return;
+        if (event.kind === "run_started") setOptimisticPrompt(undefined);
         setEvents((current) => mergeTimelineEvent(current, event));
         const terminalStatus = terminalStatusForEvent(event);
         if (terminalStatus !== undefined) {
+          setOptimisticPrompt(undefined);
           setRun((current) =>
             current?.id === event.runId ? { ...current, status: terminalStatus } : current,
           );
@@ -308,10 +313,18 @@ export function ConversationPanel({
     };
   }, [bridge, onNotice, refreshTerminalTranscript, session.foregroundRunId, session.id, t, workspaceId]);
 
-  const rows = useMemo(
-    () => reduceConversationTimeline(transcript, events, t),
-    [events, t, transcript],
-  );
+  const rows = useMemo(() => {
+    const next = reduceConversationTimeline(transcript, events, t);
+    if (optimisticPrompt === undefined) return next;
+    if (next.some((row) => row.kind === "user" && row.text === optimisticPrompt)) return next;
+    return [...next, {
+      key: `optimistic:${session.id}`,
+      kind: "user" as const,
+      label: t("you"),
+      text: optimisticPrompt,
+      status: "sending",
+    }];
+  }, [events, optimisticPrompt, session.id, t, transcript]);
   const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
 
@@ -328,7 +341,7 @@ export function ConversationPanel({
     } else if (timelinePinnedToEnd.current) {
       timeline.scrollTop = timeline.scrollHeight;
     }
-  }, [rows.length]);
+  }, [rows]);
 
   const loadEarlier = async () => {
     if (nextBefore === undefined || transcriptBusy) return;
@@ -362,6 +375,8 @@ export function ConversationPanel({
     agentBinding?: AgentBinding,
   ): Promise<boolean> => {
     if (nextPrompt === "" || active || submitting) return false;
+    timelinePinnedToEnd.current = true;
+    setOptimisticPrompt(nextPrompt);
     setSubmitting(true);
     onNotice(t("startingRunNotice"));
     try {
@@ -396,6 +411,7 @@ export function ConversationPanel({
       onNotice(t("runStarted"));
       return true;
     } catch {
+      setOptimisticPrompt(undefined);
       onNotice(t("runStartFailed"), true);
       return false;
     } finally {
@@ -417,19 +433,19 @@ export function ConversationPanel({
     }
   };
 
-  const decideApproval = async (approve: boolean) => {
+  const decideApproval = async (decision: ApprovalAction) => {
     if (pendingApproval?.approval === undefined || controlBusy) return;
     setControlBusy(true);
-    onNotice(approve ? t("submittingApproval") : t("submittingDenial"));
+    onNotice(decision === "deny" ? t("submittingDenial") : t("submittingApproval"));
     try {
-      const decision = await bridge.resolveApproval(
+      const outcome = await bridge.resolveApproval(
         workspaceId,
         session.id,
         pendingApproval.runId,
         pendingApproval.approval,
-        approve,
+        decision,
       );
-      onNotice(t("toolRequestDecision", { decision: decision.decision }));
+      onNotice(t("toolRequestDecision", { decision: outcome.decision }));
     } catch {
       onNotice(t("approvalDecisionFailed"), true);
     } finally {
@@ -568,7 +584,7 @@ export function ConversationPanel({
           </div>
         ) : (
           rows.map((row) => row.kind === "tool"
-            ? <ToolCard key={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, status: row.status }} />
+            ? <ToolCard key={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, input: row.input, status: row.status }} />
             : <Message key={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
         )}
       </div>
@@ -823,8 +839,9 @@ export function reduceTimeline(
   t: Translate = translateEnglish,
 ): TimelineRow[] {
   const rows = new Map<string, TimelineRow>();
-  for (const event of events) {
-    const assistantKey = `${event.runId}:assistant`;
+  const activeAssistant = new Map<string, string>();
+  const activeReasoning = new Map<string, string>();
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
     switch (event.kind) {
       case "run_started":
         rows.set(`${event.runId}:user`, {
@@ -832,38 +849,57 @@ export function reduceTimeline(
         });
         break;
       case "assistant_delta": {
-        const current = rows.get(assistantKey);
-        rows.set(assistantKey, {
-          key: assistantKey,
+        const key = activeAssistant.get(event.runId) ?? `${event.runId}:assistant:${event.sequence}`;
+        activeAssistant.set(event.runId, key);
+        const current = rows.get(key);
+        rows.set(key, {
+          key,
           kind: "assistant",
           label: "Sigil",
           text: `${current?.text ?? ""}${event.text ?? ""}`,
         });
         break;
       }
-      case "assistant_message":
-        rows.set(assistantKey, {
-          key: assistantKey,
-          kind: "assistant",
+      case "assistant_message": {
+        const key = activeAssistant.get(event.runId) ??
+          `${event.runId}:assistant:${event.itemId ?? event.sequence}`;
+        const current = rows.get(key);
+        const text = event.text ?? current?.text ?? "";
+        activeAssistant.delete(event.runId);
+        activeReasoning.delete(event.runId);
+        if (event.assistantKind === "tool_preamble" && text.trim() === "") break;
+        const kind = assistantRowKind(event.assistantKind);
+        rows.set(key, {
+          key,
+          kind,
           label: "Sigil",
-          text: event.text ?? rows.get(assistantKey)?.text ?? "",
+          text,
+          status: event.assistantKind === "tool_preamble" ? "tool preamble" : undefined,
         });
         break;
+      }
       case "run_finished": {
         finalizeRunRows(rows, event.runId, t);
-        const current = rows.get(assistantKey);
-        if (current === undefined || current.text === "") {
-          rows.set(assistantKey, {
-            key: assistantKey,
+        activeAssistant.delete(event.runId);
+        activeReasoning.delete(event.runId);
+        const finalText = event.text ?? t("runCompleted");
+        const lastAssistant = [...rows.values()].reverse().find(
+          (row) => row.key.startsWith(`${event.runId}:assistant:`) && row.kind === "assistant",
+        );
+        if (lastAssistant === undefined || lastAssistant.text !== finalText) {
+          const key = `${event.runId}:assistant:final:${event.sequence}`;
+          rows.set(key, {
+            key,
             kind: "assistant",
             label: "Sigil",
-            text: event.text ?? t("runCompleted"),
+            text: finalText,
           });
         }
         break;
       }
       case "reasoning_delta": {
-        const key = `${event.runId}:reasoning`;
+        const key = activeReasoning.get(event.runId) ?? `${event.runId}:reasoning:${event.sequence}`;
+        activeReasoning.set(event.runId, key);
         const current = rows.get(key);
         rows.set(key, {
           key,
@@ -877,6 +913,8 @@ export function reduceTimeline(
       case "tool_completed":
       case "tool_progress":
       case "tool_result": {
+        activeAssistant.delete(event.runId);
+        activeReasoning.delete(event.runId);
         const key = `${event.runId}:tool:${event.itemId ?? event.sequence}`;
         const current = rows.get(key);
         rows.set(key, {
@@ -884,6 +922,7 @@ export function reduceTimeline(
           kind: "tool",
           label: event.toolName ?? current?.label ?? t("tool"),
           text: event.text ?? current?.text ?? "",
+          input: event.toolInput ?? (current?.kind === "tool" ? current.input : undefined),
           status: event.status ?? event.kind.replace("tool_", ""),
         });
         break;
@@ -894,8 +933,22 @@ export function reduceTimeline(
           key,
           kind: "notice",
           label: t("approvalRequired"),
-          text: t("toolWaitingDecision", { tool: event.toolName ?? t("tool") }),
+          text: event.approval?.previewSummary ?? event.toolInput ??
+            t("toolWaitingDecision", { tool: event.toolName ?? t("tool") }),
           status: "waiting",
+        });
+        break;
+      }
+      case "approval_resolved": {
+        if (event.itemId === undefined) break;
+        const key = `${event.runId}:approval:${event.itemId}`;
+        const approved = event.status === "approved";
+        rows.set(key, {
+          key,
+          kind: "notice",
+          label: approved ? t("approvalApproved") : t("approvalDenied"),
+          text: event.text ?? (approved ? t("approvalApprovedDetail") : t("approvalDeniedDetail")),
+          status: approved ? "approved" : "denied",
         });
         break;
       }
@@ -910,7 +963,7 @@ export function reduceTimeline(
         });
         break;
       case "notice":
-        if (isAutoAllowedPermissionNotice(event.text)) break;
+        if (isPermissionNotice(event.text)) break;
         rows.set(`${event.runId}:notice:${event.sequence}`, {
           key: `${event.runId}:notice:${event.sequence}`,
           kind: "notice",
@@ -925,8 +978,16 @@ export function reduceTimeline(
   return [...rows.values()];
 }
 
-function isAutoAllowedPermissionNotice(text?: string): boolean {
-  return text?.startsWith("permission ") === true && text.endsWith(" mode=allow");
+function assistantRowKind(
+  kind: TimelineEvent["assistantKind"],
+): MessageView["kind"] {
+  if (kind === "reasoning_trace") return "reasoning";
+  if (kind === "progress" || kind === "tool_preamble") return "progress";
+  return "assistant";
+}
+
+function isPermissionNotice(text?: string): boolean {
+  return text?.startsWith("permission ") === true;
 }
 
 function finalizeRunRows(
@@ -934,15 +995,14 @@ function finalizeRunRows(
   runId: string,
   t: Translate,
 ) {
-  const reasoningKey = `${runId}:reasoning`;
-  const reasoning = rows.get(reasoningKey);
-  if (reasoning !== undefined) {
-    rows.set(reasoningKey, { ...reasoning, label: t("reasoning"), status: undefined });
-  }
-  const progressKey = `${runId}:progress`;
-  const progress = rows.get(progressKey);
-  if (progress !== undefined) {
-    rows.set(progressKey, { ...progress, label: t("progress"), status: undefined });
+  for (const [key, row] of rows) {
+    if (!key.startsWith(`${runId}:`)) continue;
+    if (row.kind === "reasoning") {
+      rows.set(key, { ...row, label: t("reasoning"), status: undefined });
+    }
+    if (row.kind === "progress") {
+      rows.set(key, { ...row, label: t("progress"), status: undefined });
+    }
   }
 }
 

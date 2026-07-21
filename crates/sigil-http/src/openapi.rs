@@ -1035,7 +1035,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApprovalDecision": {
                     "type": "string",
-                    "enum": ["approve", "deny"]
+                    "enum": ["approve", "approve_for_session", "deny"]
                 },
                 "ApprovalCommandReceipt": {
                     "type": "object",

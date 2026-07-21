@@ -1180,6 +1180,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalToolCallChanged { .. }
         | HttpRegistryError::ApprovalPolicyChanged { .. }
         | HttpRegistryError::ApprovalExpiryChanged { .. }
+        | HttpRegistryError::ApprovalDecisionUnavailable { .. }
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }

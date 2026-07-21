@@ -686,6 +686,9 @@ pub struct HttpPendingApproval {
     pub policy_version: String,
     /// Expiry timestamp in Unix milliseconds.
     pub expires_at_ms: u64,
+    /// Whether this exact approval may create a bounded session-local grant.
+    #[serde(default)]
+    pub session_grant_available: bool,
 }
 
 /// HTTP approval decision payload.
@@ -713,6 +716,8 @@ pub struct HttpApprovalDecisionRequest {
 pub enum HttpApprovalDecision {
     /// Allow the pending tool call.
     Approve,
+    /// Allow this call and equivalent bounded calls for the current session.
+    ApproveForSession,
     /// Deny the pending tool call.
     Deny,
 }
@@ -723,6 +728,7 @@ impl HttpApprovalDecision {
     pub fn to_user_decision(self) -> ToolApprovalUserDecision {
         match self {
             Self::Approve => ToolApprovalUserDecision::Approved,
+            Self::ApproveForSession => ToolApprovalUserDecision::ApprovedForSession,
             Self::Deny => ToolApprovalUserDecision::Denied,
         }
     }

@@ -390,7 +390,15 @@ pub(crate) struct DesktopApprovalDecisionInput {
     pub(crate) tool_call_hash: String,
     pub(crate) policy_version: String,
     pub(crate) expires_at_ms: u64,
-    pub(crate) approve: bool,
+    pub(crate) decision: DesktopApprovalActionInput,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopApprovalActionInput {
+    ApproveOnce,
+    ApproveSession,
+    Deny,
 }
 
 #[derive(Debug, Serialize)]
@@ -741,6 +749,9 @@ impl From<DesktopApprovalDecisionRecord> for DesktopApprovalDecisionSummary {
             call_id: value.call_id,
             decision: match value.decision {
                 sigil_desktop::DesktopApprovalRecordedDecision::Approved => "approved",
+                sigil_desktop::DesktopApprovalRecordedDecision::ApprovedForSession => {
+                    "approved_for_session"
+                }
                 sigil_desktop::DesktopApprovalRecordedDecision::Denied => "denied",
             },
         }

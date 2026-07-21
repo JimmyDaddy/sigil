@@ -71,6 +71,7 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
             &call(),
             &spec(ToolAccess::Read, None),
             Duration::from_secs(1),
+            false,
         )
         .expect("approval should register");
     assert_eq!(pending.policy_version, HTTP_APPROVAL_POLICY_VERSION);
@@ -111,6 +112,7 @@ fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
             &call(),
             &spec(ToolAccess::Read, None),
             Duration::ZERO,
+            false,
         )
         .expect("approval should register");
 
@@ -138,6 +140,7 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
             &call(),
             &spec(ToolAccess::Write, None),
             Duration::from_secs(1),
+            false,
         )
         .expect("approval should register");
     broker
@@ -164,6 +167,44 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
         ToolApproval::Approve
     ));
     assert!(handler.approval_is_explicit_user_action());
+}
+
+#[test]
+fn approval_handler_preserves_bounded_session_decisions() {
+    let broker = Arc::new(HttpApprovalBroker::default());
+    let pending = broker
+        .register(
+            "run-1",
+            &call(),
+            &spec(ToolAccess::Read, None),
+            Duration::from_secs(1),
+            true,
+        )
+        .expect("approval should register");
+    assert!(pending.session_grant_available);
+    broker
+        .resolve(
+            "call-1",
+            HttpApprovalDecisionRecord {
+                run_id: "run-1".to_owned(),
+                call_id: "call-1".to_owned(),
+                decision: ToolApprovalUserDecision::ApprovedForSession,
+                reason: None,
+            },
+        )
+        .expect("session decision should resolve");
+    let mut handler = HttpProductionApprovalHandler {
+        run_id: "run-1".to_owned(),
+        registry: Weak::new(),
+        broker,
+    };
+
+    assert!(matches!(
+        handler
+            .approve_tool_call(&call(), &spec(ToolAccess::Read, None))
+            .expect("session decision should reach the kernel"),
+        ToolApproval::ApproveForSession
+    ));
 }
 
 #[tokio::test]
@@ -626,6 +667,7 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
         tool_call_hash: "b".repeat(64),
         policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
         expires_at_ms: 10,
+        session_grant_available: false,
     };
     let event = PublicRunEvent::new(
         "durable-session-1",
@@ -696,6 +738,7 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
         tool_call_hash: "b".repeat(64),
         policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
         expires_at_ms: 10,
+        session_grant_available: false,
     };
 
     assert!(matches!(

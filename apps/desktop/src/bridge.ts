@@ -27,6 +27,7 @@ import type {
   WorkspaceSummary,
   ApprovalDecisionSummary,
   TimelineApproval,
+  ApprovalAction,
   TranscriptPage,
   TranscriptRequest,
   VerificationRerunBinding,
@@ -77,7 +78,7 @@ export interface DesktopBridge {
     sessionId: string,
     runId: string,
     approval: TimelineApproval,
-    approve: boolean,
+    decision: ApprovalAction,
   ): Promise<ApprovalDecisionSummary>;
   verification(workspaceId: string, sessionId: string): Promise<VerificationSummary>;
   rerunVerification(
@@ -164,7 +165,7 @@ export const desktopBridge: DesktopBridge = {
       workspaceId,
       input: { sessionId, runId },
     }),
-  resolveApproval: (workspaceId, sessionId, runId, approval, approve) =>
+  resolveApproval: (workspaceId, sessionId, runId, approval, decision) =>
     invoke<ApprovalDecisionSummary>("desktop_resolve_approval", {
       workspaceId,
       input: {
@@ -175,7 +176,7 @@ export const desktopBridge: DesktopBridge = {
         toolCallHash: approval.toolCallHash,
         policyVersion: approval.policyVersion,
         expiresAtMs: approval.expiresAtMs,
-        approve,
+        decision,
       },
     }),
   verification: (workspaceId, sessionId) =>

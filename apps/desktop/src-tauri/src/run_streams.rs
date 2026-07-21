@@ -544,6 +544,8 @@ async fn terminal_snapshot(
         item_id: None,
         tool_name: None,
         status: Some(status.to_owned()),
+        assistant_kind: None,
+        tool_input: None,
         approval: None,
     };
     owner.record_event(timeline.clone()).await;

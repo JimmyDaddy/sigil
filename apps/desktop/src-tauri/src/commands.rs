@@ -21,15 +21,15 @@ use tokio::sync::oneshot;
 use crate::{
     appearance::{AppearanceSnapshot, AppearanceStoreError, ResolvedTheme, ThemePreference},
     ipc::{
-        DesktopAppearanceInput, DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary,
-        DesktopBootstrap, DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopExternalUrlInput, DesktopRunAttachInput, DesktopRunAttachment,
-        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
-        DesktopSessionCreateInput, DesktopSessionDeleteInput, DesktopSessionMutationSummary,
-        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
-        DesktopSessionRenameInput, DesktopSessionSummary, DesktopTranscriptPage,
-        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection,
+        DesktopAppearanceInput, DesktopApprovalActionInput, DesktopApprovalDecisionInput,
+        DesktopApprovalDecisionSummary, DesktopBootstrap, DesktopCatalogPage,
+        DesktopCatalogRequest, DesktopCatalogState, DesktopExternalUrlInput, DesktopRunAttachInput,
+        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
+        DesktopRunSummary, DesktopSessionCreateInput, DesktopSessionDeleteInput,
+        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
+        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
+        DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -542,16 +542,20 @@ pub(crate) async fn desktop_resolve_approval(
                 tool_call_hash: input.tool_call_hash,
                 policy_version: input.policy_version,
                 expires_at_ms: input.expires_at_ms,
-                decision: if input.approve {
-                    DesktopApprovalDecision::Approve
-                } else {
-                    DesktopApprovalDecision::Deny
+                decision: match input.decision {
+                    DesktopApprovalActionInput::ApproveOnce => DesktopApprovalDecision::Approve,
+                    DesktopApprovalActionInput::ApproveSession => {
+                        DesktopApprovalDecision::ApproveForSession
+                    }
+                    DesktopApprovalActionInput::Deny => DesktopApprovalDecision::Deny,
                 },
                 reason: Some(
-                    if input.approve {
-                        "Approved in Sigil Desktop"
-                    } else {
-                        "Denied in Sigil Desktop"
+                    match input.decision {
+                        DesktopApprovalActionInput::ApproveOnce => "Approved once in Sigil Desktop",
+                        DesktopApprovalActionInput::ApproveSession => {
+                            "Approved for this session in Sigil Desktop"
+                        }
+                        DesktopApprovalActionInput::Deny => "Denied in Sigil Desktop",
                     }
                     .to_owned(),
                 ),

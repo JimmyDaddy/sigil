@@ -93,6 +93,7 @@ fn approval_event() -> HttpProtocolEvent {
         tool_call_hash: "b".repeat(64),
         policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
         expires_at_ms: 10,
+        session_grant_available: false,
     });
     event
 }

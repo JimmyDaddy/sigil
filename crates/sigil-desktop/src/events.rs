@@ -77,6 +77,9 @@ pub struct DesktopTimelineApproval {
     pub tool_call_hash: String,
     pub policy_version: String,
     pub expires_at_ms: u64,
+    pub session_grant_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,6 +113,10 @@ pub struct DesktopTimelineEvent {
     pub tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<DesktopTimelineApproval>,
 }
@@ -149,6 +156,12 @@ impl DesktopProtocolEvent {
         let tool_name = nested_string("call", "name")
             .or_else(|| nested_string("result", "tool_name"))
             .or_else(|| nested_string("progress", "tool_name"));
+        let assistant_kind = if event_type == "assistant_message" {
+            nested_string("message", "assistant_kind")
+        } else {
+            None
+        };
+        let tool_input = project_tool_input(&self.run_event.event);
         let (kind, text, item_id, status) = match event_type {
             "run_started" => (
                 DesktopTimelineEventKind::RunStarted,
@@ -264,6 +277,8 @@ impl DesktopProtocolEvent {
             item_id,
             tool_name,
             status,
+            assistant_kind,
+            tool_input,
             approval,
         })
     }
@@ -321,6 +336,8 @@ impl DesktopProtocolEvent {
             tool_call_hash: bounded_machine_label(&guard.tool_call_hash)?,
             policy_version: bounded_machine_label(&guard.policy_version)?,
             expires_at_ms: guard.expires_at_ms,
+            session_grant_available: guard.session_grant_available,
+            tool_input: project_tool_input(&self.run_event.event),
             operation: self
                 .run_event
                 .event
@@ -353,6 +370,70 @@ impl DesktopProtocolEvent {
                 .map(bounded_text),
         })
     }
+}
+
+fn project_tool_input(event: &Value) -> Option<String> {
+    let call = event.get("call")?;
+    let tool_name = call.get("name")?.as_str()?;
+    let args = serde_json::from_str::<Value>(call.get("args_json")?.as_str()?).ok()?;
+    let value = match tool_name {
+        "bash" | "shell" | "terminal_start" => {
+            let command = args.get("command")?.as_str()?;
+            if command_contains_credential_shape(command) {
+                "[credential-shaped command arguments redacted]".to_owned()
+            } else {
+                command.to_owned()
+            }
+        }
+        "read_file" | "write_file" | "delete_file" | "edit_file" => {
+            let path = args.get("path")?.as_str()?;
+            if !renderer_safe_relative_path(path) {
+                return None;
+            }
+            format!("path={path}")
+        }
+        "grep" | "search" => project_named_string_fields(&args, &["pattern", "path"])?,
+        "glob" => project_named_string_fields(&args, &["pattern", "path"])?,
+        "ls" | "list_files" => project_named_string_fields(&args, &["path"])?,
+        "websearch" | "web_search" => project_named_string_fields(&args, &["query"])?,
+        "terminal_input" => project_named_string_fields(&args, &["task_id"])?,
+        _ => return None,
+    };
+    Some(bounded_text(&value))
+}
+
+fn command_contains_credential_shape(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    [
+        "api_key=",
+        "apikey=",
+        "password=",
+        "secret=",
+        "token=",
+        "authorization:",
+        "bearer ",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn renderer_safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with(['/', '\\', '~'])
+        && !path.split(['/', '\\']).any(|segment| segment == "..")
+        && path.as_bytes().get(1).is_none_or(|byte| *byte != b':')
+}
+
+fn project_named_string_fields(args: &Value, names: &[&str]) -> Option<String> {
+    let fields = names
+        .iter()
+        .filter_map(|name| {
+            args.get(*name)
+                .and_then(Value::as_str)
+                .map(|value| format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>();
+    (!fields.is_empty()).then(|| fields.join("\n"))
 }
 
 fn tool_result_status(event: &Value) -> Option<String> {

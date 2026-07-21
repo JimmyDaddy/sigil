@@ -38,7 +38,7 @@ export function Message({
     );
   }
   return (
-    <article className={`message message-${message.kind}`}>
+    <article className={`message message-${message.kind}${message.status ? ` message-status-${message.status}` : ""}`}>
       <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}</header>
       <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
     </article>

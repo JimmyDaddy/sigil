@@ -430,6 +430,7 @@
       "ApprovalDecision": {
         "enum": [
           "approve",
+          "approve_for_session",
           "deny"
         ],
         "type": "string"

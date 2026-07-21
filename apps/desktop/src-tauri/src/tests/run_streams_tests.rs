@@ -25,6 +25,8 @@ fn only_server_terminal_events_finish_a_stream() {
         item_id: None,
         tool_name: None,
         status: None,
+        assistant_kind: None,
+        tool_input: None,
         approval: None,
     };
     assert!(!timeline_is_terminal(&event(
@@ -63,6 +65,8 @@ fn pending_approval_survives_timeline_eviction_for_safe_reattach() {
         tool_call_hash: "hash-1".to_owned(),
         policy_version: "policy-1".to_owned(),
         expires_at_ms: 1,
+        session_grant_available: false,
+        tool_input: None,
         operation: None,
         risk: None,
         snapshot_required: true,
@@ -129,6 +133,8 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         item_id: None,
         tool_name: None,
         status: None,
+        assistant_kind: None,
+        tool_input: None,
         approval: None,
     }
 }

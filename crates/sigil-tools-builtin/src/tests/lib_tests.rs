@@ -4694,6 +4694,23 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
         cat_head_analysis.classification_source,
         super::ShellClassificationSource::AstKnownReadonly
     );
+
+    let workspace_cd = format!("cd {} && ", workspace.path().display());
+    for command in [
+        format!(
+            "{workspace_cd}grep -rn '#[allow' --include='*.rs' crates/ 2>/dev/null | grep -v unwrap | head"
+        ),
+        format!("{workspace_cd}find crates -name '*.rs' -exec wc -l {{}} + | sort -rn | head"),
+        format!("{workspace_cd}ls scripts && head -20 scripts/check-touched.sh"),
+    ] {
+        let analysis = super::analyze_shell_command(workspace.path(), &command)?;
+        assert_eq!(analysis.access, ToolAccess::Read, "{command}");
+        assert_eq!(analysis.operation, ToolOperation::ExecuteReadOnlyCommand);
+    }
+
+    let unsafe_find = format!("{workspace_cd}find crates -name '*.rs' -exec rm {{}} + | head");
+    let unsafe_analysis = super::analyze_shell_command(workspace.path(), &unsafe_find)?;
+    assert_eq!(unsafe_analysis.access, ToolAccess::Execute);
     Ok(())
 }
 

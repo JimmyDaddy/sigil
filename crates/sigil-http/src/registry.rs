@@ -145,6 +145,9 @@ pub enum HttpRegistryError {
     /// The approval expiry no longer matches the pending request.
     #[error("http approval expiry changed for run {run_id} call {call_id}")]
     ApprovalExpiryChanged { run_id: String, call_id: String },
+    /// The requested decision is not available for this pending approval.
+    #[error("http approval decision is unavailable for run {run_id} call {call_id}")]
+    ApprovalDecisionUnavailable { run_id: String, call_id: String },
     /// The approval request expired before the user decision arrived.
     #[error("http approval expired for run {run_id} call {call_id}")]
     ApprovalExpired { run_id: String, call_id: String },
@@ -2168,6 +2171,14 @@ fn validate_approval_guard(
     }
     if pending.expires_at_ms != request.expires_at_ms {
         return Err(HttpRegistryError::ApprovalExpiryChanged {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    if request.decision == crate::HttpApprovalDecision::ApproveForSession
+        && !pending.session_grant_available
+    {
+        return Err(HttpRegistryError::ApprovalDecisionUnavailable {
             run_id: run_id.to_owned(),
             call_id: call_id.to_owned(),
         });

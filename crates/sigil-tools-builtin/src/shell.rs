@@ -275,9 +275,12 @@ pub(crate) fn analyze_shell_command_with_shell(
     let family = classify_shell_command_family(workspace_root, command)?;
     let normalized_command = normalize_shell_command_for_permission(command);
     let destructive = shell_command_is_destructive(command);
+    let workspace_safe_readonly =
+        !destructive && bash_command_is_safe_readonly_in_workspace(workspace_root, command)?;
     let ast_known_readonly = !destructive
         && family == CommandFamily::Unknown
-        && bash_command_is_ast_known_readonly(command);
+        && bash_ast_has_supported_readonly_structure(command)
+        && workspace_safe_readonly;
     let mut subjects = Vec::new();
     let access;
     let operation;
@@ -308,10 +311,7 @@ pub(crate) fn analyze_shell_command_with_shell(
             stable_subject,
         ));
         subjects.extend(external_shell_path_subjects(workspace_root, command)?);
-    } else if family.is_workspace_read_only()
-        || ast_known_readonly
-        || bash_command_is_safe_readonly(command)
-    {
+    } else if family.is_workspace_read_only() || ast_known_readonly || workspace_safe_readonly {
         access = ToolAccess::Read;
         operation = ToolOperation::ExecuteReadOnlyCommand;
         grant_scope = if family == CommandFamily::Unknown {
@@ -802,11 +802,10 @@ fn command_family_for_pipeline(tokens: &[String]) -> CommandFamily {
     let Some(primary) = pipeline.first().copied() else {
         return CommandFamily::Unknown;
     };
-    if pipeline.len() > 2 {
-        return CommandFamily::Unknown;
-    }
-    if let Some(filter) = pipeline.get(1)
-        && !shell_segment_is_read_filter(filter)
+    if pipeline
+        .iter()
+        .skip(1)
+        .any(|filter| !shell_segment_is_read_filter(filter))
     {
         return CommandFamily::Unknown;
     }
@@ -887,7 +886,7 @@ fn shell_segment_is_read_filter(tokens: &[String]) -> bool {
         return false;
     }
     match command {
-        "head" | "tail" | "wc" | "cat" => true,
+        "head" | "tail" | "wc" | "cat" | "grep" | "rg" => true,
         "sort" => words.iter().skip(1).all(|word| {
             word.starts_with('-')
                 && !matches!(word.as_str(), "-o" | "--output")
@@ -1093,6 +1092,7 @@ pub(crate) fn shell_invocation_is_destructive(words: &[String]) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn bash_command_is_ast_known_readonly(command: &str) -> bool {
     let trimmed = command.trim();
     !trimmed.is_empty()
@@ -1205,6 +1205,18 @@ pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {
         }
     }
     bash_segment_is_safe_readonly_with_context(&segment, allow_noop_segments)
+}
+
+fn bash_command_is_safe_readonly_in_workspace(
+    workspace_root: &Path,
+    command: &str,
+) -> Result<bool> {
+    let workspace_root = canonical_workspace_root(workspace_root)?;
+    let tokens = strip_workspace_cd_prefix(
+        &workspace_root,
+        tokenize_shell_subject_words(command.trim()),
+    )?;
+    Ok(bash_command_is_safe_readonly(&tokens.join(" ")))
 }
 
 #[cfg(test)]
@@ -1452,12 +1464,28 @@ pub(crate) fn is_help_or_version_query(words: &[String]) -> bool {
 }
 
 pub(crate) fn find_segment_is_safe_readonly(words: &[String]) -> bool {
-    !words.iter().skip(1).any(|word| {
-        matches!(
-            word.as_str(),
-            "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprintf" | "-fls"
-        )
-    })
+    let mut index = 1usize;
+    while index < words.len() {
+        match words[index].as_str() {
+            "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprintf" | "-fls" => return false,
+            "-exec" | "-execdir" => {
+                let start = index + 1;
+                let Some(relative_end) = words[start..]
+                    .iter()
+                    .position(|word| matches!(word.as_str(), ";" | "+"))
+                else {
+                    return false;
+                };
+                let end = start + relative_end;
+                if !bash_simple_segment_is_safe_readonly(&words[start..end]) {
+                    return false;
+                }
+                index = end + 1;
+            }
+            _ => index += 1,
+        }
+    }
+    true
 }
 
 pub(crate) fn git_segment_is_safe_readonly(words: &[String]) -> bool {

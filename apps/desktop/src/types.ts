@@ -333,6 +333,8 @@ export interface TimelineApproval {
   toolCallHash: string;
   policyVersion: string;
   expiresAtMs: number;
+  sessionGrantAvailable?: boolean;
+  toolInput?: string;
   operation?: string;
   risk?: string;
   snapshotRequired: boolean;
@@ -353,8 +355,12 @@ export interface TimelineEvent {
   itemId?: string;
   toolName?: string;
   status?: string;
+  assistantKind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
+  toolInput?: string;
   approval?: TimelineApproval;
 }
+
+export type ApprovalAction = "approve_once" | "approve_session" | "deny";
 
 export type RunStreamState =
   | "connecting"

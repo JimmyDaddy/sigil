@@ -26,6 +26,8 @@ mode = "manual"
 
 Check the summary, path or destination, command, and diff before choosing a decision. A plan or earlier approval is not permission for a different action. Headless `sigil run` cannot open an approval modal; an unresolved `ask` action fails.
 
+Interactive approval surfaces show the safely projected command or tool input and update the recorded card after a decision. **Allow for session** appears only when the policy can derive a bounded grant for equivalent requests; it does not authorize unrelated commands, destinations, or risk classes. Recognized read-only shell structures may run as reads, while mutating or unclassified shell syntax remains subject to the configured command policy.
+
 ## Narrow Command And Path Rules
 
 ```toml

@@ -320,7 +320,7 @@ describe("desktop coding-agent components", () => {
       displayName: "Read file",
       status: "Ok",
       tone: "success",
-      summary: "path=src/lib.rs",
+      summary: "pub fn ready() -> bool { true }",
       detailKind: "output",
       detailText: "pub fn ready() -> bool { true }",
       detailLanguage: "rust",
@@ -479,7 +479,50 @@ describe("desktop workspace and history shell", () => {
     expect(rows.every((row) => row.status !== "complete")).toBe(true);
   });
 
-  it("hides automatically allowed permission audit notices but keeps actionable policy notices", () => {
+  it("keeps streamed replies, tool calls, and the final answer in chronological order", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-order",
+      replayable: true,
+    };
+    const rows = reduceTimeline([
+      { ...base, sequence: 1, kind: "run_started", text: "Inspect" },
+      { ...base, sequence: 2, kind: "assistant_delta", text: "I will inspect." },
+      { ...base, sequence: 3, kind: "assistant_message", text: "I will inspect.", assistantKind: "tool_preamble" },
+      { ...base, sequence: 4, kind: "tool_started", itemId: "call-1", toolName: "bash", toolInput: "rg TODO", status: "running" },
+      { ...base, sequence: 5, kind: "tool_result", itemId: "call-1", toolName: "bash", text: "1 match", status: "ok" },
+      { ...base, sequence: 6, kind: "assistant_delta", text: "Found it." },
+      { ...base, sequence: 7, kind: "assistant_message", text: "Found it.", assistantKind: "final_answer" },
+      { ...base, sequence: 8, kind: "run_finished", text: "Found it." },
+    ]);
+
+    expect(rows.map((row) => row.kind)).toEqual(["user", "progress", "tool", "assistant"]);
+    expect(rows.map((row) => row.text)).toEqual(["Inspect", "I will inspect.", "1 match", "Found it."]);
+    expect(rows[2]).toEqual(expect.objectContaining({ input: "rg TODO" }));
+  });
+
+  it("replaces a waiting approval row with its resolved outcome", () => {
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "session-1",
+      runId: "run-approval",
+      replayable: true,
+      itemId: "call-1",
+    };
+    const rows = reduceTimeline([
+      { ...base, sequence: 1, kind: "approval_requested", toolName: "bash", toolInput: "rg TODO" },
+      { ...base, sequence: 2, kind: "approval_resolved", status: "approved", text: "Approved for this session" },
+    ]);
+
+    expect(rows).toEqual([expect.objectContaining({
+      label: "Approved",
+      status: "approved",
+      text: "Approved for this session",
+    })]);
+  });
+
+  it("hides low-level permission audit notices because approvals have dedicated rows", () => {
     const base = {
       workspaceId: workspace.id,
       sessionId: "session-1",
@@ -492,10 +535,7 @@ describe("desktop workspace and history shell", () => {
       { ...base, sequence: 3, kind: "notice", text: "permission bash subject=- mode=deny" },
     ]);
 
-    expect(rows.map((row) => row.text)).toEqual([
-      "permission write_file subject=README.md mode=ask",
-      "permission bash subject=- mode=deny",
-    ]);
+    expect(rows).toEqual([]);
   });
 
   it("uses the chronological durable run instead of appending its terminal replay backwards", () => {
@@ -1319,6 +1359,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getByText("Say hello")).toBeTruthy();
     expect(await screen.findByText("Run started. Live updates are connected.")).toBeTruthy();
     expect(document.querySelector(".statusbar")).toBeNull();
     expect(document.querySelector(".app-shell > .sr-only")?.textContent).toContain("Sigil is ready.");
@@ -1598,10 +1639,16 @@ describe("desktop workspace and history shell", () => {
     });
     expect(timeline.scrollTop).toBe(600);
 
+    timeline.scrollTop = 0;
+    act(() => {
+      eventListener?.({ ...base, sequence: 2, kind: "assistant_delta", text: "Growing" });
+    });
+    expect(timeline.scrollTop).toBe(600);
+
     timeline.scrollTop = 100;
     fireEvent.scroll(timeline);
     act(() => {
-      eventListener?.({ ...base, sequence: 2, kind: "assistant_message", text: "Second" });
+      eventListener?.({ ...base, sequence: 3, kind: "assistant_message", text: "Second" });
     });
     expect(timeline.scrollTop).toBe(100);
   });
@@ -1621,9 +1668,9 @@ describe("desktop workspace and history shell", () => {
         eventListener = listener;
         return () => undefined;
       },
-      resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => {
-        approvedCall = `${runId}:${approval.approvalRequestId}:${approve}`;
-        return { runId, callId: approval.callId, decision: approve ? "approved" : "denied" };
+      resolveApproval: async (_workspaceId, _sessionId, runId, approval, decision) => {
+        approvedCall = `${runId}:${approval.approvalRequestId}:${decision}`;
+        return { runId, callId: approval.callId, decision: decision === "deny" ? "denied" : "approved" };
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
@@ -1665,6 +1712,7 @@ describe("desktop workspace and history shell", () => {
           toolCallHash: "hash-1",
           policyVersion: "policy-1",
           expiresAtMs: 4_102_444_800_000,
+          sessionGrantAvailable: true,
           operation: "edit_file",
           risk: "medium",
           snapshotRequired: true,
@@ -1682,8 +1730,8 @@ describe("desktop workspace and history shell", () => {
     expect(document.activeElement).toBe(approvalDock);
     fireEvent.keyDown(approvalDock, { key: "Escape" });
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
-    await user.click(screen.getByRole("button", { name: "Approve once" }));
-    expect(approvedCall).toBe("run-1:approval-1:true");
+    await user.click(screen.getByRole("button", { name: "Allow for session" }));
+    expect(approvedCall).toBe("run-1:approval-1:approve_session");
     act(() => {
       eventListener?.({
         workspaceId: workspace.id,

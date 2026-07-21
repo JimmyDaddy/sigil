@@ -986,7 +986,7 @@ export interface components {
             session_id: string;
         };
         /** @enum {string} */
-        ApprovalDecision: "approve" | "deny";
+        ApprovalDecision: "approve" | "approve_for_session" | "deny";
         ApprovalDecisionCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["ApprovalDecisionRequest"];
         };

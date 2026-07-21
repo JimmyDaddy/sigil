@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ApprovalHandler, PublicRunEvent, PublicRunEventKind, SessionRef, ToolApproval,
-    ToolApprovalUserDecision, ToolCall, ToolSpec,
+    ToolApprovalUserDecision, ToolCall, ToolSpec, tool_approval_session_grant_available_for_facets,
 };
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
@@ -1447,14 +1447,56 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
             ));
         }
         let approval_request = match &event.event {
-            PublicRunEventKind::ApprovalRequested { call, spec, .. } => {
+            PublicRunEventKind::ApprovalRequested {
+                call,
+                spec,
+                subjects,
+                network_effect,
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
+                operation,
+                risk,
+                subject_zones,
+                confirmation,
+                snapshot_required,
+                ..
+            } => {
                 let registry = self
                     .registry
                     .upgrade()
                     .ok_or_else(|| anyhow!("production approval registry is closed"))?;
-                let pending =
-                    self.broker
-                        .register(&self.run_id, call, spec, self.approval_timeout)?;
+                let session_grant_available = match (
+                    operation,
+                    risk,
+                    local_policy_decision,
+                    network_policy_decision,
+                    source_policy_decision,
+                ) {
+                    (Some(operation), Some(risk), Some(local), Some(network), Some(source)) => {
+                        tool_approval_session_grant_available_for_facets(
+                            spec.access,
+                            *network_effect,
+                            *operation,
+                            *risk,
+                            subjects,
+                            subject_zones,
+                            confirmation.as_ref(),
+                            *snapshot_required,
+                            *local,
+                            *network,
+                            *source,
+                        )
+                    }
+                    _ => false,
+                };
+                let pending = self.broker.register(
+                    &self.run_id,
+                    call,
+                    spec,
+                    self.approval_timeout,
+                    session_grant_available,
+                )?;
                 if let Err(error) =
                     registry.register_approval_request(&self.run_id, pending.clone())
                 {
@@ -1513,9 +1555,7 @@ impl ApprovalHandler for HttpProductionApprovalHandler {
             Some(HttpApprovalDecisionRecord {
                 decision: ToolApprovalUserDecision::ApprovedForSession,
                 ..
-            }) => Err(anyhow!(
-                "HTTP V1 does not support approve-for-session decisions"
-            )),
+            }) => Ok(ToolApproval::ApproveForSession),
             None => Ok(ToolApproval::Deny {
                 reason: "HTTP approval request expired before a decision arrived".to_owned(),
             }),
@@ -1539,6 +1579,7 @@ impl HttpApprovalBroker {
         call: &ToolCall,
         spec: &ToolSpec,
         timeout: Duration,
+        session_grant_available: bool,
     ) -> Result<HttpPendingApproval> {
         let now_ms = current_unix_time_ms();
         let timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX);
@@ -1567,6 +1608,7 @@ impl HttpApprovalBroker {
             tool_call_hash,
             policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
             expires_at_ms,
+            session_grant_available,
         })
     }
 

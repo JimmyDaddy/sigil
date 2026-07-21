@@ -2,7 +2,7 @@ import { useEffect, useRef, type RefObject } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { useLocale } from "./i18n";
-import type { TimelineApproval } from "./types";
+import type { ApprovalAction, TimelineApproval } from "./types";
 import { Button } from "./ui/primitives";
 
 export function ApprovalDock({
@@ -14,7 +14,7 @@ export function ApprovalDock({
   approval: TimelineApproval;
   busy: boolean;
   composerRef: RefObject<HTMLTextAreaElement | null>;
-  onDecision: (approve: boolean) => void;
+  onDecision: (decision: ApprovalAction) => void;
 }) {
   const { locale, t } = useLocale();
   const dockRef = useRef<HTMLElement>(null);
@@ -51,6 +51,12 @@ export function ApprovalDock({
         <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
       </header>
       <p>{approval.previewSummary ?? t("reviewExactToolAction")}</p>
+      {approval.toolInput ? (
+        <div className="approval-command">
+          <strong>{t("requestedAction")}</strong>
+          <pre>{approval.toolInput}</pre>
+        </div>
+      ) : null}
       {approval.previewBody ? (
         isUnifiedDiff(approval.previewBody)
           ? <DiffViewer diff={approval.previewBody} />
@@ -62,11 +68,14 @@ export function ApprovalDock({
         <div><dt>{t("fileSnapshot")}</dt><dd>{approval.snapshotRequired ? t("required") : t("notRequired")}</dd></div>
         <div><dt>{t("decisionExpires")}</dt><dd>{expires}</dd></div>
       </dl>
-      <small>{t("approveOnceDetail")}</small>
+      <small>{approval.sessionGrantAvailable ? t("approveSessionDetail") : t("approveOnceDetail")}</small>
       {expired ? <div className="approval-expired" role="alert">{t("approvalExpired")}</div> : null}
       <div className="approval-actions">
-        <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision(false)}>{t("deny")}</Button>
-        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision(true)}>{t("approveOnce")}</Button>
+        <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision("deny")}>{t("deny")}</Button>
+        {approval.sessionGrantAvailable ? (
+          <Button variant="quiet" type="button" disabled={busy || expired} onClick={() => onDecision("approve_session")}>{t("approveSession")}</Button>
+        ) : null}
+        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision("approve_once")}>{t("approveOnce")}</Button>
       </div>
     </section>
   );

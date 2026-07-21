@@ -46,6 +46,57 @@ fn timeline_projection_keeps_conversation_text_and_drops_raw_tool_arguments() {
 }
 
 #[test]
+fn timeline_projection_keeps_allowlisted_shell_command_and_assistant_kind() {
+    let shell = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "tool_call_started",
+            "call": {
+                "id": "call-1",
+                "name": "bash",
+                "args_json": "{\"command\":\"rg TODO crates\"}"
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("shell event should project");
+    assert_eq!(shell.tool_input.as_deref(), Some("rg TODO crates"));
+
+    let assistant = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "assistant_message",
+            "message": {
+                "id": "message-1",
+                "content": "Done",
+                "assistant_kind": "final_answer"
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("assistant event should project");
+    assert_eq!(assistant.assistant_kind.as_deref(), Some("final_answer"));
+
+    let credentialed = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "tool_call_started",
+            "call": {
+                "id": "call-2",
+                "name": "bash",
+                "args_json": "{\"command\":\"TOKEN=secret-value curl example.com\"}"
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("credential-shaped command should project safely");
+    assert_eq!(
+        credentialed.tool_input.as_deref(),
+        Some("[credential-shaped command arguments redacted]")
+    );
+}
+
+#[test]
 fn tool_result_projection_keeps_bounded_safe_output_for_the_tool_card() {
     let event = envelope(
         DesktopProtocolEventClass::Durable,
@@ -93,6 +144,7 @@ fn approval_projection_requires_exact_guard_and_bounds_preview() {
         tool_call_hash: "hash-1".to_owned(),
         policy_version: "policy-1".to_owned(),
         expires_at_ms: 42,
+        session_grant_available: false,
     });
 
     let timeline = event

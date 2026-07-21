@@ -526,6 +526,8 @@ pub struct DesktopPendingApproval {
     pub tool_call_hash: String,
     pub policy_version: String,
     pub expires_at_ms: u64,
+    #[serde(default)]
+    pub session_grant_available: bool,
 }
 
 /// Explicit user decision for one pending tool call.
@@ -533,6 +535,7 @@ pub struct DesktopPendingApproval {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopApprovalDecision {
     Approve,
+    ApproveForSession,
     Deny,
 }
 
@@ -541,6 +544,7 @@ pub enum DesktopApprovalDecision {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopApprovalRecordedDecision {
     Approved,
+    ApprovedForSession,
     Denied,
 }
 
