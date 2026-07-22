@@ -55,6 +55,10 @@
 .continuity-recovery-icon .sg-icon { width: 16px; height: 16px; }
 .continuity-recovery-copy { min-width: 0; }
 .continuity-recovery-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.continuity-recovery-details { grid-column: 2 / -1; min-width: 0; border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent); }
+.continuity-recovery-details summary { width: fit-content; margin-top: 8px; cursor: pointer; font-size: 11px; font-weight: 700; }
+.continuity-recovery-details dl { display: grid; min-width: 0; margin: 8px 0 0; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; font-size: 11px; line-height: 1.45; }
+.continuity-recovery-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .timeline-empty { display: grid; min-height: 150px; place-content: center; gap: 7px; color: var(--sg-sys-color-on-surface-subtle); text-align: center; }
 .timeline-empty span { max-width: 600px; font-size: 12px; line-height: 1.5; }
 .timeline-row { max-width: min(82%, 720px); padding: 11px 13px; border: 1px solid var(--sg-sys-color-outline); border-radius: 11px; background: var(--sg-sys-color-surface-container); }

@@ -37,13 +37,23 @@ interface StructuredOutput {
   readonly language?: string;
 }
 
-export function ToolCard({ tool }: { tool: ToolView }) {
+export function ToolCard({
+  tool,
+  displayId,
+}: {
+  readonly tool: ToolView;
+  readonly displayId?: string;
+}) {
   const presentation = presentTool(tool);
   const lines = presentation.detailText?.split("\n") ?? [];
   const output = lines.slice(0, MAX_VISIBLE_OUTPUT_LINES).join("\n");
   const omittedLines = Math.max(0, lines.length - MAX_VISIBLE_OUTPUT_LINES);
   return (
-    <article className={`tool-card tool-tone-${presentation.tone}`} aria-label={`${presentation.displayName}: ${presentation.status}`}>
+    <article
+      className={`tool-card tool-tone-${presentation.tone}`}
+      data-display-id={displayId}
+      aria-label={`${presentation.displayName}: ${presentation.status}`}
+    >
       <header className="tool-card-header">
         <span className="tool-status-icon" aria-hidden="true"><Icon name={toneIcon(presentation.tone)} /></span>
         <span className="tool-card-heading">

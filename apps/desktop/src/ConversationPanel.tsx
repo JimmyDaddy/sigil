@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { ApprovalDock } from "./ApprovalDock";
 import { AgentActivityPanel } from "./AgentActivityPanel";
@@ -6,8 +6,8 @@ import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
-import { translateEnglish, useLocale, type Translate } from "./i18n";
-import { Message, type MessageView } from "./Message";
+import { useLocale, type Translate } from "./i18n";
+import { Message } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
   AgentActivitySummary,
@@ -25,9 +25,27 @@ import type {
   SkillBinding,
   SkillCatalogEntry,
   TimelineEvent,
-  TranscriptMessage,
   VerificationSummary,
 } from "./types";
+import type { ConversationDisplayPage as BridgeConversationDisplayPage } from "./types";
+import {
+  createConversationContinuityState,
+  reduceConversationContinuity,
+  resolveConversationIdentity,
+  selectConversationTimeline,
+  type ConversationContinuityState,
+  type ConversationDisplayPage,
+  type ConversationTerminalObservation,
+} from "./features/conversation/continuityReducer";
+import { projectConversationRows } from "./features/conversation/conversationRows";
+import {
+  createLiveEventState,
+  liveEventReducer,
+  selectDeltaBuffers,
+  selectLatestPendingApproval,
+  semanticLiveItemFromTimelineEvent,
+  terminalSignalFromTimelineEvent,
+} from "./features/conversation/liveEventReducer";
 import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { useNotifications } from "./ui/feedback";
@@ -40,29 +58,22 @@ interface ConversationPanelProps {
   onInitialLoadComplete?: (sessionId: string) => void;
   onRunContextChange?: (context: RunContext) => void;
   onNewSession: () => Promise<boolean>;
+  onOpenWorkspacePicker: () => void;
   onOpenSessionPicker: (query: string) => void;
   onOpenSettings: () => void;
   onOpenSupport: () => void;
 }
 
-interface TimelineRowBase {
-  key: string;
-  label: string;
-  text: string;
-  status?: string;
+interface PendingPrompt {
+  readonly identity: string;
+  readonly text: string;
+  readonly runId?: string;
 }
 
-type TimelineRow =
-  | (TimelineRowBase & { kind: MessageView["kind"] })
-  | (TimelineRowBase & { kind: "tool"; input?: string });
-
-type ContinuityAdmission =
-  | "checking"
-  | "attaching"
-  | "attached"
-  | "ready"
-  | "read_only_recovery"
-  | "read_only";
+interface TimelineAnchor {
+  readonly displayId: string;
+  readonly viewportOffset: number;
+}
 
 export function ConversationPanel({
   bridge,
@@ -71,6 +82,7 @@ export function ConversationPanel({
   onInitialLoadComplete,
   onRunContextChange,
   onNewSession,
+  onOpenWorkspacePicker,
   onOpenSessionPicker,
   onOpenSettings,
   onOpenSupport,
@@ -90,23 +102,29 @@ export function ConversationPanel({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
   const [selectedModelName, setSelectedModelName] = useState<string>();
-  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [continuityState, dispatchContinuity] = useReducer(
+    reduceConversationContinuity,
+    session.id,
+    createConversationContinuityState,
+  );
+  const [liveEventState, dispatchLiveEvent] = useReducer(
+    liveEventReducer,
+    session.id,
+    createLiveEventState,
+  );
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
-  const [optimisticPrompt, setOptimisticPrompt] = useState<string>();
+  const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
-  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
-  const [transcriptTotal, setTranscriptTotal] = useState(0);
-  const [nextBefore, setNextBefore] = useState<number>();
-  const [transcriptBusy, setTranscriptBusy] = useState(false);
-  const [transcriptError, setTranscriptError] = useState(false);
-  const [transcriptReload, setTranscriptReload] = useState(0);
+  const [displayBusy, setDisplayBusy] = useState(false);
+  const [displayError, setDisplayError] = useState(false);
+  const [displayReload, setDisplayReload] = useState(0);
   const [attachmentGap, setAttachmentGap] = useState(false);
-  const [continuityAdmission, setContinuityAdmission] = useState<ContinuityAdmission>("checking");
   const [continuityMessage, setContinuityMessage] = useState<string>();
   const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ContinuityRecoveryAction[]>([]);
+  const continuityRecoveryActionsRef = useRef<readonly ContinuityRecoveryAction[]>([]);
   const [continuityReload, setContinuityReload] = useState(0);
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -117,28 +135,26 @@ export function ConversationPanel({
   const [requestedAgent, setRequestedAgent] = useState<AgentCatalogEntry>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
-  const prependScrollHeight = useRef<number | undefined>(undefined);
+  const pendingTimelineAnchor = useRef<TimelineAnchor | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
-  const terminalTranscriptRefreshRunId = useRef<string | undefined>(undefined);
+  const canonicalRefreshAttempts = useRef(0);
+  const canonicalRefreshRunId = useRef<string | undefined>(undefined);
+  const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
+  const pendingPromptCounter = useRef(0);
   const initialRunContextSessionId = useRef<string | undefined>(undefined);
-  const initialTranscriptSessionId = useRef<string | undefined>(undefined);
+  const initialDisplaySessionId = useRef<string | undefined>(undefined);
   const initialContinuitySessionId = useRef<string | undefined>(undefined);
   const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
-  const continuityAdmissionRef = useRef<ContinuityAdmission>("checking");
   const startRunPendingRef = useRef(false);
-  const updateContinuityAdmission = useCallback((next: ContinuityAdmission) => {
-    continuityAdmissionRef.current = next;
-    setContinuityAdmission(next);
-  }, []);
   const finishInitialLoadIfReady = useCallback((sessionId: string) => {
     if (
       initialLoadReportedSessionId.current !== sessionId
       && initialRunContextSessionId.current === sessionId
-      && initialTranscriptSessionId.current === sessionId
+      && initialDisplaySessionId.current === sessionId
       && initialContinuitySessionId.current === sessionId
     ) {
       initialLoadReportedSessionId.current = sessionId;
@@ -149,6 +165,9 @@ export function ConversationPanel({
     if (!error) return;
     notify({ message, tone: "error" });
   }, [notify]);
+  useEffect(() => {
+    continuityRecoveryActionsRef.current = continuityRecoveryActions;
+  }, [continuityRecoveryActions]);
   useEffect(() => {
     setRun(undefined);
     setAgentActivity(undefined);
@@ -161,18 +180,16 @@ export function ConversationPanel({
     setPermissionMode("manual");
     setReasoningEffort(undefined);
     setSelectedModelName(undefined);
-    setEvents([]);
-    setOptimisticPrompt(undefined);
+    dispatchContinuity({ type: "session_selected", sessionId: session.id });
+    dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
+    setPendingPrompt(undefined);
     setStreamStatus(undefined);
     setVerification(undefined);
-    setTranscript([]);
-    setTranscriptTotal(0);
-    setNextBefore(undefined);
-    setTranscriptError(false);
+    setDisplayError(false);
     setAttachmentGap(false);
-    updateContinuityAdmission("checking");
     setContinuityMessage(undefined);
     setContinuityRecoveryActions([]);
+    continuityRecoveryActionsRef.current = [];
     setRunAnnouncement("");
     setInspectorOpen(false);
     setExtensionWorkbenchOpen(false);
@@ -181,18 +198,15 @@ export function ConversationPanel({
     setRequestedSkill(undefined);
     setRequestedAgent(undefined);
     activeRunIdRef.current = undefined;
-    terminalTranscriptRefreshRunId.current = undefined;
+    canonicalRefreshAttempts.current = 0;
+    canonicalRefreshRunId.current = undefined;
+    canonicalSettlementCandidate.current = undefined;
+    pendingPromptCounter.current = 0;
     initialRunContextSessionId.current = undefined;
-    initialTranscriptSessionId.current = undefined;
+    initialDisplaySessionId.current = undefined;
     initialContinuitySessionId.current = undefined;
     initialLoadReportedSessionId.current = undefined;
-  }, [session.id, updateContinuityAdmission, workspaceId]);
-
-  const refreshTerminalTranscript = useCallback((runId: string) => {
-    if (terminalTranscriptRefreshRunId.current === runId) return;
-    terminalTranscriptRefreshRunId.current = runId;
-    setTranscriptReload((value) => value + 1);
-  }, []);
+  }, [session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -255,24 +269,40 @@ export function ConversationPanel({
 
   useEffect(() => {
     let disposed = false;
-    setTranscriptBusy(true);
+    setDisplayBusy(true);
     void bridge
-      .transcript(workspaceId, session.id, { limit: 50 })
+      .display(workspaceId, session.id, { limit: 50 })
       .then((page) => {
         if (disposed) return;
-        setTranscript(page.messages);
-        setTranscriptTotal(page.totalMessages);
-        setNextBefore(page.nextBefore);
-        setTranscriptError(false);
+        const canonicalPage = toContinuityPage(page);
+        dispatchContinuity({
+          type: "initial_page_received",
+          sessionId: session.id,
+          page: canonicalPage,
+        });
+        dispatchLiveEvent({
+          type: "anchor_received",
+          sessionId: session.id,
+          anchor: canonicalPage.liveProvisionalAnchor,
+        });
+        setDisplayError(false);
       })
       .catch(() => {
-        if (!disposed) setTranscriptError(true);
+        if (!disposed) {
+          setDisplayError(true);
+          dispatchContinuity({
+            type: "initial_page_failed",
+            sessionId: session.id,
+            message: "Canonical conversation display is unavailable.",
+          });
+          initialContinuitySessionId.current = session.id;
+        }
       })
       .finally(() => {
         if (!disposed) {
-          setTranscriptBusy(false);
-          if (initialTranscriptSessionId.current !== session.id) {
-            initialTranscriptSessionId.current = session.id;
+          setDisplayBusy(false);
+          if (initialDisplaySessionId.current !== session.id) {
+            initialDisplaySessionId.current = session.id;
             finishInitialLoadIfReady(session.id);
           }
         }
@@ -280,7 +310,17 @@ export function ConversationPanel({
     return () => {
       disposed = true;
     };
-  }, [bridge, finishInitialLoadIfReady, session.id, transcriptReload, workspaceId]);
+  }, [bridge, displayReload, finishInitialLoadIfReady, session.id, workspaceId]);
+
+  useEffect(() => {
+    if (
+      continuityState.lifecycle !== "error"
+      || continuityState.transcriptLoaded
+      || initialDisplaySessionId.current !== session.id
+    ) return;
+    initialContinuitySessionId.current = session.id;
+    finishInitialLoadIfReady(session.id);
+  }, [continuityState.lifecycle, continuityState.transcriptLoaded, finishInitialLoadIfReady, session.id]);
 
   useEffect(() => {
     let disposed = false;
@@ -295,12 +335,13 @@ export function ConversationPanel({
   }, [bridge, session.id, workspaceId]);
 
   useEffect(() => {
+    if (!continuityState.transcriptLoaded || continuityState.contractError !== undefined) return;
     let disposed = false;
     let liveConnectionFailed = false;
     let continuityReprobeScheduled = false;
     let allowedRecoveryActions: ContinuityRecoveryAction[] = [];
     const unsubscribers: Array<() => void> = [];
-    updateContinuityAdmission("checking");
+    dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
     setContinuityMessage(undefined);
     setContinuityRecoveryActions([]);
     const settleInitialContinuity = () => {
@@ -314,8 +355,13 @@ export function ConversationPanel({
     ) => {
       if (disposed) return;
       const projectedActions = continuityRecoveryActionsFromError(error);
-      const actions = projectedActions ?? allowedRecoveryActions;
-      updateContinuityAdmission("read_only_recovery");
+      const actions = projectedActions ?? [...allowedRecoveryActions];
+      dispatchContinuity({
+        type: "owner_probe_failed",
+        sessionId: session.id,
+        message,
+        canContinueReadOnly: actions.includes("continue_read_only"),
+      });
       setContinuityMessage(message);
       setContinuityRecoveryActions(actions);
       settleInitialContinuity();
@@ -324,43 +370,57 @@ export function ConversationPanel({
       if (disposed || continuityReprobeScheduled) return;
       continuityReprobeScheduled = true;
       activeRunIdRef.current = runId;
-      updateContinuityAdmission("checking");
+      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
       setContinuityMessage(undefined);
       setContinuityReload((value) => value + 1);
     };
-    const setup = async () => {
-      const unsubscribeEvents = await bridge.subscribeRunEvents((event) => {
-        if (
-          disposed ||
-          event.workspaceId !== workspaceId ||
-          event.sessionId !== session.id
-        ) {
-          return;
-        }
-        if (activeRunIdRef.current === undefined) activeRunIdRef.current = event.runId;
-        if (activeRunIdRef.current !== event.runId) return;
-        if (event.kind === "run_started") setOptimisticPrompt(undefined);
-        setEvents((current) => mergeTimelineEvent(current, event));
-        if (event.kind === "control" && event.itemId?.startsWith("agent_")) {
-          setAgentActivityReload((value) => value + 1);
-        }
+    const ingestEvent = (event: TimelineEvent) => {
+      if (
+        disposed
+        || event.workspaceId !== workspaceId
+        || event.sessionId !== session.id
+      ) return;
+      const previousRunId = activeRunIdRef.current;
+      if (previousRunId === undefined) activeRunIdRef.current = event.runId;
+      if (activeRunIdRef.current !== event.runId) return;
+
+      dispatchLiveEvent({ type: "event_received", sessionId: session.id, event });
+      const liveItem = semanticLiveItemFromTimelineEvent(event);
+      if (liveItem !== undefined) {
+        dispatchContinuity({ type: "live_item_received", sessionId: session.id, item: liveItem });
+      }
+      if (event.kind === "run_started") {
+        setPendingPrompt((current) => (
+          current !== undefined && (current.runId === undefined || current.runId === event.runId)
+            ? undefined
+            : current
+        ));
+      }
+      if (event.kind === "control" && event.itemId?.startsWith("agent_")) {
+        setAgentActivityReload((value) => value + 1);
+      }
+
+      const terminal = terminalSignalFromTimelineEvent(event);
+      if (terminal !== undefined) {
+        setPendingPrompt(undefined);
+        dispatchContinuity({
+          type: "terminal_observed",
+          sessionId: session.id,
+          terminal: { runId: terminal.runId, status: terminal.status },
+        });
         const terminalStatus = terminalStatusForEvent(event);
-        if (
-          terminalStatus === undefined
-          && continuityAdmissionRef.current === "ready"
-          && !startRunPendingRef.current
-        ) {
-          scheduleContinuityReprobe(event.runId);
-        }
         if (terminalStatus !== undefined) {
-          setOptimisticPrompt(undefined);
           setRun((current) =>
             current?.id === event.runId ? { ...current, status: terminalStatus } : current,
           );
-          refreshTerminalTranscript(event.runId);
-          scheduleContinuityReprobe();
         }
-      });
+        scheduleContinuityReprobe();
+      } else if (previousRunId === undefined && !startRunPendingRef.current) {
+        scheduleContinuityReprobe(event.runId);
+      }
+    };
+    const setup = async () => {
+      const unsubscribeEvents = await bridge.subscribeRunEvents(ingestEvent);
       if (disposed) {
         unsubscribeEvents();
         return;
@@ -375,30 +435,33 @@ export function ConversationPanel({
         ) {
           return;
         }
-        if (activeRunIdRef.current === undefined) activeRunIdRef.current = status.runId;
+        const previousRunId = activeRunIdRef.current;
+        if (previousRunId === undefined) activeRunIdRef.current = status.runId;
         if (activeRunIdRef.current !== status.runId) return;
         setStreamStatus(status);
-        if (
-          status.state !== "terminal"
-          && continuityAdmissionRef.current === "ready"
-          && !startRunPendingRef.current
-        ) {
-          scheduleContinuityReprobe(status.runId);
-          return;
-        }
         if (status.state === "error") {
           liveConnectionFailed = true;
           enterRecovery(status.message ?? t("liveControlsUnavailable"));
         }
         if (status.state === "terminal") {
+          dispatchContinuity({
+            type: "terminal_transport_observed",
+            sessionId: session.id,
+            runId: status.runId,
+          });
           setRunAnnouncement(status.message ?? t("runFinishedAnnouncement"));
           setRunContextReload((value) => value + 1);
           setAgentActivityReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
-          refreshTerminalTranscript(status.runId);
           scheduleContinuityReprobe();
+        } else if (
+          status.state !== "error"
+          && previousRunId === undefined
+          && !startRunPendingRef.current
+        ) {
+          scheduleContinuityReprobe(status.runId);
         }
       });
       if (disposed) {
@@ -418,15 +481,21 @@ export function ConversationPanel({
           setRun(undefined);
           setStreamStatus(undefined);
           setAttachmentGap(false);
-          updateContinuityAdmission("ready");
+          dispatchContinuity({
+            type: "owner_probe_resolved",
+            sessionId: session.id,
+          });
           setContinuityMessage(undefined);
-          setContinuityRecoveryActions([]);
           settleInitialContinuity();
           return;
         }
 
         activeRunIdRef.current = owner.runId;
-        updateContinuityAdmission("attaching");
+        dispatchContinuity({
+          type: "owner_probe_resolved",
+          sessionId: session.id,
+          foregroundOwner: { runId: owner.runId, ownerRevision: owner.ownerRevision },
+        });
         try {
           const attachment = await bridge.attachRun(workspaceId, {
             sessionId: session.id,
@@ -437,9 +506,7 @@ export function ConversationPanel({
           setRun(attachment.run);
           setPermissionMode(attachment.run.permissionMode);
           setReasoningEffort(attachment.run.reasoningEffort);
-          setEvents((current) =>
-            attachment.events.reduce(mergeTimelineEvent, current),
-          );
+          for (const event of attachment.events) ingestEvent(event);
           setStreamStatus({
             workspaceId,
             sessionId: session.id,
@@ -449,9 +516,21 @@ export function ConversationPanel({
           });
           setAttachmentGap(attachment.hasGap);
           if (isTerminal(attachment.run.status) || attachment.streamState === "terminal") {
+            const terminal = terminalObservationFromRun(attachment.run);
+            if (terminal !== undefined) {
+              dispatchContinuity({
+                type: "terminal_observed",
+                sessionId: session.id,
+                terminal,
+              });
+            } else {
+              dispatchContinuity({
+                type: "terminal_transport_observed",
+                sessionId: session.id,
+                runId: attachment.run.id,
+              });
+            }
             activeRunIdRef.current = undefined;
-            refreshTerminalTranscript(attachment.run.id);
-            updateContinuityAdmission("checking");
             continue;
           } else if (liveConnectionFailed || attachment.streamState === "error") {
             enterRecovery(attachment.streamMessage ?? t("liveControlsUnavailable"));
@@ -464,10 +543,14 @@ export function ConversationPanel({
               confirmation.foregroundOwner?.runId !== owner.runId
               || confirmation.foregroundOwner.ownerRevision !== owner.ownerRevision
             ) {
-              updateContinuityAdmission("checking");
               continue;
             }
-            updateContinuityAdmission("attached");
+            dispatchContinuity({
+              type: "run_attached",
+              sessionId: session.id,
+              runId: owner.runId,
+              ownerRevision: owner.ownerRevision,
+            });
             setContinuityMessage(undefined);
           }
           settleInitialContinuity();
@@ -484,23 +567,107 @@ export function ConversationPanel({
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [bridge, continuityReload, finishInitialLoadIfReady, refreshTerminalTranscript, session.id, t, updateContinuityAdmission, workspaceId]);
+  }, [bridge, continuityReload, continuityState.contractError, continuityState.transcriptLoaded, finishInitialLoadIfReady, session.id, t, workspaceId]);
+
+  useEffect(() => {
+    const observed = continuityState.observedTerminal;
+    const pendingRunId = observed?.runId ?? continuityState.pendingTerminalRunId;
+    if (
+      pendingRunId === undefined
+      || continuityState.refreshState !== "needed"
+      || canonicalRefreshRunId.current === pendingRunId
+    ) return;
+
+    let cancelled = false;
+    canonicalRefreshRunId.current = pendingRunId;
+    pendingTimelineAnchor.current = timelinePinnedToEnd.current
+      ? undefined
+      : captureTimelineAnchor(timelineRef.current);
+    dispatchContinuity({ type: "refresh_started", sessionId: session.id });
+    const refresh = async () => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        canonicalRefreshAttempts.current = attempt + 1;
+        if (attempt > 0) await waitForCanonicalProjection(attempt * 75);
+        if (cancelled) return;
+        try {
+          const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }));
+          if (cancelled) return;
+          dispatchContinuity({ type: "refresh_page_received", sessionId: session.id, page });
+          dispatchLiveEvent({
+            type: "anchor_received",
+            sessionId: session.id,
+            anchor: page.liveProvisionalAnchor,
+          });
+          if (canonicalPageCoversTerminal(page, {
+            runId: pendingRunId,
+            status: observed?.status,
+          })) {
+            canonicalRefreshAttempts.current = 0;
+            canonicalRefreshRunId.current = undefined;
+            canonicalSettlementCandidate.current = pendingRunId;
+            return;
+          }
+        } catch {
+          // A bounded retry absorbs the short window between terminal transport and durable projection.
+        }
+      }
+      if (cancelled) return;
+      canonicalRefreshRunId.current = undefined;
+      dispatchContinuity({
+        type: "refresh_failed",
+        sessionId: session.id,
+        message: t("savedMessagesRetryDetail"),
+        canContinueReadOnly: continuityRecoveryActionsRef.current.includes("continue_read_only"),
+      });
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      if (canonicalRefreshRunId.current === pendingRunId) {
+        canonicalRefreshRunId.current = undefined;
+      }
+    };
+  }, [bridge, continuityReload, continuityState.observedTerminal, continuityState.pendingTerminalRunId, session.id, t, workspaceId]);
+
+  useEffect(() => {
+    const candidate = canonicalSettlementCandidate.current;
+    if (candidate === undefined) return;
+    if (continuityState.contractError !== undefined) {
+      canonicalSettlementCandidate.current = undefined;
+      return;
+    }
+    if (
+      continuityState.observedTerminal === undefined
+      && continuityState.pendingTerminalRunId === undefined
+      && continuityState.refreshState === "idle"
+    ) {
+      canonicalSettlementCandidate.current = undefined;
+      dispatchLiveEvent({ type: "run_discarded", sessionId: session.id, runId: candidate });
+    }
+  }, [continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id]);
 
   const rows = useMemo(() => {
-    const next = reduceConversationTimeline(transcript, events, t);
-    if (optimisticPrompt === undefined) return next;
-    if (next.some((row) => row.kind === "user" && row.text === optimisticPrompt)) return next;
+    const next = projectConversationRows(
+      selectConversationTimeline(continuityState),
+      selectDeltaBuffers(liveEventState),
+      t,
+    );
+    if (pendingPrompt === undefined) return next;
     return [...next, {
-      key: `optimistic:${session.id}`,
+      key: pendingPrompt.identity,
       kind: "user" as const,
       label: t("you"),
-      text: optimisticPrompt,
+      text: pendingPrompt.text,
       status: "sending",
     }];
-  }, [events, optimisticPrompt, session.id, t, transcript]);
-  const pendingApproval = useMemo(() => latestPendingApproval(events), [events]);
+  }, [continuityState, liveEventState, pendingPrompt, t]);
+  const pendingApproval = useMemo(
+    () => selectLatestPendingApproval(liveEventState),
+    [liveEventState],
+  );
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
-  const submissionBlocked = continuityAdmission !== "ready" && continuityAdmission !== "attached";
+  const submissionBlocked = continuityState.contractError !== undefined
+    || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
 
   useEffect(() => {
     if (pendingApproval?.approval !== undefined) setInspectorOpen(false);
@@ -509,37 +676,43 @@ export function ConversationPanel({
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (timeline === null) return;
-    if (prependScrollHeight.current !== undefined) {
-      timeline.scrollTop += timeline.scrollHeight - prependScrollHeight.current;
-      prependScrollHeight.current = undefined;
+    const anchor = pendingTimelineAnchor.current;
+    if (anchor !== undefined) {
+      // `refresh_started` deliberately changes reducer state before the
+      // canonical page arrives. Keep the pre-refresh anchor alive through that
+      // render so a live provisional identity can resolve to its durable
+      // successor without moving the reader's viewport.
+      if (continuityState.refreshState === "loading") return;
+      const resolvedDisplayId = resolveConversationIdentity(continuityState, anchor.displayId);
+      const anchorElement = [...timeline.querySelectorAll<HTMLElement>("[data-display-id]")]
+        .find((element) => element.dataset.displayId === resolvedDisplayId);
+      if (anchorElement !== undefined) {
+        const nextOffset = anchorElement.getBoundingClientRect().top
+          - timeline.getBoundingClientRect().top;
+        timeline.scrollTop += nextOffset - anchor.viewportOffset;
+      }
+      pendingTimelineAnchor.current = undefined;
     } else if (timelinePinnedToEnd.current) {
       timeline.scrollTop = timeline.scrollHeight;
     }
-  }, [rows]);
+  }, [continuityState, rows]);
 
   const loadEarlier = async () => {
-    if (nextBefore === undefined || transcriptBusy) return;
-    const timeline = timelineRef.current;
-    if (timeline !== null) prependScrollHeight.current = timeline.scrollHeight;
-    setTranscriptBusy(true);
+    if (continuityState.nextCursor === undefined || displayBusy) return;
+    pendingTimelineAnchor.current = captureTimelineAnchor(timelineRef.current);
+    setDisplayBusy(true);
     try {
-      const page = await bridge.transcript(workspaceId, session.id, {
-        before: nextBefore,
+      const page = toContinuityPage(await bridge.display(workspaceId, session.id, {
+        cursor: continuityState.nextCursor,
         limit: 50,
-      });
-      setTranscript((current) => {
-        const merged = mergeTranscriptPage(page.messages, current);
-        if (merged.length === current.length) prependScrollHeight.current = undefined;
-        return merged;
-      });
-      setTranscriptTotal(page.totalMessages);
-      setNextBefore(page.nextBefore);
-      setTranscriptError(false);
+      }));
+      dispatchContinuity({ type: "older_page_received", sessionId: session.id, page });
+      setDisplayError(false);
     } catch {
-      prependScrollHeight.current = undefined;
-      setTranscriptError(true);
+      pendingTimelineAnchor.current = undefined;
+      setDisplayError(true);
     } finally {
-      setTranscriptBusy(false);
+      setDisplayBusy(false);
     }
   };
 
@@ -550,7 +723,11 @@ export function ConversationPanel({
   ): Promise<boolean> => {
     if (nextPrompt === "" || active || submissionBlocked || submitting) return false;
     timelinePinnedToEnd.current = true;
-    setOptimisticPrompt(nextPrompt);
+    pendingPromptCounter.current += 1;
+    setPendingPrompt({
+      identity: `optimistic:${session.id}:${pendingPromptCounter.current}`,
+      text: nextPrompt,
+    });
     setSubmitting(true);
     startRunPendingRef.current = true;
     try {
@@ -578,16 +755,18 @@ export function ConversationPanel({
         agentBinding,
       );
       activeRunIdRef.current = started.id;
+      setPendingPrompt((current) => current === undefined ? current : { ...current, runId: started.id });
       setRun(started);
-      updateContinuityAdmission("attached");
+      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
       setContinuityMessage(undefined);
       setPermissionMode(started.permissionMode);
       setReasoningEffort(started.reasoningEffort ?? selectedReasoningEffort);
       if (modelChanged) setRunContextReload((current) => current + 1);
+      setContinuityReload((current) => current + 1);
       return true;
     } catch {
-      setOptimisticPrompt(undefined);
-      updateContinuityAdmission("checking");
+      setPendingPrompt(undefined);
+      dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
       setContinuityReload((current) => current + 1);
       onNotice(t("runStartFailed"), true);
       return false;
@@ -610,7 +789,7 @@ export function ConversationPanel({
   };
 
   const decideApproval = async (decision: ApprovalAction) => {
-    if (pendingApproval?.approval === undefined || continuityAdmission !== "attached" || controlBusy) return;
+    if (pendingApproval?.approval === undefined || continuityState.lifecycle !== "live" || controlBusy) return;
     setControlBusy(true);
     try {
       await bridge.resolveApproval(
@@ -746,38 +925,77 @@ export function ConversationPanel({
         />
       ) : null}
 
-      {continuityAdmission === "checking" || continuityAdmission === "attaching" ? (
+      {["loading_transcript", "checking_owner", "attaching_run", "finalizing"].includes(continuityState.lifecycle) ? (
         <section className="continuity-state sg-bounded-content" role="status">
           <span className="continuity-state-pulse" aria-hidden="true" />
           <div>
-            <strong>{continuityAdmission === "attaching" ? t("reattachingLiveRun") : t("checkingConversationContinuity")}</strong>
-            <p>{t("checkingConversationContinuityDetail")}</p>
+            <strong>{continuityState.lifecycle === "loading_transcript"
+              ? t("loadingConversationHistory")
+              : continuityState.lifecycle === "attaching_run"
+                ? t("reattachingLiveRun")
+                : continuityState.lifecycle === "finalizing"
+                  ? t("runFinishedAnnouncement")
+                  : t("checkingConversationContinuity")}</strong>
+            <p>{continuityState.lifecycle === "finalizing"
+              ? t("loadingSavedMessages")
+              : t("checkingConversationContinuityDetail")}</p>
           </div>
         </section>
       ) : null}
 
-      {continuityAdmission === "read_only_recovery" || continuityAdmission === "read_only" ? (
-        <section className={`continuity-recovery sg-bounded-content${continuityAdmission === "read_only" ? " is-read-only" : ""}`} role="alert">
+      {continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only" ? (
+        <section className={`continuity-recovery sg-bounded-content${continuityState.lifecycle === "read_only" ? " is-read-only" : ""}`} role="alert">
           <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
           <div className="continuity-recovery-copy">
-            <strong>{continuityAdmission === "read_only" ? t("conversationReadOnly") : t("liveControlsNeedRecovery")}</strong>
-            <p>{continuityMessage ?? t("liveControlsUnavailable")}</p>
+            <strong>{continuityState.lifecycle === "read_only" ? t("conversationReadOnly") : t("liveControlsNeedRecovery")}</strong>
+            <p>{continuityMessage ?? continuityState.recovery?.message ?? t("liveControlsUnavailable")}</p>
           </div>
           <div className="continuity-recovery-actions">
             {continuityRecoveryActions.includes("retry_current") ? (
-              <Button type="button" variant="quiet" onClick={() => setContinuityReload((value) => value + 1)}>
+              <Button type="button" variant="quiet" onClick={() => {
+                dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
+                if (continuityState.transcriptLoaded) {
+                  setContinuityReload((value) => value + 1);
+                } else {
+                  setDisplayReload((value) => value + 1);
+                }
+              }}>
                 {t("retryLiveConnection")}
               </Button>
             ) : null}
-            {continuityAdmission === "read_only_recovery"
+            {continuityRecoveryActions.includes("open_another_workspace") ? (
+              <Button type="button" variant="quiet" onClick={onOpenWorkspacePicker}>
+                {t("openAnotherWorkspace")}
+              </Button>
+            ) : null}
+            {continuityRecoveryActions.includes("open_diagnostics") ? (
+              <Button type="button" variant="quiet" onClick={onOpenSupport}>
+                {t("openSupport")}
+              </Button>
+            ) : null}
+            {continuityState.lifecycle === "read_only_recovery"
               && continuityRecoveryActions.includes("continue_read_only")
-              && !transcriptBusy
-              && !transcriptError ? (
-              <Button type="button" variant="quiet" onClick={() => updateContinuityAdmission("read_only")}>
+              && !displayBusy
+              && !displayError ? (
+              <Button type="button" variant="quiet" onClick={() => dispatchContinuity({
+                type: "continue_read_only",
+                sessionId: session.id,
+              })}>
                 {t("continueReadOnly")}
               </Button>
             ) : null}
           </div>
+          {continuityRecoveryActions.includes("show_details") ? (
+            <details className="continuity-recovery-details">
+              <summary>{t("showDetails")}</summary>
+              <dl>
+                <dt>{t("errorCode")}</dt>
+                <dd>{continuityState.recovery?.code ?? "continuity_unavailable"}</dd>
+                <dt>{t("errorMessage")}</dt>
+                <dd>{continuityMessage ?? continuityState.recovery?.message ?? t("liveControlsUnavailable")}</dd>
+              </dl>
+            </details>
+          ) : null}
         </section>
       ) : null}
 
@@ -793,47 +1011,50 @@ export function ConversationPanel({
             timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
         }}
       >
-        {attachmentGap ? (
+        {attachmentGap || continuityState.gapFacts.length > 0 ? (
           <div className="timeline-gap" role="status">
             {t("liveDetailGap")}
           </div>
         ) : null}
-        {nextBefore !== undefined ? (
+        {continuityState.nextCursor !== undefined ? (
           <div className="transcript-pagination">
             <Button
               variant="quiet"
               type="button"
-              disabled={transcriptBusy}
+              disabled={displayBusy}
               onClick={() => void loadEarlier()}
             >
-              {transcriptBusy
+              {displayBusy
                 ? t("loadingEarlierMessages")
-                : t("loadEarlierMessages", { count: Math.max(0, transcriptTotal - transcript.length) })}
+                : t("loadEarlierMessages", { count: remainingDisplayItems(continuityState) })}
             </Button>
           </div>
         ) : null}
-        {transcriptError ? (
+        {displayError || continuityState.contractError !== undefined ? (
           <ErrorCard
             title={t("savedMessagesUnavailable")}
-            message={t("savedMessagesRetryDetail")}
-            actionLabel={transcriptBusy ? t("retrying") : t("retryMessages")}
-            actionDisabled={transcriptBusy}
-            onAction={() => setTranscriptReload((value) => value + 1)}
+            message={continuityState.contractError?.message ?? t("savedMessagesRetryDetail")}
+            actionLabel={displayBusy ? t("retrying") : t("retryMessages")}
+            actionDisabled={displayBusy}
+            onAction={() => {
+              dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
+              setDisplayReload((value) => value + 1);
+            }}
           />
         ) : null}
         {rows.length === 0 ? (
           <div className="timeline-empty">
-            <strong>{transcriptBusy ? t("loadingConversationHistory") : t("readyForPrompt")}</strong>
-            <span>{transcriptBusy ? t("loadingSavedMessages") : t("newRunActivity")}</span>
+            <strong>{displayBusy ? t("loadingConversationHistory") : t("readyForPrompt")}</strong>
+            <span>{displayBusy ? t("loadingSavedMessages") : t("newRunActivity")}</span>
           </div>
         ) : (
           rows.map((row) => row.kind === "tool"
-            ? <ToolCard key={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, input: row.input, status: row.status }} />
-            : <Message key={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
+            ? <ToolCard key={row.key} displayId={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, input: row.input, status: row.status }} />
+            : <Message key={row.key} displayId={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
         )}
       </div>
 
-      {pendingApproval?.approval !== undefined && continuityAdmission === "attached" ? (
+      {pendingApproval?.approval !== undefined && continuityState.lifecycle === "live" ? (
         <ApprovalDock
           approval={pendingApproval.approval}
           busy={controlBusy}
@@ -847,6 +1068,7 @@ export function ConversationPanel({
         draftKey={draftStorageKey(workspaceId, session.id)}
         active={active}
         submissionBlocked={submissionBlocked}
+        draftEditingBlocked={!continuityState.transcriptLoaded}
         submitting={submitting}
         controlBusy={controlBusy}
         composerRef={composerRef}
@@ -975,331 +1197,78 @@ function ConversationActivity({
   );
 }
 
-function latestPendingApproval(events: TimelineEvent[]): TimelineEvent | undefined {
-  const pending = new Map<string, TimelineEvent>();
-  for (const event of events) {
-    if (event.kind === "approval_requested" && event.itemId !== undefined) {
-      pending.set(`${event.runId}:${event.itemId}`, event);
-    }
-    if (event.kind === "approval_resolved" && event.itemId !== undefined) {
-      pending.delete(`${event.runId}:${event.itemId}`);
-    }
+const TERMINAL_DISPLAY_STATUSES: readonly ConversationTerminalObservation["status"][] = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+
+function toContinuityPage(page: BridgeConversationDisplayPage): ConversationDisplayPage {
+  if (page.items.some((item) => item.source === "live_transient")) {
+    throw new Error("The canonical conversation projection returned a transient item.");
   }
-  const pendingEvents = [...pending.values()];
-  return pendingEvents[pendingEvents.length - 1];
-}
-
-export function mergeTranscriptPage(
-  older: TranscriptMessage[],
-  current: TranscriptMessage[],
-): TranscriptMessage[] {
-  const messages = new Map<string, TranscriptMessage>();
-  for (const message of [...older, ...current]) {
-    messages.set(message.messageId, message);
+  if (
+    page.terminalFrontier !== undefined
+    && !TERMINAL_DISPLAY_STATUSES.includes(
+      page.terminalFrontier.status as ConversationTerminalObservation["status"],
+    )
+  ) {
+    throw new Error("The canonical conversation projection returned a non-terminal frontier.");
   }
-  return [...messages.values()].sort((left, right) => left.ordinal - right.ordinal);
+  return page as ConversationDisplayPage;
 }
 
-export function reduceTranscript(
-  messages: TranscriptMessage[],
-  t: Translate = translateEnglish,
-): TimelineRow[] {
-  const rows: TimelineRow[] = [];
-  for (const message of [...messages].sort((left, right) => left.ordinal - right.ordinal)) {
-    const attachmentText = message.imageAttachmentCount > 0
-      ? `${message.imageAttachmentCount} image attachment${message.imageAttachmentCount === 1 ? "" : "s"} recorded.`
-      : "";
-    const text = (message.content ?? attachmentText) || "";
-    if (
-      message.role === "assistant"
-      && message.assistantKind === "tool_preamble"
-      && text.trim() === ""
-    ) {
-      continue;
-    }
-    const status = message.truncated
-      ? `preview · ${message.originalContentBytes} bytes`
-      : message.imageAttachmentCount > 0
-        ? `${message.imageAttachmentCount} attachment${message.imageAttachmentCount === 1 ? "" : "s"}`
-        : undefined;
-    if (message.role === "user") {
-      rows.push({
-        key: `history:${message.messageId}`,
-        kind: "user",
-        label: t("you"),
-        text,
-        status,
-      });
-      continue;
-    }
-    if (message.role === "tool") {
-      rows.push({
-        key: `history:${message.messageId}`,
-        kind: "tool",
-        label: message.toolName ?? t("toolResult"),
-        text,
-        status,
-      });
-      continue;
-    }
-    if (message.assistantKind === "reasoning_trace") {
-      rows.push({
-        key: `history:${message.messageId}`,
-        kind: "reasoning",
-        label: t("reasoning"),
-        text,
-        status,
-      });
-      continue;
-    }
-    if (message.assistantKind === "progress") {
-      rows.push({
-        key: `history:${message.messageId}`,
-        kind: "progress",
-        label: t("progress"),
-        text,
-        status,
-      });
-      continue;
-    }
-    rows.push({
-      key: `history:${message.messageId}`,
-      kind: "assistant",
-      label: "Sigil",
-      text,
-      status: status ?? (message.assistantKind === "tool_preamble" ? "tool preamble" : undefined),
-    });
-  }
-  return rows;
-}
-
-export function reduceConversationTimeline(
-  transcript: TranscriptMessage[],
-  events: TimelineEvent[],
-  t: Translate = translateEnglish,
-): TimelineRow[] {
-  const orderedTranscript = [...transcript].sort((left, right) => left.ordinal - right.ordinal);
-  const latestUser = [...orderedTranscript].reverse().find((message) => message.role === "user");
-  const coveredRunIds = new Set<string>();
-  if (latestUser !== undefined) {
-    const runIds = new Set(events.map((event) => event.runId));
-    for (const runId of runIds) {
-      const started = events.find((event) => event.runId === runId && event.kind === "run_started");
-      const finished = [...events].reverse().find(
-        (event) => event.runId === runId && event.kind === "run_finished",
-      );
-      if (
-        started?.text !== latestUser.content ||
-        finished?.text === undefined
-      ) {
-        continue;
-      }
-      const durableFinal = orderedTranscript.find((message) =>
-        message.ordinal > latestUser.ordinal &&
-        message.role === "assistant" &&
-        message.assistantKind === "final_answer" &&
-        message.content === finished.text
-      );
-      if (durableFinal !== undefined) coveredRunIds.add(runId);
-    }
-  }
-  return [
-    ...reduceTranscript(orderedTranscript, t),
-    ...reduceTimeline(events.filter((event) => !coveredRunIds.has(event.runId)), t),
-  ];
-}
-
-export function mergeTimelineEvent(
-  current: TimelineEvent[],
-  incoming: TimelineEvent,
-): TimelineEvent[] {
-  const key = eventKey(incoming);
-  if (current.some((event) => eventKey(event) === key)) return current;
-  const laterInSameRun = current.findIndex(
-    (event) => event.runId === incoming.runId && event.sequence > incoming.sequence,
-  );
-  if (laterInSameRun === -1) return [...current, incoming];
-  return [
-    ...current.slice(0, laterInSameRun),
-    incoming,
-    ...current.slice(laterInSameRun),
-  ];
-}
-
-export function reduceTimeline(
-  events: TimelineEvent[],
-  t: Translate = translateEnglish,
-): TimelineRow[] {
-  const rows = new Map<string, TimelineRow>();
-  const activeAssistant = new Map<string, string>();
-  const activeReasoning = new Map<string, string>();
-  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
-    switch (event.kind) {
-      case "run_started":
-        rows.set(`${event.runId}:user`, {
-          key: `${event.runId}:user`, kind: "user", label: t("you"), text: event.text ?? "",
-        });
-        break;
-      case "assistant_delta": {
-        const key = activeAssistant.get(event.runId) ?? `${event.runId}:assistant:${event.sequence}`;
-        activeAssistant.set(event.runId, key);
-        const current = rows.get(key);
-        rows.set(key, {
-          key,
-          kind: "assistant",
-          label: "Sigil",
-          text: `${current?.text ?? ""}${event.text ?? ""}`,
-        });
-        break;
-      }
-      case "assistant_message": {
-        const key = activeAssistant.get(event.runId) ??
-          `${event.runId}:assistant:${event.itemId ?? event.sequence}`;
-        const current = rows.get(key);
-        const text = event.text ?? current?.text ?? "";
-        activeAssistant.delete(event.runId);
-        activeReasoning.delete(event.runId);
-        if (event.assistantKind === "tool_preamble" && text.trim() === "") break;
-        const kind = assistantRowKind(event.assistantKind);
-        rows.set(key, {
-          key,
-          kind,
-          label: "Sigil",
-          text,
-          status: event.assistantKind === "tool_preamble" ? "tool preamble" : undefined,
-        });
-        break;
-      }
-      case "run_finished": {
-        finalizeRunRows(rows, event.runId, t);
-        activeAssistant.delete(event.runId);
-        activeReasoning.delete(event.runId);
-        const finalText = event.text ?? t("runCompleted");
-        const lastAssistant = [...rows.values()].reverse().find(
-          (row) => row.key.startsWith(`${event.runId}:assistant:`) && row.kind === "assistant",
-        );
-        if (lastAssistant === undefined || lastAssistant.text !== finalText) {
-          const key = `${event.runId}:assistant:final:${event.sequence}`;
-          rows.set(key, {
-            key,
-            kind: "assistant",
-            label: "Sigil",
-            text: finalText,
-          });
-        }
-        break;
-      }
-      case "reasoning_delta": {
-        const key = activeReasoning.get(event.runId) ?? `${event.runId}:reasoning:${event.sequence}`;
-        activeReasoning.set(event.runId, key);
-        const current = rows.get(key);
-        rows.set(key, {
-          key,
-          kind: "reasoning",
-          label: t("working"),
-          text: `${current?.text ?? ""}${event.text ?? ""}`,
-        });
-        break;
-      }
-      case "tool_started":
-      case "tool_completed":
-      case "tool_progress":
-      case "tool_result": {
-        activeAssistant.delete(event.runId);
-        activeReasoning.delete(event.runId);
-        const key = `${event.runId}:tool:${event.itemId ?? event.sequence}`;
-        const current = rows.get(key);
-        rows.set(key, {
-          key,
-          kind: "tool",
-          label: event.toolName ?? current?.label ?? t("tool"),
-          text: event.text ?? current?.text ?? "",
-          input: event.toolInput ?? (current?.kind === "tool" ? current.input : undefined),
-          status: event.status ?? event.kind.replace("tool_", ""),
-        });
-        break;
-      }
-      case "approval_requested": {
-        const key = `${event.runId}:approval:${event.itemId ?? event.sequence}`;
-        rows.set(key, {
-          key,
-          kind: "notice",
-          label: t("approvalRequired"),
-          text: event.approval?.previewSummary ?? event.toolInput ??
-            t("toolWaitingDecision", { tool: event.toolName ?? t("tool") }),
-          status: "waiting",
-        });
-        break;
-      }
-      case "approval_resolved": {
-        if (event.itemId === undefined) break;
-        const key = `${event.runId}:approval:${event.itemId}`;
-        const approved = event.status === "approved";
-        rows.set(key, {
-          key,
-          kind: "notice",
-          label: approved ? t("approvalApproved") : t("approvalDenied"),
-          text: event.text ?? (approved ? t("approvalApprovedDetail") : t("approvalDeniedDetail")),
-          status: approved ? "approved" : "denied",
-        });
-        break;
-      }
-      case "run_failed":
-      case "run_cancelled":
-        finalizeRunRows(rows, event.runId, t);
-        rows.set(`${event.runId}:terminal`, {
-          key: `${event.runId}:terminal`,
-          kind: "error",
-          label: event.kind === "run_cancelled" ? t("cancelled") : t("runFailed"),
-          text: event.text ?? (event.kind === "run_cancelled" ? t("runCancelled") : t("runFailedDetail")),
-        });
-        break;
-      case "notice":
-        if (isPermissionNotice(event.text)) break;
-        rows.set(`${event.runId}:notice:${event.sequence}`, {
-          key: `${event.runId}:notice:${event.sequence}`,
-          kind: "notice",
-          label: t("notice"),
-          text: event.text ?? t("runNotice"),
-        });
-        break;
-      default:
-        break;
-    }
-  }
-  return [...rows.values()];
-}
-
-function assistantRowKind(
-  kind: TimelineEvent["assistantKind"],
-): MessageView["kind"] {
-  if (kind === "reasoning_trace") return "reasoning";
-  if (kind === "progress" || kind === "tool_preamble") return "progress";
-  return "assistant";
-}
-
-function isPermissionNotice(text?: string): boolean {
-  return text?.startsWith("permission ") === true;
-}
-
-function finalizeRunRows(
-  rows: Map<string, TimelineRow>,
-  runId: string,
-  t: Translate,
-) {
-  for (const [key, row] of rows) {
-    if (!key.startsWith(`${runId}:`)) continue;
-    if (row.kind === "reasoning") {
-      rows.set(key, { ...row, label: t("reasoning"), status: undefined });
-    }
-    if (row.kind === "progress") {
-      rows.set(key, { ...row, label: t("progress"), status: undefined });
-    }
+function terminalObservationFromRun(
+  run: RunSummary,
+): ConversationTerminalObservation | undefined {
+  switch (run.status) {
+    case "finished":
+      return { runId: run.id, status: "succeeded" };
+    case "failed":
+      return { runId: run.id, status: "failed" };
+    case "cancelled":
+      return { runId: run.id, status: "cancelled" };
+    case "interrupted":
+      return { runId: run.id, status: "interrupted" };
+    default:
+      return undefined;
   }
 }
 
-function eventKey(event: TimelineEvent): string {
-  return `${event.runId}:${event.sequence}:${event.kind}`;
+function canonicalPageCoversTerminal(
+  page: ConversationDisplayPage,
+  observed: { runId: string; status?: ConversationTerminalObservation["status"] },
+): boolean {
+  const terminal = page.terminalFrontier;
+  return terminal !== undefined
+    && terminal.runId === observed.runId
+    && (observed.status === undefined || terminal.status === observed.status)
+    && BigInt(page.throughSessionStreamSequence) >= BigInt(terminal.sessionStreamSequence);
+}
+
+function captureTimelineAnchor(timeline: HTMLDivElement | null): TimelineAnchor | undefined {
+  if (timeline === null) return undefined;
+  const timelineTop = timeline.getBoundingClientRect().top;
+  const element = [...timeline.querySelectorAll<HTMLElement>("[data-display-id]")]
+    .find((candidate) => candidate.getBoundingClientRect().bottom >= timelineTop);
+  return element?.dataset.displayId === undefined
+    ? undefined
+    : {
+      displayId: element.dataset.displayId,
+      viewportOffset: element.getBoundingClientRect().top - timelineTop,
+    };
+}
+
+function remainingDisplayItems(state: ConversationContinuityState): string {
+  if (state.totalItems === undefined) return "0";
+  const remaining = BigInt(state.totalItems) - BigInt(state.canonicalItems.size);
+  const zero = BigInt(0);
+  return (remaining > zero ? remaining : zero).toString();
+}
+
+function waitForCanonicalProjection(delayMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
 }
 
 function isOwnerRace(error: unknown): boolean {
@@ -1337,7 +1306,9 @@ function isTerminal(status: RunSummary["status"]): boolean {
 
 function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | undefined {
   if (event.kind === "run_finished") return "finished";
-  if (event.kind === "run_failed") return "failed";
+  if (event.kind === "run_failed") {
+    return event.status === "interrupted" ? "interrupted" : "failed";
+  }
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;
 }

@@ -43,6 +43,22 @@ fn only_server_terminal_events_finish_a_stream() {
 }
 
 #[test]
+fn terminal_snapshot_projection_preserves_interrupted_status() {
+    assert_eq!(
+        terminal_timeline_projection(DesktopRunStatus::Interrupted),
+        Some((DesktopTimelineEventKind::RunFailed, "interrupted"))
+    );
+    assert_eq!(
+        terminal_timeline_projection(DesktopRunStatus::Failed),
+        Some((DesktopTimelineEventKind::RunFailed, "failed"))
+    );
+    assert_eq!(
+        terminal_timeline_projection(DesktopRunStatus::Running),
+        None
+    );
+}
+
+#[test]
 fn attachment_projection_is_bounded_and_marks_evicted_detail_as_a_gap() {
     let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
     for sequence in 1..=(MAX_ATTACHMENT_EVENTS as u64 + 1) {

@@ -21,6 +21,7 @@ export function Composer({
   draftKey,
   active,
   submissionBlocked,
+  draftEditingBlocked = false,
   submitting,
   controlBusy,
   composerRef,
@@ -46,6 +47,7 @@ export function Composer({
   draftKey: string;
   active: boolean;
   submissionBlocked: boolean;
+  draftEditingBlocked?: boolean;
   submitting: boolean;
   controlBusy: boolean;
   composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -307,6 +309,7 @@ export function Composer({
           labelHidden
           ref={composerRef}
           value={prompt}
+          disabled={draftEditingBlocked}
           onChange={(event) => {
             setPrompt(event.target.value);
             setSuggestionsDismissedFor(undefined);

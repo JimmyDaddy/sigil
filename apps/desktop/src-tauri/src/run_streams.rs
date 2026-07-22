@@ -537,13 +537,8 @@ async fn terminal_snapshot(
     if !snapshot.status.is_terminal() {
         return false;
     }
-    let (kind, status) = match snapshot.status {
-        DesktopRunStatus::Finished => (DesktopTimelineEventKind::RunFinished, "finished"),
-        DesktopRunStatus::Failed | DesktopRunStatus::Interrupted => {
-            (DesktopTimelineEventKind::RunFailed, "failed")
-        }
-        DesktopRunStatus::Cancelled => (DesktopTimelineEventKind::RunCancelled, "cancelled"),
-        _ => return false,
+    let Some((kind, status)) = terminal_timeline_projection(snapshot.status) else {
+        return false;
     };
     let timeline = DesktopTimelineEvent {
         workspace_id: workspace_id.to_owned(),
@@ -648,6 +643,18 @@ fn terminal_status(status: DesktopRunStatus) -> DesktopRunStatus {
         status
     } else {
         DesktopRunStatus::Interrupted
+    }
+}
+
+fn terminal_timeline_projection(
+    status: DesktopRunStatus,
+) -> Option<(DesktopTimelineEventKind, &'static str)> {
+    match status {
+        DesktopRunStatus::Finished => Some((DesktopTimelineEventKind::RunFinished, "finished")),
+        DesktopRunStatus::Failed => Some((DesktopTimelineEventKind::RunFailed, "failed")),
+        DesktopRunStatus::Interrupted => Some((DesktopTimelineEventKind::RunFailed, "interrupted")),
+        DesktopRunStatus::Cancelled => Some((DesktopTimelineEventKind::RunCancelled, "cancelled")),
+        _ => None,
     }
 }
 

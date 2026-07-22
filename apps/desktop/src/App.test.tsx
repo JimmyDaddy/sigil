@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { AppearanceSnapshot } from "./appearance/contract";
-import { mergeTimelineEvent, reduceConversationTimeline, reduceTimeline } from "./ConversationPanel";
 import { DiffViewer } from "./DiffViewer";
 import { ErrorCard } from "./ErrorCard";
 import { Message } from "./Message";
@@ -13,13 +12,13 @@ import { presentTool, ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
+  ConversationDisplayPage,
   ConversationContinuity,
   DesktopBootstrap,
   RunContext,
   RunStreamStatus,
   SessionSummary,
   TimelineEvent,
-  TranscriptMessage,
   WorkspaceSummary,
 } from "./types";
 import { Icon } from "./ui/icons";
@@ -93,7 +92,14 @@ type BridgeOverrides = Omit<Partial<DesktopBridge>, "bootstrap"> & {
 };
 
 function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
-  const { bootstrap, ...remainingOverrides } = overrides;
+  const {
+    bootstrap,
+    startRun,
+    continuity,
+    attachRun,
+    ...remainingOverrides
+  } = overrides;
+  let simulatedOwner: ConversationContinuity["foregroundOwner"];
   return {
     bootstrap: async () => ({
       appearance: defaultAppearance,
@@ -182,10 +188,11 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       hasMore: false,
       gapFacts: [],
     }),
-    continuity: async () => ({
+    continuity: continuity ?? (async () => ({
       durableFrontier: { throughStreamSequence: 0 },
+      foregroundOwner: simulatedOwner,
       recoveryActions: [],
-    }),
+    })),
     runContext: async () => defaultRunContext,
     agentActivity: async () => ({
       totalAgents: 0,
@@ -193,14 +200,23 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       terminalAgents: 0,
       items: [],
     }),
-    startRun: async (_workspaceId, sessionId) => ({
-      id: "run-1",
-      sessionId,
-      status: "running",
-      permissionMode: "manual",
-      streamSequence: 0,
-    }),
-    attachRun: async (_workspaceId, input) => ({
+    startRun: async (...args) => {
+      const started = startRun === undefined
+        ? {
+            id: "run-1",
+            sessionId: args[1],
+            status: "running" as const,
+            permissionMode: "manual" as const,
+            streamSequence: 0,
+          }
+        : await startRun(...args);
+      simulatedOwner = {
+        runId: started.id,
+        ownerRevision: `sha256:${"1".repeat(64)}`,
+      };
+      return started;
+    },
+    attachRun: attachRun ?? (async (_workspaceId, input) => ({
       run: {
         id: input.runId,
         sessionId: input.sessionId,
@@ -211,7 +227,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       events: [],
       streamState: "live",
       hasGap: false,
-    }),
+    })),
     cancelRun: async (_workspaceId, sessionId, runId) => ({
       id: runId,
       sessionId,
@@ -235,6 +251,12 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     subscribeAppearance: async () => () => undefined,
     ...remainingOverrides,
   };
+}
+
+async function readyComposer(): Promise<HTMLTextAreaElement> {
+  const composer = await screen.findByRole("textbox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+  await waitFor(() => expect(composer.disabled).toBe(false));
+  return composer;
 }
 
 function installMediaQueries(matches: (query: string) => boolean): () => void {
@@ -416,7 +438,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const composer = await screen.findByLabelText("Message Sigil") as HTMLTextAreaElement;
+    const composer = await readyComposer();
     await user.type(composer, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.click(screen.getByRole("button", { name: "Light theme" }));
@@ -540,232 +562,6 @@ describe("desktop workspace and history shell", () => {
 
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
     expect(createSession.mock.calls[1]).toEqual([workspace.id, "New conversation", "deepseek-v4-pro"]);
-  });
-
-  it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      replayable: true,
-    };
-    const first: TimelineEvent = {
-      ...base,
-      runId: "run-z",
-      sequence: 1, runSequence: "1",
-      kind: "run_started",
-      text: "First run",
-    };
-    const second: TimelineEvent = {
-      ...base,
-      runId: "run-a",
-      sequence: 1, runSequence: "1",
-      kind: "run_started",
-      text: "Second run",
-    };
-
-    const rows = reduceTimeline(
-      mergeTimelineEvent(mergeTimelineEvent([], first), second),
-    );
-    expect(rows.map((row) => row.text)).toEqual(["First run", "Second run"]);
-  });
-
-  it("groups one tool lifecycle into a single semantic timeline row", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-tool",
-      replayable: true,
-      itemId: "call-1",
-      toolName: "shell",
-    };
-    const rows = reduceTimeline([
-      { ...base, sequence: 1, runSequence: "1", kind: "tool_started", status: "running" },
-      { ...base, sequence: 2, runSequence: "2", kind: "tool_progress", text: "Running cargo test", status: "running" },
-      { ...base, sequence: 3, runSequence: "3", kind: "tool_result", status: "succeeded" },
-    ]);
-
-    expect(rows).toEqual([expect.objectContaining({
-      kind: "tool",
-      label: "shell",
-      text: "Running cargo test",
-      status: "succeeded",
-    })]);
-  });
-
-  it("finalizes reasoning labels without duplicating terminal state on the reply", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-terminal",
-      replayable: true,
-    };
-    const rows = reduceTimeline([
-      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Hello" },
-      { ...base, sequence: 2, runSequence: "2", kind: "reasoning_delta", text: "Inspecting" },
-      { ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Hi" },
-      { ...base, sequence: 4, runSequence: "4", kind: "run_finished", text: "Hi" },
-    ]);
-
-    expect(rows).toEqual([
-      expect.objectContaining({ kind: "user", text: "Hello" }),
-      expect.objectContaining({ kind: "reasoning", label: "Reasoning", text: "Inspecting" }),
-      expect.objectContaining({ kind: "assistant", text: "Hi" }),
-    ]);
-    expect(rows.every((row) => row.status !== "complete")).toBe(true);
-  });
-
-  it("keeps streamed replies, tool calls, and the final answer in chronological order", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-order",
-      replayable: true,
-    };
-    const rows = reduceTimeline([
-      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Inspect" },
-      { ...base, sequence: 2, runSequence: "2", kind: "assistant_delta", text: "I will inspect." },
-      { ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "I will inspect.", assistantKind: "tool_preamble" },
-      { ...base, sequence: 4, runSequence: "4", kind: "tool_started", itemId: "call-1", toolName: "bash", toolInput: "rg TODO", status: "running" },
-      { ...base, sequence: 5, runSequence: "5", kind: "tool_result", itemId: "call-1", toolName: "bash", text: "1 match", status: "ok" },
-      { ...base, sequence: 6, runSequence: "6", kind: "assistant_delta", text: "Found it." },
-      { ...base, sequence: 7, runSequence: "7", kind: "assistant_message", text: "Found it.", assistantKind: "final_answer" },
-      { ...base, sequence: 8, runSequence: "8", kind: "run_finished", text: "Found it." },
-    ]);
-
-    expect(rows.map((row) => row.kind)).toEqual(["user", "progress", "tool", "assistant"]);
-    expect(rows.map((row) => row.text)).toEqual(["Inspect", "I will inspect.", "1 match", "Found it."]);
-    expect(rows[2]).toEqual(expect.objectContaining({ input: "rg TODO" }));
-  });
-
-  it("replaces a waiting approval row with its resolved outcome", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-approval",
-      replayable: true,
-      itemId: "call-1",
-    };
-    const rows = reduceTimeline([
-      { ...base, sequence: 1, runSequence: "1", kind: "approval_requested", toolName: "bash", toolInput: "rg TODO" },
-      { ...base, sequence: 2, runSequence: "2", kind: "approval_resolved", status: "approved", text: "Approved for this session" },
-    ]);
-
-    expect(rows).toEqual([expect.objectContaining({
-      label: "Approved",
-      status: "approved",
-      text: "Approved for this session",
-    })]);
-  });
-
-  it("hides low-level permission audit notices because approvals have dedicated rows", () => {
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-permission",
-      replayable: true,
-    };
-    const rows = reduceTimeline([
-      { ...base, sequence: 1, runSequence: "1", kind: "notice", text: "permission read_file subject=README.md mode=allow" },
-      { ...base, sequence: 2, runSequence: "2", kind: "notice", text: "permission write_file subject=README.md mode=ask" },
-      { ...base, sequence: 3, runSequence: "3", kind: "notice", text: "permission bash subject=- mode=deny" },
-    ]);
-
-    expect(rows).toEqual([]);
-  });
-
-  it("uses the chronological durable run instead of appending its terminal replay backwards", () => {
-    const transcript: TranscriptMessage[] = [
-      {
-        ordinal: 4,
-        messageId: "final",
-        role: "assistant",
-        assistantKind: "final_answer",
-        content: "Done",
-        imageAttachmentCount: 0,
-        truncated: false,
-        originalContentBytes: 4,
-      },
-      {
-        ordinal: 2,
-        messageId: "tool",
-        role: "tool",
-        toolName: "read_file",
-        content: "{\"content\":\"body\",\"status\":\"ok\"}",
-        imageAttachmentCount: 0,
-        truncated: false,
-        originalContentBytes: 32,
-      },
-      {
-        ordinal: 1,
-        messageId: "user",
-        role: "user",
-        content: "Inspect",
-        imageAttachmentCount: 0,
-        truncated: false,
-        originalContentBytes: 7,
-      },
-      {
-        ordinal: 3,
-        messageId: "reasoning",
-        role: "assistant",
-        assistantKind: "reasoning_trace",
-        content: "Checking",
-        imageAttachmentCount: 0,
-        truncated: false,
-        originalContentBytes: 8,
-      },
-    ];
-    const base = {
-      workspaceId: workspace.id,
-      sessionId: "session-1",
-      runId: "run-terminal",
-      replayable: true,
-    };
-    const rows = reduceConversationTimeline(transcript, [
-      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Inspect" },
-      { ...base, sequence: 2, runSequence: "2", kind: "tool_result", itemId: "call-1", toolName: "read_file", text: "body", status: "ok" },
-      { ...base, sequence: 3, runSequence: "3", kind: "run_finished", text: "Done" },
-    ]);
-
-    expect(rows.map((row) => [row.kind, row.text])).toEqual([
-      ["user", "Inspect"],
-      ["tool", "{\"content\":\"body\",\"status\":\"ok\"}"],
-      ["reasoning", "Checking"],
-      ["assistant", "Done"],
-    ]);
-  });
-
-  it("omits empty durable tool preambles without hiding visible preamble text", () => {
-    const base = {
-      role: "assistant" as const,
-      assistantKind: "tool_preamble" as const,
-      imageAttachmentCount: 0,
-      truncated: false,
-      originalContentBytes: 0,
-    };
-    const rows = reduceConversationTimeline([
-      { ...base, ordinal: 1, messageId: "empty-preamble" },
-      {
-        ...base,
-        ordinal: 2,
-        messageId: "visible-preamble",
-        content: "I will inspect the affected file.",
-        originalContentBytes: 33,
-      },
-      {
-        ...base,
-        ordinal: 3,
-        messageId: "final",
-        assistantKind: "final_answer",
-        content: "Done.",
-        originalContentBytes: 5,
-      },
-    ], []);
-
-    expect(rows.map((row) => [row.status, row.text])).toEqual([
-      ["tool preamble", "I will inspect the affected file."],
-      [undefined, "Done."],
-    ]);
   });
 
   it("restores the most recent workspace after native bootstrap", async () => {
@@ -1205,11 +1001,11 @@ describe("desktop workspace and history shell", () => {
   it("shows branded conversation loading in the workspace instead of the session rail", async () => {
     const user = userEvent.setup();
     let resolveOpen: ((session: SessionSummary) => void) | undefined;
-    let resolveTranscript: ((page: { totalMessages: number; messages: []; }) => void) | undefined;
+    let resolveDisplay: ((page: ConversationDisplayPage) => void) | undefined;
     let resolveRunContext: ((context: RunContext) => void) | undefined;
     let resolveContinuity: ((continuity: ConversationContinuity) => void) | undefined;
-    const transcript = vi.fn(() => new Promise<{ totalMessages: number; messages: []; }>((resolve) => {
-      resolveTranscript = resolve;
+    const display = vi.fn(() => new Promise<ConversationDisplayPage>((resolve) => {
+      resolveDisplay = resolve;
     }));
     const runContext = vi.fn(() => new Promise<RunContext>((resolve) => {
       resolveRunContext = resolve;
@@ -1241,7 +1037,7 @@ describe("desktop workspace and history shell", () => {
       openSession: () => new Promise((resolve) => {
         resolveOpen = resolve;
       }),
-      transcript,
+      display,
       runContext,
       continuity,
     });
@@ -1259,14 +1055,23 @@ describe("desktop workspace and history shell", () => {
     await act(async () => {
       resolveOpen?.({ id: "http-session-loading", label: "Loading state session", runCount: 2 });
     });
-    await waitFor(() => expect(transcript).toHaveBeenCalledOnce());
+    await waitFor(() => expect(display).toHaveBeenCalledOnce());
     await waitFor(() => expect(runContext).toHaveBeenCalledOnce());
-    await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
+    expect(continuity).not.toHaveBeenCalled();
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
 
     await act(async () => {
-      resolveTranscript?.({ totalMessages: 0, messages: [] });
+      resolveDisplay?.({
+        schemaVersion: 1,
+        requestScope: "loading-request-scope",
+        throughSessionStreamSequence: "0",
+        totalItems: "0",
+        items: [],
+        hasMore: false,
+        gapFacts: [],
+      });
     });
+    await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
 
     await act(async () => {
@@ -1312,9 +1117,9 @@ describe("desktop workspace and history shell", () => {
     expect(navigation.querySelector(".history-skeleton")).toBeNull();
   });
 
-  it("opens bounded transcript text and pages older messages in chronological order", async () => {
+  it("opens canonical display items and pages older messages in chronological order", async () => {
     const user = userEvent.setup();
-    const transcriptQueries: Array<number | undefined> = [];
+    const displayQueries: Array<string | undefined> = [];
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -1338,58 +1143,103 @@ describe("desktop workspace and history shell", () => {
           },
         ],
       }),
-      transcript: async (_workspaceId, _sessionId, request) => {
-        transcriptQueries.push(request.before);
-        return request.before === undefined
+      display: async (_workspaceId, _sessionId, request) => {
+        displayQueries.push(request.cursor);
+        return request.cursor === undefined
           ? {
-              totalMessages: 4,
-              messages: [
+              schemaVersion: 1,
+              requestScope: "history-request-scope",
+              throughSessionStreamSequence: "4",
+              totalItems: "4",
+              items: [
                 {
-                  ordinal: 3,
-                  messageId: "message-tool",
-                  role: "tool",
-                  content: "cargo test passed",
-                  toolName: "shell",
-                  imageAttachmentCount: 0,
-                  truncated: false,
-                  originalContentBytes: 17,
+                  schemaVersion: 1,
+                  displayId: "message-tool",
+                  displayOrder: { sessionStreamSequence: "3", subindex: 0 },
+                  sourceEventId: "event-message-tool",
+                  kind: "tool",
+                  source: "durable_run_event",
+                  runId: "run-history",
+                  runSequence: "3",
+                  status: "succeeded",
+                  content: {
+                    type: "tool",
+                    toolName: "shell",
+                    output: "cargo test passed",
+                    truncated: false,
+                    originalContentBytes: 17,
+                  },
                 },
                 {
-                  ordinal: 4,
-                  messageId: "message-final",
-                  role: "assistant",
-                  content: "The change is complete.",
-                  assistantKind: "final_answer",
-                  imageAttachmentCount: 0,
-                  truncated: false,
-                  originalContentBytes: 23,
+                  schemaVersion: 1,
+                  displayId: "message-final",
+                  displayOrder: { sessionStreamSequence: "4", subindex: 0 },
+                  sourceEventId: "event-message-final",
+                  kind: "assistant_message",
+                  source: "durable_transcript",
+                  runId: "run-history",
+                  status: "succeeded",
+                  content: {
+                    type: "message",
+                    role: "assistant",
+                    text: "The change is complete.",
+                    assistantPhase: "final_answer",
+                    imageAttachmentCount: 0,
+                    truncated: false,
+                    originalContentBytes: 23,
+                  },
                 },
               ],
-              nextBefore: 3,
+              nextCursor: "cursor-before-3",
+              hasMore: true,
+              gapFacts: [],
             }
           : {
-              totalMessages: 4,
-              messages: [
+              schemaVersion: 1,
+              requestScope: "history-request-scope",
+              throughSessionStreamSequence: "4",
+              totalItems: "4",
+              items: [
                 {
-                  ordinal: 1,
-                  messageId: "message-user",
-                  role: "user",
-                  content: "Fix the parser",
-                  imageAttachmentCount: 0,
-                  truncated: false,
-                  originalContentBytes: 14,
+                  schemaVersion: 1,
+                  displayId: "message-user",
+                  displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+                  sourceEventId: "event-message-user",
+                  kind: "user_message",
+                  source: "durable_transcript",
+                  runId: "run-history",
+                  status: "recorded",
+                  content: {
+                    type: "message",
+                    role: "user",
+                    text: "Fix the parser",
+                    imageAttachmentCount: 0,
+                    truncated: false,
+                    originalContentBytes: 14,
+                  },
                 },
                 {
-                  ordinal: 2,
-                  messageId: "message-preamble",
-                  role: "assistant",
-                  content: "I will inspect it.",
-                  assistantKind: "tool_preamble",
-                  imageAttachmentCount: 0,
-                  truncated: false,
-                  originalContentBytes: 18,
+                  schemaVersion: 1,
+                  displayId: "message-preamble",
+                  displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+                  sourceEventId: "event-message-preamble",
+                  kind: "assistant_message",
+                  source: "durable_transcript",
+                  runId: "run-history",
+                  status: "recorded",
+                  content: {
+                    type: "message",
+                    role: "assistant",
+                    text: "I will inspect it.",
+                    assistantPhase: "tool_preamble",
+                    imageAttachmentCount: 0,
+                    truncated: false,
+                    originalContentBytes: 18,
+                  },
                 },
               ],
+              hasMore: false,
+              gapFacts: [],
             };
       },
     });
@@ -1403,7 +1253,7 @@ describe("desktop workspace and history shell", () => {
     const older = await screen.findByText("Fix the parser");
     const latest = screen.getByText("The change is complete.");
     expect(older.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(transcriptQueries).toEqual([undefined, 3]);
+    expect(displayQueries).toEqual([undefined, "cursor-before-3"]);
   });
 
   it("reattaches an active run after listeners and restores bounded controls with honest gaps", async () => {
@@ -1416,6 +1266,7 @@ describe("desktop workspace and history shell", () => {
       sessionId: "http-session-active",
       runId: "run-active",
       sequence: 1, runSequence: "1",
+      provisionalId: "live-active-user",
       replayable: true,
       kind: "run_started",
       text: "Resume this work",
@@ -1423,6 +1274,7 @@ describe("desktop workspace and history shell", () => {
     const approvalEvent: TimelineEvent = {
       ...activeEvent,
       sequence: 2, runSequence: "2",
+      provisionalId: "live-active-approval",
       kind: "approval_requested",
       itemId: "call-active",
       toolName: "write_file",
@@ -1604,6 +1456,7 @@ describe("desktop workspace and history shell", () => {
             sessionId: "http-after-idle",
             runId: "run-after-idle",
             sequence: 1, runSequence: "1",
+            provisionalId: "live-after-idle-user",
             replayable: false,
             kind: "run_started",
             text: "Work started elsewhere",
@@ -1772,18 +1625,32 @@ describe("desktop workspace and history shell", () => {
         }],
       }),
       openSession: async () => ({ id: "http-read-only-recovery", label: "Recovery session", runCount: 1 }),
-      transcript: async () => ({
-        totalMessages: 1,
-        messages: [{
-          ordinal: 1,
-          messageId: "saved-answer",
-          role: "assistant",
-          content: "Saved transcript remains readable.",
-          assistantKind: "final_answer",
-          imageAttachmentCount: 0,
-          truncated: false,
-          originalContentBytes: 34,
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "recovery-request-scope",
+        throughSessionStreamSequence: "1",
+        totalItems: "1",
+        items: [{
+          schemaVersion: 1,
+          displayId: "saved-answer",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "event-saved-answer",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: "run-unreachable",
+          status: "succeeded",
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "Saved transcript remains readable.",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 34,
+          },
         }],
+        hasMore: false,
+        gapFacts: [],
       }),
       continuity,
       attachRun: async () => Promise.reject({
@@ -1796,18 +1663,22 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("Saved transcript remains readable.")).toBeTruthy();
     expect(await screen.findByText("Live controls need attention")).toBeTruthy();
     const input = screen.getByRole("textbox", { name: "Message Sigil" });
+    expect((input as HTMLTextAreaElement).disabled).toBe(false);
     await user.type(input, "Keep this draft while recovering");
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.click(screen.getByRole("button", { name: "Continue read-only" }));
     expect(screen.getByText("Conversation is read-only")).toBeTruthy();
+    expect((input as HTMLTextAreaElement).disabled).toBe(false);
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
 
     await user.click(screen.getByRole("button", { name: "Retry connection" }));
     await waitFor(() => expect(continuity).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByText("Conversation is read-only")).toBeNull());
-    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("renders only the recovery actions projected by a failed attachment", async () => {
@@ -1849,6 +1720,56 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("Live controls need attention")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry connection" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Continue read-only" })).toBeNull();
+  });
+
+  it("routes every projected recovery action without inventing retry or read-only controls", async () => {
+    const user = userEvent.setup();
+    const pickWorkspace = vi.fn(async () => ({ cancelled: true as const }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      pickWorkspace,
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "action-recovery.jsonl",
+          sessionId: "durable-action-recovery",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Action recovery session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-action-recovery", label: "Action recovery session", runCount: 1 }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 3 },
+        foregroundOwner: {
+          runId: "run-action-recovery",
+          ownerRevision: `sha256:${"b".repeat(64)}`,
+        },
+        recoveryActions: ["open_another_workspace", "open_diagnostics", "show_details"],
+      }),
+      attachRun: async () => Promise.reject({
+        code: "run_stream_unavailable",
+        message: "The live stream is unavailable.",
+      }),
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Action recovery session/ }));
+    expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry connection" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Continue read-only" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open another workspace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open support and diagnostics" })).toBeTruthy();
+    await user.click(screen.getByText("Show details"));
+    expect(screen.getByText("owner_probe_failed")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open another workspace" }));
+    expect(pickWorkspace).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Open support and diagnostics" }));
+    expect(await screen.findByRole("heading", { name: "Support & diagnostics" })).toBeTruthy();
   });
 
   it("keeps the opened conversation mounted while history filters refresh", async () => {
@@ -1931,16 +1852,16 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("Managed conversation");
     const managedRow = screen.getByRole("button", { name: /^Managed conversation/ });
-    await user.click(managedRow);
-    await user.click(managedRow);
+    await user.dblClick(managedRow);
     expect(screen.getByRole("dialog", { name: "Rename conversation" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename conversation" })).toBeNull());
 
-    fireEvent.contextMenu(managedRow);
+    fireEvent.contextMenu(screen.getByRole("button", { name: /^Managed conversation/ }));
     await user.click(screen.getByRole("menuitem", { name: "Rename" }));
     const name = screen.getByRole("textbox", { name: "Conversation name" });
-    await user.clear(name);
-    await user.type(name, "Readable name");
+    fireEvent.change(name, { target: { value: "Readable name" } });
+    expect((name as HTMLInputElement).value).toBe("Readable name");
     await user.click(screen.getByRole("button", { name: "Rename" }));
     await waitFor(() => expect(renameSession).toHaveBeenCalledWith(workspace.id, {
       sessionRef: "managed.jsonl",
@@ -2273,7 +2194,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("Available")).toBeTruthy();
-    await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
+    await user.type(await readyComposer(), "Say hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(screen.getByText("Say hello")).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
@@ -2291,9 +2212,9 @@ describe("desktop workspace and history shell", () => {
       replayable: false,
     };
     act(() => {
-      eventListener?.({ ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Say hello" });
+      eventListener?.({ ...base, sequence: 1, runSequence: "1", provisionalId: "live-hello-user", kind: "run_started", text: "Say hello" });
       eventListener?.({ ...base, sequence: 2, runSequence: "2", kind: "assistant_delta", text: "Hel" });
-      eventListener?.({ ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Hello" });
+      eventListener?.({ ...base, sequence: 3, runSequence: "3", provisionalId: "live-hello-final", kind: "assistant_message", text: "Hello" });
       eventListener?.({ ...base, sequence: 4, runSequence: "4", kind: "run_finished", text: "Hello", replayable: true });
       statusListener?.({ ...base, state: "terminal" });
     });
@@ -2302,6 +2223,315 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("complete")).toBeNull();
     expect(screen.getByText("Completed")).toBeTruthy();
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
+  });
+
+  it("keeps a status-only terminal run finalizing until its interrupted durable frontier is loaded", async () => {
+    const user = userEvent.setup();
+    let statusListener: ((status: RunStreamStatus) => void) | undefined;
+    let resolveRefresh: ((page: ConversationDisplayPage) => void) | undefined;
+    const owner = {
+      runId: "run-status-only",
+      ownerRevision: `sha256:${"d".repeat(64)}`,
+    };
+    const continuity = vi.fn()
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 0 },
+        foregroundOwner: owner,
+        recoveryActions: [],
+      })
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 0 },
+        foregroundOwner: owner,
+        recoveryActions: [],
+      })
+      .mockResolvedValue({
+        durableFrontier: { throughStreamSequence: 2 },
+        recoveryActions: [],
+      });
+    let displayCall = 0;
+    const display = vi.fn(() => {
+      displayCall += 1;
+      if (displayCall === 1) {
+        return Promise.resolve({
+          schemaVersion: 1 as const,
+          requestScope: "status-only-scope",
+          throughSessionStreamSequence: "0",
+          totalItems: "0",
+          items: [],
+          hasMore: false,
+          gapFacts: [],
+        });
+      }
+      return new Promise<ConversationDisplayPage>((resolve) => {
+        resolveRefresh = resolve;
+      });
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "status-only.jsonl",
+          sessionId: "durable-status-only",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Status-only session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-status-only", label: "Status-only session", runCount: 1 }),
+      display,
+      continuity,
+      attachRun: async () => ({
+        run: {
+          id: owner.runId,
+          sessionId: "http-status-only",
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 0,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }),
+      subscribeRunStreamStatus: async (listener) => {
+        statusListener = listener;
+        return () => undefined;
+      },
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Status-only session/ }));
+    expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Next durable turn");
+    await waitFor(() => expect(statusListener).toBeDefined());
+    act(() => statusListener?.({
+      workspaceId: workspace.id,
+      sessionId: "http-status-only",
+      runId: owner.runId,
+      state: "terminal",
+    }));
+
+    await waitFor(() => expect(display).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
+    const send = await screen.findByRole("button", { name: "Send message" });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByText("Run finished. Review the final response and verification status.")).toHaveLength(2);
+
+    await act(async () => {
+      resolveRefresh?.({
+        schemaVersion: 1,
+        requestScope: "status-only-scope",
+        throughSessionStreamSequence: "2",
+        totalItems: "2",
+        items: [{
+          schemaVersion: 1,
+          displayId: "status-only-final",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "event-status-only-final",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: owner.runId,
+          status: "succeeded",
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "The interrupted run was saved exactly once.",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 41,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "status-only-terminal",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "event-status-only-terminal",
+          kind: "terminal",
+          source: "durable_run_event",
+          runId: owner.runId,
+          status: "interrupted",
+          content: { type: "terminal", finalMessageId: "status-only-final", summaryTruncated: false },
+        }],
+        terminalFrontier: {
+          runId: owner.runId,
+          sessionStreamSequence: "2",
+          status: "interrupted",
+        },
+        hasMore: false,
+        gapFacts: [],
+      });
+    });
+
+    expect(await screen.findByText("The interrupted run was saved exactly once.")).toBeTruthy();
+    await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("keeps a rejected canonical refresh fail-closed without discarding its live final", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const owner = {
+      runId: "run-invalid-refresh",
+      ownerRevision: `sha256:${"e".repeat(64)}`,
+    };
+    const continuity = vi.fn()
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: owner,
+        recoveryActions: ["retry_current"],
+      })
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: owner,
+        recoveryActions: ["retry_current"],
+      })
+      .mockResolvedValue({
+        durableFrontier: { throughStreamSequence: 3 },
+        recoveryActions: ["retry_current"],
+      });
+    const display = vi.fn()
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        requestScope: "invalid-refresh-scope",
+        throughSessionStreamSequence: "1",
+        totalItems: "1",
+        items: [{
+          schemaVersion: 1,
+          displayId: "stable-message",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "event-stable-message",
+          kind: "user_message",
+          source: "durable_transcript",
+          status: "recorded",
+          content: {
+            type: "message",
+            role: "user",
+            text: "Original durable content",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 24,
+          },
+        }],
+        hasMore: false,
+        gapFacts: [],
+      })
+      .mockResolvedValue({
+        schemaVersion: 1,
+        requestScope: "invalid-refresh-scope",
+        throughSessionStreamSequence: "3",
+        totalItems: "2",
+        items: [{
+          schemaVersion: 1,
+          displayId: "stable-message",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "event-stable-message",
+          kind: "user_message",
+          source: "durable_transcript",
+          status: "recorded",
+          content: {
+            type: "message",
+            role: "user",
+            text: "Conflicting durable content",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 27,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "invalid-refresh-terminal",
+          displayOrder: { sessionStreamSequence: "3", subindex: 0 },
+          sourceEventId: "event-invalid-refresh-terminal",
+          kind: "terminal",
+          source: "durable_run_event",
+          runId: owner.runId,
+          status: "succeeded",
+          content: { type: "terminal", finalMessageId: "live-invalid-final", summaryTruncated: false },
+        }],
+        terminalFrontier: {
+          runId: owner.runId,
+          sessionStreamSequence: "3",
+          status: "succeeded",
+        },
+        hasMore: false,
+        gapFacts: [],
+      });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "invalid-refresh.jsonl",
+          sessionId: "durable-invalid-refresh",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Invalid refresh session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-invalid-refresh", label: "Invalid refresh session", runCount: 1 }),
+      display,
+      continuity,
+      attachRun: async () => ({
+        run: {
+          id: owner.runId,
+          sessionId: "http-invalid-refresh",
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 1,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Invalid refresh session/ }));
+    expect(await screen.findByText("Original durable content")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Do not enable yet");
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-invalid-refresh",
+        runId: owner.runId,
+        sequence: 2,
+        runSequence: "2",
+        provisionalId: "live-invalid-final",
+        replayable: false,
+        kind: "assistant_message",
+        assistantKind: "final_answer",
+        text: "Live final must remain visible",
+      });
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-invalid-refresh",
+        runId: owner.runId,
+        sequence: 3,
+        runSequence: "3",
+        replayable: true,
+        kind: "run_finished",
+      });
+    });
+
+    expect(await screen.findByText("Live final must remain visible")).toBeTruthy();
+    expect(await screen.findByText("Saved messages are unavailable")).toBeTruthy();
+    expect(screen.getByText(/stable-message was reused with different content/)).toBeTruthy();
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
+    expect(screen.getByText("Live final must remain visible")).toBeTruthy();
+    expect(screen.getByText("Original durable content")).toBeTruthy();
+    expect(screen.queryByText("Conflicting durable content")).toBeNull();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("preserves IME text, accepts clipboard input, and does not submit during composition", async () => {
@@ -2322,7 +2552,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    const composer = await readyComposer();
     composer.focus();
     fireEvent.compositionStart(composer);
     fireEvent.change(composer, { target: { value: "请检查 中文输入" } });
@@ -2374,9 +2604,9 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+    const composer = await readyComposer();
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
     await user.selectOptions(screen.getByRole("combobox", { name: "Reasoning effort" }), "high");
-    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
     Object.defineProperty(composer, "scrollHeight", { configurable: true, value: 240 });
     await user.type(composer, "Inspect safely");
     expect(composer.style.height).toBe("176px");
@@ -2442,13 +2672,14 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Model" }),
       "deepseek-v4-pro",
     );
     expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     expect(screen.queryByRole("option", { name: "Effort unavailable" })).toBeNull();
-    await user.type(screen.getByLabelText("Message Sigil"), "Continue with pro");
+    await user.type(composer, "Continue with pro");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(selectedModels).toEqual([undefined]);
@@ -2506,13 +2737,13 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    const composer = await readyComposer();
     await user.type(composer, "Run this after Shift+Enter");
     fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
     expect(prompts).toEqual([]);
     fireEvent.keyDown(composer, { key: "Enter" });
     await waitFor(() => expect(prompts).toEqual(["Run this after Shift+Enter"]));
-    expect(composer.disabled).toBe(false);
+    await waitFor(() => expect(composer.disabled).toBe(false));
     await user.type(composer, "Follow-up draft");
     expect(draftValues.get(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Follow-up draft");
 
@@ -2555,7 +2786,7 @@ describe("desktop workspace and history shell", () => {
       replayable: false,
     };
     act(() => {
-      eventListener?.({ ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "First" });
+      eventListener?.({ ...base, sequence: 1, runSequence: "1", provisionalId: "live-scroll-user", kind: "run_started", text: "First" });
     });
     expect(timeline.scrollTop).toBe(600);
 
@@ -2568,9 +2799,222 @@ describe("desktop workspace and history shell", () => {
     timeline.scrollTop = 100;
     fireEvent.scroll(timeline);
     act(() => {
-      eventListener?.({ ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Second" });
+      eventListener?.({ ...base, sequence: 3, runSequence: "3", provisionalId: "live-scroll-answer", kind: "assistant_message", text: "Second" });
     });
     expect(timeline.scrollTop).toBe(100);
+  });
+
+  it("preserves the visible reader offset when canonical refresh reconciles a live item", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const owner = {
+      runId: "run-scroll-anchor",
+      ownerRevision: `sha256:${"f".repeat(64)}`,
+    };
+    const continuity = vi.fn()
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: owner,
+        recoveryActions: [],
+      })
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: owner,
+        recoveryActions: [],
+      })
+      .mockResolvedValue({
+        durableFrontier: { throughStreamSequence: 3 },
+        recoveryActions: [],
+      });
+    let displayCall = 0;
+    const display = vi.fn(async (): Promise<ConversationDisplayPage> => {
+      displayCall += 1;
+      const earlier = {
+        schemaVersion: 1 as const,
+        displayId: "anchor-earlier",
+        displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+        sourceEventId: "event-anchor-earlier",
+        kind: "user_message" as const,
+        source: "durable_transcript" as const,
+        status: "recorded" as const,
+        content: {
+          type: "message" as const,
+          role: "user" as const,
+          text: "Earlier saved prompt",
+          imageAttachmentCount: 0,
+          truncated: false,
+          originalContentBytes: 20,
+        },
+      };
+      if (displayCall === 1) {
+        return {
+          schemaVersion: 1,
+          requestScope: "scroll-anchor-scope",
+          throughSessionStreamSequence: "1",
+          totalItems: "1",
+          items: [earlier],
+          hasMore: false,
+          gapFacts: [],
+        };
+      }
+      return {
+        schemaVersion: 1,
+        requestScope: "scroll-anchor-scope",
+        throughSessionStreamSequence: "3",
+        totalItems: "3",
+        items: [earlier, {
+          schemaVersion: 1,
+          displayId: "durable-scroll-anchor",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "event-durable-scroll-anchor",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: owner.runId,
+          status: "succeeded",
+          reconciles: ["live-scroll-anchor"],
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "Anchored answer",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 15,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "durable-scroll-terminal",
+          displayOrder: { sessionStreamSequence: "3", subindex: 0 },
+          sourceEventId: "event-durable-scroll-terminal",
+          kind: "terminal",
+          source: "durable_run_event",
+          runId: owner.runId,
+          status: "succeeded",
+          content: {
+            type: "terminal",
+            finalMessageId: "durable-scroll-anchor",
+            summaryTruncated: false,
+          },
+        }],
+        terminalFrontier: {
+          runId: owner.runId,
+          sessionStreamSequence: "3",
+          status: "succeeded",
+        },
+        liveProvisionalAnchor: {
+          durableFrontier: "3",
+          runId: owner.runId,
+          runSequence: "3",
+        },
+        hasMore: false,
+        gapFacts: [],
+      };
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "scroll-anchor.jsonl",
+          sessionId: "durable-scroll-anchor-session",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Scroll anchor session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-scroll-anchor", label: "Scroll anchor session", runCount: 1 }),
+      display,
+      continuity,
+      attachRun: async () => ({
+        run: {
+          id: owner.runId,
+          sessionId: "http-scroll-anchor",
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 1,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Scroll anchor session/ }));
+    expect(await screen.findByText("Earlier saved prompt")).toBeTruthy();
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-scroll-anchor",
+        runId: owner.runId,
+        sequence: 2,
+        runSequence: "2",
+        provisionalId: "live-scroll-anchor",
+        replayable: false,
+        kind: "assistant_message",
+        assistantKind: "final_answer",
+        text: "Anchored answer",
+      });
+    });
+    expect(await screen.findByText("Anchored answer")).toBeTruthy();
+
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+    });
+    timeline.scrollTop = 300;
+    fireEvent.scroll(timeline);
+    const rect = (top: number, bottom: number): DOMRect => ({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: 500,
+      width: 500,
+      height: bottom - top,
+      toJSON: () => ({}),
+    });
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function getBounds(this: HTMLElement) {
+      if (this === timeline) return rect(100, 500);
+      switch (this.dataset.displayId) {
+        case "anchor-earlier": return rect(40, 80);
+        case "live-scroll-anchor": return rect(140, 180);
+        case "durable-scroll-anchor": return rect(190, 230);
+        default: return rect(0, 0);
+      }
+    });
+
+    try {
+      act(() => {
+        eventListener?.({
+          workspaceId: workspace.id,
+          sessionId: "http-scroll-anchor",
+          runId: owner.runId,
+          sequence: 3,
+          runSequence: "3",
+          replayable: true,
+          kind: "run_finished",
+        });
+      });
+
+      await waitFor(() => expect(display).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(document.querySelector('[data-display-id="durable-scroll-anchor"]')).not.toBeNull());
+      expect(document.querySelector('[data-display-id="live-scroll-anchor"]')).toBeNull();
+      expect(timeline.scrollTop).toBe(350);
+    } finally {
+      geometry.mockRestore();
+    }
   });
 
   it("submits the exact approval guard and requests cooperative cancellation", async () => {
@@ -2610,9 +3054,10 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    await user.type(screen.getByLabelText("Message Sigil"), "Edit a file");
+    await user.type(await readyComposer(), "Edit a file");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(eventListener).toBeDefined());
+    await readyComposer();
     await user.click(await screen.findByRole("button", { name: "Open verification: passed" }));
     expect(screen.getByRole("dialog", { name: "Verification" })).toBeTruthy();
     act(() => {
@@ -2621,6 +3066,7 @@ describe("desktop workspace and history shell", () => {
         sessionId: "http-session-new",
         runId: "run-1",
         sequence: 3, runSequence: "3",
+        provisionalId: "live-approval-call-1",
         replayable: true,
         kind: "approval_requested",
         itemId: "call-1",
@@ -2658,6 +3104,7 @@ describe("desktop workspace and history shell", () => {
         sessionId: "http-session-new",
         runId: "run-1",
         sequence: 4, runSequence: "4",
+        provisionalId: "live-approval-call-1",
         replayable: true,
         kind: "approval_resolved",
         itemId: "call-1",

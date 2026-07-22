@@ -13,9 +13,11 @@ export interface MessageView {
 
 export function Message({
   message,
+  displayId,
   onOpenExternalUrl,
 }: {
   readonly message: MessageView;
+  readonly displayId?: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
 }) {
   const { t } = useLocale();
@@ -24,6 +26,7 @@ export function Message({
     return (
       <details
         className={`message-disclosure message-${message.kind}`}
+        data-display-id={displayId}
         onToggle={(event) => setDisclosureOpen(event.currentTarget.open)}
       >
         <summary>
@@ -38,7 +41,10 @@ export function Message({
     );
   }
   return (
-    <article className={`message message-${message.kind}${message.status ? ` message-status-${message.status}` : ""}`}>
+    <article
+      className={`message message-${message.kind}${message.status ? ` message-status-${message.status}` : ""}`}
+      data-display-id={displayId}
+    >
       <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}</header>
       <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
     </article>

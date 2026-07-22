@@ -894,6 +894,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 onInitialLoadComplete={finishConversationNavigation}
                 onRunContextChange={captureRunContext}
                 onNewSession={() => createSession()}
+                onOpenWorkspacePicker={() => void pickWorkspace()}
                 onOpenSessionPicker={(query) => {
                   navigate("conversation");
                   setSearchDraft(query);
