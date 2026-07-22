@@ -634,6 +634,72 @@ async fn production_queue_exact_prompt_is_process_local_and_requires_reentry_aft
 }
 
 #[tokio::test]
+async fn production_queue_restart_rebinds_persisted_reasoning_effort_before_dispatch() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "effort-owner-1");
+    let mut session = production_queue_session(&temp);
+    let initial = driver
+        .conversation_queue_view(&session, None)
+        .expect("initial queue should project");
+    driver
+        .mutate_conversation_queue(
+            &session,
+            None,
+            &queue_command(
+                "enqueue-effort-before-restart",
+                initial.generation,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "reply with the durable queue effort".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: Some(crate::HttpReasoningEffort::Low),
+                },
+            ),
+        )
+        .expect("reasoning effort should persist with the safe queue item");
+    drop(driver);
+
+    let restarted = production_queue_driver(&temp, "effort-owner-2");
+    let admission = restarted
+        .next_queued_run_admission(&session)
+        .expect("restarted admission should project")
+        .expect("persisted safe prompt should remain dispatchable");
+    assert_eq!(
+        admission.reasoning_effort,
+        Some(crate::HttpReasoningEffort::Low)
+    );
+    session.foreground_run_id = Some(admission.dispatch_run_id.clone());
+    let (start, _) = restarted
+        .queued_supervisor_start(HttpQueuedRunDriverStart {
+            session: session.clone(),
+            run: crate::HttpRunSnapshot {
+                id: admission.dispatch_run_id.clone(),
+                session_id: session.id.clone(),
+                status: HttpRunStatus::Starting,
+                permission_mode: admission.permission_mode,
+                reasoning_effort: admission.reasoning_effort,
+                prompt_preview: admission.prompt_preview.clone(),
+                pending_approval_call_ids: Vec::new(),
+                stream_sequence: 0,
+            },
+            admission,
+        })
+        .expect("restarted queued dispatch should reconstruct current capability bindings");
+    let current_context = application_run_context_view(
+        &restarted.options.config_path,
+        &restarted.options.launch_cwd,
+        Path::new(&session.session_log_path),
+        &session.durable_session_scope_id,
+    )
+    .expect("current run context should project");
+
+    assert_eq!(
+        start.reasoning_effort_binding,
+        current_context.reasoning_effort_binding
+    );
+    assert!(start.reasoning_effort_binding.is_some());
+}
+
+#[tokio::test]
 async fn production_queue_session_delete_purges_only_matching_exact_prompt_material() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "delete-purge");

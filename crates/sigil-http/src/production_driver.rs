@@ -529,13 +529,30 @@ impl HttpProductionRunDriver {
             .validate_for_session(&start.session.durable_session_scope_id)
             .map_err(|_| HttpRunDriverError::new("queued promotion candidate is invalid"))?;
 
+        let run_context = application_run_context_view(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            Path::new(&start.session.session_log_path),
+            &start.session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpRunDriverError::new("queued run context is unavailable"))?;
+        let reasoning_effort_binding = if start.run.reasoning_effort.is_some() {
+            Some(run_context.reasoning_effort_binding.ok_or_else(|| {
+                HttpRunDriverError::new(
+                    "queued reasoning effort is unavailable for the current model",
+                )
+            })?)
+        } else {
+            None
+        };
+
         let standard_start = HttpRunDriverStart {
             session: start.session,
             run: start.run,
             prompt: queued.queued.prompt.clone(),
             model_name: None,
             model_selection_binding: None,
-            reasoning_effort_binding: None,
+            reasoning_effort_binding,
             skill_binding: None,
             agent_binding: None,
         };
