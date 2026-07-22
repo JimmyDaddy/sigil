@@ -250,9 +250,30 @@ impl SessionContextProjection {
 }
 
 pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessage> {
+    let delivered =
+        super::conversation_promotion_projection::delivered_conversation_queue_ids_from_entries(
+            entries,
+        );
+    let promoted_message_ids = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                if delivered.contains(&promotion.queue_id) =>
+            {
+                Some(promotion.durable_user_message.id.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     entries
         .iter()
         .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                if delivered.contains(&promotion.queue_id) =>
+            {
+                Some(promotion.durable_user_message.clone())
+            }
+            SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => None,
             SessionLogEntry::User(message)
             | SessionLogEntry::Assistant(message)
             | SessionLogEntry::ToolResult(message) => Some(message.clone()),
@@ -283,6 +304,25 @@ fn raw_model_messages_from_durable_records(
     if replacements.len() != outputs.len() {
         bail!("tool-output projection sidecar contains duplicate source event ids");
     }
+    let visible_promotions = super::conversation_promotion_projection::
+        provider_visible_conversation_promotion_event_ids(records)?;
+    let promoted_message_ids = records
+        .iter()
+        .filter_map(|record| {
+            visible_promotions
+                .contains(record.event_id())
+                .then(|| session_entry_from_stored_event(record.stored_event()).transpose())
+                .flatten()
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                Some(promotion.durable_user_message.id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let mut messages = Vec::new();
     for record in records {
         let event = record.stored_event();
@@ -290,6 +330,14 @@ fn raw_model_messages_from_durable_records(
             continue;
         };
         let message = match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                if visible_promotions.contains(&event.event_id) =>
+            {
+                promotion.durable_user_message
+            }
+            SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => {
+                continue;
+            }
             SessionLogEntry::User(message)
             | SessionLogEntry::Assistant(message)
             | SessionLogEntry::ToolResult(message) => replacements
@@ -347,17 +395,24 @@ fn portable_retained_raw_event_ids_for_plan(
         .collect::<BTreeSet<_>>();
 
     let mut retained = BTreeSet::new();
+    let visible_promotions = super::conversation_promotion_projection::
+        provider_visible_conversation_promotion_event_ids(records)?;
     for record in records {
         let event = record.stored_event();
         let Some(entry) = session_entry_from_stored_event(event)? else {
             continue;
         };
-        if matches!(
+        let provider_visible = matches!(
             entry,
             SessionLogEntry::User(_)
                 | SessionLogEntry::Assistant(_)
                 | SessionLogEntry::ToolResult(_)
-        ) && !folded.contains(&event.event_id)
+        ) || (matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+        ) && visible_promotions.contains(&event.event_id));
+        if provider_visible
+            && !folded.contains(&event.event_id)
             && !prior_boundary.contains(&event.event_id)
         {
             retained.insert(event.event_id.clone());
@@ -397,16 +452,25 @@ fn portable_retained_raw_event_ids(
     }
 
     let mut retained = portable_retained_raw_event_ids_for_plan(source_records, &plan)?;
+    let visible_promotions = super::conversation_promotion_projection::
+        provider_visible_conversation_promotion_event_ids(records)?;
     for record in &records[source_count..] {
         let event = record.stored_event();
+        let entry = session_entry_from_stored_event(event)?;
         if matches!(
-            session_entry_from_stored_event(event)?,
+            entry,
             Some(
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
                     | SessionLogEntry::ToolResult(_)
             )
-        ) {
+        ) || (matches!(
+            entry,
+            Some(SessionLogEntry::Control(
+                ControlEntry::ConversationInputPromoted(_)
+            ))
+        ) && visible_promotions.contains(&event.event_id))
+        {
             retained.insert(event.event_id.clone());
         }
     }

@@ -27,12 +27,12 @@ use crate::{
     config::HttpServerConfig,
     disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
-        HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
-        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
-        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
-        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpVerificationRerunRequest,
+        HttpApprovalDecisionRequest, HttpConversationQueueCommandRequest, HttpRunCancelRequest,
+        HttpRunStartRequest, HttpServerInfo, HttpSessionCatalogBatchExecuteRequest,
+        HttpSessionCatalogBatchPlanRequest, HttpSessionCreateRequest, HttpSessionDeleteRequest,
+        HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
+        HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
+        HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -742,6 +742,41 @@ fn route_http_request(
     {
         return match registry.session_continuity(session_id) {
             Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/queue"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.conversation_queue(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/queue"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) = parse_json_body::<HttpCommandEnvelope<HttpConversationQueueCommandRequest>>(
+            &request.body,
+        ) else {
+            return http_error_response(
+                400,
+                "bad_request",
+                "invalid conversation queue command body",
+            );
+        };
+        return match registry.command_conversation_queue(session_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
             Err(error) => registry_error_response(error),
         };
     }
@@ -1479,17 +1514,26 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalDecisionUnavailable { .. }
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
+        | HttpRegistryError::SessionRunCleanupActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }
         | HttpRegistryError::DurableSessionMutationActive
         | HttpRegistryError::CommandKeyConflict { .. }
         | HttpRegistryError::RunTerminalConflict { .. }
         | HttpRegistryError::DurableSessionNotReady
         | HttpRegistryError::DurableSessionIdentityChanged
-        | HttpRegistryError::ConversationDisplayCursorStale => 409,
+        | HttpRegistryError::ConversationDisplayCursorStale
+        | HttpRegistryError::ConversationQueueGenerationStale
+        | HttpRegistryError::ConversationQueueEntryTerminal
+        | HttpRegistryError::ConversationQueueOwnerLost
+        | HttpRegistryError::ConversationQueuePermissionRequired
+        | HttpRegistryError::ConversationQueueConflict
+        | HttpRegistryError::ConversationQueueRequiresReentry => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidSessionOpenRequest
-        | HttpRegistryError::ConversationDisplayCursorInvalid => 400,
+        | HttpRegistryError::ConversationDisplayCursorInvalid
+        | HttpRegistryError::ConversationQueueInvalidCommand
+        | HttpRegistryError::ConversationQueueUnsupported => 400,
         HttpRegistryError::DriverRejected { .. }
         | HttpRegistryError::DriverPanicked { .. }
         | HttpRegistryError::SessionBindingRejected { .. }
@@ -1500,7 +1544,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::CommandRegistrySaturated
         | HttpRegistryError::ServerShuttingDown
         | HttpRegistryError::DurableSessionUnavailable
-        | HttpRegistryError::ConversationDisplayUnavailable => 503,
+        | HttpRegistryError::ConversationDisplayUnavailable
+        | HttpRegistryError::ConversationQueueUnavailable => 503,
     };
     let code = match &error {
         HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
@@ -1513,6 +1558,16 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationDisplayCursorInvalid => "invalid_display_cursor",
         HttpRegistryError::ConversationDisplayCursorStale => "display_cursor_stale",
         HttpRegistryError::ConversationDisplayUnavailable => "conversation_display_unavailable",
+        HttpRegistryError::SessionRunCleanupActive { .. } => "session_run_cleanup_active",
+        HttpRegistryError::ConversationQueueInvalidCommand => "invalid_queue_command",
+        HttpRegistryError::ConversationQueueGenerationStale => "queue_generation_stale",
+        HttpRegistryError::ConversationQueueEntryTerminal => "queue_entry_terminal",
+        HttpRegistryError::ConversationQueueOwnerLost => "queue_owner_lost",
+        HttpRegistryError::ConversationQueuePermissionRequired => "queue_permission_required",
+        HttpRegistryError::ConversationQueueConflict => "queue_conflict",
+        HttpRegistryError::ConversationQueueRequiresReentry => "queue_requires_reentry",
+        HttpRegistryError::ConversationQueueUnsupported => "queue_action_unsupported",
+        HttpRegistryError::ConversationQueueUnavailable => "conversation_queue_unavailable",
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())

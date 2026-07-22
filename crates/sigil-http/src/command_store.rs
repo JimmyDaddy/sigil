@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    HttpApprovalCommandReceipt, HttpRunCancelCommandReceipt, HttpRunStartCommandReceipt,
-    HttpVerificationRerunCommandReceipt,
+    HttpApprovalCommandReceipt, HttpConversationQueueCommandReceipt, HttpRunCancelCommandReceipt,
+    HttpRunStartCommandReceipt, HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
 };
 
@@ -280,6 +280,7 @@ pub(crate) enum HttpStoredCommandCompletion {
     Cancel(HttpRunCancelCommandReceipt),
     Approval(HttpApprovalCommandReceipt),
     Verification(Box<HttpVerificationRerunCommandReceipt>),
+    Queue(Box<HttpConversationQueueCommandReceipt>),
     Aborted,
 }
 
@@ -415,6 +416,14 @@ fn validate_completion(
                 && receipt.command_id == identity.key.command_id
                 && receipt.client_id == identity.key.client_id
                 && receipt.session_id == identity.key.session_id
+                && !receipt.replayed
+        }
+        HttpStoredCommandCompletion::Queue(receipt) => {
+            identity.kind == "queue"
+                && receipt.command_id == identity.key.command_id
+                && receipt.client_id == identity.key.client_id
+                && receipt.session_id == identity.key.session_id
+                && receipt.queue.session_id == identity.key.session_id
                 && !receipt.replayed
         }
     };

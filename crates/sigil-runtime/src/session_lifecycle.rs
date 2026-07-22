@@ -1268,13 +1268,7 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
 }
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {
-    record
-        .stored_event()
-        .payload
-        .get("session_log_entry")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
+    sigil_kernel::conversation_transcript_entry_from_record(record)
         .context("failed to decode session lifecycle entry")
 }
 

@@ -106,6 +106,8 @@ mod compaction_sidecar;
 mod compaction_v2;
 mod context;
 mod context_projection;
+mod conversation_promotion_projection;
+mod conversation_queue_mutation;
 mod conversation_queue_promotion;
 mod entry;
 mod facade;
@@ -156,6 +158,7 @@ pub use context_projection::{
     ContextTrustProjection, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SessionContextProjection,
     SessionProjectionEntry, TaskMemorySnapshotRelation,
 };
+pub use conversation_promotion_projection::conversation_transcript_entry_from_record;
 pub use entry::*;
 pub use facade::Session;
 pub use portable_compaction::{

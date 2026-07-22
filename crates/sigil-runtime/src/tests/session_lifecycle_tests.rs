@@ -3,8 +3,11 @@ use std::fs;
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    AssistantMessageKind, ControlEntry, DurableEventType, EventClass, ImageAttachment,
+    AssistantMessageKind, ControlEntry, ConversationInputKind, ConversationInputPromotedEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputTarget,
+    ConversationQueueDurableProjection, DurableEventType, EventClass, ImageAttachment,
     ImageMimeType, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, ToolCall,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
 use super::*;
@@ -250,6 +253,95 @@ fn local_session_catalog_marks_symlink_and_scan_budget_entries_unavailable() -> 
         .export_session(&sessions.join("session-link.jsonl"), None, 1234)
         .expect_err("symlink source must fail");
     assert!(error.to_string().contains("must not be a symlink"));
+    Ok(())
+}
+
+#[test]
+fn promoted_user_projects_once_into_catalog_and_export_without_user_message_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-promoted.jsonl");
+    let store = JsonlSessionStore::new(&source)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "chat".to_owned(),
+    }))?;
+    let queue_id = ConversationInputQueueId::new("export-promoted")?;
+    let prompt = project_conversation_prompt_for_persistence("Export promoted history");
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash.clone(),
+            prompt: prompt.safe_prompt.clone(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        }),
+    ))?;
+    let revision = ConversationQueueDurableProjection::from_records(
+        &JsonlSessionStore::read_event_records(&source)?,
+    )?
+    .revision
+    .expect("queued event advances revision");
+    let mut durable_user_message = ModelMessage::user(prompt.safe_prompt.clone());
+    durable_user_message.id = "export-promoted-message".to_owned();
+    store.append_conversation_input_promoted(ConversationInputPromotedEntry {
+        queue_id,
+        expected_queue_revision: revision,
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: false,
+        durable_user_message: durable_user_message.clone(),
+        capability_descriptors: Vec::new(),
+        capability_digest: conversation_promotion_capability_digest(&[])?,
+        dispatch_run_id: "export-promoted-run".to_owned(),
+        promoted_at_ms: 2,
+    })?;
+    let assistant = ModelMessage::assistant_with_kind(
+        Some("exported".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    store.append(&SessionLogEntry::Assistant(assistant.clone()))?;
+    store.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({"run_status": "completed", "final_message_id": assistant.id}),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&source)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::UserMessageRecorded)
+            })
+            .count(),
+        0
+    );
+
+    let exports = temp.path().join("exports");
+    let service = LocalSessionLifecycleService::new("workspace-1", &sessions, &exports);
+    let catalog = service.catalog()?;
+    let entry = catalog.entries.first().expect("catalog entry");
+    assert_eq!(entry.title.as_deref(), Some("Export promoted history"));
+    assert_eq!(entry.transcript_message_count, 2);
+    let output = service.export_session(&source, None, 1234)?;
+    assert_eq!(output.message_count, 2);
+    let artifact: SessionExportV1 = serde_json::from_slice(&fs::read(output.path)?)?;
+    assert_eq!(
+        artifact
+            .payload
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == sigil_kernel::MessageRole::User
+                    && message.message_id == durable_user_message.id
+                    && message.content == durable_user_message.content
+            })
+            .count(),
+        1
+    );
     Ok(())
 }
 

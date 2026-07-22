@@ -7,26 +7,29 @@ use crate::{
     AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
     AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ApprovalMode, CandidateCheck,
     CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry, DispatchTraceKind,
+    ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputTarget, ConversationQueueDurableProjection, DispatchTraceKind,
     DispatchTraceProjectionSnapshot, DispatchTraceStatus, DurableEventType, EventClass,
-    EvidenceReceipt, EvidenceScope, FileProjectionStore, JsonlSessionStore, PathTrustZone,
-    PermissionRisk, ProjectionApplyDecision, ProjectionPressureReason, ProjectionPressureSample,
-    ProjectionPressureThresholds, ProjectionQueryContract, ProjectionQueryFamily,
-    ProjectionQueryScope, ProjectionQuerySurface, ProjectionStore, ProjectionStoreRecommendation,
-    ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
-    RunStatus, SandboxProfileRequirement, SessionListProjectionSnapshot, SessionLogEntry,
-    SessionRef, SessionStreamRecord, TaskId, TaskRunEntry, TaskRunStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEffect, ToolError,
-    ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolResultMeta,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus,
-    VerificationFailureLocatorRecorded, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
-    VerificationStateProjection, VerificationStateProjectionSnapshot, VerificationVerdict,
-    VisibleCompletionState, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, agent_graph_projection_from_records,
+    EvidenceReceipt, EvidenceScope, FileProjectionStore, JsonlSessionStore, ModelMessage,
+    PathTrustZone, PermissionRisk, ProjectionApplyDecision, ProjectionPressureReason,
+    ProjectionPressureSample, ProjectionPressureThresholds, ProjectionQueryContract,
+    ProjectionQueryFamily, ProjectionQueryScope, ProjectionQuerySurface, ProjectionStore,
+    ProjectionStoreRecommendation, ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus,
+    RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement,
+    SessionListProjectionSnapshot, SessionLogEntry, SessionRef, SessionStreamRecord, TaskId,
+    TaskRunEntry, TaskRunStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolOperation, ToolResultMeta, ToolSubjectAudit, ToolSubjectKind,
+    ToolSubjectScope, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
+    VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceiptLinkRecorded,
+    VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
+    VerificationStateProjectionSnapshot, VerificationVerdict, VisibleCompletionState,
+    WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
+    agent_graph_projection_from_records, conversation_promotion_capability_digest,
     dispatch_trace_projection_from_records, evaluate_projection_pressure,
-    session_list_projection_from_records,
+    project_conversation_prompt_for_persistence, session_list_projection_from_records,
 };
 
 fn workspace_trust_entry(workspace_id: &str, trust_event: &str) -> WorkspaceTrustDecisionEntry {
@@ -507,6 +510,58 @@ fn file_projection_store_rebuilds_session_list_projection() -> Result<()> {
             .map(|cursor| cursor.last_applied_stream_sequence),
         Some(1)
     );
+    Ok(())
+}
+
+#[test]
+fn session_list_projects_promoted_user_title_and_count_without_user_message_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session-promoted.jsonl"))?;
+    let queue_id = ConversationInputQueueId::new("session-list-promoted")?;
+    let prompt = project_conversation_prompt_for_persistence("Promoted session title");
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash.clone(),
+            prompt: prompt.safe_prompt.clone(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        }),
+    ))?;
+    let revision = ConversationQueueDurableProjection::from_records(&read_records(&store)?)?
+        .revision
+        .expect("queued event advances revision");
+    let mut durable_user_message = ModelMessage::user(prompt.safe_prompt.clone());
+    durable_user_message.id = "session-list-promoted-message".to_owned();
+    store.append_conversation_input_promoted(ConversationInputPromotedEntry {
+        queue_id,
+        expected_queue_revision: revision,
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: false,
+        durable_user_message,
+        capability_descriptors: Vec::new(),
+        capability_digest: conversation_promotion_capability_digest(&[])?,
+        dispatch_run_id: "session-list-promoted-run".to_owned(),
+        promoted_at_ms: 2,
+    })?;
+
+    let records = read_records(&store)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::UserMessageRecorded)
+            })
+            .count(),
+        0
+    );
+    let projection = session_list_projection_from_records(&records)?;
+    let entry = projection.latest_session().expect("session list entry");
+    assert_eq!(entry.title.as_deref(), Some("Promoted session title"));
+    assert_eq!(entry.user_message_count, 1);
+    assert_eq!(entry.control_entry_count, 2);
     Ok(())
 }
 

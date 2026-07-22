@@ -8,12 +8,15 @@ use crate::{
     AssistantMessageKind, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan,
     CompactionInitiation, CompletionRequest, ContinuationCheckpointV1, ContinuationItemPriority,
     ContinuationModelOutputItemV1, ContinuationModelOutputV1, ControlledCheckpointProjection,
-    EffectiveTokenBudget, ExternalEvidenceLevel, ExternalSourceRecord, ExternalTrust,
-    FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage, MutationEventRecorder,
-    PortableSemanticCompactionRequest, PortableTargetRequestMaterial, RequestFitProof,
-    SourceCacheStatus, SourceFreshness, TaskMemoryV1, TokenMeasurementBinding,
-    TokenMeasurementScope, ToolOutputProjectionPolicy, ToolRestartPolicy, UsageStats,
-    VersionedProfileIdentity, write_file_with_mutation,
+    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
+    ConversationInputQueuedEntry, ConversationInputTarget, EffectiveTokenBudget,
+    ExternalEvidenceLevel, ExternalSourceRecord, ExternalTrust, FrozenProviderRequestMaterial,
+    InputTokenEvidence, ModelMessage, MutationEventRecorder, PortableSemanticCompactionRequest,
+    PortableTargetRequestMaterial, RequestFitProof, SourceCacheStatus, SourceFreshness,
+    TaskMemoryV1, TokenMeasurementBinding, TokenMeasurementScope, ToolOutputProjectionPolicy,
+    ToolRestartPolicy, UsageStats, VersionedProfileIdentity,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    write_file_with_mutation,
 };
 
 fn portable_target_profile(profile_id: &str) -> VersionedProfileIdentity {
@@ -378,6 +381,132 @@ fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Re
     assert!(fork_payload.source_checkpoint_id.is_none());
     assert!(fork_payload.source_checkpoint_digest.is_none());
     assert_eq!(fork_payload.source_turn_digest, point.source_turn_digest);
+    Ok(())
+}
+
+#[test]
+fn promoted_user_is_checkpoint_and_fork_boundary_without_a_second_user_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifacts = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let note = workspace.join("note.txt");
+    fs::write(&note, "before\n")?;
+    let source_path = temp.path().join("source.jsonl");
+    let source_store = JsonlSessionStore::new(&source_path)?;
+    let mut source = Session::new("deepseek", "chat").with_store(source_store.clone());
+    source.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "chat".to_owned(),
+    })?;
+    let queue_id = ConversationInputQueueId::new("fork-promoted-user")?;
+    let prompt = project_conversation_prompt_for_persistence("edit the promoted note");
+    source.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash.clone(),
+            prompt: prompt.safe_prompt.clone(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        },
+    ))?;
+    let revision = source
+        .try_conversation_queue_durable_projection_from_durable()?
+        .expect("durable queue projection")
+        .revision
+        .expect("queued event advances revision");
+    let mut durable_user_message = ModelMessage::user(prompt.safe_prompt.clone());
+    durable_user_message.id = "fork-promoted-message".to_owned();
+    let promotion = ConversationInputPromotedEntry {
+        queue_id,
+        expected_queue_revision: revision,
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: false,
+        durable_user_message: durable_user_message.clone(),
+        capability_descriptors: Vec::new(),
+        capability_digest: conversation_promotion_capability_digest(&[])?,
+        dispatch_run_id: "fork-promoted-run".to_owned(),
+        promoted_at_ms: 2,
+    };
+    let promotion_event = source_store.append_conversation_input_promoted(promotion)?;
+    let recorder = MutationEventRecorder::with_artifact_root(source_store.clone(), artifacts);
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "call-promoted-edit",
+        "note.txt",
+        &note,
+        b"after\n",
+    )?;
+    let assistant = ModelMessage::assistant_with_kind(
+        Some("Done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    source.append_assistant_message(assistant.clone())?;
+    source.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": assistant.id,
+            "tool_calls": 1,
+            "error": null
+        }),
+    )?;
+
+    let records = JsonlSessionStore::read_event_records(&source_path)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::UserMessageRecorded)
+            })
+            .count(),
+        0
+    );
+    let checkpoint = ControlledCheckpointProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("promoted mutation checkpoint");
+    assert_eq!(checkpoint.prompt.as_deref(), Some("edit the promoted note"));
+    assert_eq!(checkpoint.turn_boundary_event_id, promotion_event.event_id);
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("promoted finalized turn");
+    assert_eq!(point.source_boundary_event_id, promotion_event.event_id);
+    let destination_path = temp.path().join("fork.jsonl");
+    let output = fork_conversation_at_checkpoint(
+        &source_store,
+        &records,
+        &ConversationForkRequest {
+            checkpoint_id: checkpoint.checkpoint_id,
+            checkpoint_digest: checkpoint.checkpoint_digest,
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: destination_path.clone(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "chat".to_owned(),
+        },
+    )?;
+    assert_eq!(output.copied_message_count, 2);
+    assert_eq!(
+        JsonlSessionStore::read_entries(destination_path)?
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::User(message)
+                        if message.id == durable_user_message.id
+                            && message.content == durable_user_message.content
+                )
+            })
+            .count(),
+        1
+    );
     Ok(())
 }
 

@@ -20,6 +20,9 @@ pub const CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required
 /// Schema version for the durable queue-promotion projection cursor.
 pub const CONVERSATION_QUEUE_DURABLE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
+/// Stable event identity used when a queue has not appended any mutation yet.
+pub const CONVERSATION_QUEUE_INITIAL_REVISION_EVENT_ID: &str = "conversation-queue-initial";
+
 /// Maximum URL capabilities bound to one promoted queued input.
 pub const MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS: usize = 64;
 
@@ -74,7 +77,7 @@ impl ConversationInputQueueId {
     }
 }
 
-/// A precise durable queue cursor used as the compare-and-swap revision for promotion.
+/// A precise durable queue cursor used by mutation and promotion compare-and-swap checks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConversationQueueRevision {
@@ -83,6 +86,21 @@ pub struct ConversationQueueRevision {
 }
 
 impl ConversationQueueRevision {
+    /// Returns the compare-and-swap revision for a queue with no durable mutations.
+    #[must_use]
+    pub fn initial() -> Self {
+        Self {
+            stream_sequence: 0,
+            event_id: CONVERSATION_QUEUE_INITIAL_REVISION_EVENT_ID.to_owned(),
+        }
+    }
+
+    /// Returns whether this is the explicit empty-queue revision.
+    #[must_use]
+    pub fn is_initial(&self) -> bool {
+        self.stream_sequence == 0 && self.event_id == CONVERSATION_QUEUE_INITIAL_REVISION_EVENT_ID
+    }
+
     fn from_record(record: &SessionStreamRecord) -> Self {
         Self {
             stream_sequence: record.stream_sequence(),
@@ -95,6 +113,204 @@ impl ConversationQueueRevision {
             bail!("conversation queue revision stream sequence must be non-zero");
         }
         validate_stable_id("conversation queue revision event id", &self.event_id)
+    }
+
+    fn validate_expected(&self) -> Result<()> {
+        if self.is_initial() {
+            return Ok(());
+        }
+        self.validate()
+    }
+}
+
+/// One provider-neutral append-only queue mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "action", deny_unknown_fields)]
+pub enum ConversationQueueMutation {
+    Enqueue {
+        entry: ConversationInputQueuedEntry,
+    },
+    Edit {
+        entry: ConversationInputEditedEntry,
+    },
+    Remove {
+        queue_id: ConversationInputQueueId,
+        reason: Option<String>,
+        updated_at_ms: Option<u64>,
+    },
+    Reorder {
+        entry: ConversationInputReorderedEntry,
+    },
+    Pause {
+        reason: Option<String>,
+        updated_at_ms: Option<u64>,
+    },
+    Resume {
+        reason: Option<String>,
+        updated_at_ms: Option<u64>,
+    },
+}
+
+impl ConversationQueueMutation {
+    pub(crate) fn control_entry(&self) -> ControlEntry {
+        match self {
+            Self::Enqueue { entry } => ControlEntry::ConversationInputQueued(entry.clone()),
+            Self::Edit { entry } => ControlEntry::ConversationInputEdited(entry.clone()),
+            Self::Remove {
+                queue_id,
+                reason,
+                updated_at_ms,
+            } => ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+                queue_id: queue_id.clone(),
+                status: ConversationInputStatus::Cancelled,
+                reason: reason.clone(),
+                updated_at_ms: *updated_at_ms,
+            }),
+            Self::Reorder { entry } => ControlEntry::ConversationInputReordered(entry.clone()),
+            Self::Pause {
+                reason,
+                updated_at_ms,
+            } => ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
+                action: ConversationInputQueueControlAction::Pause,
+                reason: reason.clone(),
+                updated_at_ms: *updated_at_ms,
+            }),
+            Self::Resume {
+                reason,
+                updated_at_ms,
+            } => ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
+                action: ConversationInputQueueControlAction::Resume,
+                reason: reason.clone(),
+                updated_at_ms: *updated_at_ms,
+            }),
+        }
+    }
+}
+
+/// Exact compare-and-swap command for one durable queue mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationQueueMutationCommand {
+    pub expected_queue_revision: ConversationQueueRevision,
+    pub mutation: ConversationQueueMutation,
+}
+
+/// Durable result of one accepted queue mutation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationQueueMutationReceipt {
+    pub revision: ConversationQueueRevision,
+    pub event: crate::StoredEvent,
+}
+
+/// Exact durable tail observed while deriving one promoted run's terminal evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationInputTerminalFrontier {
+    pub stream_sequence: u64,
+    pub event_id: EventId,
+    pub record_checksum: String,
+}
+
+impl ConversationInputTerminalFrontier {
+    /// Captures the exact append-only tail represented by one durable record.
+    #[must_use]
+    pub fn from_record(record: &SessionStreamRecord) -> Self {
+        Self {
+            stream_sequence: record.stream_sequence(),
+            event_id: record.event_id().to_owned(),
+            record_checksum: record.record_checksum().to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.stream_sequence == 0 {
+            bail!("conversation input terminal frontier sequence must be non-zero");
+        }
+        validate_stable_id(
+            "conversation input terminal frontier event id",
+            &self.event_id,
+        )?;
+        if self.record_checksum.trim().is_empty() {
+            bail!("conversation input terminal frontier checksum is empty");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_record(&self, record: &SessionStreamRecord) -> bool {
+        self.stream_sequence == record.stream_sequence()
+            && self.event_id == record.event_id()
+            && self.record_checksum == record.record_checksum()
+    }
+}
+
+/// Durable predicate that must still hold when one queue item reaches a terminal state.
+///
+/// Preparation failures bind to the exact pre-promotion revision and safe prompt hash. Once a
+/// promotion exists, terminal delivery binds instead to the promotion's logical dispatch run id;
+/// unrelated queue mutations must not invalidate that already-owned run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "phase", deny_unknown_fields)]
+pub enum ConversationInputTerminalExpectation {
+    Queued {
+        expected_queue_revision: ConversationQueueRevision,
+        queue_id: ConversationInputQueueId,
+        expected_prompt_hash: String,
+    },
+    Promoted {
+        queue_id: ConversationInputQueueId,
+        dispatch_run_id: String,
+        expected_frontier: ConversationInputTerminalFrontier,
+    },
+}
+
+impl ConversationInputTerminalExpectation {
+    fn queue_id(&self) -> &ConversationInputQueueId {
+        match self {
+            Self::Queued { queue_id, .. } | Self::Promoted { queue_id, .. } => queue_id,
+        }
+    }
+}
+
+/// Conditional terminal queue append owned by the runtime that observed the matching phase.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationInputTerminalCommand {
+    pub expectation: ConversationInputTerminalExpectation,
+    pub terminal: ConversationInputStatusEntry,
+}
+
+impl ConversationInputTerminalCommand {
+    pub(crate) fn validate_shape(&self) -> Result<()> {
+        if !self.terminal.status.is_terminal() {
+            bail!("conversation input terminal command requires a terminal status");
+        }
+        if &self.terminal.queue_id != self.expectation.queue_id() {
+            bail!("conversation input terminal command queue id does not match its expectation");
+        }
+        match &self.expectation {
+            ConversationInputTerminalExpectation::Queued {
+                expected_queue_revision,
+                expected_prompt_hash,
+                ..
+            } => {
+                expected_queue_revision.validate_expected()?;
+                if expected_prompt_hash.trim().is_empty() {
+                    bail!("conversation input terminal expected prompt hash is empty");
+                }
+            }
+            ConversationInputTerminalExpectation::Promoted {
+                dispatch_run_id,
+                expected_frontier,
+                ..
+            } => {
+                validate_stable_id(
+                    "conversation input terminal dispatch run id",
+                    dispatch_run_id,
+                )?;
+                expected_frontier.validate()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -316,6 +532,7 @@ pub struct ConversationQueueProjection {
 pub struct ConversationQueueDurableProjection {
     pub queue: ConversationQueueProjection,
     pub revision: Option<ConversationQueueRevision>,
+    seen_queue_ids: BTreeSet<ConversationInputQueueId>,
     cursor: Option<ProjectionCursor>,
 }
 
@@ -332,6 +549,79 @@ impl ConversationQueueDurableProjection {
             projection.apply_record(record)?;
         }
         Ok(projection)
+    }
+
+    /// Returns the exact revision callers must bind to their next queue mutation.
+    #[must_use]
+    pub fn current_revision(&self) -> ConversationQueueRevision {
+        self.revision
+            .clone()
+            .unwrap_or_else(ConversationQueueRevision::initial)
+    }
+
+    /// Returns whether one previously known queue id has already left the active projection.
+    ///
+    /// Queue ids are append-only and cannot be reused. Active items remain in `queue.items`, while
+    /// delivered, rejected, cancelled, and stale items are removed from that bounded projection.
+    /// This helper lets application adapters preserve a typed terminal rejection instead of
+    /// collapsing an already-finished id into an unknown-entry conflict.
+    #[must_use]
+    pub fn is_terminal_queue_id(&self, queue_id: &ConversationInputQueueId) -> bool {
+        self.seen_queue_ids.contains(queue_id)
+            && !self
+                .queue
+                .items
+                .iter()
+                .any(|item| item.queued.queue_id == *queue_id)
+    }
+
+    /// Validates one not-yet-appended mutation against the exact durable queue state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale revision, malformed safe prompt projection, missing item,
+    /// non-queued item, invalid reorder target, or a pause/resume no-op.
+    pub fn validate_mutation(&self, command: &ConversationQueueMutationCommand) -> Result<()> {
+        command.expected_queue_revision.validate_expected()?;
+        if self.current_revision() != command.expected_queue_revision {
+            bail!("conversation queue mutation revision is stale");
+        }
+
+        match &command.mutation {
+            ConversationQueueMutation::Enqueue { entry } => {
+                validate_queue_prompt_projection(&entry.prompt, &entry.prompt_hash)?;
+                if self.seen_queue_ids.contains(&entry.queue_id) {
+                    bail!("conversation queue mutation queue id already exists");
+                }
+            }
+            ConversationQueueMutation::Edit { entry } => {
+                validate_queue_prompt_projection(&entry.prompt, &entry.prompt_hash)?;
+                require_queued_item(&self.queue, &entry.queue_id)?;
+            }
+            ConversationQueueMutation::Remove { queue_id, .. } => {
+                require_queued_item(&self.queue, queue_id)?;
+            }
+            ConversationQueueMutation::Reorder { entry } => {
+                require_queued_item(&self.queue, &entry.queue_id)?;
+                if entry.after_queue_id.as_ref() == Some(&entry.queue_id) {
+                    bail!("conversation queue mutation cannot reorder an item after itself");
+                }
+                if let Some(after_queue_id) = &entry.after_queue_id {
+                    require_queued_item(&self.queue, after_queue_id)?;
+                }
+            }
+            ConversationQueueMutation::Pause { .. } => {
+                if self.queue.paused {
+                    bail!("conversation queue mutation queue is already paused");
+                }
+            }
+            ConversationQueueMutation::Resume { .. } => {
+                if !self.queue.paused {
+                    bail!("conversation queue mutation queue is not paused");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validates a not-yet-appended promotion against the exact current durable queue state.
@@ -400,6 +690,9 @@ impl ConversationQueueDurableProjection {
                     if let SessionLogEntry::Control(control) = entry
                         && is_queue_affecting_control(&control)
                     {
+                        if let ControlEntry::ConversationInputQueued(queued) = &control {
+                            self.seen_queue_ids.insert(queued.queue_id.clone());
+                        }
                         self.queue.apply_control_entry(&control);
                         self.revision = Some(ConversationQueueRevision::from_record(record));
                     }
@@ -521,6 +814,44 @@ fn is_queue_affecting_control(control: &ControlEntry) -> bool {
             | ControlEntry::ConversationInputStatusChanged(_)
             | ControlEntry::ConversationInputPromoted(_)
     )
+}
+
+fn require_queued_item<'a>(
+    queue: &'a ConversationQueueProjection,
+    queue_id: &ConversationInputQueueId,
+) -> Result<&'a ConversationQueueItemProjection> {
+    let item = queue
+        .items
+        .iter()
+        .find(|item| &item.queued.queue_id == queue_id)
+        .context("conversation queue mutation references an unknown queue item")?;
+    if item.status != ConversationInputStatus::Queued {
+        bail!("conversation queue mutation requires a queued item");
+    }
+    Ok(item)
+}
+
+fn validate_queue_prompt_projection(prompt: &str, prompt_hash: &str) -> Result<()> {
+    if prompt.trim().is_empty() {
+        bail!("conversation queue mutation prompt is empty");
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    let safe_hash = format!("sha256:{:x}", hasher.finalize());
+    let expected_exact_hash =
+        format!("{CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}");
+    if prompt_hash == expected_exact_hash && is_known_safe_redacted_text(prompt) {
+        return Ok(());
+    }
+
+    let projected = project_conversation_prompt_for_persistence(prompt);
+    if projected.exact_prompt_required
+        || projected.safe_prompt != prompt
+        || projected.prompt_hash != prompt_hash
+    {
+        bail!("conversation queue mutation prompt projection is not safe or does not match hash");
+    }
+    Ok(())
 }
 
 fn normalize_queue_prompt_for_projection(prompt: &mut String, prompt_hash: &mut String) {

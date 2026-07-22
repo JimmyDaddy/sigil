@@ -138,6 +138,7 @@ impl ControlledCheckpointProjection {
     /// Returns an error when a known recovery-critical mutation payload cannot be decoded or a
     /// checkpoint digest cannot be serialized deterministically.
     pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
+        crate::ConversationQueueDurableProjection::from_records(records)?;
         let unavailable_artifacts = unavailable_artifacts(records)?;
         let restored_operation_ids = restored_operation_ids(records)?;
         let mut checkpoints = Vec::new();
@@ -445,15 +446,8 @@ fn restored_operation_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<St
 }
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {
-    match record {
-        SessionStreamRecord::Stored(event) => event
-            .payload
-            .get("session_log_entry")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .context("failed to decode checkpoint session entry"),
-    }
+    crate::conversation_transcript_entry_from_record(record)
+        .context("failed to decode checkpoint session entry")
 }
 
 #[cfg(test)]

@@ -4,11 +4,14 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
-    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
-    JsonlSessionStore, MessageRole, ModelMessage, PermissionRisk, SecretRedactor, Session,
-    SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
+    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
+    ModelMessage, PermissionRisk, SecretRedactor, Session, SessionLogEntry, SessionStreamRecord,
+    StoredEvent, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
+    ToolCall, ToolOperation, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
 };
 
 use crate::conversation_display::{
@@ -222,6 +225,96 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
             .as_ref()
             .map(|frontier| (frontier.run_id.as_str(), frontier.status,)),
         Some(("run-1", ConversationDisplayStatusV1::Succeeded))
+    );
+    Ok(())
+}
+
+#[test]
+fn promoted_input_is_the_single_durable_user_display_event() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let queue_id = ConversationInputQueueId::new("queue-display-1")?;
+    let prompt = project_conversation_prompt_for_persistence("inspect the queue contract");
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash.clone(),
+            prompt: prompt.safe_prompt.clone(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        },
+    ))?;
+    let queue = session
+        .try_conversation_queue_durable_projection_from_durable()?
+        .expect("queued input should have a durable projection");
+    let revision = queue
+        .revision
+        .expect("queued input should establish a queue revision");
+    let mut durable_user_message = ModelMessage::user(prompt.safe_prompt);
+    durable_user_message.id = "queued-display-message-1".to_owned();
+    let promotion = ConversationInputPromotedEntry {
+        queue_id,
+        expected_queue_revision: revision,
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: prompt.exact_prompt_required,
+        durable_user_message,
+        capability_descriptors: Vec::new(),
+        capability_digest: conversation_promotion_capability_digest(&[])?,
+        dispatch_run_id: "queued-display-run-1".to_owned(),
+        promoted_at_ms: 2,
+    };
+    let promoted = store.append_conversation_input_promoted(promotion)?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 10)?;
+    let users = page
+        .items
+        .iter()
+        .filter(|item| item.kind == ConversationDisplayItemKindV1::UserMessage)
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].source_event_id, promoted.event_id);
+    assert_eq!(users[0].run_id.as_deref(), Some("queued-display-run-1"));
+    assert_eq!(
+        users[0].reconciles.as_deref(),
+        Some(
+            &[conversation_live_provisional_id(
+                &scope,
+                "queued-display-run-1",
+                &ConversationLiveProvisionalSlotV1::User,
+            )?][..]
+        )
+    );
+    assert!(matches!(
+        users[0].content,
+        ConversationDisplayContentV1::Message {
+            role: ConversationDisplayMessageRoleV1::User,
+            text: Some(ref text),
+            ..
+        } if text == "inspect the queue contract"
+    ));
+
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind()
+                    == Some(DurableEventType::ConversationInputPromoted)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::UserMessageRecorded)
+            })
+            .count(),
+        0,
+        "promotion must not require a second durable user-message event"
     );
     Ok(())
 }

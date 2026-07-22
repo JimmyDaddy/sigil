@@ -962,6 +962,87 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the durable follow-up queue
+         * @description Returns a bounded, secret-free queue view. Prompt hashes and process-local exact prompt material are excluded; generation is opaque and must be echoed unchanged.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current bounded queue projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversationQueueView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        /**
+         * Apply one exact follow-up queue command
+         * @description Routes one idempotent enqueue, edit, remove, reorder, pause, resume, or owner-bound interrupt-and-run-next command under the opaque queue generation CAS guard.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConversationQueueCommand"];
+                };
+            };
+            responses: {
+                /** @description Durable queue command receipt without exact prompt material */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversationQueueCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/run-context": {
         parameters: {
             query?: never;
@@ -1524,6 +1605,105 @@ export interface components {
             durable_frontier: components["schemas"]["DecimalSequence"];
             run_id: string;
             run_sequence: components["schemas"]["DecimalSequence"];
+        };
+        /** @enum {string} */
+        ConversationQueueBlockedReason: "queue_paused" | "requires_reentry" | "foreground_run_active" | "waiting_for_terminal_frontier" | "foreground_owner_lost" | "permission_required" | "conflict" | "stale" | "terminal" | "unsupported_target" | "material_unavailable";
+        ConversationQueueCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["ConversationQueueCommandRequest"];
+        };
+        ConversationQueueCommandAction: components["schemas"]["ConversationQueueEnqueueAction"] | components["schemas"]["ConversationQueueEditAction"] | components["schemas"]["ConversationQueueRemoveAction"] | components["schemas"]["ConversationQueueReorderAction"] | components["schemas"]["ConversationQueuePauseAction"] | components["schemas"]["ConversationQueueResumeAction"] | components["schemas"]["ConversationQueueInterruptAndRunNextAction"];
+        /** @enum {string} */
+        ConversationQueueCommandActionKind: "enqueue" | "edit" | "remove" | "reorder" | "pause" | "resume" | "interrupt_and_run_next";
+        ConversationQueueCommandReceipt: {
+            action: components["schemas"]["ConversationQueueCommandActionKind"];
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            expected_generation: components["schemas"]["ConversationQueueGeneration"];
+            generation: components["schemas"]["ConversationQueueGeneration"];
+            interrupt_owner?: components["schemas"]["ForegroundRunOwner"] | null;
+            queue: components["schemas"]["ConversationQueueView"];
+            replayed: boolean;
+            session_id: string;
+        };
+        ConversationQueueCommandRequest: {
+            action: components["schemas"]["ConversationQueueCommandAction"];
+            expected_generation: components["schemas"]["ConversationQueueGeneration"];
+        };
+        ConversationQueueEditAction: {
+            /** @constant */
+            action: "edit";
+            entry_id: string;
+            prompt: string;
+            reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+        };
+        ConversationQueueEnqueueAction: {
+            /** @constant */
+            action: "enqueue";
+            kind: components["schemas"]["ConversationQueueItemKind"];
+            prompt: string;
+            reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+        };
+        /** @description Opaque queue CAS generation. Clients must echo it unchanged. */
+        ConversationQueueGeneration: string;
+        ConversationQueueInterruptAndRunNextAction: {
+            /** @constant */
+            action: "interrupt_and_run_next";
+            foreground_owner_revision: string;
+            foreground_run_id: string;
+        };
+        ConversationQueueItem: {
+            blocked_reason?: components["schemas"]["ConversationQueueBlockedReason"] | null;
+            /** Format: uint64 */
+            created_at_ms?: number | null;
+            dispatchable: boolean;
+            entry_id: string;
+            kind: components["schemas"]["ConversationQueueItemKind"];
+            /** Format: uint32 */
+            order: number;
+            prompt_material: components["schemas"]["ConversationQueuePromptMaterial"];
+            prompt_preview: string;
+            prompt_preview_truncated: boolean;
+            status: components["schemas"]["ConversationQueueItemStatus"];
+            /** Format: uint64 */
+            updated_at_ms?: number | null;
+        };
+        /** @enum {string} */
+        ConversationQueueItemKind: "chat" | "plan_prompt" | "agent_mention" | "agent_message" | "unknown";
+        /** @enum {string} */
+        ConversationQueueItemStatus: "queued" | "dispatching" | "delivered" | "rejected" | "cancelled" | "stale" | "unknown";
+        ConversationQueuePauseAction: {
+            /** @constant */
+            action: "pause";
+        };
+        /** @enum {string} */
+        ConversationQueuePromptMaterial: "persisted_safe" | "available_process_local" | "requires_reentry";
+        ConversationQueueRemoveAction: {
+            /** @constant */
+            action: "remove";
+            entry_id: string;
+        };
+        ConversationQueueReorderAction: {
+            /** @constant */
+            action: "reorder";
+            after_entry_id?: string | null;
+            entry_id: string;
+        };
+        ConversationQueueResumeAction: {
+            /** @constant */
+            action: "resume";
+        };
+        ConversationQueueView: {
+            generation: components["schemas"]["ConversationQueueGeneration"];
+            items: components["schemas"]["ConversationQueueItem"][];
+            next_dispatchable_entry_id?: string | null;
+            paused: boolean;
+            /** @constant */
+            schema_version: 1;
+            session_id: string;
+            /** Format: uint32 */
+            total_items: number;
+            truncated: boolean;
         };
         ConversationTerminalFrontier: {
             run_id: string;

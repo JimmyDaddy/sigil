@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    fs,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use anyhow::Result;
 
@@ -7,7 +11,10 @@ use crate::{
     ConversationInputPromotedEntry, ConversationInputQueueControlAction,
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, ConversationQueueDurableProjection, DurableEventType, EventClass,
+    ConversationInputTarget, ConversationInputTerminalCommand,
+    ConversationInputTerminalExpectation, ConversationInputTerminalFrontier,
+    ConversationQueueDurableProjection, ConversationQueueMutation,
+    ConversationQueueMutationCommand, ConversationQueueRevision, DurableEventType, EventClass,
     JsonlSessionStore, ModelMessage, ReasoningEffort, Session, SessionLogEntry, ToolRestartPolicy,
     WebUrlCapabilityDescriptor, WebUrlProvenanceKind, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
@@ -294,6 +301,431 @@ fn promotion_compare_and_swap_rejects_stale_or_duplicate_append_without_writing(
     let before_duplicate_attempt = fs::read(&path)?;
     assert!(store.append_conversation_input_promoted(current).is_err());
     assert_eq!(fs::read(&path)?, before_duplicate_attempt);
+    Ok(())
+}
+
+#[test]
+fn conversation_queue_mutation_cas_supports_every_control_operation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let first = ConversationInputQueueId::new("queue_mutation_first")?;
+    let second = ConversationInputQueueId::new("queue_mutation_second")?;
+    let mut revision = ConversationQueueRevision::initial();
+
+    for entry in [
+        durable_queue_entry(first.clone(), "first safe prompt"),
+        durable_queue_entry(
+            second.clone(),
+            "open https://example.com/private?token=queue-mutation-secret",
+        ),
+    ] {
+        revision = store
+            .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+                expected_queue_revision: revision,
+                mutation: ConversationQueueMutation::Enqueue { entry },
+            })?
+            .revision;
+    }
+
+    let edited_prompt = project_conversation_prompt_for_persistence("edited safe prompt");
+    revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Edit {
+                entry: ConversationInputEditedEntry {
+                    queue_id: second.clone(),
+                    prompt_hash: edited_prompt.prompt_hash,
+                    prompt: edited_prompt.safe_prompt,
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    updated_at_ms: Some(3),
+                },
+            },
+        })?
+        .revision;
+    revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Reorder {
+                entry: ConversationInputReorderedEntry {
+                    queue_id: second.clone(),
+                    after_queue_id: None,
+                    updated_at_ms: Some(4),
+                },
+            },
+        })?
+        .revision;
+    revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Pause {
+                reason: Some("user paused".to_owned()),
+                updated_at_ms: Some(5),
+            },
+        })?
+        .revision;
+    revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Resume {
+                reason: None,
+                updated_at_ms: Some(6),
+            },
+        })?
+        .revision;
+    revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Remove {
+                queue_id: first.clone(),
+                reason: Some("removed by user".to_owned()),
+                updated_at_ms: Some(7),
+            },
+        })?
+        .revision;
+
+    let durable =
+        ConversationQueueDurableProjection::from_records(&store.read_event_records_writer()?)?;
+    assert_eq!(durable.current_revision(), revision);
+    assert!(!durable.queue.paused);
+    assert_eq!(durable.queue.items.len(), 1);
+    assert_eq!(durable.queue.items[0].queued.queue_id, second);
+    assert_eq!(durable.queue.items[0].queued.prompt, "edited safe prompt");
+    assert_eq!(
+        durable.queue.items[0].queued.reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    let before_reuse = fs::read(store.path())?;
+    let error = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: revision,
+            mutation: ConversationQueueMutation::Enqueue {
+                entry: durable_queue_entry(first, "reused queue id"),
+            },
+        })
+        .expect_err("a terminal queue id must not be reused");
+    assert!(format!("{error:#}").contains("queue id already exists"));
+    assert_eq!(fs::read(store.path())?, before_reuse);
+    Ok(())
+}
+
+#[test]
+fn conversation_queue_mutation_cas_rejects_stale_revision_without_writing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let queue_id = ConversationInputQueueId::new("queue_mutation_stale")?;
+    store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: ConversationQueueRevision::initial(),
+        mutation: ConversationQueueMutation::Enqueue {
+            entry: durable_queue_entry(queue_id.clone(), "original safe prompt"),
+        },
+    })?;
+
+    let edited_prompt = project_conversation_prompt_for_persistence("stale edited prompt");
+    let before = fs::read(&path)?;
+    let error = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Edit {
+                entry: ConversationInputEditedEntry {
+                    queue_id,
+                    prompt_hash: edited_prompt.prompt_hash,
+                    prompt: edited_prompt.safe_prompt,
+                    reasoning_effort: None,
+                    updated_at_ms: Some(2),
+                },
+            },
+        })
+        .expect_err("stale queue revision must fail closed");
+    assert!(format!("{error:#}").contains("revision is stale"));
+    assert_eq!(fs::read(&path)?, before);
+    Ok(())
+}
+
+#[test]
+fn conversation_queue_mutation_cas_serializes_concurrent_writers() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let queue_id = ConversationInputQueueId::new("queue_mutation_concurrent")?;
+    let revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Enqueue {
+                entry: durable_queue_entry(queue_id.clone(), "original safe prompt"),
+            },
+        })?
+        .revision;
+    let barrier = Arc::new(Barrier::new(3));
+
+    let writers = [
+        JsonlSessionStore::new(&path)?,
+        JsonlSessionStore::new(&path)?,
+    ];
+    let handles = writers
+        .into_iter()
+        .zip(["concurrent edit one", "concurrent edit two"])
+        .map(|(store, prompt)| {
+            let queue_id = queue_id.clone();
+            let revision = revision.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let prompt = project_conversation_prompt_for_persistence(prompt);
+                barrier.wait();
+                store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+                    expected_queue_revision: revision,
+                    mutation: ConversationQueueMutation::Edit {
+                        entry: ConversationInputEditedEntry {
+                            queue_id,
+                            prompt_hash: prompt.prompt_hash,
+                            prompt: prompt.safe_prompt,
+                            reasoning_effort: None,
+                            updated_at_ms: Some(2),
+                        },
+                    },
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("queue writer thread must not panic"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+    let records = store.read_event_records_writer()?;
+    assert_eq!(records.len(), 2);
+    let durable = ConversationQueueDurableProjection::from_records(&records)?;
+    let prompt = durable.queue.items[0].queued.prompt.as_str();
+    assert!(matches!(
+        prompt,
+        "concurrent edit one" | "concurrent edit two"
+    ));
+    Ok(())
+}
+
+#[test]
+fn queued_terminal_compare_and_swap_serializes_with_concurrent_edit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let queue_id = ConversationInputQueueId::new("queue_terminal_race")?;
+    let queued = durable_queue_entry(queue_id.clone(), "original queued prompt");
+    let revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Enqueue {
+                entry: queued.clone(),
+            },
+        })?
+        .revision;
+    let edited = project_conversation_prompt_for_persistence("edited queued prompt");
+    let barrier = Arc::new(Barrier::new(3));
+
+    let terminal_store = JsonlSessionStore::new(&path)?;
+    let terminal_barrier = Arc::clone(&barrier);
+    let terminal_queue_id = queue_id.clone();
+    let terminal_revision = revision.clone();
+    let terminal_prompt_hash = queued.prompt_hash.clone();
+    let terminal = thread::spawn(move || {
+        terminal_barrier.wait();
+        terminal_store.append_conversation_input_terminal_if_current(
+            ConversationInputTerminalCommand {
+                expectation: ConversationInputTerminalExpectation::Queued {
+                    expected_queue_revision: terminal_revision,
+                    queue_id: terminal_queue_id.clone(),
+                    expected_prompt_hash: terminal_prompt_hash,
+                },
+                terminal: ConversationInputStatusEntry {
+                    queue_id: terminal_queue_id,
+                    status: ConversationInputStatus::Rejected,
+                    reason: Some("preparation failed".to_owned()),
+                    updated_at_ms: Some(2),
+                },
+            },
+        )
+    });
+
+    let edit_store = JsonlSessionStore::new(&path)?;
+    let edit_barrier = Arc::clone(&barrier);
+    let edit_queue_id = queue_id.clone();
+    let edit_revision = revision;
+    let edit = thread::spawn(move || {
+        edit_barrier.wait();
+        edit_store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: edit_revision,
+            mutation: ConversationQueueMutation::Edit {
+                entry: ConversationInputEditedEntry {
+                    queue_id: edit_queue_id,
+                    prompt_hash: edited.prompt_hash,
+                    prompt: edited.safe_prompt,
+                    reasoning_effort: None,
+                    updated_at_ms: Some(2),
+                },
+            },
+        })
+    });
+
+    barrier.wait();
+    let terminal = terminal
+        .join()
+        .expect("terminal writer thread must not panic")?;
+    let edit = edit.join().expect("edit writer thread must not panic");
+    assert_ne!(terminal.is_some(), edit.is_ok());
+
+    let records = store.read_event_records_writer()?;
+    assert_eq!(records.len(), 2);
+    let projection = ConversationQueueDurableProjection::from_records(&records)?;
+    if terminal.is_some() {
+        assert!(projection.queue.items.is_empty());
+    } else {
+        assert_eq!(projection.queue.items.len(), 1);
+        assert_eq!(
+            projection.queue.items[0].queued.prompt,
+            "edited queued prompt"
+        );
+        assert_eq!(projection.queue.next_dispatchable, Some(queue_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn promoted_terminal_binds_dispatch_run_and_ignores_unrelated_queue_revision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let first_id = ConversationInputQueueId::new("queue_terminal_promoted")?;
+    let first = durable_queue_entry(first_id.clone(), "promoted queued prompt");
+    let first_revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Enqueue {
+                entry: first.clone(),
+            },
+        })?
+        .revision;
+    let promotion = promotion_entry(
+        first_id.clone(),
+        first_revision,
+        first.prompt_hash,
+        first.prompt,
+        false,
+    )?;
+    let promotion_event = store.append_conversation_input_promoted(promotion.clone())?;
+
+    let second_id = ConversationInputQueueId::new("queue_after_promoted")?;
+    store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: ConversationQueueRevision {
+            stream_sequence: promotion_event.stream_sequence,
+            event_id: promotion_event.event_id,
+        },
+        mutation: ConversationQueueMutation::Enqueue {
+            entry: durable_queue_entry(second_id.clone(), "later queued prompt"),
+        },
+    })?;
+    let terminal_frontier = ConversationInputTerminalFrontier::from_record(
+        store
+            .read_event_records_writer()?
+            .last()
+            .expect("promoted queue stream must have a frontier"),
+    );
+    let terminal = |dispatch_run_id: &str, expected_frontier| ConversationInputTerminalCommand {
+        expectation: ConversationInputTerminalExpectation::Promoted {
+            queue_id: first_id.clone(),
+            dispatch_run_id: dispatch_run_id.to_owned(),
+            expected_frontier,
+        },
+        terminal: ConversationInputStatusEntry {
+            queue_id: first_id.clone(),
+            status: ConversationInputStatus::Delivered,
+            reason: None,
+            updated_at_ms: Some(3),
+        },
+    };
+
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("provider attempt evidence raced with the terminal decision".to_owned()),
+        Vec::new(),
+    )))?;
+    let records_before_terminal = store.read_event_records_writer()?.len();
+    assert!(
+        store
+            .append_conversation_input_terminal_if_current(terminal(
+                &promotion.dispatch_run_id,
+                terminal_frontier,
+            ))?
+            .is_none()
+    );
+    let current_frontier = ConversationInputTerminalFrontier::from_record(
+        store
+            .read_event_records_writer()?
+            .last()
+            .expect("promoted queue stream must retain a frontier"),
+    );
+    assert!(
+        store
+            .append_conversation_input_terminal_if_current(terminal(
+                "wrong-run",
+                current_frontier.clone(),
+            ))?
+            .is_none()
+    );
+    assert_eq!(
+        store.read_event_records_writer()?.len(),
+        records_before_terminal
+    );
+    assert!(
+        store
+            .append_conversation_input_terminal_if_current(terminal(
+                &promotion.dispatch_run_id,
+                current_frontier,
+            ))?
+            .is_some()
+    );
+
+    let projection =
+        ConversationQueueDurableProjection::from_records(&store.read_event_records_writer()?)?;
+    assert_eq!(projection.queue.items.len(), 1);
+    assert_eq!(projection.queue.items[0].queued.queue_id, second_id);
+    assert_eq!(projection.queue.next_dispatchable, Some(second_id));
+    Ok(())
+}
+
+#[test]
+fn conditional_terminal_rejects_nonterminal_status_without_writing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let queue_id = ConversationInputQueueId::new("queue_nonterminal")?;
+    let queued = durable_queue_entry(queue_id.clone(), "queued prompt");
+    let revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Enqueue {
+                entry: queued.clone(),
+            },
+        })?
+        .revision;
+    let before = store.read_event_records_writer()?.len();
+
+    let error = store
+        .append_conversation_input_terminal_if_current(ConversationInputTerminalCommand {
+            expectation: ConversationInputTerminalExpectation::Queued {
+                expected_queue_revision: revision,
+                queue_id: queue_id.clone(),
+                expected_prompt_hash: queued.prompt_hash,
+            },
+            terminal: ConversationInputStatusEntry {
+                queue_id,
+                status: ConversationInputStatus::Dispatching,
+                reason: None,
+                updated_at_ms: Some(2),
+            },
+        })
+        .expect_err("nonterminal status must fail before append");
+    assert!(error.to_string().contains("requires a terminal status"));
+    assert_eq!(store.read_event_records_writer()?.len(), before);
     Ok(())
 }
 

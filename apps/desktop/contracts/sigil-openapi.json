@@ -1219,6 +1219,475 @@
         ],
         "type": "object"
       },
+      "ConversationQueueBlockedReason": {
+        "enum": [
+          "queue_paused",
+          "requires_reentry",
+          "foreground_run_active",
+          "waiting_for_terminal_frontier",
+          "foreground_owner_lost",
+          "permission_required",
+          "conflict",
+          "stale",
+          "terminal",
+          "unsupported_target",
+          "material_unavailable"
+        ],
+        "type": "string"
+      },
+      "ConversationQueueCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/ConversationQueueCommandRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ConversationQueueCommandAction": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ConversationQueueEnqueueAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueueEditAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueueRemoveAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueueReorderAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueuePauseAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueueResumeAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationQueueInterruptAndRunNextAction"
+          }
+        ]
+      },
+      "ConversationQueueCommandActionKind": {
+        "enum": [
+          "enqueue",
+          "edit",
+          "remove",
+          "reorder",
+          "pause",
+          "resume",
+          "interrupt_and_run_next"
+        ],
+        "type": "string"
+      },
+      "ConversationQueueCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ConversationQueueCommandActionKind"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/ConversationQueueGeneration"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/ConversationQueueGeneration"
+          },
+          "interrupt_owner": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ForegroundRunOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queue": {
+            "$ref": "#/components/schemas/ConversationQueueView"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "action",
+          "expected_generation",
+          "generation",
+          "queue",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ConversationQueueCommandAction"
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/ConversationQueueGeneration"
+          }
+        },
+        "required": [
+          "expected_generation",
+          "action"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueEditAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "edit",
+            "type": "string"
+          },
+          "entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "entry_id",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueEnqueueAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "enqueue",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConversationQueueItemKind"
+          },
+          "prompt": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "prompt",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueGeneration": {
+        "description": "Opaque queue CAS generation. Clients must echo it unchanged.",
+        "maxLength": 512,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:-]+$",
+        "type": "string"
+      },
+      "ConversationQueueInterruptAndRunNextAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "interrupt_and_run_next",
+            "type": "string"
+          },
+          "foreground_owner_revision": {
+            "maxLength": 71,
+            "minLength": 71,
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "foreground_run_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "foreground_run_id",
+          "foreground_owner_revision"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueItem": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConversationQueueBlockedReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at_ms": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "dispatchable": {
+            "type": "boolean"
+          },
+          "entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConversationQueueItemKind"
+          },
+          "order": {
+            "format": "uint32",
+            "maximum": 99,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prompt_material": {
+            "$ref": "#/components/schemas/ConversationQueuePromptMaterial"
+          },
+          "prompt_preview": {
+            "maxLength": 240,
+            "type": "string"
+          },
+          "prompt_preview_truncated": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConversationQueueItemStatus"
+          },
+          "updated_at_ms": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entry_id",
+          "order",
+          "kind",
+          "status",
+          "prompt_preview",
+          "prompt_preview_truncated",
+          "prompt_material",
+          "dispatchable"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueItemKind": {
+        "enum": [
+          "chat",
+          "plan_prompt",
+          "agent_mention",
+          "agent_message",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ConversationQueueItemStatus": {
+        "enum": [
+          "queued",
+          "dispatching",
+          "delivered",
+          "rejected",
+          "cancelled",
+          "stale",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ConversationQueuePauseAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "pause",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "ConversationQueuePromptMaterial": {
+        "enum": [
+          "persisted_safe",
+          "available_process_local",
+          "requires_reentry"
+        ],
+        "type": "string"
+      },
+      "ConversationQueueRemoveAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "remove",
+            "type": "string"
+          },
+          "entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueReorderAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "reorder",
+            "type": "string"
+          },
+          "after_entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueResumeAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "resume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "ConversationQueueView": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "$ref": "#/components/schemas/ConversationQueueGeneration"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationQueueItem"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "next_dispatchable_entry_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "total_items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "generation",
+          "paused",
+          "total_items",
+          "items",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "ConversationTerminalFrontier": {
         "additionalProperties": false,
         "properties": {
@@ -3990,6 +4459,93 @@
           }
         },
         "summary": "Read one canonical durable conversation display page"
+      }
+    },
+    "/sessions/{session_id}/queue": {
+      "get": {
+        "description": "Returns a bounded, secret-free queue view. Prompt hashes and process-local exact prompt material are excluded; generation is opaque and must be echoed unchanged.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationQueueView"
+                }
+              }
+            },
+            "description": "Current bounded queue projection"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read the durable follow-up queue"
+      },
+      "post": {
+        "description": "Routes one idempotent enqueue, edit, remove, reorder, pause, resume, or owner-bound interrupt-and-run-next command under the opaque queue generation CAS guard.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationQueueCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationQueueCommandReceipt"
+                }
+              }
+            },
+            "description": "Durable queue command receipt without exact prompt material"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Apply one exact follow-up queue command"
       }
     },
     "/sessions/{session_id}/run-context": {

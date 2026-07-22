@@ -1482,6 +1482,203 @@ pub struct HttpRunSnapshot {
     pub stream_sequence: u64,
 }
 
+/// Schema version for the bounded conversation queue application view.
+pub const HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION: u16 = 1;
+
+/// Maximum queue rows returned to one local application client.
+pub const HTTP_MAX_CONVERSATION_QUEUE_ITEMS: usize = 100;
+
+/// Opaque compare-and-swap generation for one exact durable queue projection.
+///
+/// Clients must echo this value unchanged and must not infer ordering from its contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HttpConversationQueueGeneration(pub String);
+
+/// Product-level class of one queued input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationQueueItemKind {
+    Chat,
+    PlanPrompt,
+    AgentMention,
+    AgentMessage,
+    Unknown,
+}
+
+/// Durable lifecycle projected for one queued input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationQueueItemStatus {
+    Queued,
+    Dispatching,
+    Delivered,
+    Rejected,
+    Cancelled,
+    Stale,
+    Unknown,
+}
+
+/// Availability of the exact prompt material required for future dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationQueuePromptMaterial {
+    /// The durable prompt is already an exact safe value.
+    PersistedSafe,
+    /// Exact material is bound to the current application owner only.
+    AvailableProcessLocal,
+    /// Exact material was intentionally lost and the user must enter it again.
+    RequiresReentry,
+}
+
+/// Typed reason why a queue item cannot currently be promoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationQueueBlockedReason {
+    QueuePaused,
+    RequiresReentry,
+    ForegroundRunActive,
+    WaitingForTerminalFrontier,
+    ForegroundOwnerLost,
+    PermissionRequired,
+    Conflict,
+    Stale,
+    Terminal,
+    UnsupportedTarget,
+    MaterialUnavailable,
+}
+
+/// One bounded, secret-free queue row. Exact prompt material and prompt hashes are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationQueueItem {
+    pub entry_id: String,
+    pub order: u32,
+    pub kind: HttpConversationQueueItemKind,
+    pub status: HttpConversationQueueItemStatus,
+    pub prompt_preview: String,
+    pub prompt_preview_truncated: bool,
+    pub prompt_material: HttpConversationQueuePromptMaterial,
+    pub dispatchable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<HttpConversationQueueBlockedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Bounded queue projection for one exact application session scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationQueueView {
+    pub schema_version: u16,
+    pub session_id: String,
+    pub generation: HttpConversationQueueGeneration,
+    pub paused: bool,
+    pub total_items: u32,
+    pub items: Vec<HttpConversationQueueItem>,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_dispatchable_entry_id: Option<String>,
+}
+
+/// Stable operation label returned without echoing exact prompt material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationQueueCommandActionKind {
+    Enqueue,
+    Edit,
+    Remove,
+    Reorder,
+    Pause,
+    Resume,
+    InterruptAndRunNext,
+}
+
+/// Exact queue mutation submitted inside the existing idempotent command envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HttpConversationQueueCommandAction {
+    Enqueue {
+        prompt: String,
+        kind: HttpConversationQueueItemKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<HttpReasoningEffort>,
+    },
+    Edit {
+        entry_id: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<HttpReasoningEffort>,
+    },
+    Remove {
+        entry_id: String,
+    },
+    Reorder {
+        entry_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_entry_id: Option<String>,
+    },
+    Pause,
+    Resume,
+    InterruptAndRunNext {
+        foreground_run_id: String,
+        foreground_owner_revision: String,
+    },
+}
+
+impl HttpConversationQueueCommandAction {
+    /// Returns a content-free operation label suitable for receipts and audit projection.
+    #[must_use]
+    pub const fn kind(&self) -> HttpConversationQueueCommandActionKind {
+        match self {
+            Self::Enqueue { .. } => HttpConversationQueueCommandActionKind::Enqueue,
+            Self::Edit { .. } => HttpConversationQueueCommandActionKind::Edit,
+            Self::Remove { .. } => HttpConversationQueueCommandActionKind::Remove,
+            Self::Reorder { .. } => HttpConversationQueueCommandActionKind::Reorder,
+            Self::Pause => HttpConversationQueueCommandActionKind::Pause,
+            Self::Resume => HttpConversationQueueCommandActionKind::Resume,
+            Self::InterruptAndRunNext { .. } => {
+                HttpConversationQueueCommandActionKind::InterruptAndRunNext
+            }
+        }
+    }
+}
+
+/// Queue-specific compare-and-swap payload carried by `HttpCommandEnvelope`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationQueueCommandRequest {
+    pub expected_generation: HttpConversationQueueGeneration,
+    pub action: HttpConversationQueueCommandAction,
+}
+
+/// Durable queue mutation receipt. Exact prompt material is never echoed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationQueueCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub action: HttpConversationQueueCommandActionKind,
+    pub expected_generation: HttpConversationQueueGeneration,
+    pub generation: HttpConversationQueueGeneration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_owner: Option<HttpForegroundRunOwner>,
+    pub queue: HttpConversationQueueView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub replayed: bool,
+}
+
+impl HttpConversationQueueCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
 /// Pending approval metadata registered by a running HTTP adapter driver.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

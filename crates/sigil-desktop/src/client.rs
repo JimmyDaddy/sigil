@@ -7,11 +7,14 @@ use uuid::Uuid;
 
 use crate::{
     dto::{
-        DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION, DESKTOP_HTTP_PROTOCOL_VERSION,
-        DesktopApprovalCommandReceipt, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-        DesktopCommandEnvelope, DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
-        DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
-        DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION, DESKTOP_CONVERSATION_QUEUE_SCHEMA_VERSION,
+        DESKTOP_HTTP_PROTOCOL_VERSION, DesktopApprovalCommandReceipt,
+        DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCommandEnvelope,
+        DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
+        DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
+        DesktopConversationQueueCommandRequest, DesktopConversationQueueView, DesktopErrorResponse,
+        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
+        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
         DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
         DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
@@ -31,6 +34,9 @@ const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RUN_EVENT_NAME: &str = "run_event";
+const MAX_CONVERSATION_QUEUE_ITEMS: usize = 100;
+const MAX_CONVERSATION_QUEUE_PROMPT_PREVIEW_CHARS: usize = 240;
+const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
 
 /// Authenticated typed client for one desktop-owned loopback server.
 ///
@@ -293,6 +299,76 @@ impl DesktopHttpClient {
             return Err(DesktopClientError::InvalidResponse);
         }
         Ok(page)
+    }
+
+    /// Reads the bounded, secret-free durable follow-up queue projection.
+    pub async fn conversation_queue(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopConversationQueueView, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let view: DesktopConversationQueueView = self
+            .get_json(
+                self.route(["sessions", session_id, "queue"])?,
+                StatusCode::OK,
+            )
+            .await?;
+        validate_conversation_queue_view(session_id, &view)?;
+        Ok(view)
+    }
+
+    /// Applies one exact queue mutation under the opaque queue generation CAS guard.
+    pub async fn command_conversation_queue(
+        &self,
+        session_id: &str,
+        payload: DesktopConversationQueueCommandRequest,
+    ) -> Result<DesktopConversationQueueCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_conversation_queue_command(&payload)?;
+        let expected_action = payload.action.kind();
+        let expected_generation = payload.expected_generation.clone();
+        let expected_interrupt_owner = match &payload.action {
+            DesktopConversationQueueCommandAction::InterruptAndRunNext {
+                foreground_run_id,
+                foreground_owner_revision,
+            } => Some((foreground_run_id.clone(), foreground_owner_revision.clone())),
+            _ => None,
+        };
+        let command = self.command(session_id, None, payload);
+        let expected_command_id = command.command_id.clone();
+        let expected_client_id = command.client_id.clone();
+        let receipt: DesktopConversationQueueCommandReceipt = self
+            .post_json(
+                self.route(["sessions", session_id, "queue"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != expected_command_id
+            || receipt.client_id != expected_client_id
+            || receipt.session_id != session_id
+            || receipt.action != expected_action
+            || receipt.expected_generation != expected_generation
+            || match (
+                expected_interrupt_owner.as_ref(),
+                receipt.interrupt_owner.as_ref(),
+            ) {
+                (Some((run_id, revision)), Some(owner)) => {
+                    owner.run_id != *run_id || owner.owner_revision != *revision
+                }
+                (None, None) => false,
+                _ => true,
+            }
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_opaque_queue_generation(&receipt.generation.0)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        validate_conversation_queue_view(session_id, &receipt.queue)?;
+        if receipt.generation != receipt.queue.generation {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// Starts a run with an idempotent command identity.
@@ -711,6 +787,111 @@ fn validate_owner_revision(value: &str) -> Result<(), DesktopClientError> {
 
 fn validate_replay_cursor(value: &str) -> Result<(), DesktopClientError> {
     if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_conversation_queue_view(
+    session_id: &str,
+    view: &DesktopConversationQueueView,
+) -> Result<(), DesktopClientError> {
+    use std::collections::BTreeSet;
+
+    if view.schema_version != DESKTOP_CONVERSATION_QUEUE_SCHEMA_VERSION
+        || view.session_id != session_id
+        || view.items.len() > MAX_CONVERSATION_QUEUE_ITEMS
+        || usize::try_from(view.total_items).map_or(true, |total| total < view.items.len())
+        || view.truncated != (view.total_items as usize > view.items.len())
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    validate_opaque_queue_generation(&view.generation.0)
+        .map_err(|_| DesktopClientError::InvalidResponse)?;
+    let mut ids = BTreeSet::new();
+    for (order, item) in view.items.iter().enumerate() {
+        validate_stream_identity(&item.entry_id)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        if !ids.insert(item.entry_id.as_str())
+            || item.order as usize != order
+            || item.prompt_preview.chars().count() > MAX_CONVERSATION_QUEUE_PROMPT_PREVIEW_CHARS
+            || item.dispatchable != item.blocked_reason.is_none()
+            || item
+                .created_at_ms
+                .zip(item.updated_at_ms)
+                .is_some_and(|(created, updated)| updated < created)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    if let Some(entry_id) = view.next_dispatchable_entry_id.as_deref() {
+        validate_stream_identity(entry_id).map_err(|_| DesktopClientError::InvalidResponse)?;
+        let projected_item = view.items.iter().find(|item| item.entry_id == entry_id);
+        if projected_item.is_some_and(|item| !item.dispatchable)
+            || (projected_item.is_none() && !view.truncated)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    Ok(())
+}
+
+fn validate_conversation_queue_command(
+    request: &DesktopConversationQueueCommandRequest,
+) -> Result<(), DesktopClientError> {
+    validate_opaque_queue_generation(&request.expected_generation.0)?;
+    match &request.action {
+        DesktopConversationQueueCommandAction::Enqueue { prompt, .. } => {
+            validate_queue_prompt(prompt)?;
+        }
+        DesktopConversationQueueCommandAction::Edit {
+            entry_id, prompt, ..
+        } => {
+            validate_stream_identity(entry_id)?;
+            validate_queue_prompt(prompt)?;
+        }
+        DesktopConversationQueueCommandAction::Remove { entry_id } => {
+            validate_stream_identity(entry_id)?;
+        }
+        DesktopConversationQueueCommandAction::Reorder {
+            entry_id,
+            after_entry_id,
+        } => {
+            validate_stream_identity(entry_id)?;
+            if let Some(after_entry_id) = after_entry_id {
+                validate_stream_identity(after_entry_id)?;
+                if after_entry_id == entry_id {
+                    return Err(DesktopClientError::InvalidRoute);
+                }
+            }
+        }
+        DesktopConversationQueueCommandAction::Pause
+        | DesktopConversationQueueCommandAction::Resume => {}
+        DesktopConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => {
+            validate_stream_identity(foreground_run_id)?;
+            validate_owner_revision(foreground_owner_revision)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_opaque_queue_generation(value: &str) -> Result<(), DesktopClientError> {
+    if value.is_empty()
+        || value.len() > 512
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_queue_prompt(prompt: &str) -> Result<(), DesktopClientError> {
+    if prompt.trim().is_empty() || prompt.len() > MAX_CONVERSATION_QUEUE_PROMPT_BYTES {
         return Err(DesktopClientError::InvalidRoute);
     }
     Ok(())

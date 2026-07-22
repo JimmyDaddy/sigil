@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Current command-envelope protocol accepted by `sigil serve`.
 pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 2;
 pub(crate) const DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION: u16 = 1;
+pub(crate) const DESKTOP_CONVERSATION_QUEUE_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1052,6 +1053,179 @@ pub struct DesktopRunSnapshot {
     #[serde(default)]
     pub pending_approval_call_ids: Vec<String>,
     pub stream_sequence: u64,
+}
+
+/// Opaque compare-and-swap generation for one exact durable queue projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DesktopConversationQueueGeneration(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationQueueItemKind {
+    Chat,
+    PlanPrompt,
+    AgentMention,
+    AgentMessage,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationQueueItemStatus {
+    Queued,
+    Dispatching,
+    Delivered,
+    Rejected,
+    Cancelled,
+    Stale,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationQueuePromptMaterial {
+    PersistedSafe,
+    AvailableProcessLocal,
+    RequiresReentry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationQueueBlockedReason {
+    QueuePaused,
+    RequiresReentry,
+    ForegroundRunActive,
+    WaitingForTerminalFrontier,
+    ForegroundOwnerLost,
+    PermissionRequired,
+    Conflict,
+    Stale,
+    Terminal,
+    UnsupportedTarget,
+    MaterialUnavailable,
+}
+
+/// One secret-free queue row. Exact prompts and prompt hashes stay behind the server boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationQueueItem {
+    pub entry_id: String,
+    pub order: u32,
+    pub kind: DesktopConversationQueueItemKind,
+    pub status: DesktopConversationQueueItemStatus,
+    pub prompt_preview: String,
+    pub prompt_preview_truncated: bool,
+    pub prompt_material: DesktopConversationQueuePromptMaterial,
+    pub dispatchable: bool,
+    #[serde(default)]
+    pub blocked_reason: Option<DesktopConversationQueueBlockedReason>,
+    #[serde(default)]
+    pub created_at_ms: Option<u64>,
+    #[serde(default)]
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Bounded queue projection for one exact desktop session handle.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationQueueView {
+    pub schema_version: u16,
+    pub session_id: String,
+    pub generation: DesktopConversationQueueGeneration,
+    pub paused: bool,
+    pub total_items: u32,
+    pub items: Vec<DesktopConversationQueueItem>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_dispatchable_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationQueueCommandActionKind {
+    Enqueue,
+    Edit,
+    Remove,
+    Reorder,
+    Pause,
+    Resume,
+    InterruptAndRunNext,
+}
+
+/// Exact queue mutation. Prompts are request-only and are never present in a receipt or view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopConversationQueueCommandAction {
+    Enqueue {
+        prompt: String,
+        kind: DesktopConversationQueueItemKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<DesktopReasoningEffort>,
+    },
+    Edit {
+        entry_id: String,
+        prompt: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<DesktopReasoningEffort>,
+    },
+    Remove {
+        entry_id: String,
+    },
+    Reorder {
+        entry_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_entry_id: Option<String>,
+    },
+    Pause,
+    Resume,
+    InterruptAndRunNext {
+        foreground_run_id: String,
+        foreground_owner_revision: String,
+    },
+}
+
+impl DesktopConversationQueueCommandAction {
+    #[must_use]
+    pub const fn kind(&self) -> DesktopConversationQueueCommandActionKind {
+        match self {
+            Self::Enqueue { .. } => DesktopConversationQueueCommandActionKind::Enqueue,
+            Self::Edit { .. } => DesktopConversationQueueCommandActionKind::Edit,
+            Self::Remove { .. } => DesktopConversationQueueCommandActionKind::Remove,
+            Self::Reorder { .. } => DesktopConversationQueueCommandActionKind::Reorder,
+            Self::Pause => DesktopConversationQueueCommandActionKind::Pause,
+            Self::Resume => DesktopConversationQueueCommandActionKind::Resume,
+            Self::InterruptAndRunNext { .. } => {
+                DesktopConversationQueueCommandActionKind::InterruptAndRunNext
+            }
+        }
+    }
+}
+
+/// Queue-specific compare-and-swap payload carried by the generic desktop command envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationQueueCommandRequest {
+    pub expected_generation: DesktopConversationQueueGeneration,
+    pub action: DesktopConversationQueueCommandAction,
+}
+
+/// Durable queue mutation receipt with no exact prompt material.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationQueueCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub action: DesktopConversationQueueCommandActionKind,
+    pub expected_generation: DesktopConversationQueueGeneration,
+    pub generation: DesktopConversationQueueGeneration,
+    #[serde(default)]
+    pub interrupt_owner: Option<DesktopForegroundRunOwner>,
+    pub queue: DesktopConversationQueueView,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub replayed: bool,
 }
 
 /// Versioned, idempotent command envelope.

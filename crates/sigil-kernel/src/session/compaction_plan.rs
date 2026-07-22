@@ -125,6 +125,21 @@ impl CompactionFoldPlan {
         let session_id = validate_complete_stream(records)?;
         validate_prior_folded_through(records, &session_id, prior_folded_through)?;
 
+        let visible_promotions = super::conversation_promotion_projection::
+            provider_visible_conversation_promotion_event_ids(records)?;
+        let promoted_message_ids = records
+            .iter()
+            .filter(|record| visible_promotions.contains(record.event_id()))
+            .filter_map(|record| session_entry_from_stored_event(record.stored_event()).transpose())
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                    Some(promotion.durable_user_message.id)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let mut messages = Vec::new();
         let mut protected = BTreeMap::new();
         for record in records {
@@ -134,6 +149,19 @@ impl CompactionFoldPlan {
             decode_stored_event(event.clone())?;
             let reference = event_ref(event);
             match session_entry_from_stored_event(event)? {
+                Some(SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(
+                    promotion,
+                ))) if visible_promotions.contains(&event.event_id) => {
+                    messages.push(FoldMessage {
+                        event: reference,
+                        message: promotion.durable_user_message,
+                    });
+                }
+                Some(SessionLogEntry::User(message))
+                    if promoted_message_ids.contains(&message.id) =>
+                {
+                    protected.insert(reference, CompactionFoldProtectionReason::ControlState);
+                }
                 Some(SessionLogEntry::User(message))
                 | Some(SessionLogEntry::Assistant(message))
                 | Some(SessionLogEntry::ToolResult(message)) => {

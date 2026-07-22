@@ -231,6 +231,40 @@ impl Session {
             .extend(controls.into_iter().map(SessionLogEntry::Control));
     }
 
+    /// Adopts one already-durable queue promotion into the active process projection.
+    ///
+    /// The promotion control remains the only durable user event. Its safe user message is added
+    /// only to this live session so tool-follow-up turns owned by the same process retain their
+    /// user context before the queue reaches `Delivered`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the promotion belongs to another session or its queue/message
+    /// identity is already present in the live projection.
+    pub fn record_durably_appended_conversation_input_promotion(
+        &mut self,
+        promotion: ConversationInputPromotedEntry,
+    ) -> Result<()> {
+        promotion.validate_for_session(&self.session_scope_id)?;
+        if self.entries.iter().any(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(existing)) => {
+                existing.queue_id == promotion.queue_id
+                    || existing.durable_user_message.id == promotion.durable_user_message.id
+            }
+            SessionLogEntry::User(message) => message.id == promotion.durable_user_message.id,
+            _ => false,
+        }) {
+            bail!("conversation input promotion is already present in the live session");
+        }
+        let durable_user_message = promotion.durable_user_message.clone();
+        self.entries.push(SessionLogEntry::Control(
+            ControlEntry::ConversationInputPromoted(promotion),
+        ));
+        self.entries
+            .push(SessionLogEntry::User(durable_user_message));
+        Ok(())
+    }
+
     /// Returns the live session scope used to bind URL capabilities and external provenance.
     pub fn session_scope_id(&self) -> &str {
         &self.session_scope_id

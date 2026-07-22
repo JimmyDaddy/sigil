@@ -73,6 +73,7 @@ pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
 pub mod application_catalog;
+pub mod application_queue;
 pub mod application_run;
 pub mod context;
 pub mod context_window;

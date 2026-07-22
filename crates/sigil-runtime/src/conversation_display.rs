@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AssistantMessageKind, CheckpointRestoreConflictReason, CheckpointRestored, ControlEntry,
-    ConversationRunLifecycleRecordV1, ConversationRunTerminalStatusV1, DurableEventType,
-    JsonlSessionStore, MessageRole, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
+    ConversationInputPromotedEntry, ConversationRunLifecycleRecordV1,
+    ConversationRunTerminalStatusV1, DurableEventType, JsonlSessionStore, MessageRole,
+    ModelMessage, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
     ToolApprovalUserDecision, TypedDomainEvent, conversation_run_lifecycle_record_from_stream,
     safe_persistence_text,
 };
@@ -747,32 +748,7 @@ fn project_session_entry(
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match entry {
         SessionLogEntry::User(message) => {
-            if message.role != MessageRole::User {
-                bail!("conversation display user entry has a non-user role");
-            }
-            let content = project_optional_text(message.content.as_deref());
-            if content.is_none() && message.image_attachments.is_empty() {
-                return Ok(Vec::new());
-            }
-            let run_id = active_run_id(active_run);
-            let mut item = new_message_item(
-                expected_scope,
-                record,
-                0,
-                run_id.clone(),
-                ConversationDisplayMessageRoleV1::User,
-                content,
-                None,
-                message.image_attachments.len(),
-            );
-            if let Some(run_id) = run_id {
-                item.reconciles = Some(vec![conversation_live_provisional_id(
-                    expected_scope,
-                    &run_id,
-                    &ConversationLiveProvisionalSlotV1::User,
-                )?]);
-            }
-            Ok(vec![item])
+            project_durable_user_message(record, expected_scope, message, active_run_id(active_run))
         }
         SessionLogEntry::Assistant(message) => {
             if message.role != MessageRole::Assistant {
@@ -943,6 +919,9 @@ fn project_control(
     approval_items: &mut HashMap<String, String>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match control {
+        ControlEntry::ConversationInputPromoted(promotion) => {
+            project_promoted_user_message(record, expected_scope, promotion, active_run)
+        }
         ControlEntry::Note { kind, data } if kind == "reasoning_trace" => {
             let Some(text) = data.get("text").and_then(serde_json::Value::as_str) else {
                 bail!("reasoning trace note is missing text");
@@ -1027,6 +1006,59 @@ fn project_control(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn project_promoted_user_message(
+    record: &SessionStreamRecord,
+    expected_scope: &str,
+    promotion: ConversationInputPromotedEntry,
+    active_run: &Option<ActiveRunProjection>,
+) -> Result<Vec<ConversationDisplayItemV1>> {
+    promotion.validate_for_session(expected_scope)?;
+    if let Some(active) = active_run
+        && active.run_id != promotion.dispatch_run_id
+    {
+        bail!("conversation input promotion overlaps another durable run");
+    }
+    project_durable_user_message(
+        record,
+        expected_scope,
+        promotion.durable_user_message,
+        Some(promotion.dispatch_run_id),
+    )
+}
+
+fn project_durable_user_message(
+    record: &SessionStreamRecord,
+    expected_scope: &str,
+    message: ModelMessage,
+    run_id: Option<String>,
+) -> Result<Vec<ConversationDisplayItemV1>> {
+    if message.role != MessageRole::User {
+        bail!("conversation display user entry has a non-user role");
+    }
+    let content = project_optional_text(message.content.as_deref());
+    if content.is_none() && message.image_attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut item = new_message_item(
+        expected_scope,
+        record,
+        0,
+        run_id.clone(),
+        ConversationDisplayMessageRoleV1::User,
+        content,
+        None,
+        message.image_attachments.len(),
+    );
+    if let Some(run_id) = run_id {
+        item.reconciles = Some(vec![conversation_live_provisional_id(
+            expected_scope,
+            &run_id,
+            &ConversationLiveProvisionalSlotV1::User,
+        )?]);
+    }
+    Ok(vec![item])
 }
 
 fn active_run_id(active_run: &Option<ActiveRunProjection>) -> Option<String> {

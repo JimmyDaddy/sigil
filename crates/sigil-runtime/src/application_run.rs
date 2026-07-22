@@ -13,20 +13,22 @@ use sigil_kernel::{
     AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
     AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
     ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler, InteractionMode,
-    JsonlSessionStore, McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder,
-    NoopEventHandler, PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
-    RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
-    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
-    SessionLogEntry, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
-    WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
+    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
+    MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler, PermissionMode,
+    PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig, RunCancellationFinalizedEntry,
+    RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
+    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
+    RunQuiescenceOutcome, RunTaskGuard, SecretString, Session, SessionLogEntry,
+    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
     verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
-    activate_eager_remote_mcp_server, attach_remote_mcp_activation_presenter,
-    attach_session_url_capability_store,
+    activate_eager_remote_mcp_server,
+    application_queue::{ApplicationQueuedRunPrepareError, PreparedApplicationQueuedRunInput},
+    attach_remote_mcp_activation_presenter, attach_session_url_capability_store,
     build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
     context_candidates_from_safe_sources, current_unix_time_ms,
     product_view::{ApplicationAgentActivityView, agent_activity_product_view_from_entries},
@@ -434,6 +436,122 @@ impl PreparedApplicationRun {
         (self.execution, self.control)
     }
 
+    /// Commits one validated queued promotion behind the application ownership boundary, then
+    /// replaces the ordinary run input.
+    ///
+    /// URL capability material is staged before the writer-lock promotion CAS. That promotion is
+    /// the unique durable user event and embeds the safe message plus capability descriptors. The
+    /// already-durable promotion is then adopted by the live session projection before the
+    /// capabilities are committed. Only a successful commit installs the no-persistence frozen
+    /// queued input; any failure consumes this prepared run so it cannot dispatch without its
+    /// durable promotion evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the prepared run does not match the queued session, logical run,
+    /// provider/model, or safe prompt, or when any durable promotion stage fails.
+    pub(crate) fn commit_queued_promotion(
+        mut self,
+        queued: PreparedApplicationQueuedRunInput,
+    ) -> Result<Self, ApplicationQueuedRunPrepareError> {
+        if self.execution.session_id != queued.session_scope_id {
+            return Err(ApplicationQueuedRunPrepareError::invalid_invocation(
+                "prepared run belongs to a different session scope",
+            ));
+        }
+        if self.execution.run_id != queued.promotion.dispatch_run_id {
+            return Err(ApplicationQueuedRunPrepareError::invalid_invocation(
+                "prepared run id does not match the queued dispatch run id",
+            ));
+        }
+        if self.execution.prompt != queued.safe_prompt {
+            return Err(ApplicationQueuedRunPrepareError::prompt_material_mismatch(
+                "prepared run prompt is not the durable safe prompt",
+            ));
+        }
+        if self.execution.session.provider_name() != queued.provider_name
+            || self.execution.session.model_name() != queued.model_name
+        {
+            return Err(ApplicationQueuedRunPrepareError::frozen_request_mismatch(
+                "provider or model does not match the prepared session",
+            ));
+        }
+        let ApplicationRunExecutionKind::Main { input, .. } = &mut self.execution.kind else {
+            return Err(ApplicationQueuedRunPrepareError::invalid_invocation(
+                "queued main-thread input cannot invoke an agent profile",
+            ));
+        };
+        if self.execution.session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::User(message)
+                    if message.id == queued.promotion.durable_user_message.id
+            )
+        }) {
+            return Err(ApplicationQueuedRunPrepareError::QueueConflict {
+                source: anyhow!("queued durable user message id is already present"),
+            });
+        }
+
+        let durable_message_id = queued.promotion.durable_user_message.id.clone();
+        let registrar = self.execution.session.user_url_capability_registrar();
+        if !queued.capability_registrations.is_empty() && registrar.is_none() {
+            return Err(ApplicationQueuedRunPrepareError::promotion_commit(
+                "capability_stage",
+                anyhow!("queued URL capability registrar is unavailable"),
+            ));
+        }
+        if let Some(registrar) = registrar.as_ref() {
+            for registration in &queued.capability_registrations {
+                if let Err(source) = registrar.stage(registration.clone()) {
+                    let _ = registrar.rollback_message(&durable_message_id);
+                    return Err(ApplicationQueuedRunPrepareError::promotion_commit(
+                        "capability_stage",
+                        source,
+                    ));
+                }
+            }
+        }
+
+        let promotion_store =
+            JsonlSessionStore::new(&self.execution.session_log_path).map_err(|source| {
+                rollback_queued_capabilities(registrar.as_deref(), &durable_message_id);
+                ApplicationQueuedRunPrepareError::promotion_commit("promotion_store", source)
+            })?;
+        if let Err(source) =
+            promotion_store.append_conversation_input_promoted(queued.promotion.clone())
+        {
+            rollback_queued_capabilities(registrar.as_deref(), &durable_message_id);
+            return Err(ApplicationQueuedRunPrepareError::promotion_commit(
+                "promotion_cas",
+                source,
+            ));
+        }
+        if let Err(source) = self
+            .execution
+            .session
+            .record_durably_appended_conversation_input_promotion(queued.promotion.clone())
+        {
+            rollback_queued_capabilities(registrar.as_deref(), &durable_message_id);
+            return Err(ApplicationQueuedRunPrepareError::promotion_commit(
+                "promotion_projection",
+                source,
+            ));
+        }
+        if let Some(registrar) = registrar.as_ref()
+            && let Err(source) = registrar.commit_message(&durable_message_id)
+        {
+            rollback_queued_capabilities(Some(registrar.as_ref()), &durable_message_id);
+            return Err(ApplicationQueuedRunPrepareError::promotion_commit(
+                "capability_commit",
+                source,
+            ));
+        }
+
+        **input = queued.input;
+        Ok(self)
+    }
+
     /// Returns the durable session id.
     #[must_use]
     pub fn session_id(&self) -> &str {
@@ -450,6 +568,29 @@ impl PreparedApplicationRun {
     #[must_use]
     pub fn session_log_path(&self) -> &Path {
         &self.execution.session_log_path
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_in_memory_queued_promotion(
+        &self,
+        queue_id: &sigil_kernel::ConversationInputQueueId,
+    ) -> bool {
+        self.execution.session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                    if &promotion.queue_id == queue_id
+            )
+        })
+    }
+}
+
+fn rollback_queued_capabilities(
+    registrar: Option<&dyn sigil_kernel::UserUrlCapabilityRegistrar>,
+    durable_message_id: &str,
+) {
+    if let Some(registrar) = registrar {
+        let _ = registrar.rollback_message(durable_message_id);
     }
 }
 
@@ -1061,6 +1202,54 @@ pub async fn prepare_application_run(
     request: ApplicationRunRequest,
     services: &ApplicationRunServices,
 ) -> std::result::Result<PreparedApplicationRun, ApplicationRunPrepareError> {
+    let (prepared, frozen_request) =
+        prepare_application_run_internal(request, services, None).await?;
+    debug_assert!(frozen_request.is_none());
+    Ok(prepared)
+}
+
+pub(crate) async fn prepare_application_run_with_exact_first_request(
+    request: ApplicationRunRequest,
+    services: &ApplicationRunServices,
+    exact_prompt: SecretString,
+    durable_user_message_id: String,
+) -> std::result::Result<
+    (PreparedApplicationRun, ApplicationExactFirstRequestAssembly),
+    ApplicationRunPrepareError,
+> {
+    if exact_prompt.expose_secret().trim().is_empty() || durable_user_message_id.trim().is_empty() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "queued exact prompt and durable user message id must not be empty".to_owned(),
+        });
+    }
+    let (prepared, assembly) = prepare_application_run_internal(
+        request,
+        services,
+        Some((exact_prompt, durable_user_message_id)),
+    )
+    .await?;
+    let assembly = assembly.ok_or_else(|| ApplicationRunPrepareError::Internal {
+        source: anyhow!("queued first request was not frozen by application assembly"),
+    })?;
+    Ok((prepared, assembly))
+}
+
+pub(crate) struct ApplicationExactFirstRequestAssembly {
+    pub(crate) frozen_request: FrozenProviderRequestMaterial,
+    pub(crate) run_input: AgentRunInput,
+}
+
+async fn prepare_application_run_internal(
+    request: ApplicationRunRequest,
+    services: &ApplicationRunServices,
+    queued_first_request: Option<(SecretString, String)>,
+) -> std::result::Result<
+    (
+        PreparedApplicationRun,
+        Option<ApplicationExactFirstRequestAssembly>,
+    ),
+    ApplicationRunPrepareError,
+> {
     if request.prompt.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "prompt must not be empty".to_owned(),
@@ -1098,6 +1287,7 @@ pub async fn prepare_application_run(
         root_task_guard,
         provider,
         options,
+        target_max_tokens,
         mut input,
         run_id,
         prompt,
@@ -1121,7 +1311,17 @@ pub async fn prepare_application_run(
         )
         .await
         .map_err(ApplicationRunPrepareError::execution)?;
-    input = attach_application_request_context(input, &surface.context_resolver, &prompt).await;
+    let context_prompt = queued_first_request
+        .as_ref()
+        .map_or(prompt.as_str(), |(exact_prompt, _)| {
+            exact_prompt.expose_secret()
+        });
+    let runtime_context = surface
+        .context_resolver
+        .resolve(context_prompt)
+        .await
+        .unwrap_or_default();
+    input = input.with_runtime_context(runtime_context.clone());
     let mut registry = surface.registry;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
@@ -1171,6 +1371,42 @@ pub async fn prepare_application_run(
         registry = constrain_application_tool_registry(registry, &scope)
             .map_err(ApplicationRunPrepareError::execution)?;
     }
+    let queued_first_assembly =
+        if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
+            let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
+            exact_user_message.id = durable_user_message_id.clone();
+            let request = session
+                .build_pre_turn_candidate_request(
+                    &workspace_root,
+                    &options.memory_config,
+                    registry.specs(),
+                    target_max_tokens,
+                    options.reasoning_effort.clone(),
+                    session.latest_response_handle(provider.name()),
+                    options.traffic_partition_key.clone(),
+                    &[exact_user_message],
+                    runtime_context.clone(),
+                    &[],
+                )
+                .map_err(ApplicationRunPrepareError::execution)?;
+            let frozen_request =
+                FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)
+                    .map_err(ApplicationRunPrepareError::execution)?;
+            let mut run_input = AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_runtime_context(runtime_context)
+                .with_logical_run_id(run_id.clone())
+                .with_cancellation(cancellation_handle.clone())
+                .with_initial_frozen_provider_request(frozen_request.clone());
+            if let Some(max_output_tokens) = target_max_tokens {
+                run_input = run_input.with_max_output_tokens(max_output_tokens);
+            }
+            Some(ApplicationExactFirstRequestAssembly {
+                frozen_request,
+                run_input,
+            })
+        } else {
+            None
+        };
     let session_id = session.session_scope_id().to_owned();
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
@@ -1197,7 +1433,7 @@ pub async fn prepare_application_run(
             input: Box::new(input),
         }
     };
-    Ok(PreparedApplicationRun {
+    let prepared = PreparedApplicationRun {
         execution: ApplicationRunExecution {
             kind,
             session,
@@ -1224,7 +1460,8 @@ pub async fn prepare_application_run(
             events,
             _session_lease: session_lease,
         },
-    })
+    };
+    Ok((prepared, queued_first_assembly))
 }
 
 /// Creates or reopens the durable V2 session used by an adapter routing handle.
@@ -1508,20 +1745,13 @@ fn application_bound_session_entries(
     expected_session_scope_id: &str,
 ) -> Result<Vec<SessionLogEntry>> {
     let records = application_bound_session_records(session_path, expected_session_scope_id)?;
+    sigil_kernel::ConversationQueueDurableProjection::from_records(&records)?;
     records
         .iter()
-        .filter_map(|record| {
-            record
-                .stored_event()
-                .payload
-                .get("session_log_entry")
-                .cloned()
-        })
-        .map(|value| {
-            serde_json::from_value::<SessionLogEntry>(value)
-                .context("failed to decode durable application session entry")
-        })
-        .collect()
+        .map(sigil_kernel::conversation_transcript_entry_from_record)
+        .collect::<Result<Vec<_>>>()
+        .context("failed to decode durable application session entry")
+        .map(|entries| entries.into_iter().flatten().collect())
 }
 
 fn application_bound_session_records(
@@ -1924,6 +2154,7 @@ pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunI
     AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
+#[cfg(test)]
 async fn attach_application_request_context(
     input: AgentRunInput,
     context_resolver: &crate::RequestContextResolver,
@@ -1946,6 +2177,7 @@ struct BlockingApplicationRunPreparation {
     root_task_guard: RunTaskGuard,
     provider: Box<dyn sigil_kernel::Provider>,
     options: AgentRunOptions,
+    target_max_tokens: Option<u32>,
     input: AgentRunInput,
     run_id: String,
     prompt: String,
@@ -2059,6 +2291,10 @@ fn prepare_application_run_blocking(
     if let Some(constraints) = request.constraints.as_ref() {
         input = input.with_max_output_tokens(constraints.max_output_tokens);
     }
+    let target_max_tokens = request
+        .constraints
+        .as_ref()
+        .map(|constraints| constraints.max_output_tokens);
     let redactor = secret_redactor_for_root_config(&root_config);
     Ok(BlockingApplicationRunPreparation {
         root_config,
@@ -2074,6 +2310,7 @@ fn prepare_application_run_blocking(
         root_task_guard,
         provider,
         options,
+        target_max_tokens,
         input,
         run_id: request.run_id,
         prompt: request.prompt,

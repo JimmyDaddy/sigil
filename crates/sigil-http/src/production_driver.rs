@@ -9,8 +9,22 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalHandler, PublicRunEvent, PublicRunEventKind, SessionRef, ToolApproval,
-    ToolApprovalUserDecision, ToolCall, ToolSpec, tool_approval_session_grant_available_for_facets,
+    ApprovalHandler, CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX, ControlEntry,
+    ConversationInputEditedEntry, ConversationInputKind, ConversationInputPromotedEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    ConversationInputTerminalCommand, ConversationInputTerminalExpectation,
+    ConversationInputTerminalFrontier, ConversationQueueDurableProjection,
+    ConversationQueueMutation, ConversationQueueMutationCommand, ConversationQueueRevision,
+    JsonlSessionStore, ModelMessage, ProviderPhysicalAttemptOutcome,
+    ProviderPhysicalAttemptProjection, PublicRunEvent, PublicRunEventKind, SecretString,
+    SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision, ToolCall, ToolSpec,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    project_user_message_for_persistence_with_nonce_and_issued_at, stable_event_uuid,
+    tool_approval_session_grant_available_for_facets,
+};
+use sigil_runtime::application_queue::{
+    ApplicationQueuedPromptMaterial, ApplicationQueuedRunRequest, prepare_application_queued_run,
 };
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
@@ -35,18 +49,24 @@ use crate::{
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
     HttpApprovalDecisionRecord, HttpContextWindowSource, HttpConversationDisplayDriverError,
-    HttpConversationDisplayPage, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
-    HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpConversationDisplayPage, HttpConversationQueueBlockedReason,
+    HttpConversationQueueCommandAction, HttpConversationQueueDriverCommand,
+    HttpConversationQueueDriverError, HttpConversationQueueGeneration, HttpConversationQueueItem,
+    HttpConversationQueueItemKind, HttpConversationQueueItemStatus,
+    HttpConversationQueuePromptMaterial, HttpConversationQueueView, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
+    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission,
+    HttpQueuedRunDriverStart, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
+    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_HTTP_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_HTTP_EXACT_QUEUE_PROMPTS: usize = 128;
+const MAX_HTTP_QUEUE_PREVIEW_CHARS: usize = 240;
 
 /// Runtime inputs and bounded waits owned by the production HTTP driver.
 #[derive(Debug, Clone)]
@@ -94,6 +114,12 @@ trait HttpApplicationRunPreparer: Send + Sync {
         request: ApplicationRunRequest,
         services: ApplicationRunServices,
     ) -> Result<PreparedApplicationRun>;
+
+    async fn prepare_queued(
+        &self,
+        request: ApplicationQueuedRunRequest,
+        services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun>;
 }
 
 struct HttpSharedApplicationRunPreparer;
@@ -109,6 +135,16 @@ impl HttpApplicationRunPreparer for HttpSharedApplicationRunPreparer {
             .await
             .map_err(anyhow::Error::new)
     }
+
+    async fn prepare_queued(
+        &self,
+        request: ApplicationQueuedRunRequest,
+        services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun> {
+        prepare_application_queued_run(request, &services)
+            .await
+            .map_err(anyhow::Error::new)
+    }
 }
 
 /// Production run driver backed by the shared runtime application service.
@@ -121,6 +157,52 @@ pub struct HttpProductionRunDriver {
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
+    exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HttpExactQueuePromptKey {
+    session_scope_id: String,
+    queue_id: ConversationInputQueueId,
+}
+
+#[derive(Clone)]
+struct HttpExactQueuePrompt {
+    prompt_hash: String,
+    exact_prompt: SecretString,
+}
+
+struct HttpQueuedRunPreparation {
+    durable_queue: ConversationQueueDurableProjection,
+    promotion: ConversationInputPromotedEntry,
+    prompt_material: ApplicationQueuedPromptMaterial,
+    capability_registrations: Vec<sigil_kernel::UserUrlCapabilityRegistration>,
+    exact_prompt_key: HttpExactQueuePromptKey,
+}
+
+#[derive(Clone)]
+struct HttpQueuedRunTerminalContext {
+    queue_id: ConversationInputQueueId,
+    dispatch_run_id: String,
+    expected_queue_revision: ConversationQueueRevision,
+    prompt_hash: String,
+    exact_prompt_key: HttpExactQueuePromptKey,
+}
+
+#[derive(Clone, Copy)]
+enum HttpQueuedUnpromotedTerminal {
+    Rejected,
+    Cancelled,
+}
+
+impl std::fmt::Debug for HttpExactQueuePrompt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpExactQueuePrompt")
+            .field("prompt_hash", &self.prompt_hash)
+            .field("exact_prompt", &"[redacted]")
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for HttpProductionRunDriver {
@@ -180,6 +262,7 @@ impl HttpProductionRunDriver {
             registry: OnceLock::new(),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
+            exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -221,9 +304,346 @@ impl HttpProductionRunDriver {
             .and_then(Weak::upgrade)
             .ok_or_else(|| HttpRunDriverError::new("production driver registry is not attached"))
     }
+
+    fn reconcile_orphaned_queued_dispatches(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<(), HttpConversationQueueDriverError> {
+        self.reconcile_orphaned_queued_dispatches_with(session, |_| Ok(()))
+    }
+
+    fn reconcile_orphaned_queued_dispatches_with<F>(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        mut before_terminal_append: F,
+    ) -> Result<(), HttpConversationQueueDriverError>
+    where
+        F: FnMut(&JsonlSessionStore) -> Result<(), HttpConversationQueueDriverError>,
+    {
+        for _ in 0..=crate::HTTP_MAX_CONVERSATION_QUEUE_ITEMS {
+            let records = JsonlSessionStore::read_event_records(&session.session_log_path)
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            if records
+                .iter()
+                .any(|record| record.session_id() != session.durable_session_scope_id)
+            {
+                return Err(HttpConversationQueueDriverError::Unavailable);
+            }
+            let projection = ConversationQueueDurableProjection::from_records(&records)
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            let Some(item) = projection
+                .queue
+                .items
+                .iter()
+                .find(|item| item.status == ConversationInputStatus::Dispatching)
+            else {
+                return Ok(());
+            };
+            let promotion = http_queued_promotion(&records, &item.queued.queue_id)
+                .ok_or(HttpConversationQueueDriverError::Conflict)?;
+            let (status, reason) =
+                http_queued_terminal_from_attempt_evidence(&records, &promotion.dispatch_run_id)
+                    .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            let expected_frontier = records
+                .last()
+                .map(ConversationInputTerminalFrontier::from_record)
+                .ok_or(HttpConversationQueueDriverError::Unavailable)?;
+            let store = JsonlSessionStore::new(&session.session_log_path)
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            before_terminal_append(&store)?;
+            let appended = store
+                .append_conversation_input_terminal_if_current(ConversationInputTerminalCommand {
+                    expectation: ConversationInputTerminalExpectation::Promoted {
+                        queue_id: promotion.queue_id.clone(),
+                        dispatch_run_id: promotion.dispatch_run_id,
+                        expected_frontier,
+                    },
+                    terminal: ConversationInputStatusEntry {
+                        queue_id: promotion.queue_id.clone(),
+                        status,
+                        reason,
+                        updated_at_ms: Some(current_unix_time_ms()),
+                    },
+                })
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            if appended.is_none() {
+                continue;
+            }
+            self.exact_queue_prompts
+                .lock()
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?
+                .remove(&exact_queue_prompt_key(session, promotion.queue_id));
+        }
+        Err(HttpConversationQueueDriverError::Conflict)
+    }
+
+    fn queued_supervisor_start(
+        &self,
+        start: HttpQueuedRunDriverStart,
+    ) -> Result<(HttpRunDriverStart, HttpQueuedRunPreparation), HttpRunDriverError> {
+        if start.run.id != start.admission.dispatch_run_id
+            || start.session.foreground_run_id.as_deref() != Some(start.run.id.as_str())
+        {
+            return Err(HttpRunDriverError::new(
+                "queued run registration does not own the admitted foreground identity",
+            ));
+        }
+        let state = read_http_durable_queue_state(&start.session)
+            .map_err(|_| HttpRunDriverError::new("durable queued run state is unavailable"))?;
+        let revision = state.projection.current_revision();
+        if start.admission.generation != http_queue_generation(revision.clone()) {
+            return Err(HttpRunDriverError::new(
+                "queued run admission no longer matches the durable generation",
+            ));
+        }
+        let queue_id = ConversationInputQueueId::new(start.admission.entry_id.clone())
+            .map_err(|_| HttpRunDriverError::new("queued run entry identity is invalid"))?;
+        if state.projection.queue.next_dispatchable.as_ref() != Some(&queue_id) {
+            return Err(HttpRunDriverError::new(
+                "queued run entry is no longer the durable dispatch frontier",
+            ));
+        }
+        let queued = state
+            .projection
+            .queue
+            .items
+            .iter()
+            .find(|item| item.queued.queue_id == queue_id)
+            .ok_or_else(|| HttpRunDriverError::new("queued run entry is unavailable"))?;
+        if queued.status != ConversationInputStatus::Queued
+            || queued.queued.target != ConversationInputTarget::MainThread
+            || queued.queued.kind != ConversationInputKind::Chat
+        {
+            return Err(HttpRunDriverError::new(
+                "queued run entry is not a dispatchable main-thread chat",
+            ));
+        }
+        let dispatch_run_id = stable_http_queued_dispatch_run_id(
+            &start.session.durable_session_scope_id,
+            &queue_id,
+            &revision,
+        );
+        if dispatch_run_id != start.admission.dispatch_run_id {
+            return Err(HttpRunDriverError::new(
+                "queued run dispatch identity no longer matches durable admission",
+            ));
+        }
+
+        let exact_prompt_key = exact_queue_prompt_key(&start.session, queue_id.clone());
+        let (prompt_material, exact_prompt) = if queued
+            .queued
+            .prompt_hash
+            .starts_with(CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX)
+        {
+            let exact_prompts = self
+                .exact_queue_prompts
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("queued exact prompt state is unavailable"))?;
+            let exact = exact_prompts
+                .get(&exact_prompt_key)
+                .filter(|exact| exact.prompt_hash == queued.queued.prompt_hash)
+                .ok_or_else(|| {
+                    HttpRunDriverError::new("queued exact prompt requires user reentry")
+                })?;
+            (
+                ApplicationQueuedPromptMaterial::AvailableProcessLocal {
+                    queue_id: queue_id.clone(),
+                    prompt_hash: exact.prompt_hash.clone(),
+                    exact_prompt: exact.exact_prompt.clone(),
+                },
+                exact.exact_prompt.expose_secret().to_owned(),
+            )
+        } else {
+            (
+                ApplicationQueuedPromptMaterial::PersistedSafe,
+                queued.queued.prompt.clone(),
+            )
+        };
+        let prompt_projection = project_conversation_prompt_for_persistence(&exact_prompt);
+        if prompt_projection.prompt_hash != queued.queued.prompt_hash
+            || prompt_projection.safe_prompt != queued.queued.prompt
+        {
+            return Err(HttpRunDriverError::new(
+                "queued exact prompt no longer matches its durable projection",
+            ));
+        }
+
+        let promotion_seed = stable_http_identity_seed(&[
+            &start.session.durable_session_scope_id,
+            queue_id.as_str(),
+            &revision.stream_sequence.to_string(),
+            &revision.event_id,
+        ]);
+        let durable_message_id = stable_event_uuid(
+            "sigil-http-conversation-queue-user-message",
+            &promotion_seed,
+        );
+        let promoted_at_ms = current_unix_time_ms();
+        let capability_projection = project_user_message_for_persistence_with_nonce_and_issued_at(
+            durable_message_id.clone(),
+            exact_prompt,
+            Some(&dispatch_run_id),
+            promoted_at_ms,
+            None,
+        )
+        .map_err(|_| HttpRunDriverError::new("queued URL capability projection failed"))?;
+        let mut capability_registrations = capability_projection.capability_registrations;
+        capability_registrations.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let capability_descriptors = capability_registrations
+            .iter()
+            .map(|registration| {
+                registration.durable_descriptor(&start.session.durable_session_scope_id)
+            })
+            .collect::<Vec<_>>();
+        let capability_digest =
+            conversation_promotion_capability_digest(&capability_descriptors)
+                .map_err(|_| HttpRunDriverError::new("queued capability digest failed"))?;
+        let mut durable_user_message = ModelMessage::user(queued.queued.prompt.clone());
+        durable_user_message.id = durable_message_id;
+        let promotion = ConversationInputPromotedEntry {
+            queue_id,
+            expected_queue_revision: revision,
+            prompt_hash: queued.queued.prompt_hash.clone(),
+            exact_prompt_required: prompt_projection.exact_prompt_required,
+            durable_user_message,
+            capability_descriptors,
+            capability_digest,
+            dispatch_run_id,
+            promoted_at_ms,
+        };
+        promotion
+            .validate_for_session(&start.session.durable_session_scope_id)
+            .map_err(|_| HttpRunDriverError::new("queued promotion candidate is invalid"))?;
+
+        let standard_start = HttpRunDriverStart {
+            session: start.session,
+            run: start.run,
+            prompt: queued.queued.prompt.clone(),
+            model_name: None,
+            model_selection_binding: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+        };
+        Ok((
+            standard_start,
+            HttpQueuedRunPreparation {
+                durable_queue: state.projection,
+                promotion,
+                prompt_material,
+                capability_registrations,
+                exact_prompt_key,
+            },
+        ))
+    }
+
+    fn start_supervised_run(
+        &self,
+        start: HttpRunDriverStart,
+        queued: Option<HttpQueuedRunPreparation>,
+    ) -> Result<(), HttpRunDriverError> {
+        let registry = self.attached_registry()?;
+        let broker = Arc::new(HttpApprovalBroker::default());
+        let (cancel_sender, cancel_receiver) = mpsc::unbounded_channel();
+        let active = Arc::new(HttpProductionActiveRun {
+            session_id: start.session.id.clone(),
+            broker: Arc::clone(&broker),
+            cancel_sender,
+        });
+        {
+            let mut runs = self
+                .active_runs
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            if runs.contains_key(&start.run.id) {
+                return Err(HttpRunDriverError::new(format!(
+                    "production run already active: {}",
+                    start.run.id
+                )));
+            }
+            runs.insert(start.run.id.clone(), active);
+        }
+
+        let queued_terminal = queued.as_ref().map(|queued| HttpQueuedRunTerminalContext {
+            queue_id: queued.promotion.queue_id.clone(),
+            dispatch_run_id: queued.promotion.dispatch_run_id.clone(),
+            expected_queue_revision: queued.promotion.expected_queue_revision.clone(),
+            prompt_hash: queued.promotion.prompt_hash.clone(),
+            exact_prompt_key: queued.exact_prompt_key.clone(),
+        });
+        let queued_session = start.session.clone();
+        let terminal_exact_queue_prompts = Arc::clone(&self.exact_queue_prompts);
+
+        let supervisor = HttpRunSupervisor {
+            options: self.options.clone(),
+            services: self.services.clone(),
+            preparer: Arc::clone(&self.preparer),
+            event_bus: Arc::clone(&self.event_bus),
+            registry: Arc::downgrade(&registry),
+            broker: Arc::clone(&broker),
+            start: start.clone(),
+            queued,
+            exact_queue_prompts: Arc::clone(&self.exact_queue_prompts),
+            cancel_receiver,
+        };
+        let task = self.runtime.spawn(supervisor.run());
+        let active_runs = Arc::clone(&self.active_runs);
+        let active_runs_ready = Arc::clone(&self.active_runs_ready);
+        let registry = Arc::downgrade(&registry);
+        let run_id = start.run.id;
+        self.runtime.spawn(async move {
+            let mut uncertain = match task.await {
+                Ok(Ok(())) => false,
+                Ok(Err(_)) | Err(_) => true,
+            };
+            if let Some(queued_terminal) = queued_terminal {
+                let unpromoted_terminal = registry
+                    .upgrade()
+                    .and_then(|registry| registry.get_run(&run_id).ok())
+                    .map_or(HttpQueuedUnpromotedTerminal::Rejected, |run| {
+                        match run.status {
+                            crate::HttpRunStatus::Cancelled | crate::HttpRunStatus::Interrupted => {
+                                HttpQueuedUnpromotedTerminal::Cancelled
+                            }
+                            _ => HttpQueuedUnpromotedTerminal::Rejected,
+                        }
+                    });
+                uncertain |= tokio::task::spawn_blocking(move || {
+                    finalize_http_queued_terminal(
+                        &queued_session,
+                        &queued_terminal,
+                        unpromoted_terminal,
+                    )?;
+                    evict_http_promoted_exact_prompt(
+                        &queued_session,
+                        Some(&queued_terminal),
+                        &terminal_exact_queue_prompts,
+                    )
+                })
+                .await
+                .map_or(true, |result| result.is_err());
+            }
+            broker.cancel_all();
+            if uncertain && let Some(registry) = registry.upgrade() {
+                let _ = registry.record_run_execution_uncertain(&run_id);
+            }
+            if let Ok(mut runs) = active_runs.lock() {
+                runs.remove(&run_id);
+                active_runs_ready.notify_all();
+            }
+            if let Some(registry) = registry.upgrade() {
+                let _ = registry.record_run_released(&run_id);
+            }
+        });
+        Ok(())
+    }
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
+    fn requires_run_release_barrier(&self) -> bool {
+        true
+    }
+
     fn bind_session(
         &self,
         session_id: &str,
@@ -285,6 +705,14 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn purge_session_local_state(&self, durable_session_scope_id: &str) {
+        let mut exact_prompts = self
+            .exact_queue_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        exact_prompts.retain(|key, _| key.session_scope_id != durable_session_scope_id);
+    }
+
     fn session_frontier(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -300,58 +728,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
-        let registry = self.attached_registry()?;
-        let broker = Arc::new(HttpApprovalBroker::default());
-        let (cancel_sender, cancel_receiver) = mpsc::unbounded_channel();
-        let active = Arc::new(HttpProductionActiveRun {
-            session_id: start.session.id.clone(),
-            broker: Arc::clone(&broker),
-            cancel_sender,
-        });
-        {
-            let mut runs = self
-                .active_runs
-                .lock()
-                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
-            if runs.contains_key(&start.run.id) {
-                return Err(HttpRunDriverError::new(format!(
-                    "production run already active: {}",
-                    start.run.id
-                )));
-            }
-            runs.insert(start.run.id.clone(), active);
-        }
-
-        let supervisor = HttpRunSupervisor {
-            options: self.options.clone(),
-            services: self.services.clone(),
-            preparer: Arc::clone(&self.preparer),
-            event_bus: Arc::clone(&self.event_bus),
-            registry: Arc::downgrade(&registry),
-            broker: Arc::clone(&broker),
-            start: start.clone(),
-            cancel_receiver,
-        };
-        let task = self.runtime.spawn(supervisor.run());
-        let active_runs = Arc::clone(&self.active_runs);
-        let active_runs_ready = Arc::clone(&self.active_runs_ready);
-        let registry = Arc::downgrade(&registry);
-        let run_id = start.run.id;
-        self.runtime.spawn(async move {
-            let uncertain = match task.await {
-                Ok(Ok(())) => false,
-                Ok(Err(_)) | Err(_) => true,
-            };
-            broker.cancel_all();
-            if uncertain && let Some(registry) = registry.upgrade() {
-                let _ = registry.record_run_execution_uncertain(&run_id);
-            }
-            if let Ok(mut runs) = active_runs.lock() {
-                runs.remove(&run_id);
-                active_runs_ready.notify_all();
-            }
-        });
-        Ok(())
+        self.start_supervised_run(start, None)
     }
 
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
@@ -727,6 +1104,302 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn conversation_queue_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        foreground_owner: Option<&crate::HttpForegroundRunOwner>,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        let state = read_http_durable_queue_state(session)?;
+        let exact_prompts = self
+            .exact_queue_prompts
+            .lock()
+            .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+        Ok(http_conversation_queue_view(
+            session,
+            foreground_owner,
+            &state,
+            &exact_prompts,
+        ))
+    }
+
+    fn mutate_conversation_queue(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        foreground_owner: Option<&crate::HttpForegroundRunOwner>,
+        command: &HttpConversationQueueDriverCommand,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        let state = read_http_durable_queue_state(session)?;
+        let current_generation = http_queue_generation(state.projection.current_revision());
+        if command.request.expected_generation != current_generation {
+            return Err(HttpConversationQueueDriverError::StaleGeneration);
+        }
+        if let HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } = &command.request.action
+        {
+            let owner = foreground_owner.ok_or(HttpConversationQueueDriverError::OwnerLost)?;
+            if owner.run_id != *foreground_run_id
+                || owner.owner_revision != *foreground_owner_revision
+            {
+                return Err(HttpConversationQueueDriverError::OwnerLost);
+            }
+            let exact_prompts = self
+                .exact_queue_prompts
+                .lock()
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+            validate_http_interrupt_candidate(session, &state, &exact_prompts)?;
+            return Ok(http_conversation_queue_view(
+                session,
+                foreground_owner,
+                &state,
+                &exact_prompts,
+            ));
+        }
+
+        let now_ms = current_unix_time_ms();
+        let expected_queue_revision = state.projection.current_revision();
+        let mut cache_update = None;
+        let mutation = match &command.request.action {
+            HttpConversationQueueCommandAction::Enqueue {
+                prompt,
+                kind,
+                reasoning_effort,
+            } => {
+                let queue_id = stable_http_queue_id(
+                    &session.durable_session_scope_id,
+                    &command.client_id,
+                    &command.command_id,
+                )?;
+                let projection = project_conversation_prompt_for_persistence(prompt);
+                cache_update = Some(HttpExactQueueCacheUpdate::Replace {
+                    key: exact_queue_prompt_key(session, queue_id.clone()),
+                    prompt_hash: projection.prompt_hash.clone(),
+                    exact_prompt: projection
+                        .exact_prompt_required
+                        .then(|| SecretString::new(prompt.clone())),
+                });
+                ConversationQueueMutation::Enqueue {
+                    entry: ConversationInputQueuedEntry {
+                        queue_id,
+                        target: ConversationInputTarget::MainThread,
+                        kind: http_queue_kind_to_kernel(*kind),
+                        prompt_hash: projection.prompt_hash,
+                        prompt: projection.safe_prompt,
+                        reasoning_effort: reasoning_effort.map(Into::into),
+                        created_at_ms: Some(now_ms),
+                    },
+                }
+            }
+            HttpConversationQueueCommandAction::Edit {
+                entry_id,
+                prompt,
+                reasoning_effort,
+            } => {
+                let queue_id = ConversationInputQueueId::new(entry_id.clone())
+                    .map_err(|_| HttpConversationQueueDriverError::Conflict)?;
+                ensure_http_queue_item_mutable(&state.projection, &queue_id)?;
+                let projection = project_conversation_prompt_for_persistence(prompt);
+                cache_update = Some(HttpExactQueueCacheUpdate::Replace {
+                    key: exact_queue_prompt_key(session, queue_id.clone()),
+                    prompt_hash: projection.prompt_hash.clone(),
+                    exact_prompt: projection
+                        .exact_prompt_required
+                        .then(|| SecretString::new(prompt.clone())),
+                });
+                ConversationQueueMutation::Edit {
+                    entry: ConversationInputEditedEntry {
+                        queue_id,
+                        prompt_hash: projection.prompt_hash,
+                        prompt: projection.safe_prompt,
+                        reasoning_effort: reasoning_effort.map(Into::into),
+                        updated_at_ms: Some(now_ms),
+                    },
+                }
+            }
+            HttpConversationQueueCommandAction::Remove { entry_id } => {
+                let queue_id = ConversationInputQueueId::new(entry_id.clone())
+                    .map_err(|_| HttpConversationQueueDriverError::Conflict)?;
+                ensure_http_queue_item_mutable(&state.projection, &queue_id)?;
+                cache_update = Some(HttpExactQueueCacheUpdate::Remove(exact_queue_prompt_key(
+                    session,
+                    queue_id.clone(),
+                )));
+                ConversationQueueMutation::Remove {
+                    queue_id,
+                    reason: Some("removed by application queue command".to_owned()),
+                    updated_at_ms: Some(now_ms),
+                }
+            }
+            HttpConversationQueueCommandAction::Reorder {
+                entry_id,
+                after_entry_id,
+            } => {
+                let queue_id = ConversationInputQueueId::new(entry_id.clone())
+                    .map_err(|_| HttpConversationQueueDriverError::Conflict)?;
+                ensure_http_queue_item_mutable(&state.projection, &queue_id)?;
+                let after_queue_id = after_entry_id
+                    .as_ref()
+                    .map(|entry_id| ConversationInputQueueId::new(entry_id.clone()))
+                    .transpose()
+                    .map_err(|_| HttpConversationQueueDriverError::Conflict)?;
+                if let Some(after_queue_id) = after_queue_id.as_ref() {
+                    ensure_http_queue_item_mutable(&state.projection, after_queue_id)?;
+                }
+                ConversationQueueMutation::Reorder {
+                    entry: ConversationInputReorderedEntry {
+                        queue_id,
+                        after_queue_id,
+                        updated_at_ms: Some(now_ms),
+                    },
+                }
+            }
+            HttpConversationQueueCommandAction::Pause => ConversationQueueMutation::Pause {
+                reason: Some("paused by application queue command".to_owned()),
+                updated_at_ms: Some(now_ms),
+            },
+            HttpConversationQueueCommandAction::Resume => ConversationQueueMutation::Resume {
+                reason: Some("resumed by application queue command".to_owned()),
+                updated_at_ms: Some(now_ms),
+            },
+            HttpConversationQueueCommandAction::InterruptAndRunNext { .. } => {
+                unreachable!("interrupt action returned after exact owner validation")
+            }
+        };
+
+        let mut exact_prompts = self
+            .exact_queue_prompts
+            .lock()
+            .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+        validate_http_exact_queue_cache_capacity(&exact_prompts, cache_update.as_ref())?;
+        let store = JsonlSessionStore::new(&session.session_log_path)
+            .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+        if store
+            .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+                expected_queue_revision,
+                mutation,
+            })
+            .is_err()
+        {
+            let latest = read_http_durable_queue_state(session)?;
+            return if http_queue_generation(latest.projection.current_revision())
+                != current_generation
+            {
+                Err(HttpConversationQueueDriverError::StaleGeneration)
+            } else {
+                Err(HttpConversationQueueDriverError::Conflict)
+            };
+        }
+        apply_http_exact_queue_cache_update(&mut exact_prompts, cache_update);
+        let state = read_http_durable_queue_state(session)?;
+        Ok(http_conversation_queue_view(
+            session,
+            foreground_owner,
+            &state,
+            &exact_prompts,
+        ))
+    }
+
+    fn next_queued_run_admission(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<Option<HttpQueuedRunAdmission>, HttpConversationQueueDriverError> {
+        self.reconcile_orphaned_queued_dispatches(session)?;
+        let state = read_http_durable_queue_state(session)?;
+        if state
+            .projection
+            .queue
+            .items
+            .iter()
+            .any(|item| item.status == ConversationInputStatus::Dispatching)
+        {
+            return Ok(None);
+        }
+        let exact_prompts = self
+            .exact_queue_prompts
+            .lock()
+            .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+        let view = http_conversation_queue_view(session, None, &state, &exact_prompts);
+        let Some(entry_id) = view.next_dispatchable_entry_id.as_deref() else {
+            return Ok(None);
+        };
+        let item = state
+            .projection
+            .queue
+            .items
+            .iter()
+            .find(|item| item.queued.queue_id.as_str() == entry_id)
+            .ok_or(HttpConversationQueueDriverError::Conflict)?;
+        if item.status != ConversationInputStatus::Queued
+            || item.queued.kind != ConversationInputKind::Chat
+            || item.queued.target != ConversationInputTarget::MainThread
+        {
+            return Ok(None);
+        }
+        let context = application_run_context_view(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+        let dispatch_run_id = stable_http_queued_dispatch_run_id(
+            &session.durable_session_scope_id,
+            &item.queued.queue_id,
+            &state.projection.current_revision(),
+        );
+        let prompt_preview = view
+            .items
+            .iter()
+            .find(|row| row.entry_id == entry_id)
+            .map(|row| row.prompt_preview.clone())
+            .ok_or(HttpConversationQueueDriverError::Conflict)?;
+        Ok(Some(HttpQueuedRunAdmission {
+            entry_id: entry_id.to_owned(),
+            generation: view.generation,
+            dispatch_run_id,
+            prompt_preview,
+            permission_mode: context.default_permission_mode.into(),
+            reasoning_effort: item.queued.reasoning_effort.clone().map(Into::into),
+        }))
+    }
+
+    fn start_queued_run(&self, start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
+        let (start, queued) = self.queued_supervisor_start(start)?;
+        self.start_supervised_run(start, Some(queued))
+    }
+
+    fn wait_for_run_release(
+        &self,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<(), HttpRunDriverError> {
+        let deadline = Instant::now() + timeout;
+        let mut runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+        while runs.contains_key(run_id) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(HttpRunDriverError::new(format!(
+                    "production run cleanup timed out: {run_id}"
+                )));
+            }
+            let (next, wait) = self
+                .active_runs_ready
+                .wait_timeout(runs, remaining)
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            runs = next;
+            if wait.timed_out() && runs.contains_key(run_id) {
+                return Err(HttpRunDriverError::new(format!(
+                    "production run cleanup timed out: {run_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn rerun_verification(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -774,6 +1447,572 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 }
 
+struct HttpDurableQueueState {
+    projection: ConversationQueueDurableProjection,
+    updated_at_ms: BTreeMap<ConversationInputQueueId, u64>,
+}
+
+enum HttpExactQueueCacheUpdate {
+    Replace {
+        key: HttpExactQueuePromptKey,
+        prompt_hash: String,
+        exact_prompt: Option<SecretString>,
+    },
+    Remove(HttpExactQueuePromptKey),
+}
+
+fn read_http_durable_queue_state(
+    session: &crate::HttpSessionSnapshot,
+) -> Result<HttpDurableQueueState, HttpConversationQueueDriverError> {
+    let records = JsonlSessionStore::read_event_records(&session.session_log_path)
+        .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+    if records
+        .iter()
+        .any(|record| record.session_id() != session.durable_session_scope_id)
+    {
+        return Err(HttpConversationQueueDriverError::Unavailable);
+    }
+    let projection = ConversationQueueDurableProjection::from_records(&records)
+        .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
+    let mut updated_at_ms = BTreeMap::new();
+    for record in records {
+        let Some(value) = record
+            .stored_event()
+            .payload
+            .get("session_log_entry")
+            .cloned()
+        else {
+            continue;
+        };
+        let Ok(SessionLogEntry::Control(control)) = serde_json::from_value(value) else {
+            continue;
+        };
+        let update = match control {
+            ControlEntry::ConversationInputQueued(entry) => {
+                entry.created_at_ms.map(|time| (entry.queue_id, time))
+            }
+            ControlEntry::ConversationInputEdited(entry) => {
+                entry.updated_at_ms.map(|time| (entry.queue_id, time))
+            }
+            ControlEntry::ConversationInputReordered(entry) => {
+                entry.updated_at_ms.map(|time| (entry.queue_id, time))
+            }
+            ControlEntry::ConversationInputStatusChanged(entry) => {
+                entry.updated_at_ms.map(|time| (entry.queue_id, time))
+            }
+            _ => None,
+        };
+        if let Some((queue_id, time)) = update {
+            updated_at_ms.insert(queue_id, time);
+        }
+    }
+    Ok(HttpDurableQueueState {
+        projection,
+        updated_at_ms,
+    })
+}
+
+fn http_conversation_queue_view(
+    session: &crate::HttpSessionSnapshot,
+    foreground_owner: Option<&crate::HttpForegroundRunOwner>,
+    state: &HttpDurableQueueState,
+    exact_prompts: &BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>,
+) -> HttpConversationQueueView {
+    let next_dispatchable = state.projection.queue.next_dispatchable.as_ref();
+    let has_dispatching_frontier = state
+        .projection
+        .queue
+        .items
+        .iter()
+        .any(|item| item.status == ConversationInputStatus::Dispatching);
+    let total_items = state.projection.queue.items.len();
+    let items = state
+        .projection
+        .queue
+        .items
+        .iter()
+        .take(crate::HTTP_MAX_CONVERSATION_QUEUE_ITEMS)
+        .enumerate()
+        .map(|(index, item)| {
+            let key = exact_queue_prompt_key(session, item.queued.queue_id.clone());
+            let prompt_material = if item
+                .queued
+                .prompt_hash
+                .starts_with(CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX)
+            {
+                if exact_prompts
+                    .get(&key)
+                    .is_some_and(|material| material.prompt_hash == item.queued.prompt_hash)
+                {
+                    HttpConversationQueuePromptMaterial::AvailableProcessLocal
+                } else {
+                    HttpConversationQueuePromptMaterial::RequiresReentry
+                }
+            } else {
+                HttpConversationQueuePromptMaterial::PersistedSafe
+            };
+            let is_supported = item.queued.target == ConversationInputTarget::MainThread
+                && item.queued.kind == ConversationInputKind::Chat;
+            let is_next = next_dispatchable == Some(&item.queued.queue_id);
+            let dispatchable = item.status == ConversationInputStatus::Queued
+                && is_supported
+                && is_next
+                && !has_dispatching_frontier
+                && !state.projection.queue.paused
+                && foreground_owner.is_none()
+                && prompt_material != HttpConversationQueuePromptMaterial::RequiresReentry;
+            let blocked_reason = if item.status == ConversationInputStatus::Stale {
+                Some(HttpConversationQueueBlockedReason::Stale)
+            } else if item.status.is_terminal() {
+                Some(HttpConversationQueueBlockedReason::Terminal)
+            } else if item.status == ConversationInputStatus::Dispatching {
+                Some(HttpConversationQueueBlockedReason::Conflict)
+            } else if !is_supported {
+                Some(HttpConversationQueueBlockedReason::UnsupportedTarget)
+            } else if state.projection.queue.paused {
+                Some(HttpConversationQueueBlockedReason::QueuePaused)
+            } else if prompt_material == HttpConversationQueuePromptMaterial::RequiresReentry {
+                Some(HttpConversationQueueBlockedReason::RequiresReentry)
+            } else if item.status == ConversationInputStatus::Queued
+                && (has_dispatching_frontier || !is_next)
+            {
+                Some(HttpConversationQueueBlockedReason::WaitingForTerminalFrontier)
+            } else if foreground_owner.is_some() {
+                Some(HttpConversationQueueBlockedReason::ForegroundRunActive)
+            } else {
+                None
+            };
+            let (prompt_preview, prompt_preview_truncated) =
+                http_queue_prompt_preview(&item.queued.prompt);
+            HttpConversationQueueItem {
+                entry_id: item.queued.queue_id.as_str().to_owned(),
+                order: u32::try_from(index).unwrap_or(u32::MAX),
+                kind: kernel_queue_kind_to_http(item.queued.kind),
+                status: kernel_queue_status_to_http(item.status),
+                prompt_preview,
+                prompt_preview_truncated,
+                prompt_material,
+                dispatchable,
+                blocked_reason,
+                created_at_ms: item.queued.created_at_ms,
+                updated_at_ms: state.updated_at_ms.get(&item.queued.queue_id).copied(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let next_dispatchable_entry_id = items
+        .iter()
+        .find(|item| item.dispatchable)
+        .map(|item| item.entry_id.clone());
+    HttpConversationQueueView {
+        schema_version: crate::HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        generation: http_queue_generation(state.projection.current_revision()),
+        paused: state.projection.queue.paused,
+        total_items: u32::try_from(total_items).unwrap_or(u32::MAX),
+        items,
+        truncated: total_items > crate::HTTP_MAX_CONVERSATION_QUEUE_ITEMS,
+        next_dispatchable_entry_id,
+    }
+}
+
+fn exact_queue_prompt_key(
+    session: &crate::HttpSessionSnapshot,
+    queue_id: ConversationInputQueueId,
+) -> HttpExactQueuePromptKey {
+    HttpExactQueuePromptKey {
+        session_scope_id: session.durable_session_scope_id.clone(),
+        queue_id,
+    }
+}
+
+fn stable_http_queue_id(
+    session_scope_id: &str,
+    client_id: &str,
+    command_id: &str,
+) -> Result<ConversationInputQueueId, HttpConversationQueueDriverError> {
+    ConversationInputQueueId::new(stable_event_uuid(
+        "sigil-http-conversation-queue-entry",
+        &stable_http_identity_seed(&[session_scope_id, client_id, command_id]),
+    ))
+    .map_err(|_| HttpConversationQueueDriverError::Conflict)
+}
+
+fn stable_http_queued_dispatch_run_id(
+    session_scope_id: &str,
+    queue_id: &ConversationInputQueueId,
+    revision: &ConversationQueueRevision,
+) -> String {
+    stable_event_uuid(
+        "sigil-http-conversation-queue-dispatch",
+        &stable_http_identity_seed(&[
+            session_scope_id,
+            queue_id.as_str(),
+            &revision.stream_sequence.to_string(),
+            &revision.event_id,
+        ]),
+    )
+}
+
+fn stable_http_identity_seed(parts: &[&str]) -> String {
+    use std::fmt::Write as _;
+
+    let mut seed = String::new();
+    for part in parts {
+        write!(&mut seed, "{}:{part}", part.len())
+            .expect("writing a stable identity seed into String cannot fail");
+    }
+    seed
+}
+
+fn http_queue_generation(revision: ConversationQueueRevision) -> HttpConversationQueueGeneration {
+    let mut hasher = Sha256::new();
+    for part in [
+        revision.stream_sequence.to_be_bytes().as_slice(),
+        revision.event_id.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    HttpConversationQueueGeneration(format!("queue-v1:{:x}", hasher.finalize()))
+}
+
+fn http_queue_prompt_preview(prompt: &str) -> (String, bool) {
+    let truncated = prompt.chars().count() > MAX_HTTP_QUEUE_PREVIEW_CHARS;
+    if !truncated {
+        return (prompt.to_owned(), false);
+    }
+    let preview = prompt
+        .chars()
+        .take(MAX_HTTP_QUEUE_PREVIEW_CHARS.saturating_sub(3))
+        .collect::<String>();
+    (format!("{preview}..."), true)
+}
+
+fn http_queue_kind_to_kernel(kind: HttpConversationQueueItemKind) -> ConversationInputKind {
+    match kind {
+        HttpConversationQueueItemKind::Chat => ConversationInputKind::Chat,
+        HttpConversationQueueItemKind::PlanPrompt => ConversationInputKind::PlanPrompt,
+        HttpConversationQueueItemKind::AgentMention => ConversationInputKind::AgentMention,
+        HttpConversationQueueItemKind::AgentMessage => ConversationInputKind::AgentMessage,
+        HttpConversationQueueItemKind::Unknown => ConversationInputKind::Unknown,
+    }
+}
+
+fn kernel_queue_kind_to_http(kind: ConversationInputKind) -> HttpConversationQueueItemKind {
+    match kind {
+        ConversationInputKind::Chat => HttpConversationQueueItemKind::Chat,
+        ConversationInputKind::PlanPrompt => HttpConversationQueueItemKind::PlanPrompt,
+        ConversationInputKind::AgentMention => HttpConversationQueueItemKind::AgentMention,
+        ConversationInputKind::AgentMessage => HttpConversationQueueItemKind::AgentMessage,
+        ConversationInputKind::Unknown => HttpConversationQueueItemKind::Unknown,
+    }
+}
+
+fn kernel_queue_status_to_http(status: ConversationInputStatus) -> HttpConversationQueueItemStatus {
+    match status {
+        ConversationInputStatus::Queued => HttpConversationQueueItemStatus::Queued,
+        ConversationInputStatus::Dispatching => HttpConversationQueueItemStatus::Dispatching,
+        ConversationInputStatus::Delivered => HttpConversationQueueItemStatus::Delivered,
+        ConversationInputStatus::Rejected => HttpConversationQueueItemStatus::Rejected,
+        ConversationInputStatus::Cancelled => HttpConversationQueueItemStatus::Cancelled,
+        ConversationInputStatus::Stale => HttpConversationQueueItemStatus::Stale,
+        ConversationInputStatus::Unknown => HttpConversationQueueItemStatus::Unknown,
+    }
+}
+
+fn ensure_http_queue_item_mutable(
+    projection: &ConversationQueueDurableProjection,
+    queue_id: &ConversationInputQueueId,
+) -> Result<(), HttpConversationQueueDriverError> {
+    let Some(item) = projection
+        .queue
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == *queue_id)
+    else {
+        return if projection.is_terminal_queue_id(queue_id) {
+            Err(HttpConversationQueueDriverError::Terminal)
+        } else {
+            Err(HttpConversationQueueDriverError::Conflict)
+        };
+    };
+    if item.status.is_terminal() {
+        return Err(HttpConversationQueueDriverError::Terminal);
+    }
+    if item.status != ConversationInputStatus::Queued {
+        return Err(HttpConversationQueueDriverError::Conflict);
+    }
+    Ok(())
+}
+
+fn validate_http_interrupt_candidate(
+    session: &crate::HttpSessionSnapshot,
+    state: &HttpDurableQueueState,
+    exact_prompts: &BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>,
+) -> Result<(), HttpConversationQueueDriverError> {
+    if state.projection.queue.paused {
+        return Err(HttpConversationQueueDriverError::Conflict);
+    }
+    let queue_id = state
+        .projection
+        .queue
+        .next_dispatchable
+        .as_ref()
+        .ok_or(HttpConversationQueueDriverError::Conflict)?;
+    let item = state
+        .projection
+        .queue
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == *queue_id)
+        .ok_or(HttpConversationQueueDriverError::Conflict)?;
+    if item.status != ConversationInputStatus::Queued {
+        return Err(HttpConversationQueueDriverError::Conflict);
+    }
+    if item.queued.target != ConversationInputTarget::MainThread
+        || item.queued.kind != ConversationInputKind::Chat
+    {
+        return Err(HttpConversationQueueDriverError::Unsupported);
+    }
+    if item
+        .queued
+        .prompt_hash
+        .starts_with(CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX)
+    {
+        let key = exact_queue_prompt_key(session, queue_id.clone());
+        if exact_prompts
+            .get(&key)
+            .is_none_or(|material| material.prompt_hash != item.queued.prompt_hash)
+        {
+            return Err(HttpConversationQueueDriverError::RequiresReentry);
+        }
+    }
+    Ok(())
+}
+
+fn validate_http_exact_queue_cache_capacity(
+    cache: &BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>,
+    update: Option<&HttpExactQueueCacheUpdate>,
+) -> Result<(), HttpConversationQueueDriverError> {
+    let Some(HttpExactQueueCacheUpdate::Replace {
+        key,
+        exact_prompt: Some(_),
+        ..
+    }) = update
+    else {
+        return Ok(());
+    };
+    if !cache.contains_key(key) && cache.len() >= MAX_HTTP_EXACT_QUEUE_PROMPTS {
+        return Err(HttpConversationQueueDriverError::Conflict);
+    }
+    Ok(())
+}
+
+fn apply_http_exact_queue_cache_update(
+    cache: &mut BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>,
+    update: Option<HttpExactQueueCacheUpdate>,
+) {
+    match update {
+        Some(HttpExactQueueCacheUpdate::Replace {
+            key,
+            prompt_hash,
+            exact_prompt: Some(exact_prompt),
+        }) => {
+            cache.insert(
+                key,
+                HttpExactQueuePrompt {
+                    prompt_hash,
+                    exact_prompt,
+                },
+            );
+        }
+        Some(HttpExactQueueCacheUpdate::Replace {
+            key,
+            exact_prompt: None,
+            ..
+        })
+        | Some(HttpExactQueueCacheUpdate::Remove(key)) => {
+            cache.remove(&key);
+        }
+        None => {}
+    }
+}
+
+fn evict_http_promoted_exact_prompt(
+    session: &crate::HttpSessionSnapshot,
+    queued: Option<&HttpQueuedRunTerminalContext>,
+    exact_queue_prompts: &Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>,
+) -> Result<(), HttpRunDriverError> {
+    let Some(queued) = queued else {
+        return Ok(());
+    };
+    let state = read_http_durable_queue_state(session)
+        .map_err(|_| HttpRunDriverError::new("durable queued promotion state is unavailable"))?;
+    let still_queued = state
+        .projection
+        .queue
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == queued.queue_id)
+        .is_some_and(|item| item.status == ConversationInputStatus::Queued);
+    if still_queued {
+        return Ok(());
+    }
+    exact_queue_prompts
+        .lock()
+        .map_err(|_| HttpRunDriverError::new("queued exact prompt state is unavailable"))?
+        .remove(&queued.exact_prompt_key);
+    Ok(())
+}
+
+fn finalize_http_queued_terminal(
+    session: &crate::HttpSessionSnapshot,
+    queued: &HttpQueuedRunTerminalContext,
+    unpromoted_terminal: HttpQueuedUnpromotedTerminal,
+) -> Result<(), HttpRunDriverError> {
+    let records = JsonlSessionStore::read_event_records(&session.session_log_path)
+        .map_err(|_| HttpRunDriverError::new("queued terminal evidence is unavailable"))?;
+    if records
+        .iter()
+        .any(|record| record.session_id() != session.durable_session_scope_id)
+    {
+        return Err(HttpRunDriverError::new(
+            "queued terminal evidence belongs to another durable session",
+        ));
+    }
+    let queue = ConversationQueueDurableProjection::from_records(&records)
+        .map_err(|_| HttpRunDriverError::new("durable queued terminal state is invalid"))?;
+    let Some(item) = queue
+        .queue
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == queued.queue_id)
+    else {
+        return Ok(());
+    };
+    let unpromoted = item.status == ConversationInputStatus::Queued;
+    if !unpromoted && item.status != ConversationInputStatus::Dispatching {
+        return Ok(());
+    }
+
+    let (expectation, status, reason) = if unpromoted {
+        let (status, reason) = match unpromoted_terminal {
+            HttpQueuedUnpromotedTerminal::Rejected => (
+                ConversationInputStatus::Rejected,
+                Some("queued run preparation ended before durable promotion".to_owned()),
+            ),
+            HttpQueuedUnpromotedTerminal::Cancelled => (
+                ConversationInputStatus::Cancelled,
+                Some("queued run was cancelled before durable promotion".to_owned()),
+            ),
+        };
+        (
+            ConversationInputTerminalExpectation::Queued {
+                expected_queue_revision: queued.expected_queue_revision.clone(),
+                queue_id: queued.queue_id.clone(),
+                expected_prompt_hash: queued.prompt_hash.clone(),
+            },
+            status,
+            reason,
+        )
+    } else {
+        let Some(promotion) = http_queued_promotion(&records, &queued.queue_id) else {
+            return Ok(());
+        };
+        if promotion.dispatch_run_id != queued.dispatch_run_id {
+            return Ok(());
+        }
+        let (status, reason) =
+            http_queued_terminal_from_attempt_evidence(&records, &queued.dispatch_run_id)?;
+        let expected_frontier = records
+            .last()
+            .map(ConversationInputTerminalFrontier::from_record)
+            .ok_or_else(|| HttpRunDriverError::new("queued terminal frontier is unavailable"))?;
+        (
+            ConversationInputTerminalExpectation::Promoted {
+                queue_id: queued.queue_id.clone(),
+                dispatch_run_id: queued.dispatch_run_id.clone(),
+                expected_frontier,
+            },
+            status,
+            reason,
+        )
+    };
+    let store = JsonlSessionStore::new(&session.session_log_path)
+        .map_err(|_| HttpRunDriverError::new("queued terminal store is unavailable"))?;
+    store
+        .append_conversation_input_terminal_if_current(ConversationInputTerminalCommand {
+            expectation,
+            terminal: ConversationInputStatusEntry {
+                queue_id: queued.queue_id.clone(),
+                status,
+                reason,
+                updated_at_ms: Some(current_unix_time_ms()),
+            },
+        })
+        .map(|_| ())
+        .map_err(|_| HttpRunDriverError::new("queued terminal status could not be persisted"))
+}
+
+fn http_queued_promotion(
+    records: &[sigil_kernel::SessionStreamRecord],
+    queue_id: &ConversationInputQueueId,
+) -> Option<ConversationInputPromotedEntry> {
+    records.iter().rev().find_map(|record| {
+        let event = record.stored_event();
+        if event.event_kind() != Some(sigil_kernel::DurableEventType::ConversationInputPromoted) {
+            return None;
+        }
+        serde_json::from_value::<ConversationInputPromotedEntry>(event.payload.clone())
+            .ok()
+            .filter(|promotion| &promotion.queue_id == queue_id)
+    })
+}
+
+fn http_queued_terminal_from_attempt_evidence(
+    records: &[sigil_kernel::SessionStreamRecord],
+    dispatch_run_id: &str,
+) -> Result<(ConversationInputStatus, Option<String>), HttpRunDriverError> {
+    let attempts = ProviderPhysicalAttemptProjection::from_records(records)
+        .map_err(|_| HttpRunDriverError::new("queued provider attempt evidence is invalid"))?;
+    let attempts = attempts.attempts_for_logical_run_id(dispatch_run_id);
+    Ok(match attempts.as_slice() {
+        [] => (
+            ConversationInputStatus::Rejected,
+            Some("queued promotion was not followed by a provider physical attempt".to_owned()),
+        ),
+        [attempt] => match attempt.terminal.as_ref().map(|entry| entry.outcome) {
+            Some(
+                ProviderPhysicalAttemptOutcome::Completed
+                | ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
+                | ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput,
+            ) => (ConversationInputStatus::Delivered, None),
+            Some(ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption) => (
+                ConversationInputStatus::Rejected,
+                Some("queued provider attempt confirmed no model consumption".to_owned()),
+            ),
+            Some(
+                ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain
+                | ProviderPhysicalAttemptOutcome::Interrupted,
+            ) => (
+                ConversationInputStatus::Stale,
+                Some(
+                    "queued provider outcome is uncertain and will not be replayed automatically"
+                        .to_owned(),
+                ),
+            ),
+            None => (
+                ConversationInputStatus::Stale,
+                Some("queued provider physical attempt has no durable terminal".to_owned()),
+            ),
+        },
+        _ => (
+            ConversationInputStatus::Stale,
+            Some("queued promotion has multiple provider physical attempts".to_owned()),
+        ),
+    })
+}
+
 struct HttpProductionActiveRun {
     session_id: String,
     broker: Arc<HttpApprovalBroker>,
@@ -793,10 +2032,19 @@ struct HttpRunSupervisor {
     registry: Weak<HttpSessionRunRegistry>,
     broker: Arc<HttpApprovalBroker>,
     start: HttpRunDriverStart,
+    queued: Option<HttpQueuedRunPreparation>,
+    exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionCancellationCommand>,
 }
 
 impl HttpRunSupervisor {
+    fn evict_promoted_exact_prompt(
+        &self,
+        queued: Option<&HttpQueuedRunTerminalContext>,
+    ) -> Result<(), HttpRunDriverError> {
+        evict_http_promoted_exact_prompt(&self.start.session, queued, &self.exact_queue_prompts)
+    }
+
     async fn run(mut self) -> Result<(), HttpRunDriverError> {
         let registry = self.registry.upgrade().ok_or_else(|| {
             HttpRunDriverError::new("production registry closed before run preparation")
@@ -830,7 +2078,29 @@ impl HttpRunSupervisor {
         };
         let services = self.services.clone();
         let preparer = Arc::clone(&self.preparer);
-        let mut preparation = Box::pin(preparer.prepare(request, services));
+        let queued_terminal = self
+            .queued
+            .as_ref()
+            .map(|queued| HttpQueuedRunTerminalContext {
+                queue_id: queued.promotion.queue_id.clone(),
+                dispatch_run_id: queued.promotion.dispatch_run_id.clone(),
+                expected_queue_revision: queued.promotion.expected_queue_revision.clone(),
+                prompt_hash: queued.promotion.prompt_hash.clone(),
+                exact_prompt_key: queued.exact_prompt_key.clone(),
+            });
+        let mut preparation = match self.queued.take() {
+            Some(queued) => preparer.prepare_queued(
+                ApplicationQueuedRunRequest {
+                    run: request,
+                    durable_queue: queued.durable_queue,
+                    promotion: queued.promotion,
+                    prompt_material: queued.prompt_material,
+                    capability_registrations: queued.capability_registrations,
+                },
+                services,
+            ),
+            None => preparer.prepare(request, services),
+        };
         let preparation_outcome = tokio::select! {
             biased;
             result = &mut preparation => Ok(result),
@@ -858,10 +2128,12 @@ impl HttpRunSupervisor {
                             error,
                         );
                         let _ = preparation.await;
+                        self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
                         return Err(error);
                     }
                 };
                 drop(preparation);
+                self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
                 return match preparation_result {
                     Ok(prepared) => {
                         self.cancel_prepared_before_execution(
@@ -884,6 +2156,7 @@ impl HttpRunSupervisor {
                 ));
             }
         };
+        self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
         let prepared = match preparation_result {
             Ok(prepared) => prepared,
             Err(error) => {

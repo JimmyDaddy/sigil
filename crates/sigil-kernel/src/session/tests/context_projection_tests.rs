@@ -1,4 +1,8 @@
-use crate::ToolCall;
+use crate::{
+    ConversationInputKind, ConversationInputQueueId, ConversationInputStatus,
+    ConversationInputTarget, ToolCall, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
+};
 use anyhow::Result;
 
 use super::*;
@@ -149,6 +153,93 @@ fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_bound
         .map(|message| message.content.as_deref())
         .collect::<Vec<_>>();
     assert!(request_contents.ends_with(&[Some("first"), Some("second"), Some("third")]));
+    Ok(())
+}
+
+#[test]
+fn promoted_user_is_live_immediately_but_durable_context_waits_for_delivery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session-promoted.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let queue_id = ConversationInputQueueId::new("context-promoted")?;
+    let prompt = project_conversation_prompt_for_persistence("promoted context request");
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash.clone(),
+            prompt: prompt.safe_prompt.clone(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        },
+    ))?;
+    let revision = session
+        .try_conversation_queue_durable_projection_from_durable()?
+        .expect("durable queue projection")
+        .revision
+        .expect("queued event advances revision");
+    let mut durable_user_message = ModelMessage::user(prompt.safe_prompt.clone());
+    durable_user_message.id = "context-promoted-message".to_owned();
+    let promotion = ConversationInputPromotedEntry {
+        queue_id: queue_id.clone(),
+        expected_queue_revision: revision,
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: false,
+        durable_user_message: durable_user_message.clone(),
+        capability_descriptors: Vec::new(),
+        capability_digest: conversation_promotion_capability_digest(&[])?,
+        dispatch_run_id: "context-promoted-run".to_owned(),
+        promoted_at_ms: 2,
+    };
+    store.append_conversation_input_promoted(promotion.clone())?;
+
+    let dispatching = session
+        .try_context_projection_from_durable()?
+        .expect("durable context projection");
+    assert!(dispatching.model_messages().is_empty());
+    session.record_durably_appended_conversation_input_promotion(promotion)?;
+    assert_eq!(
+        session
+            .context_projection()
+            .model_messages()
+            .iter()
+            .filter(|message| message.id == durable_user_message.id)
+            .count(),
+        1
+    );
+
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+            queue_id,
+            status: ConversationInputStatus::Delivered,
+            reason: None,
+            updated_at_ms: Some(3),
+        }),
+    ))?;
+    let delivered = session
+        .try_context_projection_from_durable()?
+        .expect("durable context projection");
+    assert_eq!(
+        delivered
+            .model_messages()
+            .iter()
+            .filter(|message| {
+                message.id == durable_user_message.id
+                    && message.content == durable_user_message.content
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        JsonlSessionStore::read_event_records(store.path())?
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::UserMessageRecorded)
+            })
+            .count(),
+        0
+    );
     Ok(())
 }
 

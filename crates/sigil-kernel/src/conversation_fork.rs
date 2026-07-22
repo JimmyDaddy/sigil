@@ -37,6 +37,7 @@ impl ConversationForkProjection {
     ///
     /// Returns an error when a stored session entry cannot be decoded.
     pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
+        crate::ConversationQueueDurableProjection::from_records(records)?;
         let mut points = Vec::new();
         let mut current = None::<ConversationTurnBuilder>;
         let mut turn_index = 0usize;
@@ -400,15 +401,8 @@ fn safe_prefix_for_complete_turn(
 }
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {
-    match record {
-        SessionStreamRecord::Stored(event) => event
-            .payload
-            .get("session_log_entry")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .context("failed to decode conversation fork session entry"),
-    }
+    crate::conversation_transcript_entry_from_record(record)
+        .context("failed to decode conversation fork session entry")
 }
 
 fn validate_source_and_destination(

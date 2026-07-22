@@ -5,9 +5,11 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpAgentActivityView, HttpApplicationAgentBinding, HttpApplicationSkillBinding,
-    HttpApprovalDecisionRecord, HttpConversationDisplayPage, HttpDurableSessionFrontier,
-    HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpApprovalDecisionRecord, HttpConversationDisplayPage, HttpConversationQueueCommandRequest,
+    HttpConversationQueueGeneration, HttpConversationQueueView, HttpDurableSessionFrontier,
+    HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort, HttpRunContextView,
+    HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -55,11 +57,59 @@ pub struct HttpRunDriverApproval {
     pub decision: HttpApprovalDecisionRecord,
 }
 
+/// Secret-free admission selected by the application owner for one queued foreground run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpQueuedRunAdmission {
+    /// Durable queue item selected under `generation`.
+    pub entry_id: String,
+    /// Opaque queue generation used by the promotion CAS.
+    pub generation: HttpConversationQueueGeneration,
+    /// Logical run id durably bound by queue promotion.
+    pub dispatch_run_id: String,
+    /// Safe bounded prompt preview used by process-local run status.
+    pub prompt_preview: String,
+    /// Effective permission mode resolved by the application owner.
+    pub permission_mode: HttpPermissionMode,
+    /// Exact queued reasoning effort when present.
+    pub reasoning_effort: Option<HttpReasoningEffort>,
+}
+
+/// Start context for a queue-owned foreground run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpQueuedRunDriverStart {
+    /// Session snapshot after the registry acquired foreground ownership.
+    pub session: HttpSessionSnapshot,
+    /// Registered process-local run snapshot.
+    pub run: HttpRunSnapshot,
+    /// Durable queue admission that must be revalidated before promotion.
+    pub admission: HttpQueuedRunAdmission,
+}
+
+/// Idempotent identity and exact payload for one queue mutation.
+///
+/// The application owner uses this identity to derive stable durable entry ids. This prevents a
+/// retry after a process interruption from appending a second logical queue item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConversationQueueDriverCommand {
+    /// Stable command identity within the client/session scope.
+    pub command_id: String,
+    /// Stable application-client identity owning the command.
+    pub client_id: String,
+    /// Exact queue generation and requested mutation.
+    pub request: HttpConversationQueueCommandRequest,
+}
+
 /// Driver interface used by the HTTP registry.
 ///
 /// The registry owns IDs and routing state. The driver owns actual agent execution,
 /// cancellation, and approval delivery so this crate does not duplicate the agent loop.
 pub trait HttpRunDriver: Send + Sync {
+    /// Whether terminal registry state must retain an admission barrier until the driver reports
+    /// that its process-local supervisor and runtime session lease have both been released.
+    fn requires_run_release_barrier(&self) -> bool {
+        false
+    }
+
     /// Creates or resolves the durable session binding for one adapter session.
     ///
     /// # Errors
@@ -85,6 +135,12 @@ pub trait HttpRunDriver: Send + Sync {
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
         Err(HttpSessionOpenBindingError::Unavailable)
     }
+
+    /// Purges process-local material owned by one durable session after its source was deleted.
+    ///
+    /// The durable deletion path calls this only after the catalog mutation succeeds. The default
+    /// is a no-op for drivers that retain no session-scoped secrets or caches.
+    fn purge_session_local_state(&self, _durable_session_scope_id: &str) {}
 
     /// Starts execution for a registered run.
     ///
@@ -194,6 +250,78 @@ pub trait HttpRunDriver: Send + Sync {
         ))
     }
 
+    /// Projects the current durable follow-up queue with process-local material availability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection when the durable projection or application owner is unavailable.
+    fn conversation_queue_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _foreground_owner: Option<&HttpForegroundRunOwner>,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        Err(HttpConversationQueueDriverError::Unavailable)
+    }
+
+    /// Applies one exact queue CAS mutation and returns the resulting bounded view.
+    ///
+    /// The implementation owns secret-safe projection and any process-local exact prompt cache.
+    /// It must not persist the raw prompt from enqueue or edit actions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection for stale generations, terminal entries, owner loss, permission,
+    /// conflict, unsupported actions, or unavailable durable truth.
+    fn mutate_conversation_queue(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _foreground_owner: Option<&HttpForegroundRunOwner>,
+        _command: &HttpConversationQueueDriverCommand,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        Err(HttpConversationQueueDriverError::Unavailable)
+    }
+
+    /// Selects the next exact dispatchable queue item without changing durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection when material or durable queue truth cannot be proven.
+    fn next_queued_run_admission(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpQueuedRunAdmission>, HttpConversationQueueDriverError> {
+        Ok(None)
+    }
+
+    /// Starts one internally registered queue-owned foreground run.
+    ///
+    /// This is deliberately separate from the public run-start route. The driver must prepare and
+    /// freeze the exact request, commit queue promotion by writer-lock CAS, and only then execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when preparation, promotion, or owned supervisor startup fails.
+    fn start_queued_run(&self, _start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "queued run execution is unavailable",
+        ))
+    }
+
+    /// Waits for one run supervisor to release its process-local session lease after terminal.
+    ///
+    /// Synthetic drivers own no asynchronous supervisor by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when cleanup does not complete before `timeout`.
+    fn wait_for_run_release(
+        &self,
+        _run_id: &str,
+        _timeout: Duration,
+    ) -> Result<(), HttpRunDriverError> {
+        Ok(())
+    }
+
     /// Executes one exact stale-safe verification rerun.
     ///
     /// # Errors
@@ -257,6 +385,35 @@ pub enum HttpConversationDisplayDriverError {
     StaleCursor,
     /// Durable projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
+    Unavailable,
+}
+
+/// Typed application-owner rejection for queue projection and mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpConversationQueueDriverError {
+    /// The client generation no longer matches durable queue truth.
+    #[error("conversation queue generation is stale")]
+    StaleGeneration,
+    /// The addressed queue entry already reached a terminal state.
+    #[error("conversation queue entry is terminal")]
+    Terminal,
+    /// The foreground owner binding changed or disappeared.
+    #[error("conversation queue foreground owner changed")]
+    OwnerLost,
+    /// Current policy cannot authorize this queue operation.
+    #[error("conversation queue operation requires permission")]
+    Permission,
+    /// The queue mutation conflicts with current durable state.
+    #[error("conversation queue operation conflicts with durable state")]
+    Conflict,
+    /// Exact prompt material was intentionally lost and must be entered again.
+    #[error("conversation queue prompt requires reentry")]
+    RequiresReentry,
+    /// The requested queue action is not supported by this application owner.
+    #[error("conversation queue operation is unsupported")]
+    Unsupported,
+    /// Durable queue truth or application ownership could not be proven.
+    #[error("conversation queue is unavailable")]
     Unavailable,
 }
 

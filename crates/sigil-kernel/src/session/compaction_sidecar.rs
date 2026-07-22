@@ -324,6 +324,9 @@ impl ContinuationSourceCatalog {
             let entry = session_entry_from_stored_event(event)?
                 .context("folded checkpoint source is not a provider-visible message")?;
             let message = match entry {
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                    promotion.durable_user_message
+                }
                 SessionLogEntry::User(message)
                 | SessionLogEntry::Assistant(message)
                 | SessionLogEntry::ToolResult(message) => message,

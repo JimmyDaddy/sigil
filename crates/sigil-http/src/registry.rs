@@ -11,7 +11,9 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sigil_kernel::{SessionRef, safe_persistence_text};
+use sigil_kernel::{
+    SessionRef, project_conversation_prompt_for_persistence, safe_persistence_text,
+};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -21,18 +23,23 @@ use crate::{
         HttpStoredCommandIdentity, HttpStoredCommandKey,
     },
     driver::{
-        HttpConversationDisplayDriverError, HttpRunDriver, HttpRunDriverApproval,
-        HttpRunDriverCancel, HttpRunDriverStart, HttpSessionOpenBindingError,
+        HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
+        HttpConversationQueueDriverError, HttpQueuedRunDriverStart, HttpRunDriver,
+        HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
+        HttpSessionOpenBindingError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
         HttpApprovalDecisionRequest, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
-        HttpForegroundRunOwner, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
-        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
-        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-        HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
-        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+        HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
+        HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
+        HttpConversationQueuePromptMaterial, HttpConversationQueueView, HttpForegroundRunOwner,
+        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
+        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
+        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
+        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
+        HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -41,6 +48,10 @@ const DEFAULT_IN_MEMORY_COMMAND_CAPACITY: usize = 4_096;
 const MAX_SESSION_OPEN_REFERENCE_BYTES: usize = 512;
 const MAX_SESSION_OPEN_ID_BYTES: usize = 512;
 const MAX_SESSION_OPEN_LABEL_BYTES: usize = 160;
+const MAX_CONVERSATION_QUEUE_ID_BYTES: usize = 512;
+const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
+const QUEUE_INTERRUPT_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
+const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
 
 /// Errors returned by the HTTP session/run registry.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
@@ -84,6 +95,9 @@ pub enum HttpRegistryError {
     /// Another foreground run still owns this adapter session.
     #[error("http session {session_id} already has foreground run {run_id}")]
     SessionForegroundRunActive { session_id: String, run_id: String },
+    /// A terminal run still owns process-local cleanup or the runtime session lease.
+    #[error("http session {session_id} is still releasing run {run_id}")]
+    SessionRunCleanupActive { session_id: String, run_id: String },
     /// A verification rerun already owns the session's foreground mutation lease.
     #[error("http session {session_id} already has an active verification rerun")]
     SessionVerificationActive { session_id: String },
@@ -115,6 +129,33 @@ pub enum HttpRegistryError {
     /// The canonical durable display projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
     ConversationDisplayUnavailable,
+    /// The caller's queue generation no longer matches durable queue truth.
+    #[error("conversation queue generation is stale")]
+    ConversationQueueGenerationStale,
+    /// The queue command contains an empty or over-bounded exact field.
+    #[error("conversation queue command is invalid")]
+    ConversationQueueInvalidCommand,
+    /// The addressed queue entry already reached a terminal state.
+    #[error("conversation queue entry is terminal")]
+    ConversationQueueEntryTerminal,
+    /// The foreground owner changed before an interrupt-and-run-next command was admitted.
+    #[error("conversation queue foreground owner changed")]
+    ConversationQueueOwnerLost,
+    /// Current policy does not authorize the queue operation.
+    #[error("conversation queue operation requires permission")]
+    ConversationQueuePermissionRequired,
+    /// The queue operation conflicts with current durable state.
+    #[error("conversation queue operation conflicts with durable state")]
+    ConversationQueueConflict,
+    /// Exact prompt material was intentionally lost and must be entered again.
+    #[error("conversation queue prompt requires reentry")]
+    ConversationQueueRequiresReentry,
+    /// The requested queue action is not supported by the application owner.
+    #[error("conversation queue operation is unsupported")]
+    ConversationQueueUnsupported,
+    /// Durable queue truth or its application owner is unavailable.
+    #[error("conversation queue is unavailable")]
+    ConversationQueueUnavailable,
     /// The driver unwound after the registry had published a tentative operation.
     #[error("http driver panicked during {operation} for run {run_id}")]
     DriverPanicked {
@@ -204,6 +245,7 @@ pub enum HttpRegistryError {
 /// In-memory registry for HTTP adapter sessions, runs, cancellations, and approvals.
 pub struct HttpSessionRunRegistry {
     state: Mutex<HttpRegistryState>,
+    queue_command_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     driver: Arc<dyn HttpRunDriver>,
     command_store: Option<Arc<HttpDurableCommandStore>>,
     in_memory_command_capacity: usize,
@@ -228,6 +270,7 @@ impl HttpSessionRunRegistry {
     pub fn new(driver: Arc<dyn HttpRunDriver>) -> Self {
         Self {
             state: Mutex::new(HttpRegistryState::default()),
+            queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: None,
             in_memory_command_capacity: DEFAULT_IN_MEMORY_COMMAND_CAPACITY,
@@ -243,6 +286,7 @@ impl HttpSessionRunRegistry {
         let id_namespace = format!("e{}", command_store.server_epoch());
         Self {
             state: Mutex::new(HttpRegistryState::with_id_namespace(id_namespace)),
+            queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: Some(command_store),
             in_memory_command_capacity: 0,
@@ -256,6 +300,7 @@ impl HttpSessionRunRegistry {
     ) -> Self {
         Self {
             state: Mutex::new(HttpRegistryState::default()),
+            queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: None,
             in_memory_command_capacity: capacity,
@@ -292,6 +337,7 @@ impl HttpSessionRunRegistry {
             run_ids: Vec::new(),
             binding,
             foreground_run_id: None,
+            release_pending_run_id: None,
             foreground_owner_generation: 0,
             verification_in_progress: false,
         };
@@ -331,34 +377,42 @@ impl HttpSessionRunRegistry {
                     HttpRegistryError::DurableSessionUnavailable
                 }
             })?;
-        let mut state = self.lock_state();
-        state.ensure_accepting_commands()?;
-        if let Some(existing) = state
-            .sessions
-            .values()
-            .find(|session| session.binding.session_scope_id == binding.session_scope_id)
-        {
-            if existing.binding.session_log_path != binding.session_log_path {
-                return Err(HttpRegistryError::InvalidSessionBinding {
-                    session_id: existing.id.clone(),
-                    message: "durable scope resolved to another canonical path".to_owned(),
-                });
+        let snapshot = {
+            let mut state = self.lock_state();
+            state.ensure_accepting_commands()?;
+            if let Some(existing) = state
+                .sessions
+                .values()
+                .find(|session| session.binding.session_scope_id == binding.session_scope_id)
+            {
+                if existing.binding.session_log_path != binding.session_log_path {
+                    return Err(HttpRegistryError::InvalidSessionBinding {
+                        session_id: existing.id.clone(),
+                        message: "durable scope resolved to another canonical path".to_owned(),
+                    });
+                }
+                existing.snapshot()
+            } else {
+                let id = state.next_session_id();
+                validate_session_binding(&id, &binding)?;
+                let session = HttpSessionState {
+                    id: id.clone(),
+                    label: request.label,
+                    run_ids: Vec::new(),
+                    binding,
+                    foreground_run_id: None,
+                    release_pending_run_id: None,
+                    foreground_owner_generation: 0,
+                    verification_in_progress: false,
+                };
+                let snapshot = session.snapshot();
+                state.sessions.insert(id, session);
+                snapshot
             }
-            return Ok(existing.snapshot());
-        }
-        let id = state.next_session_id();
-        validate_session_binding(&id, &binding)?;
-        let session = HttpSessionState {
-            id: id.clone(),
-            label: request.label,
-            run_ids: Vec::new(),
-            binding,
-            foreground_run_id: None,
-            foreground_owner_generation: 0,
-            verification_in_progress: false,
         };
-        let snapshot = session.snapshot();
-        state.sessions.insert(id, session);
+        // Reopening is also the restart recovery trigger for durable safe queued work. Admission
+        // failure must not hide an otherwise valid historical session from the client.
+        let _ = self.schedule_next_queued_run(&snapshot.id);
         Ok(snapshot)
     }
 
@@ -379,7 +433,11 @@ impl HttpSessionRunRegistry {
     ) -> Result<HttpDurableSessionMutationGuard<'_>, HttpRegistryError> {
         let mut state = self.lock_state();
         state.ensure_accepting_commands()?;
-        if state.durable_session_mutations.contains(durable_session_id) {
+        if state.durable_session_mutations.contains(durable_session_id)
+            || state
+                .active_queue_session_commands
+                .contains(durable_session_id)
+        {
             return Err(HttpRegistryError::DurableSessionMutationActive);
         }
         for session in state
@@ -389,6 +447,12 @@ impl HttpSessionRunRegistry {
         {
             if let Some(run_id) = session.foreground_run_id.as_ref() {
                 return Err(HttpRegistryError::SessionForegroundRunActive {
+                    session_id: session.id.clone(),
+                    run_id: run_id.clone(),
+                });
+            }
+            if let Some(run_id) = session.release_pending_run_id.as_ref() {
+                return Err(HttpRegistryError::SessionRunCleanupActive {
                     session_id: session.id.clone(),
                     run_id: run_id.clone(),
                 });
@@ -411,13 +475,19 @@ impl HttpSessionRunRegistry {
 
     pub(crate) fn durable_session_mutation_is_blocked(&self, durable_session_id: &str) -> bool {
         let state = self.lock_state();
-        if !state.accepting_commands || state.durable_session_mutations.contains(durable_session_id)
+        if !state.accepting_commands
+            || state.durable_session_mutations.contains(durable_session_id)
+            || state
+                .active_queue_session_commands
+                .contains(durable_session_id)
         {
             return true;
         }
         state.sessions.values().any(|session| {
             session.binding.session_scope_id == durable_session_id
-                && (session.foreground_run_id.is_some() || session.verification_in_progress)
+                && (session.foreground_run_id.is_some()
+                    || session.release_pending_run_id.is_some()
+                    || session.verification_in_progress)
         })
     }
 
@@ -661,6 +731,371 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    /// Projects the bounded durable follow-up queue for one adapter session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or the application owner cannot prove queue
+    /// state and process-local material availability.
+    pub fn conversation_queue(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpConversationQueueView, HttpRegistryError> {
+        let (session, foreground_owner) = {
+            let state = self.lock_state();
+            let current = state.sessions.get(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
+            (current.snapshot(), current.foreground_owner())
+        };
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .conversation_queue_view(&session, foreground_owner.as_ref())
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "conversation queue view",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(queue_driver_registry_error)
+    }
+
+    /// Applies one idempotent queue command under the exact durable queue generation.
+    ///
+    /// Mutation receipts are completed before best-effort scheduler admission so a successful
+    /// durable write never becomes an un-replayable failed command merely because execution could
+    /// not start immediately. Interrupt-and-run-next additionally binds the exact foreground owner,
+    /// waits for the production supervisor to release its session lease, and only then admits the
+    /// next queued run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for protocol or identity conflicts, stale queue generations, owner drift,
+    /// unavailable exact prompt material, or a rejected queue operation.
+    pub fn command_conversation_queue(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+    ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        validate_conversation_queue_command(&command.payload)?;
+
+        let request = HttpReservedCommand::queue(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_queue(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let action = command.payload.action.kind();
+        let expected_generation = command.payload.expected_generation.clone();
+        let is_interrupt = matches!(
+            command.payload.action,
+            HttpConversationQueueCommandAction::InterruptAndRunNext { .. }
+        );
+        let queue_command_lock = self.queue_command_lock(session_id);
+        let mut queue_command_guard = Some(
+            queue_command_lock
+                .lock()
+                .expect("per-session queue command lock should not be poisoned"),
+        );
+        let result = (|| {
+            let (session, foreground_owner, queue_session_guard) = {
+                let mut state = self.lock_state();
+                state.ensure_accepting_commands()?;
+                let durable_session_id = state
+                    .sessions
+                    .get(session_id)
+                    .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                        session_id: session_id.to_owned(),
+                    })?
+                    .binding
+                    .session_scope_id
+                    .clone();
+                if state
+                    .durable_session_mutations
+                    .contains(&durable_session_id)
+                    || !state
+                        .active_queue_session_commands
+                        .insert(durable_session_id.clone())
+                {
+                    return Err(HttpRegistryError::DurableSessionMutationActive);
+                }
+                let current = state.sessions.get(session_id).ok_or_else(|| {
+                    HttpRegistryError::SessionNotFound {
+                        session_id: session_id.to_owned(),
+                    }
+                })?;
+                (
+                    current.snapshot(),
+                    current.foreground_owner(),
+                    HttpQueueSessionCommandGuard {
+                        registry: self,
+                        durable_session_id,
+                    },
+                )
+            };
+            let mut queue_session_guard = Some(queue_session_guard);
+
+            let interrupt_owner = match &command.payload.action {
+                HttpConversationQueueCommandAction::InterruptAndRunNext {
+                    foreground_run_id,
+                    foreground_owner_revision,
+                } => {
+                    let owner = foreground_owner
+                        .as_ref()
+                        .filter(|owner| {
+                            owner.run_id == *foreground_run_id
+                                && owner.owner_revision == *foreground_owner_revision
+                        })
+                        .cloned()
+                        .ok_or(HttpRegistryError::ConversationQueueOwnerLost)?;
+                    Some(owner)
+                }
+                _ => None,
+            };
+
+            let driver_command = HttpConversationQueueDriverCommand {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                request: command.payload.clone(),
+            };
+            let mut queue = catch_unwind(AssertUnwindSafe(|| {
+                self.driver.mutate_conversation_queue(
+                    &session,
+                    foreground_owner.as_ref(),
+                    &driver_command,
+                )
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "conversation queue mutation",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(queue_driver_registry_error)?;
+
+            if let Some(owner) = interrupt_owner.as_ref() {
+                self.cancel_run_with_reason(
+                    &owner.run_id,
+                    Some("interrupt and run next queued prompt".to_owned()),
+                )
+                .map_err(|error| match error {
+                    HttpRegistryError::RunNotActive { .. }
+                    | HttpRegistryError::RunNoLongerForeground { .. }
+                    | HttpRegistryError::RunOwnerChanged { .. } => {
+                        HttpRegistryError::ConversationQueueOwnerLost
+                    }
+                    other => other,
+                })?;
+                // The exact queue candidate was validated and cancellation was accepted while
+                // excluding concurrent queue mutations. Subsequent edits may now update the
+                // latest revision while the cooperative terminal/release barrier completes.
+                drop(queue_command_guard.take());
+                drop(queue_session_guard.take());
+                catch_unwind(AssertUnwindSafe(|| {
+                    self.driver
+                        .wait_for_run_release(&owner.run_id, QUEUE_INTERRUPT_RELEASE_TIMEOUT)
+                }))
+                .map_err(|_| HttpRegistryError::DriverPanicked {
+                    operation: "queued interrupt release",
+                    run_id: owner.run_id.clone(),
+                })?
+                .map_err(|_| HttpRegistryError::ConversationQueueUnavailable)?;
+                let _ = self.record_run_released(&owner.run_id)?;
+                queue = self.conversation_queue(session_id)?;
+            }
+
+            Ok(HttpConversationQueueCommandReceipt {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                session_id: command.session_id.clone(),
+                action,
+                expected_generation: expected_generation.clone(),
+                generation: queue.generation.clone(),
+                interrupt_owner,
+                queue,
+                correlation_id: command.correlation_id.clone(),
+                replayed: false,
+            })
+        })();
+        drop(queue_command_guard);
+        completion.complete(HttpCommandCompletion::Queue(Box::new(result.clone())))?;
+
+        if result.is_ok() && !is_interrupt {
+            // Queue state is already durable and replayable. Scheduler admission is intentionally
+            // best-effort and will be retried after release, resume, reopen, or a later mutation.
+            let _ = self.schedule_next_queued_run(session_id);
+        }
+        result
+    }
+
+    /// Admits and starts the next queue-owned foreground run without using the public run route.
+    ///
+    /// The application driver returns a secret-free admission derived from current durable truth.
+    /// The registry then rechecks single-foreground ownership before registering the logical
+    /// dispatch run. Promotion CAS and provider execution remain driver-owned.
+    fn schedule_next_queued_run(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<HttpRunSnapshot>, HttpRegistryError> {
+        self.schedule_next_queued_run_with_retries(session_id, QUEUE_STALE_START_RESCHEDULE_LIMIT)
+    }
+
+    fn schedule_next_queued_run_with_retries(
+        &self,
+        session_id: &str,
+        retries_remaining: usize,
+    ) -> Result<Option<HttpRunSnapshot>, HttpRegistryError> {
+        let session = {
+            let state = self.lock_state();
+            state.ensure_accepting_commands()?;
+            let current = state.sessions.get(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
+            if current.foreground_run_id.is_some()
+                || current.release_pending_run_id.is_some()
+                || current.verification_in_progress
+                || state
+                    .durable_session_mutations
+                    .contains(&current.binding.session_scope_id)
+            {
+                return Ok(None);
+            }
+            current.snapshot()
+        };
+
+        let admission = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.next_queued_run_admission(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "queued run admission",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(queue_driver_registry_error)?;
+        let Some(admission) = admission else {
+            return Ok(None);
+        };
+        let release_barrier = self.driver.requires_run_release_barrier();
+        if admission.entry_id.trim().is_empty()
+            || admission.dispatch_run_id.trim().is_empty()
+            || admission.generation.0.trim().is_empty()
+        {
+            return Err(HttpRegistryError::ConversationQueueUnavailable);
+        }
+
+        let (session_snapshot, run_snapshot) = {
+            let mut state = self.lock_state();
+            state.ensure_accepting_commands()?;
+            if state.runs.contains_key(&admission.dispatch_run_id) {
+                return Err(HttpRegistryError::ConversationQueueConflict);
+            }
+            let durable_session_id = state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?
+                .binding
+                .session_scope_id
+                .clone();
+            if state
+                .durable_session_mutations
+                .contains(&durable_session_id)
+            {
+                return Ok(None);
+            }
+            let current = state.sessions.get_mut(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
+            if current.foreground_run_id.is_some()
+                || current.release_pending_run_id.is_some()
+                || current.verification_in_progress
+            {
+                return Ok(None);
+            }
+            let run = HttpRunState::new(
+                admission.dispatch_run_id.clone(),
+                session_id.to_owned(),
+                admission.permission_mode,
+                admission.reasoning_effort,
+                prompt_preview(&admission.prompt_preview),
+            );
+            current.run_ids.push(admission.dispatch_run_id.clone());
+            current.foreground_owner_generation =
+                current.foreground_owner_generation.saturating_add(1);
+            current.foreground_run_id = Some(admission.dispatch_run_id.clone());
+            current.release_pending_run_id =
+                release_barrier.then(|| admission.dispatch_run_id.clone());
+            let session_snapshot = current.snapshot();
+            let run_snapshot = run.snapshot();
+            state.runs.insert(admission.dispatch_run_id.clone(), run);
+            (session_snapshot, run_snapshot)
+        };
+
+        let start = HttpQueuedRunDriverStart {
+            session: session_snapshot,
+            run: run_snapshot,
+            admission,
+        };
+        let run_id = start.run.id.clone();
+        let failed_admission = start.admission.clone();
+        match catch_unwind(AssertUnwindSafe(|| self.driver.start_queued_run(start))) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.lock_state().rollback_queued_run_registration(&run_id);
+                let rejection = HttpRegistryError::DriverRejected {
+                    operation: "queued start",
+                    run_id,
+                    message: error.message,
+                };
+                let latest = self.conversation_queue(session_id)?;
+                let Some(latest_entry_id) = latest.next_dispatchable_entry_id.as_deref() else {
+                    return Ok(None);
+                };
+                let admission_drifted = latest.generation != failed_admission.generation
+                    || latest_entry_id != failed_admission.entry_id;
+                if admission_drifted && retries_remaining > 0 {
+                    return self
+                        .schedule_next_queued_run_with_retries(session_id, retries_remaining - 1);
+                }
+                return Err(rejection);
+            }
+            Err(_) => {
+                self.lock_state().mark_run_driver_uncertain(&run_id)?;
+                return Err(HttpRegistryError::DriverPanicked {
+                    operation: "queued start",
+                    run_id,
+                });
+            }
+        }
+
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get_mut(&run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.clone(),
+            })?;
+        if run.status == HttpRunStatus::Starting {
+            run.status = HttpRunStatus::Running;
+        }
+        Ok(Some(run.snapshot()))
+    }
+
     /// Starts one run inside an existing HTTP adapter session.
     ///
     /// # Errors
@@ -685,6 +1120,7 @@ impl HttpSessionRunRegistry {
         let skill_binding = request.skill_binding;
         let agent_binding = request.agent_binding;
         let prompt = request.prompt;
+        let release_barrier = self.driver.requires_run_release_barrier();
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
             state.ensure_accepting_commands()?;
@@ -715,6 +1151,12 @@ impl HttpSessionRunRegistry {
                     run_id: run_id.clone(),
                 });
             }
+            if let Some(run_id) = session.release_pending_run_id.as_ref() {
+                return Err(HttpRegistryError::SessionRunCleanupActive {
+                    session_id: session_id.to_owned(),
+                    run_id: run_id.clone(),
+                });
+            }
             if session.verification_in_progress {
                 return Err(HttpRegistryError::SessionVerificationActive {
                     session_id: session_id.to_owned(),
@@ -731,6 +1173,7 @@ impl HttpSessionRunRegistry {
             session.foreground_owner_generation =
                 session.foreground_owner_generation.saturating_add(1);
             session.foreground_run_id = Some(run_id.clone());
+            session.release_pending_run_id = release_barrier.then(|| run_id.clone());
             let session_snapshot = session.snapshot();
             let run_snapshot = run.snapshot();
             state.runs.insert(run_id.clone(), run);
@@ -758,6 +1201,7 @@ impl HttpSessionRunRegistry {
                 {
                     state.transition_run_terminal(&run_id, HttpRunTerminalOutcome::Failed)?;
                 }
+                state.clear_run_release_barrier(&run_id);
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "start",
                     run_id,
@@ -800,6 +1244,51 @@ impl HttpSessionRunRegistry {
         outcome: HttpRunTerminalOutcome,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         self.lock_state().transition_run_terminal(run_id, outcome)
+    }
+
+    /// Notifies the queue scheduler after a driver-owned supervisor released its session lease.
+    ///
+    /// A durable terminal callback alone is intentionally insufficient: the next queued run is
+    /// admitted only after the production owner has completed process-local cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run is unknown, has not reached terminal state, or queue
+    /// admission fails. No public run-start command is synthesized.
+    pub fn record_run_released(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<HttpRunSnapshot>, HttpRegistryError> {
+        let session_id = {
+            let mut state = self.lock_state();
+            let run = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if !run.status.is_terminal() && run.status != HttpRunStatus::ExecutionUncertain {
+                return Err(HttpRegistryError::RunNotActive {
+                    run_id: run_id.to_owned(),
+                });
+            }
+            let session_id = run.session_id.clone();
+            let session = state.sessions.get_mut(&session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.clone(),
+                }
+            })?;
+            if let Some(pending_run_id) = session.release_pending_run_id.as_deref()
+                && pending_run_id != run_id
+            {
+                // A concurrent release callback already admitted the next owned run. Repeating
+                // the old release notification must not clear the new owner's barrier.
+                return Ok(None);
+            }
+            session.release_pending_run_id = None;
+            session_id
+        };
+        self.schedule_next_queued_run(&session_id)
     }
 
     /// Quarantines a run whose owned production execution task unwound without a durable terminal.
@@ -1033,6 +1522,12 @@ impl HttpSessionRunRegistry {
                 })?;
                 if let Some(run_id) = session.foreground_run_id.as_ref() {
                     return Err(HttpRegistryError::SessionForegroundRunActive {
+                        session_id: session_id.to_owned(),
+                        run_id: run_id.clone(),
+                    });
+                }
+                if let Some(run_id) = session.release_pending_run_id.as_ref() {
+                    return Err(HttpRegistryError::SessionRunCleanupActive {
                         session_id: session_id.to_owned(),
                         run_id: run_id.clone(),
                     });
@@ -1527,6 +2022,18 @@ impl HttpSessionRunRegistry {
             .lock()
             .expect("http registry state lock should not be poisoned")
     }
+
+    fn queue_command_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .queue_command_locks
+            .lock()
+            .expect("http queue command lock registry should not be poisoned");
+        Arc::clone(
+            locks
+                .entry(session_id.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
 }
 
 struct HttpRegistryState {
@@ -1538,6 +2045,7 @@ struct HttpRegistryState {
     accepting_commands: bool,
     id_namespace: Option<String>,
     durable_session_mutations: BTreeSet<String>,
+    active_queue_session_commands: BTreeSet<String>,
 }
 
 impl Default for HttpRegistryState {
@@ -1551,7 +2059,22 @@ impl Default for HttpRegistryState {
             accepting_commands: true,
             id_namespace: None,
             durable_session_mutations: BTreeSet::new(),
+            active_queue_session_commands: BTreeSet::new(),
         }
+    }
+}
+
+struct HttpQueueSessionCommandGuard<'a> {
+    registry: &'a HttpSessionRunRegistry,
+    durable_session_id: String,
+}
+
+impl Drop for HttpQueueSessionCommandGuard<'_> {
+    fn drop(&mut self) {
+        self.registry
+            .lock_state()
+            .active_queue_session_commands
+            .remove(&self.durable_session_id);
     }
 }
 
@@ -1563,8 +2086,13 @@ pub(crate) struct HttpDurableSessionMutationGuard<'a> {
 
 impl HttpDurableSessionMutationGuard<'_> {
     pub(crate) fn finish(mut self, evict_adapter_sessions: bool) {
-        let mut state = self.registry.lock_state();
         if evict_adapter_sessions {
+            self.registry
+                .driver
+                .purge_session_local_state(&self.durable_session_id);
+        }
+        let mut state = self.registry.lock_state();
+        let adapter_session_ids = if evict_adapter_sessions {
             let adapter_session_ids = state
                 .sessions
                 .values()
@@ -1580,10 +2108,21 @@ impl HttpDurableSessionMutationGuard<'_> {
             state
                 .command_reservations
                 .retain(|key, _| !adapter_session_ids.contains(&key.session_id));
-        }
+            adapter_session_ids
+        } else {
+            BTreeSet::new()
+        };
         state
             .durable_session_mutations
             .remove(&self.durable_session_id);
+        drop(state);
+        if !adapter_session_ids.is_empty() {
+            self.registry
+                .queue_command_locks
+                .lock()
+                .expect("http queue command lock registry should not be poisoned")
+                .retain(|session_id, _| !adapter_session_ids.contains(session_id));
+        }
         self.released = true;
     }
 }
@@ -1623,6 +2162,7 @@ enum HttpCommandKind {
     Cancel,
     Approval,
     Verification,
+    Queue,
 }
 
 impl HttpCommandKind {
@@ -1632,6 +2172,7 @@ impl HttpCommandKind {
             Self::Cancel => b"cancel",
             Self::Approval => b"approval",
             Self::Verification => b"verification",
+            Self::Queue => b"queue",
         }
     }
 
@@ -1641,6 +2182,7 @@ impl HttpCommandKind {
             Self::Cancel => "cancel",
             Self::Approval => "approval",
             Self::Verification => "verification",
+            Self::Queue => "queue",
         }
     }
 }
@@ -1681,6 +2223,14 @@ impl HttpReservedCommand {
         Self::new(HttpCommandKind::Verification, &[path_session_id], command)
     }
 
+    fn queue(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        let encoded = secret_safe_queue_command_fingerprint_payload(command)?;
+        Self::new_encoded(HttpCommandKind::Queue, &[path_session_id], &encoded)
+    }
+
     fn new<T>(
         kind: HttpCommandKind,
         targets: &[&str],
@@ -1691,12 +2241,20 @@ impl HttpReservedCommand {
     {
         let encoded = serde_json::to_vec(command)
             .map_err(|_| HttpRegistryError::CommandIdentityEncodingFailed)?;
+        Self::new_encoded(kind, targets, &encoded)
+    }
+
+    fn new_encoded(
+        kind: HttpCommandKind,
+        targets: &[&str],
+        encoded: &[u8],
+    ) -> Result<Self, HttpRegistryError> {
         let mut hasher = Sha256::new();
         update_command_fingerprint_part(&mut hasher, kind.label());
         for target in targets {
             update_command_fingerprint_part(&mut hasher, target.as_bytes());
         }
-        update_command_fingerprint_part(&mut hasher, &encoded);
+        update_command_fingerprint_part(&mut hasher, encoded);
         Ok(Self {
             kind,
             fingerprint: hasher.finalize().into(),
@@ -1722,6 +2280,7 @@ enum HttpCommandCompletion {
     Cancel(Result<HttpRunCancelCommandReceipt, HttpRegistryError>),
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
+    Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
     Aborted,
 }
 
@@ -1766,10 +2325,23 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Verification(Box::new(receipt))
             }
+            Self::Queue(result) if result.is_ok() => {
+                let mut receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful queue completion should contain a receipt")
+                    .clone();
+                project_stored_conversation_queue(&mut receipt.queue);
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Queue(Box::new(receipt))
+            }
             Self::Start(Err(_))
             | Self::Cancel(Err(_))
             | Self::Approval(Err(_))
             | Self::Verification(_)
+            | Self::Queue(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
         }
     }
@@ -1782,6 +2354,7 @@ impl HttpCommandCompletion {
             HttpStoredCommandCompletion::Verification(receipt) => {
                 Self::Verification(Box::new(Ok(*receipt)))
             }
+            HttpStoredCommandCompletion::Queue(receipt) => Self::Queue(Box::new(Ok(*receipt))),
             HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => {
                 Self::Aborted
             }
@@ -1794,6 +2367,21 @@ fn project_stored_run_snapshot(run: &mut HttpRunSnapshot) {
     for call_id in &mut run.pending_approval_call_ids {
         *call_id = safe_persistence_text(call_id);
     }
+}
+
+fn project_stored_conversation_queue(queue: &mut HttpConversationQueueView) {
+    for item in &mut queue.items {
+        if item.prompt_material == HttpConversationQueuePromptMaterial::AvailableProcessLocal {
+            item.prompt_material = HttpConversationQueuePromptMaterial::RequiresReentry;
+            item.dispatchable = false;
+            item.blocked_reason = Some(HttpConversationQueueBlockedReason::RequiresReentry);
+        }
+    }
+    queue.next_dispatchable_entry_id = queue
+        .items
+        .iter()
+        .find(|item| item.dispatchable)
+        .map(|item| item.entry_id.clone());
 }
 
 struct HttpCommandReservation {
@@ -1955,6 +2543,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1967,6 +2556,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1979,6 +2569,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -1993,6 +2584,20 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_queue(&self) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::Queue(result) => {
+                (*result).map(HttpConversationQueueCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -2128,6 +2733,31 @@ impl HttpRegistryState {
             })
     }
 
+    fn clear_run_release_barrier(&mut self, run_id: &str) {
+        for session in self.sessions.values_mut() {
+            if session.release_pending_run_id.as_deref() == Some(run_id) {
+                session.release_pending_run_id = None;
+            }
+        }
+    }
+
+    fn rollback_queued_run_registration(&mut self, run_id: &str) {
+        let Some(run) = self.runs.remove(run_id) else {
+            return;
+        };
+        if let Some(session) = self.sessions.get_mut(&run.session_id) {
+            session.run_ids.retain(|current| current != run_id);
+            if session.foreground_run_id.as_deref() == Some(run_id) {
+                session.foreground_run_id = None;
+                session.foreground_owner_generation =
+                    session.foreground_owner_generation.saturating_add(1);
+            }
+            if session.release_pending_run_id.as_deref() == Some(run_id) {
+                session.release_pending_run_id = None;
+            }
+        }
+    }
+
     fn mark_run_driver_uncertain(
         &mut self,
         run_id: &str,
@@ -2156,6 +2786,7 @@ struct HttpSessionState {
     run_ids: Vec<String>,
     binding: HttpSessionBinding,
     foreground_run_id: Option<String>,
+    release_pending_run_id: Option<String>,
     foreground_owner_generation: u64,
     verification_in_progress: bool,
 }
@@ -2313,12 +2944,119 @@ fn update_command_fingerprint_part(hasher: &mut Sha256, part: &[u8]) {
     hasher.update(part);
 }
 
+/// Encodes the durable idempotency identity without exact prompt bytes.
+///
+/// Commands whose exact prompts collapse to the same secret-safe projection intentionally share
+/// one durable identity. A user correction must therefore use a fresh command id; retaining a raw
+/// or reversibly keyed exact-prompt digest in the durable command store would violate the queue's
+/// process-local material boundary.
+fn secret_safe_queue_command_fingerprint_payload(
+    command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+) -> Result<Vec<u8>, HttpRegistryError> {
+    let action = match &command.payload.action {
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt,
+            kind,
+            reasoning_effort,
+        } => {
+            let projection = project_conversation_prompt_for_persistence(prompt);
+            serde_json::json!({
+                "action": "enqueue",
+                "safe_prompt": projection.safe_prompt,
+                "prompt_hash": projection.prompt_hash,
+                "kind": kind,
+                "reasoning_effort": reasoning_effort,
+            })
+        }
+        HttpConversationQueueCommandAction::Edit {
+            entry_id,
+            prompt,
+            reasoning_effort,
+        } => {
+            let projection = project_conversation_prompt_for_persistence(prompt);
+            serde_json::json!({
+                "action": "edit",
+                "entry_id": entry_id,
+                "safe_prompt": projection.safe_prompt,
+                "prompt_hash": projection.prompt_hash,
+                "reasoning_effort": reasoning_effort,
+            })
+        }
+        HttpConversationQueueCommandAction::Remove { entry_id } => serde_json::json!({
+            "action": "remove",
+            "entry_id": entry_id,
+        }),
+        HttpConversationQueueCommandAction::Reorder {
+            entry_id,
+            after_entry_id,
+        } => serde_json::json!({
+            "action": "reorder",
+            "entry_id": entry_id,
+            "after_entry_id": after_entry_id,
+        }),
+        HttpConversationQueueCommandAction::Pause => serde_json::json!({
+            "action": "pause",
+        }),
+        HttpConversationQueueCommandAction::Resume => serde_json::json!({
+            "action": "resume",
+        }),
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => serde_json::json!({
+            "action": "interrupt_and_run_next",
+            "foreground_run_id": foreground_run_id,
+            "foreground_owner_revision": foreground_owner_revision,
+        }),
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "protocol_version": command.protocol_version,
+        "command_id": command.command_id,
+        "client_id": command.client_id,
+        "session_id": command.session_id,
+        "expected_stream_sequence": command.expected_stream_sequence,
+        "correlation_id": command.correlation_id,
+        "payload": {
+            "expected_generation": command.payload.expected_generation,
+            "action": action,
+        },
+    }))
+    .map_err(|_| HttpRegistryError::CommandIdentityEncodingFailed)
+}
+
 fn command_store_registry_error(error: HttpCommandStoreError) -> HttpRegistryError {
     match error {
         HttpCommandStoreError::Saturated => HttpRegistryError::CommandRegistrySaturated,
         error => HttpRegistryError::CommandIdentityPersistenceFailed {
             message: error.to_string(),
         },
+    }
+}
+
+fn queue_driver_registry_error(error: HttpConversationQueueDriverError) -> HttpRegistryError {
+    match error {
+        HttpConversationQueueDriverError::StaleGeneration => {
+            HttpRegistryError::ConversationQueueGenerationStale
+        }
+        HttpConversationQueueDriverError::Terminal => {
+            HttpRegistryError::ConversationQueueEntryTerminal
+        }
+        HttpConversationQueueDriverError::OwnerLost => {
+            HttpRegistryError::ConversationQueueOwnerLost
+        }
+        HttpConversationQueueDriverError::Permission => {
+            HttpRegistryError::ConversationQueuePermissionRequired
+        }
+        HttpConversationQueueDriverError::Conflict => HttpRegistryError::ConversationQueueConflict,
+        HttpConversationQueueDriverError::RequiresReentry => {
+            HttpRegistryError::ConversationQueueRequiresReentry
+        }
+        HttpConversationQueueDriverError::Unsupported => {
+            HttpRegistryError::ConversationQueueUnsupported
+        }
+        HttpConversationQueueDriverError::Unavailable => {
+            HttpRegistryError::ConversationQueueUnavailable
+        }
     }
 }
 
@@ -2362,6 +3100,50 @@ fn validate_session_open_request(
         return Err(HttpRegistryError::InvalidSessionOpenRequest);
     }
     Ok(session_ref)
+}
+
+fn validate_conversation_queue_command(
+    request: &HttpConversationQueueCommandRequest,
+) -> Result<(), HttpRegistryError> {
+    if !is_bounded_queue_token(&request.expected_generation.0) {
+        return Err(HttpRegistryError::ConversationQueueInvalidCommand);
+    }
+    let valid_prompt = |prompt: &str| {
+        !prompt.trim().is_empty() && prompt.len() <= MAX_CONVERSATION_QUEUE_PROMPT_BYTES
+    };
+    let valid = match &request.action {
+        HttpConversationQueueCommandAction::Enqueue { prompt, .. } => valid_prompt(prompt),
+        HttpConversationQueueCommandAction::Edit {
+            entry_id, prompt, ..
+        } => is_bounded_queue_token(entry_id) && valid_prompt(prompt),
+        HttpConversationQueueCommandAction::Remove { entry_id } => is_bounded_queue_token(entry_id),
+        HttpConversationQueueCommandAction::Reorder {
+            entry_id,
+            after_entry_id,
+        } => {
+            is_bounded_queue_token(entry_id)
+                && after_entry_id.as_deref().is_none_or(is_bounded_queue_token)
+        }
+        HttpConversationQueueCommandAction::Pause | HttpConversationQueueCommandAction::Resume => {
+            true
+        }
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => {
+            is_bounded_queue_token(foreground_run_id)
+                && is_bounded_queue_token(foreground_owner_revision)
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(HttpRegistryError::ConversationQueueInvalidCommand)
+}
+
+fn is_bounded_queue_token(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_CONVERSATION_QUEUE_ID_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 fn validate_session_binding(

@@ -802,6 +802,7 @@ impl FileProjectionStore<SessionListProjectionSnapshot> {
         &self,
         records: &[SessionStreamRecord],
     ) -> Result<ProjectionStoreState<SessionListProjectionSnapshot>> {
+        crate::ConversationQueueDurableProjection::from_records(records)?;
         self.rebuild_from_records(records, apply_session_list_projection_snapshot_record)
     }
 }
@@ -950,6 +951,7 @@ impl From<&SessionListProjection> for SessionListProjectionSnapshot {
 pub fn session_list_projection_from_records(
     records: &[SessionStreamRecord],
 ) -> Result<SessionListProjectionSnapshot> {
+    crate::ConversationQueueDurableProjection::from_records(records)?;
     let mut projection = SessionListProjection::default();
     let mut cursor: Option<ProjectionCursor> = None;
     for record in records {
@@ -1621,6 +1623,14 @@ fn apply_control_entry_to_session_list(
         }
         ControlEntry::SessionModelSelected { model_name } => {
             projection.model_name = Some(model_name.clone());
+        }
+        ControlEntry::ConversationInputPromoted(promotion) => {
+            projection.user_message_count += 1;
+            if projection.title.is_none()
+                && let Some(title) = session_title_from_message(&promotion.durable_user_message)
+            {
+                projection.title = Some(title);
+            }
         }
         ControlEntry::UsageSnapshot(usage) => {
             projection.latest_usage = Some(SessionListUsageSummary {

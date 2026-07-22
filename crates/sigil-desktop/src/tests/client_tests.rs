@@ -200,6 +200,174 @@ fn conversation_display_rejects_noncanonical_decimal_text() {
 }
 
 #[test]
+fn conversation_queue_decodes_bounded_secret_free_rows() {
+    let view: crate::DesktopConversationQueueView = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "session_id": "session-1",
+        "generation": "queue-v1:17:event-1",
+        "paused": false,
+        "total_items": 1,
+        "items": [{
+            "entry_id": "queue-1",
+            "order": 0,
+            "kind": "chat",
+            "status": "queued",
+            "prompt_preview": "[redacted]",
+            "prompt_preview_truncated": false,
+            "prompt_material": "available_process_local",
+            "dispatchable": false,
+            "blocked_reason": "foreground_run_active",
+            "created_at_ms": 10,
+            "updated_at_ms": 11
+        }],
+        "truncated": false
+    }))
+    .expect("queue view should decode");
+
+    validate_conversation_queue_view("session-1", &view)
+        .expect("bounded queue view should validate");
+    assert_eq!(view.generation.0, "queue-v1:17:event-1");
+    assert_eq!(
+        view.items[0].prompt_material,
+        crate::DesktopConversationQueuePromptMaterial::AvailableProcessLocal
+    );
+    let debug = format!("{view:?}");
+    assert!(!debug.contains("prompt_hash"));
+    assert!(!debug.contains("exact private prompt"));
+}
+
+#[test]
+fn conversation_queue_rejects_unbounded_or_inconsistent_server_views() {
+    let item = crate::DesktopConversationQueueItem {
+        entry_id: "queue-1".to_owned(),
+        order: 0,
+        kind: crate::DesktopConversationQueueItemKind::Chat,
+        status: crate::DesktopConversationQueueItemStatus::Queued,
+        prompt_preview: "safe".to_owned(),
+        prompt_preview_truncated: false,
+        prompt_material: crate::DesktopConversationQueuePromptMaterial::PersistedSafe,
+        dispatchable: true,
+        blocked_reason: None,
+        created_at_ms: None,
+        updated_at_ms: None,
+    };
+    let base = crate::DesktopConversationQueueView {
+        schema_version: 1,
+        session_id: "session-1".to_owned(),
+        generation: crate::DesktopConversationQueueGeneration("queue-v1:0:initial".to_owned()),
+        paused: false,
+        total_items: 1,
+        items: vec![item.clone()],
+        truncated: false,
+        next_dispatchable_entry_id: Some("queue-1".to_owned()),
+    };
+    validate_conversation_queue_view("session-1", &base).expect("consistent view should validate");
+
+    let mut oversized = base.clone();
+    oversized.total_items = 101;
+    oversized.items = vec![item; 101];
+    assert!(validate_conversation_queue_view("session-1", &oversized).is_err());
+
+    let mut missing_block = base;
+    missing_block.items[0].dispatchable = false;
+    assert!(validate_conversation_queue_view("session-1", &missing_block).is_err());
+
+    let truncated = crate::DesktopConversationQueueView {
+        schema_version: 1,
+        session_id: "session-1".to_owned(),
+        generation: crate::DesktopConversationQueueGeneration("queue-v1:0:initial".to_owned()),
+        paused: false,
+        total_items: 2,
+        items: vec![crate::DesktopConversationQueueItem {
+            entry_id: "queue-1".to_owned(),
+            order: 0,
+            kind: crate::DesktopConversationQueueItemKind::Chat,
+            status: crate::DesktopConversationQueueItemStatus::Queued,
+            prompt_preview: "redacted".to_owned(),
+            prompt_preview_truncated: false,
+            prompt_material: crate::DesktopConversationQueuePromptMaterial::RequiresReentry,
+            dispatchable: false,
+            blocked_reason: Some(crate::DesktopConversationQueueBlockedReason::RequiresReentry),
+            created_at_ms: None,
+            updated_at_ms: None,
+        }],
+        truncated: true,
+        next_dispatchable_entry_id: Some("queue-2".to_owned()),
+    };
+    validate_conversation_queue_view("session-1", &truncated)
+        .expect("a bounded view may point at the next row beyond its returned window");
+}
+
+#[test]
+fn conversation_queue_command_serializes_cas_and_owner_binding() {
+    let request = crate::DesktopConversationQueueCommandRequest {
+        expected_generation: crate::DesktopConversationQueueGeneration(
+            "queue-v1:17:event-1".to_owned(),
+        ),
+        action: crate::DesktopConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id: "run-7".to_owned(),
+            foreground_owner_revision: format!("sha256:{}", "a".repeat(64)),
+        },
+    };
+    validate_conversation_queue_command(&request).expect("exact owner binding should validate");
+    let value = serde_json::to_value(&request).expect("queue command should serialize");
+    assert_eq!(value["expected_generation"], "queue-v1:17:event-1");
+    assert_eq!(value["action"]["action"], "interrupt_and_run_next");
+    assert_eq!(value["action"]["foreground_run_id"], "run-7");
+
+    let invalid = crate::DesktopConversationQueueCommandRequest {
+        expected_generation: crate::DesktopConversationQueueGeneration(
+            "queue-v1:17:event-1".to_owned(),
+        ),
+        action: crate::DesktopConversationQueueCommandAction::Reorder {
+            entry_id: "queue-1".to_owned(),
+            after_entry_id: Some("queue-1".to_owned()),
+        },
+    };
+    assert!(validate_conversation_queue_command(&invalid).is_err());
+}
+
+#[test]
+fn conversation_queue_receipt_echoes_cas_and_exact_interrupt_owner() {
+    let receipt: crate::DesktopConversationQueueCommandReceipt =
+        serde_json::from_value(serde_json::json!({
+            "command_id": "command-queue-1",
+            "client_id": "desktop-1",
+            "session_id": "session-1",
+            "action": "interrupt_and_run_next",
+            "expected_generation": "queue-v1:17:event-1",
+            "generation": "queue-v1:18:event-2",
+            "interrupt_owner": {
+                "run_id": "run-7",
+                "owner_revision": format!("sha256:{}", "a".repeat(64))
+            },
+            "queue": {
+                "schema_version": 1,
+                "session_id": "session-1",
+                "generation": "queue-v1:18:event-2",
+                "paused": false,
+                "total_items": 0,
+                "items": [],
+                "truncated": false,
+                "next_dispatchable_entry_id": null
+            },
+            "correlation_id": "event-2",
+            "replayed": false
+        }))
+        .expect("queue receipt should decode");
+
+    assert_eq!(receipt.expected_generation.0, "queue-v1:17:event-1");
+    let owner = receipt
+        .interrupt_owner
+        .as_ref()
+        .expect("interrupt receipt should bind the exact foreground owner");
+    assert_eq!(owner.run_id, "run-7");
+    assert_eq!(owner.owner_revision, format!("sha256:{}", "a".repeat(64)));
+    validate_conversation_queue_view("session-1", &receipt.queue)
+        .expect("receipt queue projection should remain bounded and consistent");
+}
+
+#[test]
 fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
     let activity: crate::DesktopAgentActivityView = serde_json::from_value(serde_json::json!({
         "total_agents": 1,

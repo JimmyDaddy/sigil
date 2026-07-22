@@ -36,20 +36,27 @@ use super::{
     HttpConversationDisplayItem, HttpConversationDisplayItemKind,
     HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
     HttpConversationDisplaySource, HttpConversationDisplayStatus,
-    HttpConversationLiveProvisionalAnchor, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
+    HttpConversationLiveProvisionalAnchor, HttpConversationQueueBlockedReason,
+    HttpConversationQueueCommandAction, HttpConversationQueueCommandActionKind,
+    HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
+    HttpConversationQueueDriverCommand, HttpConversationQueueDriverError,
+    HttpConversationQueueGeneration, HttpConversationQueueItem, HttpConversationQueueItemKind,
+    HttpConversationQueueItemStatus, HttpConversationQueuePromptMaterial,
+    HttpConversationQueueView, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
+    HttpDurableProtocolJournal, HttpDurableSessionFrontier, HttpForegroundRunOwner,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
     HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpProtocolVersionError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
+    HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
+    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
+    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
+    HttpSseEvent, HttpSupportContext, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -475,9 +482,8 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 8)
             .expect("disclosure journal should open"),
     );
-    let registry = Arc::new(HttpSessionRunRegistry::new(Arc::new(
-        RecordingRunDriver::default(),
-    )));
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
     let server = HttpLocalServer::bind_production(
         HttpServerConfig::default(),
         Some("secret-token"),
@@ -726,6 +732,10 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             .as_str()
             .is_some_and(|value| value.starts_with("session-delete:"))
     );
+    assert_eq!(
+        driver.purged_session_scopes(),
+        vec![managed_session_id.clone()]
+    );
     let (status, deleted_page) = http_raw_request(
         address,
         http_get(
@@ -737,6 +747,46 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     .await;
     assert_eq!(status, 200);
     assert_eq!(deleted_page["entries"].as_array().map(Vec::len), Some(0));
+
+    let (status, remaining_page) = http_raw_request(
+        address,
+        http_get("/session-catalog?limit=1", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let remaining = &remaining_page["entries"][0];
+    let remaining_session_ref = remaining["session_ref"]
+        .as_str()
+        .expect("remaining ready session should expose a reference")
+        .to_owned();
+    let remaining_session_id = remaining["session_id"]
+        .as_str()
+        .expect("remaining ready session should expose an identity")
+        .to_owned();
+    let delete_body = json!({
+        "session_ref": remaining_session_ref,
+        "session_id": remaining_session_id,
+    })
+    .to_string();
+    let (status, single_deleted) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/delete",
+            Some("secret-token"),
+            &delete_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        single_deleted["operation_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session-delete:"))
+    );
+    assert_eq!(
+        driver.purged_session_scopes(),
+        vec![managed_session_id, remaining_session_id]
+    );
 
     let invalid_source = sessions.join("broken.jsonl");
     fs::write(&invalid_source, b"not a session stream\n").expect("invalid source should write");
@@ -2009,6 +2059,55 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["paths"]["/sessions/{session_id}/display"]["get"]["responses"]["409"].is_object()
     );
     assert!(
+        document["paths"]["/sessions/{session_id}/queue"]["get"]["responses"]["200"].is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/queue"]["post"]["responses"]["409"].is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueCommand"]["allOf"][1]["properties"]["payload"]
+            ["$ref"],
+        "#/components/schemas/ConversationQueueCommandRequest"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueView"]["properties"]["items"]["maxItems"],
+        100
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueGeneration"]["pattern"],
+        "^[A-Za-z0-9._:-]+$"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueInterruptAndRunNextAction"]["properties"]
+            ["foreground_owner_revision"]["pattern"],
+        "^sha256:[0-9a-f]{64}$"
+    );
+    assert!(
+        document["components"]["schemas"]["ConversationQueueCommandReceipt"]["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "expected_generation"))
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueCommandReceipt"]["properties"]["interrupt_owner"]
+            ["oneOf"][0]["$ref"],
+        "#/components/schemas/ForegroundRunOwner"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationQueueItem"]["properties"]["prompt_preview"]
+            ["maxLength"],
+        240
+    );
+    assert!(
+        document["components"]["schemas"]["ConversationQueueItem"]["properties"]
+            .get("prompt")
+            .is_none()
+    );
+    assert!(
+        document["components"]["schemas"]["ConversationQueueItem"]["properties"]
+            .get("prompt_hash")
+            .is_none()
+    );
+    assert!(
         document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
             .is_object()
     );
@@ -2227,6 +2326,747 @@ fn command_envelope_preserves_version_retry_and_stale_client_fields() {
             received: HTTP_PROTOCOL_VERSION + 1,
         })
     );
+}
+
+#[test]
+fn conversation_queue_contract_keeps_exact_prompt_request_only() {
+    let request = HttpConversationQueueCommandRequest {
+        expected_generation: HttpConversationQueueGeneration("queue-v1:17:event-1".to_owned()),
+        action: HttpConversationQueueCommandAction::Enqueue {
+            prompt: "exact private prompt".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: Some(HttpReasoningEffort::High),
+        },
+    };
+    assert_eq!(
+        request.action.kind(),
+        HttpConversationQueueCommandActionKind::Enqueue
+    );
+    let request_json = serde_json::to_value(&request).expect("queue request should serialize");
+    assert_eq!(request_json["action"]["action"], "enqueue");
+    assert_eq!(request_json["action"]["prompt"], "exact private prompt");
+
+    let view = HttpConversationQueueView {
+        schema_version: 1,
+        session_id: "session-1".to_owned(),
+        generation: HttpConversationQueueGeneration("queue-v1:18:event-2".to_owned()),
+        paused: false,
+        total_items: 1,
+        items: vec![HttpConversationQueueItem {
+            entry_id: "queue-1".to_owned(),
+            order: 0,
+            kind: HttpConversationQueueItemKind::Chat,
+            status: HttpConversationQueueItemStatus::Queued,
+            prompt_preview: "[redacted]".to_owned(),
+            prompt_preview_truncated: false,
+            prompt_material: HttpConversationQueuePromptMaterial::AvailableProcessLocal,
+            dispatchable: false,
+            blocked_reason: Some(HttpConversationQueueBlockedReason::ForegroundRunActive),
+            created_at_ms: Some(10),
+            updated_at_ms: Some(11),
+        }],
+        truncated: false,
+        next_dispatchable_entry_id: None,
+    };
+    let receipt = HttpConversationQueueCommandReceipt {
+        command_id: "command-queue-1".to_owned(),
+        client_id: "client-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        action: HttpConversationQueueCommandActionKind::Enqueue,
+        expected_generation: HttpConversationQueueGeneration("queue-v1:17:event-1".to_owned()),
+        generation: view.generation.clone(),
+        interrupt_owner: None,
+        queue: view,
+        correlation_id: None,
+        replayed: false,
+    };
+    let receipt_json =
+        serde_json::to_string(&receipt).expect("queue receipt should serialize safely");
+    assert!(!receipt_json.contains("exact private prompt"));
+    assert!(!receipt_json.contains("prompt_hash"));
+    assert!(receipt_json.contains("available_process_local"));
+}
+
+#[test]
+fn conversation_queue_interrupt_action_binds_exact_foreground_owner() {
+    let action: HttpConversationQueueCommandAction = serde_json::from_value(json!({
+        "action": "interrupt_and_run_next",
+        "foreground_run_id": "run-7",
+        "foreground_owner_revision": format!("sha256:{}", "a".repeat(64))
+    }))
+    .expect("owner-bound interrupt action should decode");
+
+    assert!(matches!(
+        action,
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            ref foreground_run_id,
+            ref foreground_owner_revision,
+        } if foreground_run_id == "run-7"
+            && foreground_owner_revision == &format!("sha256:{}", "a".repeat(64))
+    ));
+}
+
+#[test]
+fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fingerprint() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    registry
+        .start_run(
+            &session.id,
+            run_start("keep queue pending", HttpPermissionMode::Manual),
+        )
+        .expect("foreground run should start");
+    let command = conversation_queue_command(
+        "queue-command-identity",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt: "follow up once".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: Some(HttpReasoningEffort::High),
+        },
+    )
+    .with_correlation_id("queue-correlation-1");
+
+    let first = registry
+        .command_conversation_queue(&session.id, command.clone())
+        .expect("first queue command should execute");
+    let replay = registry
+        .command_conversation_queue(&session.id, command)
+        .expect("exact queue retry should replay");
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    assert_eq!(first.generation, replay.generation);
+    assert_eq!(first.queue, replay.queue);
+
+    let delivered = driver.queue_commands();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].command_id, "queue-command-identity");
+    assert_eq!(delivered[0].client_id, "desktop-client");
+    assert_eq!(
+        delivered[0].request.expected_generation,
+        queue_generation(0)
+    );
+    assert!(matches!(
+        &delivered[0].request.action,
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt,
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: Some(HttpReasoningEffort::High),
+        } if prompt == "follow up once"
+    ));
+
+    let conflicting = conversation_queue_command(
+        "queue-command-identity",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt: "different payload".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: Some(HttpReasoningEffort::High),
+        },
+    )
+    .with_correlation_id("queue-correlation-1");
+    assert_eq!(
+        registry.command_conversation_queue(&session.id, conflicting),
+        Err(HttpRegistryError::CommandKeyConflict {
+            session_id: session.id,
+            client_id: "desktop-client".to_owned(),
+            command_id: "queue-command-identity".to_owned(),
+        })
+    );
+    assert_eq!(driver.queue_commands().len(), 1);
+    assert_eq!(driver.queued_starts().len(), 0);
+}
+
+#[test]
+fn conversation_queue_stale_and_malformed_commands_have_zero_mutation() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+
+    let stale = conversation_queue_command(
+        "queue-command-stale",
+        "desktop-client",
+        &session.id,
+        99,
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt: "must not be appended".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: None,
+        },
+    );
+    assert_eq!(
+        registry.command_conversation_queue(&session.id, stale),
+        Err(HttpRegistryError::ConversationQueueGenerationStale)
+    );
+    assert_eq!(driver.applied_queue_mutations(), 0);
+    assert_eq!(
+        registry
+            .conversation_queue(&session.id)
+            .expect("queue should remain readable"),
+        empty_conversation_queue(&session.id)
+    );
+
+    let malformed = conversation_queue_command(
+        "queue-command-malformed",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::Enqueue {
+            prompt: " ".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: None,
+        },
+    );
+    assert_eq!(
+        registry.command_conversation_queue(&session.id, malformed),
+        Err(HttpRegistryError::ConversationQueueInvalidCommand)
+    );
+    assert_eq!(
+        driver.queue_commands().len(),
+        1,
+        "only the stale, structurally valid request may reach the driver"
+    );
+    assert_eq!(driver.applied_queue_mutations(), 0);
+}
+
+#[test]
+fn conversation_queue_enqueue_during_foreground_and_cancel_retain_pending_work() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let foreground = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground run should start");
+
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-active",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "run after foreground".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: None,
+                },
+            ),
+        )
+        .expect("enqueue should succeed while foreground is active");
+    assert_eq!(driver.public_starts().len(), 1);
+    assert_eq!(driver.queued_starts().len(), 0);
+    let pending = registry
+        .conversation_queue(&session.id)
+        .expect("queue should remain readable");
+    assert_eq!(pending.total_items, 1);
+    assert_eq!(
+        pending.items[0].blocked_reason,
+        Some(HttpConversationQueueBlockedReason::ForegroundRunActive)
+    );
+
+    registry
+        .cancel_run(&foreground.id)
+        .expect("foreground cancellation should route");
+    let after_cancel = registry
+        .conversation_queue(&session.id)
+        .expect("cancel must not clear queued work");
+    assert_eq!(after_cancel.total_items, 1);
+    assert_eq!(
+        after_cancel.items[0].status,
+        HttpConversationQueueItemStatus::Queued
+    );
+    assert_eq!(driver.queued_starts().len(), 0);
+}
+
+#[test]
+fn conversation_queue_resume_starts_one_internal_run_when_idle() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-pause",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Pause,
+            ),
+        )
+        .expect("queue should pause");
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-paused-enqueue",
+                "desktop-client",
+                &session.id,
+                1,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "start after resume".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: Some(HttpReasoningEffort::Medium),
+                },
+            ),
+        )
+        .expect("paused queue should accept work");
+    assert_eq!(driver.queued_starts().len(), 0);
+
+    let resume = conversation_queue_command(
+        "queue-command-resume",
+        "desktop-client",
+        &session.id,
+        2,
+        HttpConversationQueueCommandAction::Resume,
+    );
+    let first = registry
+        .command_conversation_queue(&session.id, resume.clone())
+        .expect("resume should schedule queued work");
+    let replay = registry
+        .command_conversation_queue(&session.id, resume)
+        .expect("resume retry should replay");
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    let starts = driver.queued_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].admission.entry_id, "queue-entry-1");
+    assert_eq!(
+        starts[0].admission.reasoning_effort,
+        Some(HttpReasoningEffort::Medium)
+    );
+    assert_eq!(driver.public_starts().len(), 0);
+    assert_eq!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain readable")
+            .foreground_run_id
+            .as_deref(),
+        Some("queued-run-queue-entry-1")
+    );
+}
+
+#[test]
+fn conversation_queue_stale_start_is_rolled_back_and_rescheduled_from_latest_generation() {
+    let driver = Arc::new(QueueTestDriver::default());
+    driver.reject_next_queued_start_as_stale();
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-stale-start",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "reschedule from the latest durable generation".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: None,
+                },
+            ),
+        )
+        .expect("durable enqueue should succeed even when first admission becomes stale");
+
+    assert_eq!(driver.queued_start_attempts(), 2);
+    let starts = driver.queued_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].admission.entry_id, "queue-entry-1");
+    assert_eq!(starts[0].admission.generation, queue_generation(2));
+    let rebound = registry
+        .get_session(&session.id)
+        .expect("rescheduled session should remain registered");
+    assert_eq!(rebound.run_ids, vec!["queued-run-queue-entry-1"]);
+    assert_eq!(
+        registry
+            .get_run("queued-run-queue-entry-1")
+            .expect("rescheduled run should remain inspectable")
+            .status,
+        HttpRunStatus::Running
+    );
+}
+
+#[test]
+fn conversation_queue_interrupt_owner_mismatch_fails_before_cancel() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let foreground = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground should start");
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-before-mismatch",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "wait for exact owner".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: None,
+                },
+            ),
+        )
+        .expect("enqueue should succeed");
+
+    let mismatch = conversation_queue_command(
+        "queue-command-mismatch",
+        "desktop-client",
+        &session.id,
+        1,
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id: foreground.id,
+            foreground_owner_revision: format!("sha256:{}", "f".repeat(64)),
+        },
+    );
+    assert_eq!(
+        registry.command_conversation_queue(&session.id, mismatch),
+        Err(HttpRegistryError::ConversationQueueOwnerLost)
+    );
+    assert!(driver.cancels().is_empty());
+    assert_eq!(driver.queue_commands().len(), 1);
+    assert_eq!(driver.queued_starts().len(), 0);
+}
+
+#[test]
+fn conversation_queue_interrupt_without_dispatchable_next_does_not_cancel() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground should start");
+    let owner = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("foreground owner should exist");
+    let interrupt = conversation_queue_command(
+        "queue-command-empty-interrupt",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id: owner.run_id,
+            foreground_owner_revision: owner.owner_revision,
+        },
+    );
+
+    assert_eq!(
+        registry.command_conversation_queue(&session.id, interrupt),
+        Err(HttpRegistryError::ConversationQueueConflict)
+    );
+    assert!(driver.cancels().is_empty());
+    assert_eq!(driver.applied_queue_mutations(), 0);
+    assert_eq!(driver.queued_starts().len(), 0);
+}
+
+#[test]
+fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutation() {
+    let driver = Arc::new(QueueTestDriver::new(true));
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let foreground = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground should start");
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-before-serialized-interrupt",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "run only after serialized cancellation".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: None,
+                },
+            ),
+        )
+        .expect("queue candidate should enqueue");
+    let owner = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("foreground owner should exist");
+
+    let validation_entered = Arc::new(Barrier::new(2));
+    let validation_release = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&validation_entered);
+    let observer_release = Arc::clone(&validation_release);
+    driver.observe_interrupt_validation(Arc::new(move || {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+    let wait_entered = Arc::new(Barrier::new(2));
+    let wait_release = Arc::new(Barrier::new(2));
+    let release_entered = Arc::clone(&wait_entered);
+    let release_continue = Arc::clone(&wait_release);
+    driver.observe_release_wait(Arc::new(move |_run_id, _timeout| {
+        release_entered.wait();
+        release_continue.wait();
+    }));
+
+    let interrupt_registry = Arc::clone(&registry);
+    let interrupt_session_id = session.id.clone();
+    let interrupt_thread = std::thread::spawn(move || {
+        interrupt_registry.command_conversation_queue(
+            &interrupt_session_id,
+            conversation_queue_command(
+                "queue-command-serialized-interrupt",
+                "desktop-client",
+                &interrupt_session_id,
+                1,
+                HttpConversationQueueCommandAction::InterruptAndRunNext {
+                    foreground_run_id: owner.run_id,
+                    foreground_owner_revision: owner.owner_revision,
+                },
+            ),
+        )
+    });
+    validation_entered.wait();
+    assert!(matches!(
+        registry.reserve_durable_session_mutation(&session.durable_session_scope_id),
+        Err(HttpRegistryError::DurableSessionMutationActive)
+    ));
+
+    let (pause_sender, pause_receiver) = std::sync::mpsc::channel();
+    let pause_registry = Arc::clone(&registry);
+    let pause_session_id = session.id.clone();
+    let pause_thread = std::thread::spawn(move || {
+        let result = pause_registry.command_conversation_queue(
+            &pause_session_id,
+            conversation_queue_command(
+                "queue-command-concurrent-pause",
+                "desktop-client",
+                &pause_session_id,
+                1,
+                HttpConversationQueueCommandAction::Pause,
+            ),
+        );
+        pause_sender
+            .send(result)
+            .expect("pause result receiver should remain available");
+    });
+    assert!(
+        pause_receiver
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "queue mutation must wait while interrupt validation has not committed cancellation"
+    );
+
+    validation_release.wait();
+    wait_entered.wait();
+    assert_eq!(driver.cancels().len(), 1);
+    let paused = pause_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("pause should proceed after cancellation acceptance")
+        .expect("pause should succeed against the still-current generation");
+    assert!(paused.queue.paused);
+    registry
+        .record_run_terminal(&foreground.id, HttpRunTerminalOutcome::Interrupted)
+        .expect("terminal event should release foreground ownership");
+    wait_release.wait();
+
+    let interrupted = interrupt_thread
+        .join()
+        .expect("interrupt command thread should join")
+        .expect("interrupt should complete after release");
+    pause_thread.join().expect("pause thread should join");
+    assert!(interrupted.queue.paused);
+    assert_eq!(driver.queued_starts().len(), 0);
+    drop(
+        registry
+            .reserve_durable_session_mutation(&session.durable_session_scope_id)
+            .expect("durable mutation should become available after queue command completion"),
+    );
+}
+
+#[test]
+fn conversation_queue_interrupt_waits_for_release_before_starting_next() {
+    let driver = Arc::new(QueueTestDriver::new(true));
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let foreground = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground should start");
+    registry
+        .command_conversation_queue(
+            &session.id,
+            conversation_queue_command(
+                "queue-command-before-interrupt",
+                "desktop-client",
+                &session.id,
+                0,
+                HttpConversationQueueCommandAction::Enqueue {
+                    prompt: "run after release".to_owned(),
+                    kind: HttpConversationQueueItemKind::Chat,
+                    reasoning_effort: None,
+                },
+            ),
+        )
+        .expect("enqueue should succeed");
+    let owner = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("foreground owner should exist");
+    let wait_entered = Arc::new(Barrier::new(2));
+    let wait_release = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&wait_entered);
+    let observer_release = Arc::clone(&wait_release);
+    driver.observe_release_wait(Arc::new(move |_run_id, _timeout| {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+
+    let interrupt = conversation_queue_command(
+        "queue-command-interrupt",
+        "desktop-client",
+        &session.id,
+        1,
+        HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id: owner.run_id.clone(),
+            foreground_owner_revision: owner.owner_revision.clone(),
+        },
+    );
+    let command_registry = Arc::clone(&registry);
+    let command_session_id = session.id.clone();
+    let command_thread = std::thread::spawn(move || {
+        command_registry.command_conversation_queue(&command_session_id, interrupt)
+    });
+    wait_entered.wait();
+    assert_eq!(driver.cancels().len(), 1);
+    assert_eq!(driver.queued_starts().len(), 0);
+    registry
+        .record_run_terminal(&foreground.id, HttpRunTerminalOutcome::Interrupted)
+        .expect("supervisor terminal should release foreground ownership");
+    assert_eq!(driver.queued_starts().len(), 0);
+    wait_release.wait();
+
+    let receipt = command_thread
+        .join()
+        .expect("interrupt command thread should join")
+        .expect("interrupt command should succeed after release");
+    assert_eq!(receipt.interrupt_owner, Some(owner));
+    assert_eq!(driver.queued_starts().len(), 1);
+    assert_eq!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain readable")
+            .foreground_run_id
+            .as_deref(),
+        Some("queued-run-queue-entry-1")
+    );
+}
+
+#[test]
+fn conversation_queue_durable_replay_downgrades_process_local_material() {
+    let temp = tempfile::tempdir().expect("temporary directory should create");
+    let path = temp.path().join("queue-commands.json");
+    let driver = Arc::new(QueueTestDriver::default());
+    let command;
+    let session_id;
+    {
+        let store =
+            Arc::new(HttpDurableCommandStore::open(&path, 8).expect("command store should open"));
+        let registry = HttpSessionRunRegistry::with_durable_command_store(driver.clone(), store);
+        let session = create_session(&registry, HttpSessionCreateRequest::default());
+        session_id = session.id.clone();
+        registry
+            .start_run(
+                &session.id,
+                run_start("keep queue pending", HttpPermissionMode::Manual),
+            )
+            .expect("foreground should start");
+        command = conversation_queue_command(
+            "queue-command-durable",
+            "desktop-client",
+            &session.id,
+            0,
+            HttpConversationQueueCommandAction::Enqueue {
+                prompt: "inspect with authorization=first-secret".to_owned(),
+                kind: HttpConversationQueueItemKind::Chat,
+                reasoning_effort: None,
+            },
+        );
+        let receipt = registry
+            .command_conversation_queue(&session.id, command.clone())
+            .expect("queue command should persist");
+        assert_eq!(
+            receipt.queue.items[0].prompt_material,
+            HttpConversationQueuePromptMaterial::AvailableProcessLocal
+        );
+        let replay_with_equivalent_safe_projection = registry
+            .command_conversation_queue(
+                &session.id,
+                conversation_queue_command(
+                    "queue-command-durable",
+                    "desktop-client",
+                    &session.id,
+                    0,
+                    HttpConversationQueueCommandAction::Enqueue {
+                        prompt: "inspect with authorization=second-secret".to_owned(),
+                        kind: HttpConversationQueueItemKind::Chat,
+                        reasoning_effort: None,
+                    },
+                ),
+            )
+            .expect("equivalent secret-safe command identity should replay");
+        assert!(replay_with_equivalent_safe_projection.replayed);
+        assert_eq!(driver.applied_queue_mutations(), 1);
+    }
+    let stored = fs::read_to_string(&path).expect("durable command store should be readable");
+    assert!(!stored.contains("first-secret"));
+    assert!(!stored.contains("second-secret"));
+    assert!(!stored.contains("authorization="));
+
+    let replay_driver = Arc::new(QueueTestDriver::default());
+    let store =
+        Arc::new(HttpDurableCommandStore::open(&path, 8).expect("command store should reopen"));
+    let replay_registry =
+        HttpSessionRunRegistry::with_durable_command_store(replay_driver.clone(), store);
+    let replay = replay_registry
+        .command_conversation_queue(&session_id, command)
+        .expect("stored queue receipt should replay without a live session");
+    assert!(replay.replayed);
+    assert_eq!(
+        replay.queue.items[0].prompt_material,
+        HttpConversationQueuePromptMaterial::RequiresReentry
+    );
+    assert_eq!(
+        replay.queue.items[0].blocked_reason,
+        Some(HttpConversationQueueBlockedReason::RequiresReentry)
+    );
+    assert!(!replay.queue.items[0].dispatchable);
+    assert!(replay_driver.queue_commands().is_empty());
 }
 
 #[test]
@@ -4525,9 +5365,368 @@ fn policy_version() -> String {
     "policy-v1".to_owned()
 }
 
+fn queue_generation(revision: u64) -> HttpConversationQueueGeneration {
+    HttpConversationQueueGeneration(format!("queue-v1:{revision}"))
+}
+
+fn conversation_queue_command(
+    command_id: &str,
+    client_id: &str,
+    session_id: &str,
+    expected_revision: u64,
+    action: HttpConversationQueueCommandAction,
+) -> HttpCommandEnvelope<HttpConversationQueueCommandRequest> {
+    HttpCommandEnvelope::new(
+        command_id,
+        client_id,
+        session_id,
+        HttpConversationQueueCommandRequest {
+            expected_generation: queue_generation(expected_revision),
+            action,
+        },
+    )
+}
+
+fn empty_conversation_queue(session_id: &str) -> HttpConversationQueueView {
+    HttpConversationQueueView {
+        schema_version: 1,
+        session_id: session_id.to_owned(),
+        generation: queue_generation(0),
+        paused: false,
+        total_items: 0,
+        items: Vec::new(),
+        truncated: false,
+        next_dispatchable_entry_id: None,
+    }
+}
+
+struct QueueTestEntry {
+    item: HttpConversationQueueItem,
+    reasoning_effort: Option<HttpReasoningEffort>,
+}
+
+#[derive(Default)]
+struct QueueTestState {
+    generation: u64,
+    next_entry: u64,
+    paused: bool,
+    entries: Vec<QueueTestEntry>,
+    commands: Vec<HttpConversationQueueDriverCommand>,
+    applied_mutations: usize,
+}
+
+impl QueueTestState {
+    fn view(
+        &self,
+        session_id: &str,
+        foreground_owner: Option<&HttpForegroundRunOwner>,
+    ) -> HttpConversationQueueView {
+        let mut items = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(order, entry)| {
+                let mut item = entry.item.clone();
+                item.order = u32::try_from(order).expect("synthetic queue order should fit");
+                if item.status == HttpConversationQueueItemStatus::Queued {
+                    let blocked_reason = if self.paused {
+                        Some(HttpConversationQueueBlockedReason::QueuePaused)
+                    } else if foreground_owner.is_some() {
+                        Some(HttpConversationQueueBlockedReason::ForegroundRunActive)
+                    } else if item.prompt_material
+                        == HttpConversationQueuePromptMaterial::RequiresReentry
+                    {
+                        Some(HttpConversationQueueBlockedReason::RequiresReentry)
+                    } else {
+                        None
+                    };
+                    item.dispatchable = blocked_reason.is_none();
+                    item.blocked_reason = blocked_reason;
+                } else {
+                    item.dispatchable = false;
+                    item.blocked_reason = None;
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        let next_dispatchable_entry_id = items
+            .iter()
+            .find(|item| item.dispatchable)
+            .map(|item| item.entry_id.clone());
+        let total_items = u32::try_from(items.len()).expect("synthetic queue size should fit");
+        items.shrink_to_fit();
+        HttpConversationQueueView {
+            schema_version: 1,
+            session_id: session_id.to_owned(),
+            generation: queue_generation(self.generation),
+            paused: self.paused,
+            total_items,
+            items,
+            truncated: false,
+            next_dispatchable_entry_id,
+        }
+    }
+}
+
+type QueueReleaseObserver = Arc<dyn Fn(&str, Duration) + Send + Sync>;
+type QueueInterruptValidationObserver = Arc<dyn Fn() + Send + Sync>;
+
+struct QueueTestDriver {
+    recording: RecordingRunDriver,
+    state: Mutex<QueueTestState>,
+    queued_starts: Mutex<Vec<HttpQueuedRunDriverStart>>,
+    queued_start_attempts: AtomicUsize,
+    reject_next_queued_start_as_stale: AtomicUsize,
+    release_barrier: bool,
+    release_observer: Mutex<Option<QueueReleaseObserver>>,
+    interrupt_validation_observer: Mutex<Option<QueueInterruptValidationObserver>>,
+}
+
+impl Default for QueueTestDriver {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl QueueTestDriver {
+    fn new(release_barrier: bool) -> Self {
+        Self {
+            recording: RecordingRunDriver::default(),
+            state: Mutex::new(QueueTestState::default()),
+            queued_starts: Mutex::new(Vec::new()),
+            queued_start_attempts: AtomicUsize::new(0),
+            reject_next_queued_start_as_stale: AtomicUsize::new(0),
+            release_barrier,
+            release_observer: Mutex::new(None),
+            interrupt_validation_observer: Mutex::new(None),
+        }
+    }
+
+    fn queue_commands(&self) -> Vec<HttpConversationQueueDriverCommand> {
+        lock(&self.state).commands.clone()
+    }
+
+    fn applied_queue_mutations(&self) -> usize {
+        lock(&self.state).applied_mutations
+    }
+
+    fn public_starts(&self) -> Vec<HttpRunDriverStart> {
+        self.recording.starts()
+    }
+
+    fn queued_starts(&self) -> Vec<HttpQueuedRunDriverStart> {
+        lock(&self.queued_starts).clone()
+    }
+
+    fn queued_start_attempts(&self) -> usize {
+        self.queued_start_attempts.load(Ordering::SeqCst)
+    }
+
+    fn reject_next_queued_start_as_stale(&self) {
+        self.reject_next_queued_start_as_stale
+            .store(1, Ordering::SeqCst);
+    }
+
+    fn cancels(&self) -> Vec<HttpRunDriverCancel> {
+        self.recording.cancels()
+    }
+
+    fn observe_release_wait(&self, observer: QueueReleaseObserver) {
+        *lock(&self.release_observer) = Some(observer);
+    }
+
+    fn observe_interrupt_validation(&self, observer: QueueInterruptValidationObserver) {
+        *lock(&self.interrupt_validation_observer) = Some(observer);
+    }
+}
+
+impl HttpRunDriver for QueueTestDriver {
+    fn requires_run_release_barrier(&self) -> bool {
+        self.release_barrier
+    }
+
+    fn bind_session(
+        &self,
+        session_id: &str,
+        model_name: Option<&str>,
+    ) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        self.recording.bind_session(session_id, model_name)
+    }
+
+    fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.recording.start_run(start)
+    }
+
+    fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
+        self.recording.cancel_run(cancel)
+    }
+
+    fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError> {
+        self.recording.submit_approval(approval)
+    }
+
+    fn session_frontier(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<HttpDurableSessionFrontier, HttpRunDriverError> {
+        Ok(HttpDurableSessionFrontier {
+            through_stream_sequence: 0,
+        })
+    }
+
+    fn conversation_queue_view(
+        &self,
+        session: &super::HttpSessionSnapshot,
+        foreground_owner: Option<&HttpForegroundRunOwner>,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        Ok(lock(&self.state).view(&session.id, foreground_owner))
+    }
+
+    fn mutate_conversation_queue(
+        &self,
+        session: &super::HttpSessionSnapshot,
+        foreground_owner: Option<&HttpForegroundRunOwner>,
+        command: &HttpConversationQueueDriverCommand,
+    ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
+        let mut state = lock(&self.state);
+        state.commands.push(command.clone());
+        if command.request.expected_generation != queue_generation(state.generation) {
+            return Err(HttpConversationQueueDriverError::StaleGeneration);
+        }
+        match &command.request.action {
+            HttpConversationQueueCommandAction::Enqueue {
+                prompt,
+                kind,
+                reasoning_effort,
+            } => {
+                state.next_entry += 1;
+                let entry_id = format!("queue-entry-{}", state.next_entry);
+                state.entries.push(QueueTestEntry {
+                    item: HttpConversationQueueItem {
+                        entry_id,
+                        order: 0,
+                        kind: *kind,
+                        status: HttpConversationQueueItemStatus::Queued,
+                        prompt_preview: format!("queued prompt ({} bytes)", prompt.len()),
+                        prompt_preview_truncated: false,
+                        prompt_material: HttpConversationQueuePromptMaterial::AvailableProcessLocal,
+                        dispatchable: false,
+                        blocked_reason: None,
+                        created_at_ms: None,
+                        updated_at_ms: None,
+                    },
+                    reasoning_effort: *reasoning_effort,
+                });
+            }
+            HttpConversationQueueCommandAction::Pause => state.paused = true,
+            HttpConversationQueueCommandAction::Resume => state.paused = false,
+            HttpConversationQueueCommandAction::InterruptAndRunNext { .. } => {
+                if state.paused {
+                    return Err(HttpConversationQueueDriverError::Conflict);
+                }
+                let candidate = state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.item.status == HttpConversationQueueItemStatus::Queued)
+                    .ok_or(HttpConversationQueueDriverError::Conflict)?;
+                if candidate.item.kind != HttpConversationQueueItemKind::Chat {
+                    return Err(HttpConversationQueueDriverError::Unsupported);
+                }
+                if candidate.item.prompt_material
+                    == HttpConversationQueuePromptMaterial::RequiresReentry
+                {
+                    return Err(HttpConversationQueueDriverError::RequiresReentry);
+                }
+                let view = state.view(&session.id, foreground_owner);
+                drop(state);
+                if let Some(observer) = lock(&self.interrupt_validation_observer).clone() {
+                    observer();
+                }
+                return Ok(view);
+            }
+            HttpConversationQueueCommandAction::Edit { .. }
+            | HttpConversationQueueCommandAction::Remove { .. }
+            | HttpConversationQueueCommandAction::Reorder { .. } => {
+                return Err(HttpConversationQueueDriverError::Unsupported);
+            }
+        }
+        state.generation += 1;
+        state.applied_mutations += 1;
+        Ok(state.view(&session.id, foreground_owner))
+    }
+
+    fn next_queued_run_admission(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<Option<HttpQueuedRunAdmission>, HttpConversationQueueDriverError> {
+        let state = lock(&self.state);
+        if state.paused {
+            return Ok(None);
+        }
+        Ok(state
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.item.status == HttpConversationQueueItemStatus::Queued
+                    && entry.item.prompt_material
+                        != HttpConversationQueuePromptMaterial::RequiresReentry
+            })
+            .map(|entry| HttpQueuedRunAdmission {
+                entry_id: entry.item.entry_id.clone(),
+                generation: queue_generation(state.generation),
+                dispatch_run_id: format!("queued-run-{}", entry.item.entry_id),
+                prompt_preview: entry.item.prompt_preview.clone(),
+                permission_mode: HttpPermissionMode::Manual,
+                reasoning_effort: entry.reasoning_effort,
+            }))
+    }
+
+    fn start_queued_run(&self, start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.queued_start_attempts.fetch_add(1, Ordering::SeqCst);
+        let mut state = lock(&self.state);
+        if self
+            .reject_next_queued_start_as_stale
+            .swap(0, Ordering::SeqCst)
+            != 0
+        {
+            state.generation += 1;
+            return Err(HttpRunDriverError::new(
+                "synthetic queued admission became stale before start",
+            ));
+        }
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.item.entry_id == start.admission.entry_id)
+            .ok_or_else(|| HttpRunDriverError::new("synthetic queue entry is missing"))?;
+        if entry.item.status != HttpConversationQueueItemStatus::Queued {
+            return Err(HttpRunDriverError::new(
+                "synthetic queue entry was already promoted",
+            ));
+        }
+        entry.item.status = HttpConversationQueueItemStatus::Delivered;
+        state.generation += 1;
+        drop(state);
+        lock(&self.queued_starts).push(start);
+        Ok(())
+    }
+
+    fn wait_for_run_release(
+        &self,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<(), HttpRunDriverError> {
+        if let Some(observer) = lock(&self.release_observer).clone() {
+            observer(run_id, timeout);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct RecordingRunDriver {
     bound_models: Mutex<Vec<Option<String>>>,
+    purged_session_scopes: Mutex<Vec<String>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
@@ -4553,6 +5752,10 @@ struct RecordingRunDriver {
 impl RecordingRunDriver {
     fn bound_models(&self) -> Vec<Option<String>> {
         lock(&self.bound_models).clone()
+    }
+
+    fn purged_session_scopes(&self) -> Vec<String> {
+        lock(&self.purged_session_scopes).clone()
     }
 
     fn starts(&self) -> Vec<HttpRunDriverStart> {
@@ -4673,6 +5876,10 @@ impl HttpRunDriver for RecordingRunDriver {
             session_scope_id: expected_session_id.to_owned(),
             session_log_path: recording_session_log_path(expected_session_id),
         })
+    }
+
+    fn purge_session_local_state(&self, durable_session_scope_id: &str) {
+        lock(&self.purged_session_scopes).push(durable_session_scope_id.to_owned());
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {

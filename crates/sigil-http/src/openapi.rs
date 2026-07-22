@@ -1,6 +1,9 @@
 use serde_json::{Value, json};
 
-use crate::{HTTP_SERVER_INFO_SCHEMA_VERSION, protocol::HTTP_PROTOCOL_VERSION};
+use crate::{
+    HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION, HTTP_MAX_CONVERSATION_QUEUE_ITEMS,
+    HTTP_SERVER_INFO_SCHEMA_VERSION, protocol::HTTP_PROTOCOL_VERSION,
+};
 
 /// OpenAPI version emitted for the MVP desktop/app-server command surface.
 pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
@@ -437,6 +440,45 @@ pub fn http_openapi_document() -> Value {
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
                         "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/queue": {
+                "get": {
+                    "summary": "Read the durable follow-up queue",
+                    "description": "Returns a bounded, secret-free queue view. Prompt hashes and process-local exact prompt material are excluded; generation is opaque and must be echoed unchanged.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Current bounded queue projection",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationQueueView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                },
+                "post": {
+                    "summary": "Apply one exact follow-up queue command",
+                    "description": "Routes one idempotent enqueue, edit, remove, reorder, pause, resume, or owner-bound interrupt-and-run-next command under the opaque queue generation CAS guard.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationQueueCommand" } } }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Durable queue command receipt without exact prompt material",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationQueueCommandReceipt" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
                         "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
@@ -1169,6 +1211,183 @@ pub fn http_openapi_document() -> Value {
                         "has_more": { "type": "boolean" },
                         "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
                         "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] }
+                    }
+                },
+                "ConversationQueueGeneration": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^[A-Za-z0-9._:-]+$",
+                    "description": "Opaque queue CAS generation. Clients must echo it unchanged."
+                },
+                "ConversationQueueItemKind": {
+                    "type": "string",
+                    "enum": ["chat", "plan_prompt", "agent_mention", "agent_message", "unknown"]
+                },
+                "ConversationQueueItemStatus": {
+                    "type": "string",
+                    "enum": ["queued", "dispatching", "delivered", "rejected", "cancelled", "stale", "unknown"]
+                },
+                "ConversationQueuePromptMaterial": {
+                    "type": "string",
+                    "enum": ["persisted_safe", "available_process_local", "requires_reentry"]
+                },
+                "ConversationQueueBlockedReason": {
+                    "type": "string",
+                    "enum": ["queue_paused", "requires_reentry", "foreground_run_active", "waiting_for_terminal_frontier", "foreground_owner_lost", "permission_required", "conflict", "stale", "terminal", "unsupported_target", "material_unavailable"]
+                },
+                "ConversationQueueItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["entry_id", "order", "kind", "status", "prompt_preview", "prompt_preview_truncated", "prompt_material", "dispatchable"],
+                    "properties": {
+                        "entry_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "order": { "type": "integer", "format": "uint32", "minimum": 0, "maximum": HTTP_MAX_CONVERSATION_QUEUE_ITEMS - 1 },
+                        "kind": { "$ref": "#/components/schemas/ConversationQueueItemKind" },
+                        "status": { "$ref": "#/components/schemas/ConversationQueueItemStatus" },
+                        "prompt_preview": { "type": "string", "maxLength": 240 },
+                        "prompt_preview_truncated": { "type": "boolean" },
+                        "prompt_material": { "$ref": "#/components/schemas/ConversationQueuePromptMaterial" },
+                        "dispatchable": { "type": "boolean" },
+                        "blocked_reason": { "oneOf": [{ "$ref": "#/components/schemas/ConversationQueueBlockedReason" }, { "type": "null" }] },
+                        "created_at_ms": { "type": ["integer", "null"], "format": "uint64" },
+                        "updated_at_ms": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "ConversationQueueView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "session_id", "generation", "paused", "total_items", "items", "truncated"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION },
+                        "session_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
+                        "paused": { "type": "boolean" },
+                        "total_items": { "type": "integer", "format": "uint32", "minimum": 0 },
+                        "items": { "type": "array", "maxItems": HTTP_MAX_CONVERSATION_QUEUE_ITEMS, "items": { "$ref": "#/components/schemas/ConversationQueueItem" } },
+                        "truncated": { "type": "boolean" },
+                        "next_dispatchable_entry_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationQueueEnqueueAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "prompt", "kind"],
+                    "properties": {
+                        "action": { "type": "string", "const": "enqueue" },
+                        "prompt": { "type": "string", "minLength": 1, "maxLength": 65536 },
+                        "kind": { "$ref": "#/components/schemas/ConversationQueueItemKind" },
+                        "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] }
+                    }
+                },
+                "ConversationQueueEditAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "entry_id", "prompt"],
+                    "properties": {
+                        "action": { "type": "string", "const": "edit" },
+                        "entry_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "prompt": { "type": "string", "minLength": 1, "maxLength": 65536 },
+                        "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] }
+                    }
+                },
+                "ConversationQueueRemoveAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "entry_id"],
+                    "properties": {
+                        "action": { "type": "string", "const": "remove" },
+                        "entry_id": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationQueueReorderAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "entry_id"],
+                    "properties": {
+                        "action": { "type": "string", "const": "reorder" },
+                        "entry_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "after_entry_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationQueuePauseAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action"],
+                    "properties": { "action": { "type": "string", "const": "pause" } }
+                },
+                "ConversationQueueResumeAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action"],
+                    "properties": { "action": { "type": "string", "const": "resume" } }
+                },
+                "ConversationQueueInterruptAndRunNextAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "foreground_run_id", "foreground_owner_revision"],
+                    "properties": {
+                        "action": { "type": "string", "const": "interrupt_and_run_next" },
+                        "foreground_run_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "foreground_owner_revision": { "type": "string", "minLength": 71, "maxLength": 71, "pattern": "^sha256:[0-9a-f]{64}$" }
+                    }
+                },
+                "ConversationQueueCommandAction": {
+                    "oneOf": [
+                        { "$ref": "#/components/schemas/ConversationQueueEnqueueAction" },
+                        { "$ref": "#/components/schemas/ConversationQueueEditAction" },
+                        { "$ref": "#/components/schemas/ConversationQueueRemoveAction" },
+                        { "$ref": "#/components/schemas/ConversationQueueReorderAction" },
+                        { "$ref": "#/components/schemas/ConversationQueuePauseAction" },
+                        { "$ref": "#/components/schemas/ConversationQueueResumeAction" },
+                        { "$ref": "#/components/schemas/ConversationQueueInterruptAndRunNextAction" }
+                    ]
+                },
+                "ConversationQueueCommandActionKind": {
+                    "type": "string",
+                    "enum": ["enqueue", "edit", "remove", "reorder", "pause", "resume", "interrupt_and_run_next"]
+                },
+                "ConversationQueueCommandRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["expected_generation", "action"],
+                    "properties": {
+                        "expected_generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
+                        "action": { "$ref": "#/components/schemas/ConversationQueueCommandAction" }
+                    }
+                },
+                "ConversationQueueCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/ConversationQueueCommandRequest" }
+                            }
+                        }
+                    ]
+                },
+                "ConversationQueueCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "action", "expected_generation", "generation", "queue", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "action": { "$ref": "#/components/schemas/ConversationQueueCommandActionKind" },
+                        "expected_generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
+                        "generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
+                        "interrupt_owner": {
+                            "oneOf": [
+                                { "$ref": "#/components/schemas/ForegroundRunOwner" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "queue": { "$ref": "#/components/schemas/ConversationQueueView" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "replayed": { "type": "boolean" }
                     }
                 },
                 "DecimalSequence": {
