@@ -128,6 +128,49 @@ fn durable_journal_replays_after_process_reopen() {
 }
 
 #[test]
+fn durable_journal_migrates_the_previous_protocol_schema_on_reopen() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    {
+        let journal =
+            HttpDurableProtocolJournal::open(&path, 16).expect("journal should initialize");
+        journal
+            .append(durable_event(1))
+            .expect("start should persist");
+    }
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal should remain readable"))
+            .expect("journal should parse");
+    persisted["schema_version"] = serde_json::Value::from(2_u64);
+    persisted["events"][0]["schema_version"] = serde_json::Value::from(1_u64);
+    persisted["events"][0]
+        .as_object_mut()
+        .expect("event should be an object")
+        .remove("provisional_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&persisted).expect("previous fixture should serialize"),
+    )
+    .expect("previous fixture should write");
+
+    let reopened = HttpDurableProtocolJournal::open(&path, 16)
+        .expect("previous journal schema should migrate");
+    let replay = reopened
+        .replay_run_after("session-1", "run-1", None)
+        .expect("migrated journal should replay");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
+    assert!(replay[0].provisional_id.is_some());
+
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("migrated journal should persist"))
+            .expect("migrated journal should parse");
+    assert_eq!(migrated["schema_version"], 3);
+    assert_eq!(migrated["events"][0]["schema_version"], 2);
+    assert!(migrated["events"][0]["provisional_id"].is_string());
+}
+
+#[test]
 fn durable_journal_rejects_a_second_process_owner_for_the_same_path() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let path = temp.path().join("protocol-journal.json");

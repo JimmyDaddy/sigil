@@ -18,6 +18,8 @@ use crate::sse::{
 };
 
 const HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION: u32 = 3;
+const HTTP_PROTOCOL_JOURNAL_PREVIOUS_SCHEMA_VERSION: u32 = 2;
+const HTTP_PROTOCOL_EVENT_PREVIOUS_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MAX_HTTP_PROTOCOL_JOURNAL_EVENTS: usize = 4_096;
 pub(crate) const MAX_HTTP_PROTOCOL_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 
@@ -350,11 +352,22 @@ impl HttpProtocolJournalFile {
         }
     }
 
-    fn into_state(self) -> Result<HttpProtocolJournalState, HttpProtocolJournalError> {
-        if self.schema_version != HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION {
-            return Err(HttpProtocolJournalError::Corrupt {
-                message: format!("unsupported schema version {}", self.schema_version),
-            });
+    fn into_state(mut self) -> Result<HttpProtocolJournalState, HttpProtocolJournalError> {
+        match self.schema_version {
+            HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION => {}
+            HTTP_PROTOCOL_JOURNAL_PREVIOUS_SCHEMA_VERSION => {
+                self.events = self
+                    .events
+                    .into_iter()
+                    .map(migrate_previous_schema_event)
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.schema_version = HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION;
+            }
+            schema_version => {
+                return Err(HttpProtocolJournalError::Corrupt {
+                    message: format!("unsupported schema version {schema_version}"),
+                });
+            }
         }
         if self.events.len() > MAX_HTTP_PROTOCOL_JOURNAL_EVENTS
             || self.high_watermarks.len() > MAX_HTTP_PROTOCOL_JOURNAL_EVENTS
@@ -453,6 +466,49 @@ impl HttpProtocolJournalFile {
             high_watermarks,
         })
     }
+}
+
+fn migrate_previous_schema_event(
+    event: HttpProtocolEvent,
+) -> Result<HttpProtocolEvent, HttpProtocolJournalError> {
+    if event.schema_version != HTTP_PROTOCOL_EVENT_PREVIOUS_SCHEMA_VERSION || !event.is_durable() {
+        return Err(HttpProtocolJournalError::Corrupt {
+            message: "previous protocol journal contains an incompatible event".to_owned(),
+        });
+    }
+    let replay_id = event.replay_id;
+    let approval_request = event.approval_request;
+    let original_run_event = serde_json::to_value(&event.run_event).map_err(|error| {
+        HttpProtocolJournalError::Corrupt {
+            message: error.to_string(),
+        }
+    })?;
+    let mut migrated = HttpProtocolEvent::from_run_event(event.run_event).map_err(|error| {
+        HttpProtocolJournalError::Corrupt {
+            message: error.to_string(),
+        }
+    })?;
+    let migrated_run_event = serde_json::to_value(&migrated.run_event).map_err(|error| {
+        HttpProtocolJournalError::Corrupt {
+            message: error.to_string(),
+        }
+    })?;
+    if !migrated.is_durable()
+        || migrated.replay_id != replay_id
+        || migrated_run_event != original_run_event
+    {
+        return Err(HttpProtocolJournalError::Corrupt {
+            message: "previous protocol journal contains a non-canonical durable event".to_owned(),
+        });
+    }
+    migrated.approval_request = approval_request;
+    if !migrated.has_valid_approval_metadata() {
+        return Err(HttpProtocolJournalError::Corrupt {
+            message: "previous protocol journal approval metadata does not match its payload"
+                .to_owned(),
+        });
+    }
+    Ok(migrated)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
