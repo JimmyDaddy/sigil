@@ -14,12 +14,18 @@ export interface ComposerSuggestion {
 }
 
 export function ComposerSuggestions({
+  id,
+  label,
+  unavailableLabel,
   suggestions,
   activeIndex,
   query,
   onSelect,
   onActiveIndexChange,
 }: {
+  id: string;
+  label: string;
+  unavailableLabel: string;
   suggestions: ComposerSuggestion[];
   activeIndex: number;
   query: string;
@@ -28,9 +34,10 @@ export function ComposerSuggestions({
 }) {
   if (suggestions.length === 0) return null;
   return (
-    <div className="composer-suggestions" role="listbox" aria-label="Composer suggestions">
+    <div id={id} className="composer-suggestions" role="listbox" aria-label={label}>
       {suggestions.map((suggestion, index) => (
         <Button
+          id={`${id}-option-${index}`}
           key={suggestion.id}
           className={`composer-suggestion${index === activeIndex ? " is-active" : ""}`}
           variant="quiet"
@@ -48,7 +55,7 @@ export function ComposerSuggestions({
             <strong>{suggestion.label}</strong>
             <small>{suggestion.available ? suggestion.description : suggestion.unavailableReason}</small>
           </span>
-          {!suggestion.available ? <span className="composer-suggestion-state">Unavailable</span> : null}
+          {!suggestion.available ? <span className="composer-suggestion-state">{unavailableLabel}</span> : null}
         </Button>
       ))}
     </div>

@@ -56,7 +56,7 @@ import {
 } from "./features/conversation/liveEventReducer";
 import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
-import { useNotifications } from "./ui/feedback";
+import { LoadingState, useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
@@ -1030,7 +1030,6 @@ export function ConversationPanel({
       .catch(() => {
         setCompactionReview(undefined);
         setConversationRecoveryError(true);
-        notify({ message: t("compactionPreviewFailed"), tone: "error" });
       })
       .finally(() => setConversationRecoveryBusy(false));
   }, [bridge, conversationRecovery, conversationRecoveryBusy, conversationRecoveryLoading, notify, session.id, t, workspaceId]);
@@ -1056,7 +1055,6 @@ export function ConversationPanel({
     } catch {
       setCompactionReview(undefined);
       setConversationRecoveryError(true);
-      notify({ message: t("compactionPreviewStale"), tone: "error" });
     } finally {
       setConversationRecoveryBusy(false);
     }
@@ -1075,7 +1073,6 @@ export function ConversationPanel({
     } catch {
       setCheckpointRestorePreview(undefined);
       setConversationRecoveryError(true);
-      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
     } finally {
       setConversationRecoveryBusy(false);
     }
@@ -1103,7 +1100,6 @@ export function ConversationPanel({
       }
       notify({ message: t("restoreCompleted"), tone: "success" });
     } catch {
-      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
       setConversationRecoveryError(true);
     } finally {
       setConversationRecoveryBusy(false);
@@ -1125,13 +1121,14 @@ export function ConversationPanel({
       }
       return receipt.fork;
     } catch {
-      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
       setConversationRecoveryError(true);
       return undefined;
     } finally {
       setConversationRecoveryBusy(false);
     }
   };
+
+  const continuityLoading = conversationLoadingCopy(continuityState.lifecycle, t);
 
   return (
     <div className="conversation-layout">
@@ -1245,23 +1242,13 @@ export function ConversationPanel({
         />
       ) : null}
 
-      {["loading_transcript", "checking_owner", "attaching_run", "finalizing"].includes(continuityState.lifecycle) ? (
-        <section className="continuity-state sg-bounded-content" role="status">
-          <span className="continuity-state-pulse" aria-hidden="true" />
-          <div>
-            <strong>{continuityState.lifecycle === "loading_transcript"
-              ? t("loadingConversationHistory")
-              : continuityState.lifecycle === "attaching_run"
-                ? t("reattachingLiveRun")
-                : continuityState.lifecycle === "finalizing"
-                  ? t("runFinishedAnnouncement")
-                  : t("checkingConversationContinuity")}</strong>
-            <p>{continuityState.lifecycle === "finalizing"
-              ? t("loadingSavedMessages")
-              : t("checkingConversationContinuityDetail")}</p>
-          </div>
-        </section>
-      ) : null}
+      {continuityLoading === undefined || initialLoadReportedSessionId.current !== session.id ? null : (
+        <LoadingState
+          className="conversation-continuity-loading sg-bounded-content"
+          label={continuityLoading.label}
+          detail={continuityLoading.detail}
+        />
+      )}
 
       {continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only" ? (
         <section className={`continuity-recovery sg-bounded-content${continuityState.lifecycle === "read_only" ? " is-read-only" : ""}`} role="alert">
@@ -1362,16 +1349,16 @@ export function ConversationPanel({
             }}
           />
         ) : null}
-        {rows.length === 0 ? (
+        {rows.length === 0 && continuityLoading === undefined ? (
           <div className="timeline-empty">
-            <strong>{displayBusy ? t("loadingConversationHistory") : t("readyForPrompt")}</strong>
-            <span>{displayBusy ? t("loadingSavedMessages") : t("newRunActivity")}</span>
+            <strong>{t("readyForPrompt")}</strong>
+            <span>{t("newRunActivity")}</span>
           </div>
-        ) : (
+        ) : rows.length > 0 ? (
           rows.map((row) => row.kind === "tool"
             ? <ToolCard key={row.key} displayId={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, input: row.input, status: row.status }} />
             : <Message key={row.key} displayId={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
-        )}
+        ) : null}
       </div>
 
       {pendingApproval?.approval !== undefined && continuityState.lifecycle === "live" ? (
@@ -1539,6 +1526,27 @@ function isTerminalAgentStatus(status: import("./types").AgentActivityStatus): b
   return ["completed", "failed", "cancelled", "interrupted", "unavailable"].includes(status);
 }
 
+function conversationLoadingCopy(
+  lifecycle: ConversationContinuityState["lifecycle"],
+  t: Translate,
+): { readonly label: string; readonly detail: string } | undefined {
+  switch (lifecycle) {
+    case "loading_transcript":
+      return { label: t("loadingConversationHistory"), detail: t("loadingSavedMessages") };
+    case "checking_owner":
+      return {
+        label: t("checkingConversationContinuity"),
+        detail: t("checkingConversationContinuityDetail"),
+      };
+    case "attaching_run":
+      return { label: t("reattachingLiveRun"), detail: t("checkingConversationContinuityDetail") };
+    case "finalizing":
+      return { label: t("runFinishedAnnouncement"), detail: t("loadingSavedMessages") };
+    default:
+      return undefined;
+  }
+}
+
 function ConversationActivity({
   state,
   t,
@@ -1547,18 +1555,22 @@ function ConversationActivity({
   readonly t: Translate;
 }) {
   const effectiveState = state ?? "idle";
+  if (effectiveState === "idle" || effectiveState === "terminal") return null;
   const label = (() => {
     switch (effectiveState) {
-      case "idle": return t("conversationIdle");
       case "connecting": return t("conversationConnecting");
       case "live": return t("conversationLive");
       case "reconnecting": return t("conversationReconnecting");
-      case "terminal": return t("conversationTerminal");
       case "error": return t("conversationStreamError");
     }
   })();
   return (
-    <span className={`conversation-activity stream-${effectiveState}`} role="status">
+    <span
+      className={`conversation-activity stream-${effectiveState}`}
+      role={effectiveState === "error" ? "alert" : "status"}
+      aria-live={effectiveState === "error" ? "assertive" : "polite"}
+      aria-atomic="true"
+    >
       <span className="conversation-activity-dot" aria-hidden="true" />
       {label}
     </span>

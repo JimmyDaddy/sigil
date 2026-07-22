@@ -318,7 +318,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
 }
 
 async function readyComposer(): Promise<HTMLTextAreaElement> {
-  const composer = await screen.findByRole("textbox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+  const composer = await screen.findByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
   await waitFor(() => expect(composer.disabled).toBe(false));
   return composer;
 }
@@ -1137,11 +1137,13 @@ describe("desktop workspace and history shell", () => {
     });
     await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
 
     await act(async () => {
       resolveRunContext?.(defaultRunContext);
     });
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
 
     await act(async () => {
       resolveContinuity?.({
@@ -1474,7 +1476,7 @@ describe("desktop workspace and history shell", () => {
     expect(order).toEqual(["events", "status", "attach"]);
 
     await waitFor(() => expect(conversationQueue).toHaveBeenCalled());
-    const composer = screen.getByRole("textbox", { name: "Message Sigil" });
+    const composer = screen.getByRole("combobox", { name: "Message Sigil" });
     await user.type(composer, "Follow up after approval");
     fireEvent.keyDown(composer, { key: "Enter" });
     await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledWith(
@@ -1567,7 +1569,7 @@ describe("desktop workspace and history shell", () => {
       await user.click(await screen.findByRole("button", { name: /^After idle session/ }));
       const send = await screen.findByRole("button", { name: "Send message" });
       await waitFor(() => expect(continuity).toHaveBeenCalledTimes(1));
-      await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Keep this draft pending");
+      await user.type(screen.getByRole("combobox", { name: "Message Sigil" }), "Keep this draft pending");
       expect((send as HTMLButtonElement).disabled).toBe(false);
       await waitFor(() => {
         expect(eventListener).toBeDefined();
@@ -1656,7 +1658,7 @@ describe("desktop workspace and history shell", () => {
     })} />);
 
     await user.click(await screen.findByRole("button", { name: /^Owner race session/ }));
-    const input = await screen.findByRole("textbox", { name: "Message Sigil" });
+    const input = await screen.findByRole("combobox", { name: "Message Sigil" });
     await waitFor(() => expect(continuity).toHaveBeenCalledTimes(2));
     expect(attachRun).toHaveBeenCalledTimes(1);
     await user.type(input, "Continue safely");
@@ -1712,7 +1714,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(await screen.findByRole("button", { name: /^Post attach race/ }));
     await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
     expect(attachRun).toHaveBeenCalledTimes(1);
-    const input = screen.getByRole("textbox", { name: "Message Sigil" });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
     await user.type(input, "No stale owner window");
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -1787,7 +1789,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(await screen.findByRole("button", { name: /^Recovery session/ }));
     expect(await screen.findByText("Saved transcript remains readable.")).toBeTruthy();
     expect(await screen.findByText("Live controls need attention")).toBeTruthy();
-    const input = screen.getByRole("textbox", { name: "Message Sigil" });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
     expect((input as HTMLTextAreaElement).disabled).toBe(false);
     await user.type(input, "Keep this draft while recovering");
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
@@ -2318,8 +2320,9 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByText("Available")).toBeTruthy();
-    await user.type(await readyComposer(), "Say hello");
+    const composer = await readyComposer();
+    expect(screen.queryByText("Available")).toBeNull();
+    await user.type(composer, "Say hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(screen.getByText("Say hello")).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
@@ -2346,7 +2349,7 @@ describe("desktop workspace and history shell", () => {
 
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     expect(screen.queryByText("complete")).toBeNull();
-    expect(screen.getByText("Completed")).toBeTruthy();
+    expect(screen.queryByText("Completed")).toBeNull();
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
   });
 
@@ -2431,7 +2434,7 @@ describe("desktop workspace and history shell", () => {
 
     await user.click(await screen.findByRole("button", { name: /^Status-only session/ }));
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
-    await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Next durable turn");
+    await user.type(screen.getByRole("combobox", { name: "Message Sigil" }), "Next durable turn");
     await waitFor(() => expect(statusListener).toBeDefined());
     act(() => statusListener?.({
       workspaceId: workspace.id,
@@ -2623,7 +2626,7 @@ describe("desktop workspace and history shell", () => {
 
     await user.click(await screen.findByRole("button", { name: /^Invalid refresh session/ }));
     expect(await screen.findByText("Original durable content")).toBeTruthy();
-    await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Do not enable yet");
+    await user.type(screen.getByRole("combobox", { name: "Message Sigil" }), "Do not enable yet");
     await waitFor(() => expect(eventListener).toBeDefined());
     act(() => {
       eventListener?.({

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type {
@@ -89,6 +89,7 @@ export function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const [interruptPrompt, setInterruptPrompt] = useState<string>();
+  const suggestionListId = `${useId()}-suggestions`;
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
@@ -293,6 +294,9 @@ export function Composer({
     <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       {suggestionsOpen ? (
         <ComposerSuggestions
+          id={suggestionListId}
+          label={t("composerSuggestions")}
+          unavailableLabel={t("unavailable")}
           suggestions={suggestions}
           activeIndex={Math.min(activeSuggestion, suggestions.length - 1)}
           query={suggestionQuery?.query ?? ""}
@@ -340,6 +344,13 @@ export function Composer({
           ref={composerRef}
           value={prompt}
           disabled={draftEditingBlocked}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={suggestionsOpen}
+          aria-controls={suggestionsOpen ? suggestionListId : undefined}
+          aria-activedescendant={suggestionsOpen
+            ? `${suggestionListId}-option-${Math.min(activeSuggestion, suggestions.length - 1)}`
+            : undefined}
           onChange={(event) => {
             setPrompt(event.target.value);
             setSuggestionsDismissedFor(undefined);

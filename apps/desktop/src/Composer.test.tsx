@@ -272,10 +272,31 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
+  it("binds invocation suggestions to the composer with the combobox contract", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+    await user.type(input, "/");
+
+    const listbox = screen.getByRole("listbox", { name: "Composer suggestions" });
+    const firstOption = screen.getAllByRole("option")[0];
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(input.getAttribute("aria-controls")).toBe(listbox.id);
+    expect(input.getAttribute("aria-activedescendant")).toBe(firstOption.id);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(screen.getAllByRole("option")[1].id);
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("keeps the draft editable but blocks run actions until continuity is verified", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer({ submissionBlocked: true });
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Keep this draft");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -283,7 +304,7 @@ describe("structured composer", () => {
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(onSubmit).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
-    for (const select of screen.getAllByRole("combobox")) {
+    for (const select of screen.getAllByRole("combobox").filter((control) => control.tagName === "SELECT")) {
       expect((select as HTMLSelectElement).disabled).toBe(true);
     }
   });
@@ -291,7 +312,7 @@ describe("structured composer", () => {
   it("selects an exact skill binding and submits only the task prompt", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "$rev");
     await user.click(screen.getByRole("option", { name: /Review/ }));
@@ -309,7 +330,7 @@ describe("structured composer", () => {
   it("selects an exact agent snapshot and submits only the task prompt", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "@expl");
     await user.click(screen.getByRole("option", { name: /explore/ }));
@@ -325,7 +346,7 @@ describe("structured composer", () => {
   it("routes slash effort locally instead of sending it to the model", async () => {
     const user = userEvent.setup();
     const { onSubmit, onReasoningEffortChange } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/effort high");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -337,7 +358,7 @@ describe("structured composer", () => {
   it("opens and filters the agent workbench from the slash command", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenAgentWorkbench } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/agent plan");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -350,7 +371,7 @@ describe("structured composer", () => {
   it("binds the supervised plan agent from /plan", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/plan inspect the runtime");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -364,7 +385,7 @@ describe("structured composer", () => {
   it("routes /resume to conversation search and keeps compact available", async () => {
     const user = userEvent.setup();
     const { onOpenSessionPicker } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/");
     expect(screen.getByRole("option", { name: /Compact context/ })).not.toBeNull();
@@ -378,7 +399,7 @@ describe("structured composer", () => {
   it("routes /compact to an explicit desktop preview instead of the model", async () => {
     const user = userEvent.setup();
     const { onPreviewCompaction, onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/compact");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -390,7 +411,7 @@ describe("structured composer", () => {
   it("routes /config to the desktop settings page", async () => {
     const user = userEvent.setup();
     const { onOpenSettings, onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/config");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -402,7 +423,7 @@ describe("structured composer", () => {
   it.each(["/doctor", "/feedback"])("routes %s to support and diagnostics", async (command) => {
     const user = userEvent.setup();
     const { onOpenSupport, onSubmit } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, command);
     fireEvent.keyDown(input, { key: "Enter" });
@@ -414,7 +435,7 @@ describe("structured composer", () => {
   it("shows unavailable agents without dispatching a run", async () => {
     const user = userEvent.setup();
     const { onSubmit, onNotice } = renderComposer();
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "@dis");
     await user.click(screen.getByRole("option", { name: /disabled/ }));
@@ -429,7 +450,7 @@ describe("structured composer", () => {
   it("queues Enter submissions by default while a run is active", async () => {
     const user = userEvent.setup();
     const { onSubmit, onInterruptAndRunNext } = renderComposer({ active: true });
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Run this after the current task");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -442,7 +463,7 @@ describe("structured composer", () => {
   it("does not queue an IME composition Enter", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer({ active: true });
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "继续执行");
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
@@ -455,7 +476,7 @@ describe("structured composer", () => {
     const user = userEvent.setup();
     const onInterruptAndRunNext = vi.fn(async (_prompt: string) => false);
     renderComposer({ active: true, onInterruptAndRunNext });
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Urgent follow-up");
     await user.click(screen.getByRole("button", { name: "Interrupt and run next" }));
@@ -470,7 +491,7 @@ describe("structured composer", () => {
   it("opens the durable queue without changing the draft", async () => {
     const user = userEvent.setup();
     const { onOpenQueue } = renderComposer({ active: true, queueCount: 2 });
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
