@@ -408,6 +408,39 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/display": {
+                "get": {
+                    "summary": "Read one canonical durable conversation display page",
+                    "description": "Returns stable identity/order projection from scope-checked append-only session truth. Durable sequences use decimal strings; raw durable scope, paths, checksums, credentials and tool arguments are excluded.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+                        },
+                        {
+                            "name": "cursor",
+                            "in": "query",
+                            "required": false,
+                            "description": "Opaque backwards cursor bound to one fixed durable frontier",
+                            "schema": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$" }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Canonical conversation display page",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationDisplayPage" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}/runs": {
                 "post": {
                     "summary": "Start a run in a session",
@@ -688,11 +721,12 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
                         "bounded_transcript_replay": { "type": "boolean" },
+                        "canonical_conversation_display": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
@@ -960,6 +994,186 @@ pub fn http_openapi_document() -> Value {
                         "truncated": { "type": "boolean" },
                         "original_content_bytes": { "type": "integer", "format": "uint64" }
                     }
+                },
+                "ConversationDisplayOrder": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_stream_sequence", "subindex"],
+                    "properties": {
+                        "session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "subindex": { "type": "integer", "format": "uint32", "minimum": 0 }
+                    }
+                },
+                "ConversationDisplayItemKind": {
+                    "type": "string",
+                    "enum": ["user_message", "reasoning", "assistant_message", "tool", "approval", "checkpoint", "notice", "terminal"]
+                },
+                "ConversationDisplaySource": {
+                    "type": "string",
+                    "enum": ["durable_transcript", "durable_run_event", "live_transient"]
+                },
+                "ConversationDisplayStatus": {
+                    "type": "string",
+                    "enum": ["recorded", "requested", "waiting_for_approval", "approved", "denied", "completed", "succeeded", "failed", "cancelled", "interrupted", "blocked"]
+                },
+                "ConversationDisplayContent": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "role", "image_attachment_count", "truncated", "original_content_bytes"],
+                            "properties": {
+                                "type": { "const": "message" },
+                                "role": { "type": "string", "enum": ["user", "assistant"] },
+                                "text": { "type": ["string", "null"], "maxLength": 65536 },
+                                "assistant_phase": { "type": ["string", "null"], "enum": ["tool_preamble", "progress", "final_answer", null] },
+                                "image_attachment_count": { "type": "integer", "format": "uint64" },
+                                "truncated": { "type": "boolean" },
+                                "original_content_bytes": { "type": "integer", "format": "uint64" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "text", "truncated", "original_content_bytes"],
+                            "properties": {
+                                "type": { "const": "reasoning" },
+                                "text": { "type": "string", "maxLength": 65536 },
+                                "truncated": { "type": "boolean" },
+                                "original_content_bytes": { "type": "integer", "format": "uint64" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "truncated", "original_content_bytes"],
+                            "properties": {
+                                "type": { "const": "tool" },
+                                "call_id": { "type": ["string", "null"], "maxLength": 512 },
+                                "tool_name": { "type": ["string", "null"], "maxLength": 512 },
+                                "output": { "type": ["string", "null"], "maxLength": 65536 },
+                                "truncated": { "type": "boolean" },
+                                "original_content_bytes": { "type": "integer", "format": "uint64" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "call_id", "tool_name"],
+                            "properties": {
+                                "type": { "const": "approval" },
+                                "call_id": { "type": "string", "maxLength": 512 },
+                                "tool_name": { "type": "string", "maxLength": 512 },
+                                "decision": { "type": ["string", "null"], "enum": ["approved", "approved_for_session", "denied", null] }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "outcome"],
+                            "properties": {
+                                "type": { "const": "checkpoint" },
+                                "outcome": { "type": "string", "enum": ["restored", "conflict"] },
+                                "checkpoint_id": { "type": ["string", "null"], "maxLength": 512 },
+                                "conflict_reason": { "type": ["string", "null"], "enum": ["workspace_mismatch", "current_hash_mismatch", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding", null] }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "text", "truncated", "original_content_bytes"],
+                            "properties": {
+                                "type": { "const": "notice" },
+                                "text": { "type": "string", "maxLength": 65536 },
+                                "truncated": { "type": "boolean" },
+                                "original_content_bytes": { "type": "integer", "format": "uint64" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type", "summary_truncated"],
+                            "properties": {
+                                "type": { "const": "terminal" },
+                                "final_message_id": { "type": ["string", "null"], "maxLength": 512 },
+                                "safe_summary": { "type": ["string", "null"], "maxLength": 65536 },
+                                "summary_truncated": { "type": "boolean" }
+                            }
+                        }
+                    ]
+                },
+                "ConversationDisplayItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "display_id", "display_order", "source_event_id", "kind", "source", "status", "content"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "display_id": { "type": "string", "maxLength": 512 },
+                        "display_order": { "$ref": "#/components/schemas/ConversationDisplayOrder" },
+                        "source_event_id": { "type": "string", "maxLength": 512 },
+                        "kind": { "$ref": "#/components/schemas/ConversationDisplayItemKind" },
+                        "source": { "$ref": "#/components/schemas/ConversationDisplaySource" },
+                        "run_id": { "type": ["string", "null"], "maxLength": 512 },
+                        "run_sequence": { "oneOf": [{ "$ref": "#/components/schemas/DecimalSequence" }, { "type": "null" }] },
+                        "status": { "$ref": "#/components/schemas/ConversationDisplayStatus" },
+                        "content": { "$ref": "#/components/schemas/ConversationDisplayContent" },
+                        "reconciles": { "type": ["array", "null"], "maxItems": 16, "items": { "type": "string", "maxLength": 512 } }
+                    }
+                },
+                "ConversationTerminalFrontier": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["run_id", "session_stream_sequence", "status"],
+                    "properties": {
+                        "run_id": { "type": "string", "maxLength": 512 },
+                        "session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "status": { "$ref": "#/components/schemas/ConversationDisplayStatus" }
+                    }
+                },
+                "ConversationDisplayGapKind": {
+                    "type": "string",
+                    "enum": ["retention", "replay"]
+                },
+                "ConversationDisplayGapFact": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "after_session_stream_sequence"],
+                    "properties": {
+                        "kind": { "$ref": "#/components/schemas/ConversationDisplayGapKind" },
+                        "after_session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" }
+                    }
+                },
+                "ConversationLiveProvisionalAnchor": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Process-local observation only; never a durable display order.",
+                    "required": ["durable_frontier", "run_id", "run_sequence"],
+                    "properties": {
+                        "durable_frontier": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "run_id": { "type": "string", "maxLength": 512 },
+                        "run_sequence": { "$ref": "#/components/schemas/DecimalSequence" }
+                    }
+                },
+                "ConversationDisplayPage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "request_scope", "through_session_stream_sequence", "total_items", "items", "has_more", "gap_facts"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "request_scope": { "type": "string", "maxLength": 512 },
+                        "through_session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "terminal_frontier": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTerminalFrontier" }, { "type": "null" }] },
+                        "total_items": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ConversationDisplayItem" } },
+                        "next_cursor": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$" },
+                        "has_more": { "type": "boolean" },
+                        "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
+                        "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] }
+                    }
+                },
+                "DecimalSequence": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
                 },
                 "AgentActivityStatus": {
                     "type": "string",

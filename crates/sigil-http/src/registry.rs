@@ -21,18 +21,18 @@ use crate::{
         HttpStoredCommandIdentity, HttpStoredCommandKey,
     },
     driver::{
-        HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
-        HttpSessionOpenBindingError,
+        HttpConversationDisplayDriverError, HttpRunDriver, HttpRunDriverApproval,
+        HttpRunDriverCancel, HttpRunDriverStart, HttpSessionOpenBindingError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
-        HttpApprovalDecisionRequest, HttpContinuityRecoveryAction, HttpForegroundRunOwner,
-        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
-        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
-        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
-        HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpApprovalDecisionRequest, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
+        HttpForegroundRunOwner, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
+        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
+        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+        HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
+        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -106,6 +106,15 @@ pub enum HttpRegistryError {
         run_id: String,
         message: String,
     },
+    /// The opaque canonical-display cursor is malformed or bound to another request scope.
+    #[error("conversation display cursor is invalid")]
+    ConversationDisplayCursorInvalid,
+    /// The opaque canonical-display cursor no longer matches retained durable truth.
+    #[error("conversation display cursor is stale")]
+    ConversationDisplayCursorStale,
+    /// The canonical durable display projection could not be proven safely.
+    #[error("conversation display projection is unavailable")]
+    ConversationDisplayUnavailable,
     /// The driver unwound after the registry had published a tentative operation.
     #[error("http driver panicked during {operation} for run {run_id}")]
     DriverPanicked {
@@ -547,6 +556,61 @@ impl HttpSessionRunRegistry {
             run_id: session_id.to_owned(),
             message: error.message,
         })
+    }
+
+    /// Projects one canonical durable conversation page and validates its foreground anchor.
+    ///
+    /// The driver owns durable scope validation and the exact public run-event watermark. The
+    /// registry never guesses a live sequence from its command stream; it only clears an anchor
+    /// whose run no longer owns the session after projection completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown, the cursor is stale, or durable projection
+    /// cannot be proven safely.
+    pub fn conversation_display_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<HttpConversationDisplayPage, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let mut page = catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .conversation_display_page(&session, cursor, limit)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "conversation display",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| match error {
+            HttpConversationDisplayDriverError::InvalidCursor => {
+                HttpRegistryError::ConversationDisplayCursorInvalid
+            }
+            HttpConversationDisplayDriverError::StaleCursor => {
+                HttpRegistryError::ConversationDisplayCursorStale
+            }
+            HttpConversationDisplayDriverError::Unavailable => {
+                HttpRegistryError::ConversationDisplayUnavailable
+            }
+        })?;
+
+        let state = self.lock_state();
+        let current =
+            state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?;
+        if page
+            .live_provisional_anchor
+            .as_ref()
+            .is_some_and(|anchor| current.foreground_run_id.as_deref() != Some(&anchor.run_id))
+        {
+            page.live_provisional_anchor = None;
+        }
+        Ok(page)
     }
 
     /// Projects typed run configuration and context usage for an existing adapter session.

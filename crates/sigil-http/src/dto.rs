@@ -7,13 +7,20 @@ pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
     TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
 };
+use sigil_runtime::conversation_display::{
+    ConversationDisplayApprovalDecisionV1, ConversationDisplayAssistantPhaseV1,
+    ConversationDisplayCheckpointConflictReasonV1, ConversationDisplayCheckpointOutcomeV1,
+    ConversationDisplayContentV1, ConversationDisplayItemKindV1, ConversationDisplayItemV1,
+    ConversationDisplayMessageRoleV1, ConversationDisplayPageV1, ConversationDisplaySourceV1,
+    ConversationDisplayStatusV1, ConversationTerminalFrontierV1,
+};
 use sigil_runtime::support::{
     DoctorSupportReportV1, SupportDoctorCheckV1, SupportDoctorStatus, SupportEnvironmentV1,
     SupportPrivacyV1, SupportTerminalFamily,
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 5;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 6;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +40,8 @@ pub struct HttpServerCapabilities {
     pub durable_session_reopen: bool,
     /// A bound durable session exposes a scope-checked, bounded transcript page.
     pub bounded_transcript_replay: bool,
+    /// A bound durable session exposes canonical identity/order display pages.
+    pub canonical_conversation_display: bool,
     /// Durable run events support cursor-bound replay.
     pub durable_event_replay: bool,
     /// Transient and durable run events can be followed while the server is active.
@@ -59,6 +68,7 @@ impl HttpServerCapabilities {
             session_catalog: true,
             durable_session_reopen: true,
             bounded_transcript_replay: true,
+            canonical_conversation_display: true,
             durable_event_replay: true,
             live_events: true,
             approval: true,
@@ -618,6 +628,406 @@ pub struct HttpSessionTranscriptPage {
     /// Exclusive ordinal for the next older page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_before: Option<u64>,
+}
+
+/// Durable order projected for one canonical conversation item.
+///
+/// The stream sequence is encoded as decimal text so JavaScript clients cannot lose precision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationDisplayOrder {
+    pub session_stream_sequence: String,
+    pub subindex: u32,
+}
+
+/// Provider-neutral visual category for one canonical item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayItemKind {
+    UserMessage,
+    Reasoning,
+    AssistantMessage,
+    Tool,
+    Approval,
+    Checkpoint,
+    Notice,
+    Terminal,
+}
+
+/// Durable evidence class behind one canonical item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplaySource {
+    DurableTranscript,
+    DurableRunEvent,
+    LiveTransient,
+}
+
+/// Bounded lifecycle vocabulary used by canonical items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayStatus {
+    Recorded,
+    Requested,
+    WaitingForApproval,
+    Approved,
+    Denied,
+    Completed,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+    Blocked,
+}
+
+/// Provider-neutral message author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayMessageRole {
+    User,
+    Assistant,
+}
+
+/// Assistant phase retained for canonical renderer presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayAssistantPhase {
+    ToolPreamble,
+    Progress,
+    FinalAnswer,
+}
+
+/// User decision recorded for one approval item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayApprovalDecision {
+    Approved,
+    ApprovedForSession,
+    Denied,
+}
+
+/// Durable checkpoint outcome shown by the canonical renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayCheckpointOutcome {
+    Restored,
+    Conflict,
+}
+
+/// Bounded checkpoint conflict vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayCheckpointConflictReason {
+    WorkspaceMismatch,
+    CurrentHashMismatch,
+    ArtifactUnavailable,
+    SensitiveSnapshot,
+    UnsupportedSnapshot,
+    InvalidBinding,
+}
+
+/// Typed, secret-safe content carried by one canonical display item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+pub enum HttpConversationDisplayContent {
+    Message {
+        role: HttpConversationDisplayMessageRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_phase: Option<HttpConversationDisplayAssistantPhase>,
+        image_attachment_count: u64,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Reasoning {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Tool {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Approval {
+        call_id: String,
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<HttpConversationDisplayApprovalDecision>,
+    },
+    Checkpoint {
+        outcome: HttpConversationDisplayCheckpointOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflict_reason: Option<HttpConversationDisplayCheckpointConflictReason>,
+    },
+    Notice {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Terminal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<String>,
+        summary_truncated: bool,
+    },
+}
+
+/// One canonical, durable display item safe for authenticated local clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationDisplayItem {
+    pub schema_version: u16,
+    pub display_id: String,
+    pub display_order: HttpConversationDisplayOrder,
+    pub source_event_id: String,
+    pub kind: HttpConversationDisplayItemKind,
+    pub source: HttpConversationDisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_sequence: Option<String>,
+    pub status: HttpConversationDisplayStatus,
+    pub content: HttpConversationDisplayContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciles: Option<Vec<String>>,
+}
+
+/// Latest proven terminal boundary at the page's fixed durable frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationTerminalFrontier {
+    pub run_id: String,
+    pub session_stream_sequence: String,
+    pub status: HttpConversationDisplayStatus,
+}
+
+/// Gap fact retained for clients without exposing journal or filesystem details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationDisplayGapFact {
+    pub kind: HttpConversationDisplayGapKind,
+    pub after_session_stream_sequence: String,
+}
+
+/// Bounded gap vocabulary for future retention/replay projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationDisplayGapKind {
+    Retention,
+    Replay,
+}
+
+/// Process-local run anchor observed after the durable page was projected.
+///
+/// This anchor is explicitly provisional and never supplies durable display order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationLiveProvisionalAnchor {
+    pub durable_frontier: String,
+    pub run_id: String,
+    pub run_sequence: String,
+}
+
+/// Opaque-cursor page over canonical durable conversation display items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationDisplayPage {
+    pub schema_version: u16,
+    /// Process-local adapter session id; the raw durable scope is intentionally omitted.
+    pub request_scope: String,
+    pub through_session_stream_sequence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_frontier: Option<HttpConversationTerminalFrontier>,
+    pub total_items: String,
+    pub items: Vec<HttpConversationDisplayItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    #[serde(default)]
+    pub gap_facts: Vec<HttpConversationDisplayGapFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_provisional_anchor: Option<HttpConversationLiveProvisionalAnchor>,
+}
+
+impl HttpConversationDisplayPage {
+    pub(crate) fn from_runtime(request_scope: &str, page: ConversationDisplayPageV1) -> Self {
+        Self {
+            schema_version: page.schema_version,
+            request_scope: request_scope.to_owned(),
+            through_session_stream_sequence: page.through_session_stream_sequence.to_string(),
+            terminal_frontier: page.terminal_frontier.map(Into::into),
+            total_items: page.total_items.to_string(),
+            items: page.items.into_iter().map(Into::into).collect(),
+            next_cursor: page.next_cursor,
+            has_more: page.has_more,
+            gap_facts: Vec::new(),
+            live_provisional_anchor: None,
+        }
+    }
+}
+
+impl From<ConversationTerminalFrontierV1> for HttpConversationTerminalFrontier {
+    fn from(frontier: ConversationTerminalFrontierV1) -> Self {
+        Self {
+            run_id: frontier.run_id,
+            session_stream_sequence: frontier.session_stream_sequence.to_string(),
+            status: frontier.status.into(),
+        }
+    }
+}
+
+impl From<ConversationDisplayItemV1> for HttpConversationDisplayItem {
+    fn from(item: ConversationDisplayItemV1) -> Self {
+        Self {
+            schema_version: item.schema_version,
+            display_id: item.display_id,
+            display_order: HttpConversationDisplayOrder {
+                session_stream_sequence: item.display_order.session_stream_sequence.to_string(),
+                subindex: item.display_order.subindex,
+            },
+            source_event_id: item.source_event_id,
+            kind: item.kind.into(),
+            source: item.source.into(),
+            run_id: item.run_id,
+            run_sequence: item.run_sequence.map(|sequence| sequence.to_string()),
+            status: item.status.into(),
+            content: item.content.into(),
+            reconciles: item.reconciles,
+        }
+    }
+}
+
+impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
+    fn from(content: ConversationDisplayContentV1) -> Self {
+        match content {
+            ConversationDisplayContentV1::Message {
+                role,
+                text,
+                assistant_phase,
+                image_attachment_count,
+                truncated,
+                original_content_bytes,
+            } => Self::Message {
+                role: role.into(),
+                text,
+                assistant_phase: assistant_phase.map(Into::into),
+                image_attachment_count: usize_as_u64(image_attachment_count),
+                truncated,
+                original_content_bytes: usize_as_u64(original_content_bytes),
+            },
+            ConversationDisplayContentV1::Reasoning {
+                text,
+                truncated,
+                original_content_bytes,
+            } => Self::Reasoning {
+                text,
+                truncated,
+                original_content_bytes: usize_as_u64(original_content_bytes),
+            },
+            ConversationDisplayContentV1::Tool {
+                call_id,
+                tool_name,
+                output,
+                truncated,
+                original_content_bytes,
+            } => Self::Tool {
+                call_id,
+                tool_name,
+                output,
+                truncated,
+                original_content_bytes: usize_as_u64(original_content_bytes),
+            },
+            ConversationDisplayContentV1::Approval {
+                call_id,
+                tool_name,
+                decision,
+            } => Self::Approval {
+                call_id,
+                tool_name,
+                decision: decision.map(Into::into),
+            },
+            ConversationDisplayContentV1::Checkpoint {
+                outcome,
+                checkpoint_id,
+                conflict_reason,
+            } => Self::Checkpoint {
+                outcome: outcome.into(),
+                checkpoint_id,
+                conflict_reason: conflict_reason.map(Into::into),
+            },
+            ConversationDisplayContentV1::Notice {
+                text,
+                truncated,
+                original_content_bytes,
+            } => Self::Notice {
+                text,
+                truncated,
+                original_content_bytes: usize_as_u64(original_content_bytes),
+            },
+            ConversationDisplayContentV1::Terminal {
+                final_message_id,
+                safe_summary,
+                summary_truncated,
+            } => Self::Terminal {
+                final_message_id,
+                safe_summary,
+                summary_truncated,
+            },
+        }
+    }
+}
+
+macro_rules! map_enum {
+    ($source:ty => $target:ty { $($variant:ident),+ $(,)? }) => {
+        impl From<$source> for $target {
+            fn from(value: $source) -> Self {
+                match value {
+                    $(<$source>::$variant => <$target>::$variant,)+
+                }
+            }
+        }
+    };
+}
+
+map_enum!(ConversationDisplayItemKindV1 => HttpConversationDisplayItemKind {
+    UserMessage, Reasoning, AssistantMessage, Tool, Approval, Checkpoint, Notice, Terminal
+});
+map_enum!(ConversationDisplaySourceV1 => HttpConversationDisplaySource {
+    DurableTranscript, DurableRunEvent, LiveTransient
+});
+map_enum!(ConversationDisplayStatusV1 => HttpConversationDisplayStatus {
+    Recorded, Requested, WaitingForApproval, Approved, Denied, Completed, Succeeded, Failed,
+    Cancelled, Interrupted, Blocked
+});
+map_enum!(ConversationDisplayMessageRoleV1 => HttpConversationDisplayMessageRole {
+    User, Assistant
+});
+map_enum!(ConversationDisplayAssistantPhaseV1 => HttpConversationDisplayAssistantPhase {
+    ToolPreamble, Progress, FinalAnswer
+});
+map_enum!(ConversationDisplayApprovalDecisionV1 => HttpConversationDisplayApprovalDecision {
+    Approved, ApprovedForSession, Denied
+});
+map_enum!(ConversationDisplayCheckpointOutcomeV1 => HttpConversationDisplayCheckpointOutcome {
+    Restored, Conflict
+});
+map_enum!(ConversationDisplayCheckpointConflictReasonV1 => HttpConversationDisplayCheckpointConflictReason {
+    WorkspaceMismatch, CurrentHashMismatch, ArtifactUnavailable, SensitiveSnapshot,
+    UnsupportedSnapshot, InvalidBinding
+});
+
+fn usize_as_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// Provider-neutral child-agent lifecycle visible to authenticated application clients.

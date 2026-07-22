@@ -5,9 +5,9 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpAgentActivityView, HttpApplicationAgentBinding, HttpApplicationSkillBinding,
-    HttpApprovalDecisionRecord, HttpDurableSessionFrontier, HttpRunContextView, HttpRunSnapshot,
-    HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpApprovalDecisionRecord, HttpConversationDisplayPage, HttpDurableSessionFrontier,
+    HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
+    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -137,6 +137,21 @@ pub trait HttpRunDriver: Send + Sync {
         ))
     }
 
+    /// Projects one canonical durable conversation page for a bound session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed stale-cursor rejection or a generic unavailable result. The projection must
+    /// not expose the raw durable scope or session path.
+    fn conversation_display_page(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        Err(HttpConversationDisplayDriverError::Unavailable)
+    }
+
     /// Reads the current scope-checked durable frontier without mutating session truth.
     ///
     /// # Errors
@@ -229,6 +244,20 @@ pub enum HttpSessionOpenBindingError {
 pub struct HttpRunDriverError {
     /// Driver-provided error message.
     pub message: String,
+}
+
+/// Typed rejection surface for the canonical display query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpConversationDisplayDriverError {
+    /// The opaque cursor is malformed or belongs to another request scope.
+    #[error("conversation display cursor is invalid")]
+    InvalidCursor,
+    /// The opaque cursor no longer binds the fixed durable history frontier.
+    #[error("conversation display cursor is stale")]
+    StaleCursor,
+    /// Durable projection could not be proven safely.
+    #[error("conversation display projection is unavailable")]
+    Unavailable,
 }
 
 impl HttpRunDriverError {

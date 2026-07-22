@@ -173,6 +173,15 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       totalMessages: 0,
       messages: [],
     }),
+    display: async () => ({
+      schemaVersion: 1,
+      requestScope: "test-request-scope",
+      throughSessionStreamSequence: "0",
+      totalItems: "0",
+      items: [],
+      hasMore: false,
+      gapFacts: [],
+    }),
     continuity: async () => ({
       durableFrontier: { throughStreamSequence: 0 },
       recoveryActions: [],
@@ -542,14 +551,14 @@ describe("desktop workspace and history shell", () => {
     const first: TimelineEvent = {
       ...base,
       runId: "run-z",
-      sequence: 1,
+      sequence: 1, runSequence: "1",
       kind: "run_started",
       text: "First run",
     };
     const second: TimelineEvent = {
       ...base,
       runId: "run-a",
-      sequence: 1,
+      sequence: 1, runSequence: "1",
       kind: "run_started",
       text: "Second run",
     };
@@ -570,9 +579,9 @@ describe("desktop workspace and history shell", () => {
       toolName: "shell",
     };
     const rows = reduceTimeline([
-      { ...base, sequence: 1, kind: "tool_started", status: "running" },
-      { ...base, sequence: 2, kind: "tool_progress", text: "Running cargo test", status: "running" },
-      { ...base, sequence: 3, kind: "tool_result", status: "succeeded" },
+      { ...base, sequence: 1, runSequence: "1", kind: "tool_started", status: "running" },
+      { ...base, sequence: 2, runSequence: "2", kind: "tool_progress", text: "Running cargo test", status: "running" },
+      { ...base, sequence: 3, runSequence: "3", kind: "tool_result", status: "succeeded" },
     ]);
 
     expect(rows).toEqual([expect.objectContaining({
@@ -591,10 +600,10 @@ describe("desktop workspace and history shell", () => {
       replayable: true,
     };
     const rows = reduceTimeline([
-      { ...base, sequence: 1, kind: "run_started", text: "Hello" },
-      { ...base, sequence: 2, kind: "reasoning_delta", text: "Inspecting" },
-      { ...base, sequence: 3, kind: "assistant_message", text: "Hi" },
-      { ...base, sequence: 4, kind: "run_finished", text: "Hi" },
+      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Hello" },
+      { ...base, sequence: 2, runSequence: "2", kind: "reasoning_delta", text: "Inspecting" },
+      { ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Hi" },
+      { ...base, sequence: 4, runSequence: "4", kind: "run_finished", text: "Hi" },
     ]);
 
     expect(rows).toEqual([
@@ -613,14 +622,14 @@ describe("desktop workspace and history shell", () => {
       replayable: true,
     };
     const rows = reduceTimeline([
-      { ...base, sequence: 1, kind: "run_started", text: "Inspect" },
-      { ...base, sequence: 2, kind: "assistant_delta", text: "I will inspect." },
-      { ...base, sequence: 3, kind: "assistant_message", text: "I will inspect.", assistantKind: "tool_preamble" },
-      { ...base, sequence: 4, kind: "tool_started", itemId: "call-1", toolName: "bash", toolInput: "rg TODO", status: "running" },
-      { ...base, sequence: 5, kind: "tool_result", itemId: "call-1", toolName: "bash", text: "1 match", status: "ok" },
-      { ...base, sequence: 6, kind: "assistant_delta", text: "Found it." },
-      { ...base, sequence: 7, kind: "assistant_message", text: "Found it.", assistantKind: "final_answer" },
-      { ...base, sequence: 8, kind: "run_finished", text: "Found it." },
+      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Inspect" },
+      { ...base, sequence: 2, runSequence: "2", kind: "assistant_delta", text: "I will inspect." },
+      { ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "I will inspect.", assistantKind: "tool_preamble" },
+      { ...base, sequence: 4, runSequence: "4", kind: "tool_started", itemId: "call-1", toolName: "bash", toolInput: "rg TODO", status: "running" },
+      { ...base, sequence: 5, runSequence: "5", kind: "tool_result", itemId: "call-1", toolName: "bash", text: "1 match", status: "ok" },
+      { ...base, sequence: 6, runSequence: "6", kind: "assistant_delta", text: "Found it." },
+      { ...base, sequence: 7, runSequence: "7", kind: "assistant_message", text: "Found it.", assistantKind: "final_answer" },
+      { ...base, sequence: 8, runSequence: "8", kind: "run_finished", text: "Found it." },
     ]);
 
     expect(rows.map((row) => row.kind)).toEqual(["user", "progress", "tool", "assistant"]);
@@ -637,8 +646,8 @@ describe("desktop workspace and history shell", () => {
       itemId: "call-1",
     };
     const rows = reduceTimeline([
-      { ...base, sequence: 1, kind: "approval_requested", toolName: "bash", toolInput: "rg TODO" },
-      { ...base, sequence: 2, kind: "approval_resolved", status: "approved", text: "Approved for this session" },
+      { ...base, sequence: 1, runSequence: "1", kind: "approval_requested", toolName: "bash", toolInput: "rg TODO" },
+      { ...base, sequence: 2, runSequence: "2", kind: "approval_resolved", status: "approved", text: "Approved for this session" },
     ]);
 
     expect(rows).toEqual([expect.objectContaining({
@@ -656,9 +665,9 @@ describe("desktop workspace and history shell", () => {
       replayable: true,
     };
     const rows = reduceTimeline([
-      { ...base, sequence: 1, kind: "notice", text: "permission read_file subject=README.md mode=allow" },
-      { ...base, sequence: 2, kind: "notice", text: "permission write_file subject=README.md mode=ask" },
-      { ...base, sequence: 3, kind: "notice", text: "permission bash subject=- mode=deny" },
+      { ...base, sequence: 1, runSequence: "1", kind: "notice", text: "permission read_file subject=README.md mode=allow" },
+      { ...base, sequence: 2, runSequence: "2", kind: "notice", text: "permission write_file subject=README.md mode=ask" },
+      { ...base, sequence: 3, runSequence: "3", kind: "notice", text: "permission bash subject=- mode=deny" },
     ]);
 
     expect(rows).toEqual([]);
@@ -713,9 +722,9 @@ describe("desktop workspace and history shell", () => {
       replayable: true,
     };
     const rows = reduceConversationTimeline(transcript, [
-      { ...base, sequence: 1, kind: "run_started", text: "Inspect" },
-      { ...base, sequence: 2, kind: "tool_result", itemId: "call-1", toolName: "read_file", text: "body", status: "ok" },
-      { ...base, sequence: 3, kind: "run_finished", text: "Done" },
+      { ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Inspect" },
+      { ...base, sequence: 2, runSequence: "2", kind: "tool_result", itemId: "call-1", toolName: "read_file", text: "body", status: "ok" },
+      { ...base, sequence: 3, runSequence: "3", kind: "run_finished", text: "Done" },
     ]);
 
     expect(rows.map((row) => [row.kind, row.text])).toEqual([
@@ -1406,14 +1415,14 @@ describe("desktop workspace and history shell", () => {
       workspaceId: workspace.id,
       sessionId: "http-session-active",
       runId: "run-active",
-      sequence: 1,
+      sequence: 1, runSequence: "1",
       replayable: true,
       kind: "run_started",
       text: "Resume this work",
     };
     const approvalEvent: TimelineEvent = {
       ...activeEvent,
-      sequence: 2,
+      sequence: 2, runSequence: "2",
       kind: "approval_requested",
       itemId: "call-active",
       toolName: "write_file",
@@ -1594,7 +1603,7 @@ describe("desktop workspace and history shell", () => {
             workspaceId: workspace.id,
             sessionId: "http-after-idle",
             runId: "run-after-idle",
-            sequence: 1,
+            sequence: 1, runSequence: "1",
             replayable: false,
             kind: "run_started",
             text: "Work started elsewhere",
@@ -2282,10 +2291,10 @@ describe("desktop workspace and history shell", () => {
       replayable: false,
     };
     act(() => {
-      eventListener?.({ ...base, sequence: 1, kind: "run_started", text: "Say hello" });
-      eventListener?.({ ...base, sequence: 2, kind: "assistant_delta", text: "Hel" });
-      eventListener?.({ ...base, sequence: 3, kind: "assistant_message", text: "Hello" });
-      eventListener?.({ ...base, sequence: 4, kind: "run_finished", text: "Hello", replayable: true });
+      eventListener?.({ ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "Say hello" });
+      eventListener?.({ ...base, sequence: 2, runSequence: "2", kind: "assistant_delta", text: "Hel" });
+      eventListener?.({ ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Hello" });
+      eventListener?.({ ...base, sequence: 4, runSequence: "4", kind: "run_finished", text: "Hello", replayable: true });
       statusListener?.({ ...base, state: "terminal" });
     });
 
@@ -2546,20 +2555,20 @@ describe("desktop workspace and history shell", () => {
       replayable: false,
     };
     act(() => {
-      eventListener?.({ ...base, sequence: 1, kind: "run_started", text: "First" });
+      eventListener?.({ ...base, sequence: 1, runSequence: "1", kind: "run_started", text: "First" });
     });
     expect(timeline.scrollTop).toBe(600);
 
     timeline.scrollTop = 0;
     act(() => {
-      eventListener?.({ ...base, sequence: 2, kind: "assistant_delta", text: "Growing" });
+      eventListener?.({ ...base, sequence: 2, runSequence: "2", kind: "assistant_delta", text: "Growing" });
     });
     expect(timeline.scrollTop).toBe(600);
 
     timeline.scrollTop = 100;
     fireEvent.scroll(timeline);
     act(() => {
-      eventListener?.({ ...base, sequence: 3, kind: "assistant_message", text: "Second" });
+      eventListener?.({ ...base, sequence: 3, runSequence: "3", kind: "assistant_message", text: "Second" });
     });
     expect(timeline.scrollTop).toBe(100);
   });
@@ -2611,7 +2620,7 @@ describe("desktop workspace and history shell", () => {
         workspaceId: workspace.id,
         sessionId: "http-session-new",
         runId: "run-1",
-        sequence: 3,
+        sequence: 3, runSequence: "3",
         replayable: true,
         kind: "approval_requested",
         itemId: "call-1",
@@ -2648,7 +2657,7 @@ describe("desktop workspace and history shell", () => {
         workspaceId: workspace.id,
         sessionId: "http-session-new",
         runId: "run-1",
-        sequence: 4,
+        sequence: 4, runSequence: "4",
         replayable: true,
         kind: "approval_resolved",
         itemId: "call-1",

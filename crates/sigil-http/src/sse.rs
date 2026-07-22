@@ -5,6 +5,9 @@ use sigil_kernel::{
     PublicRunEvent, PublicRunEventKind, ToolCall, ToolResultStatus, safe_persistence_json_value,
     safe_persistence_text,
 };
+use sigil_runtime::conversation_display::{
+    ConversationLiveProvisionalSlotV1, conversation_live_provisional_id,
+};
 use thiserror::Error as ThisError;
 use tokio::sync::broadcast;
 
@@ -14,7 +17,7 @@ use crate::{HTTP_APPROVAL_POLICY_VERSION, HttpPendingApproval};
 /// SSE event name used for public run events.
 pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
 /// Current schema version for HTTP protocol event envelopes.
-pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 2;
 
 const HTTP_PROTOCOL_CURSOR_PREFIX: &str = "sigil-http-run-v1";
 
@@ -135,6 +138,9 @@ pub struct HttpProtocolEvent {
     /// Guard material required to resolve an HTTP-owned approval request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_request: Option<HttpPendingApproval>,
+    /// Opaque identity for an exact live semantic slot that a durable display item may reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
     /// Public run event payload.
     pub run_event: PublicRunEvent,
 }
@@ -147,6 +153,7 @@ impl HttpProtocolEvent {
     /// Returns an error when a durable cursor cannot be generated for the event.
     pub fn from_run_event(mut event: PublicRunEvent) -> Result<Self, HttpProtocolCursorError> {
         let event_class = protocol_event_class(&event.event);
+        let provisional_id = protocol_provisional_id(&event)?;
         if event_class == HttpProtocolEventClass::Durable {
             project_durable_text_for_persistence(&mut event.event);
         }
@@ -161,6 +168,7 @@ impl HttpProtocolEvent {
             event_class,
             replay_id,
             approval_request: None,
+            provisional_id,
             run_event: event,
         })
     }
@@ -180,12 +188,14 @@ impl HttpProtocolEvent {
                     schema_version: self.schema_version,
                     replay_id: self.replay_id.clone().unwrap_or_default(),
                     approval_request: self.approval_request.clone(),
+                    provisional_id: self.provisional_id.clone(),
                     run_event: self.run_event.clone(),
                 })
             }
             HttpProtocolEventClass::Transient => {
                 HttpProtocolEventView::Transient(HttpTransientEventView {
                     schema_version: self.schema_version,
+                    provisional_id: self.provisional_id.clone(),
                     run_event: self.run_event.clone(),
                 })
             }
@@ -204,6 +214,67 @@ impl HttpProtocolEvent {
             (Some(_), _) => false,
         }
     }
+}
+
+fn protocol_provisional_id(
+    event: &PublicRunEvent,
+) -> Result<Option<String>, HttpProtocolCursorError> {
+    let slot = match &event.event {
+        PublicRunEventKind::RunStarted { .. } => Some(ConversationLiveProvisionalSlotV1::User),
+        PublicRunEventKind::AssistantMessage { message } => {
+            Some(ConversationLiveProvisionalSlotV1::AssistantMessage {
+                message_id: message.id.clone(),
+            })
+        }
+        PublicRunEventKind::ToolCallStarted { call }
+        | PublicRunEventKind::ToolCallCompleted { call }
+        | PublicRunEventKind::ApprovalRequested { call, .. } => {
+            let slot = if matches!(&event.event, PublicRunEventKind::ApprovalRequested { .. }) {
+                ConversationLiveProvisionalSlotV1::Approval {
+                    call_id: call.id.clone(),
+                }
+            } else {
+                ConversationLiveProvisionalSlotV1::Tool {
+                    call_id: call.id.clone(),
+                }
+            };
+            Some(slot)
+        }
+        PublicRunEventKind::ToolCallArgsDelta { id, .. } => {
+            Some(ConversationLiveProvisionalSlotV1::Tool {
+                call_id: id.clone(),
+            })
+        }
+        PublicRunEventKind::ToolResult { result } => {
+            Some(ConversationLiveProvisionalSlotV1::Tool {
+                call_id: result.call_id.clone(),
+            })
+        }
+        PublicRunEventKind::ToolProgress { progress } => {
+            Some(ConversationLiveProvisionalSlotV1::Tool {
+                call_id: progress.call_id.clone(),
+            })
+        }
+        PublicRunEventKind::ApprovalResolved { call_id, .. } => {
+            Some(ConversationLiveProvisionalSlotV1::Approval {
+                call_id: call_id.clone(),
+            })
+        }
+        PublicRunEventKind::RunFinished { .. }
+        | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RunCancelled => Some(ConversationLiveProvisionalSlotV1::Terminal),
+        PublicRunEventKind::TaskRunStarted { .. }
+        | PublicRunEventKind::TaskRunFinished { .. }
+        | PublicRunEventKind::TextDelta { .. }
+        | PublicRunEventKind::ReasoningDelta { .. }
+        | PublicRunEventKind::Usage { .. }
+        | PublicRunEventKind::ContinuationState { .. }
+        | PublicRunEventKind::Control { .. }
+        | PublicRunEventKind::Notice { .. } => None,
+    };
+    slot.map(|slot| conversation_live_provisional_id(&event.session_id, &event.run_id, &slot))
+        .transpose()
+        .map_err(|_| HttpProtocolCursorError::InvalidProvisionalIdentity)
 }
 
 fn approval_guard_is_persistence_safe(approval: &HttpPendingApproval) -> bool {
@@ -381,6 +452,8 @@ pub struct HttpDurableEventView {
     pub replay_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_request: Option<HttpPendingApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
     pub run_event: PublicRunEvent,
 }
 
@@ -389,6 +462,8 @@ pub struct HttpDurableEventView {
 #[serde(rename_all = "snake_case")]
 pub struct HttpTransientEventView {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
     pub run_event: PublicRunEvent,
 }
 
@@ -475,6 +550,9 @@ pub enum HttpProtocolCursorError {
     /// Cursor sequence must be positive.
     #[error("invalid cursor sequence: {sequence}")]
     InvalidSequence { sequence: u64 },
+    /// The event's stable semantic slot could not produce an opaque live identity.
+    #[error("invalid live provisional identity")]
+    InvalidProvisionalIdentity,
 }
 
 /// Errors returned while replaying durable HTTP protocol events.
@@ -621,6 +699,7 @@ impl HttpProtocolEventBuffer {
 pub struct HttpLiveEventBus {
     buffer: HttpProtocolEventBuffer,
     durable_journal: Option<std::sync::Arc<HttpDurableProtocolJournal>>,
+    latest_sequences: Mutex<BTreeMap<HttpRunSequenceKey, u64>>,
     sender: broadcast::Sender<HttpProtocolEvent>,
 }
 
@@ -633,6 +712,7 @@ impl HttpLiveEventBus {
         Self {
             buffer: HttpProtocolEventBuffer::new(),
             durable_journal: None,
+            latest_sequences: Mutex::new(BTreeMap::new()),
             sender,
         }
     }
@@ -648,6 +728,7 @@ impl HttpLiveEventBus {
         Self {
             buffer: HttpProtocolEventBuffer::new(),
             durable_journal: Some(journal),
+            latest_sequences: Mutex::new(BTreeMap::new()),
             sender,
         }
     }
@@ -714,8 +795,64 @@ impl HttpLiveEventBus {
                 .expect("http protocol event buffer lock should not be poisoned")
                 .push(event.clone());
         }
+        let sequence_key = HttpRunSequenceKey {
+            session_id: event.run_event.session_id.clone(),
+            run_id: event.run_event.run_id.clone(),
+        };
+        let terminal = matches!(
+            &event.run_event.event,
+            PublicRunEventKind::RunFinished { .. }
+                | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RunCancelled
+        );
+        let mut latest_sequences = self
+            .latest_sequences
+            .lock()
+            .expect("http live sequence watermark lock should not be poisoned");
+        if terminal {
+            latest_sequences.remove(&sequence_key);
+        } else {
+            latest_sequences
+                .entry(sequence_key)
+                .and_modify(|sequence| *sequence = (*sequence).max(event.run_event.sequence))
+                .or_insert(event.run_event.sequence);
+        }
+        drop(latest_sequences);
         let _ = self.sender.send(event.clone());
         Ok(event)
+    }
+
+    /// Reads the latest published per-run sequence without exposing replay payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured durable journal cannot be read safely.
+    pub fn latest_run_sequence(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<u64>, HttpProtocolReplayError> {
+        let live = self
+            .latest_sequences
+            .lock()
+            .map_err(|_| HttpProtocolReplayError::JournalUnavailable)?
+            .get(&HttpRunSequenceKey {
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+            })
+            .copied();
+        let durable = self
+            .durable_journal
+            .as_ref()
+            .map(|journal| journal.latest_run_sequence(session_id, run_id))
+            .transpose()
+            .map_err(|_| HttpProtocolReplayError::JournalUnavailable)?
+            .flatten();
+        Ok(match (live, durable) {
+            (Some(live), Some(durable)) => Some(live.max(durable)),
+            (Some(sequence), None) | (None, Some(sequence)) => Some(sequence),
+            (None, None) => None,
+        })
     }
 
     #[cfg(test)]
@@ -724,6 +861,14 @@ impl HttpLiveEventBus {
             .events
             .lock()
             .expect("http protocol event buffer lock should not be poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_sequence_watermark_len(&self) -> usize {
+        self.latest_sequences
+            .lock()
+            .expect("http live sequence watermark lock should not be poisoned")
             .len()
     }
 

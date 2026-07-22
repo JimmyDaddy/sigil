@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopAgentActivityStatus, DesktopAgentActivityView, DesktopAgentHandoffStatus,
     DesktopApplicationClientAction, DesktopApprovalDecisionRecord, DesktopContextWindowSource,
+    DesktopConversationDisplayApprovalDecision as NativeConversationDisplayApprovalDecision,
+    DesktopConversationDisplayAssistantPhase as NativeConversationDisplayAssistantPhase,
+    DesktopConversationDisplayCheckpointConflictReason as NativeConversationDisplayCheckpointConflictReason,
+    DesktopConversationDisplayCheckpointOutcome as NativeConversationDisplayCheckpointOutcome,
+    DesktopConversationDisplayContent as NativeConversationDisplayContent,
+    DesktopConversationDisplayItem as NativeConversationDisplayItem,
+    DesktopConversationDisplayItemKind as NativeConversationDisplayItemKind,
+    DesktopConversationDisplayMessageRole as NativeConversationDisplayMessageRole,
+    DesktopConversationDisplayPage as NativeConversationDisplayPage,
+    DesktopConversationDisplaySource as NativeConversationDisplaySource,
+    DesktopConversationDisplayStatus as NativeConversationDisplayStatus,
     DesktopModelSelectionPolicy, DesktopPermissionMode, DesktopReasoningEffort,
     DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogBatchAction,
     DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
@@ -441,6 +452,139 @@ pub(crate) struct DesktopTranscriptMessage {
     pub(crate) image_attachment_count: u64,
     pub(crate) truncated: bool,
     pub(crate) original_content_bytes: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopConversationDisplayRequest {
+    pub(crate) cursor: Option<String>,
+    pub(crate) limit: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplayPage {
+    pub(crate) schema_version: u16,
+    pub(crate) request_scope: String,
+    pub(crate) through_session_stream_sequence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_frontier: Option<DesktopConversationTerminalFrontier>,
+    pub(crate) total_items: String,
+    pub(crate) items: Vec<DesktopConversationDisplayItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) has_more: bool,
+    pub(crate) gap_facts: Vec<DesktopConversationDisplayGapFact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationTerminalFrontier {
+    pub(crate) run_id: String,
+    pub(crate) session_stream_sequence: String,
+    pub(crate) status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplayItem {
+    pub(crate) schema_version: u16,
+    pub(crate) display_id: String,
+    pub(crate) display_order: DesktopConversationDisplayOrder,
+    pub(crate) source_event_id: String,
+    pub(crate) kind: &'static str,
+    pub(crate) source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_sequence: Option<String>,
+    pub(crate) status: &'static str,
+    pub(crate) content: DesktopConversationDisplayContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reconciles: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplayOrder {
+    pub(crate) session_stream_sequence: String,
+    pub(crate) subindex: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
+pub(crate) enum DesktopConversationDisplayContent {
+    Message {
+        role: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assistant_phase: Option<&'static str>,
+        image_attachment_count: u64,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Reasoning {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Tool {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Approval {
+        call_id: String,
+        tool_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decision: Option<&'static str>,
+    },
+    Checkpoint {
+        outcome: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        conflict_reason: Option<&'static str>,
+    },
+    Notice {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Terminal {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<String>,
+        summary_truncated: bool,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplayGapFact {
+    pub(crate) kind: &'static str,
+    pub(crate) after_session_stream_sequence: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationLiveProvisionalAnchor {
+    pub(crate) durable_frontier: String,
+    pub(crate) run_id: String,
+    pub(crate) run_sequence: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -937,6 +1081,210 @@ impl From<DesktopSessionTranscriptMessage> for DesktopTranscriptMessage {
             truncated: value.truncated,
             original_content_bytes: value.original_content_bytes,
         }
+    }
+}
+
+impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
+    fn from(value: NativeConversationDisplayPage) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            request_scope: value.request_scope,
+            through_session_stream_sequence: value.through_session_stream_sequence,
+            terminal_frontier: value.terminal_frontier.map(|frontier| {
+                DesktopConversationTerminalFrontier {
+                    run_id: frontier.run_id,
+                    session_stream_sequence: frontier.session_stream_sequence,
+                    status: conversation_display_status(frontier.status),
+                }
+            }),
+            total_items: value.total_items,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+            has_more: value.has_more,
+            gap_facts: value
+                .gap_facts
+                .into_iter()
+                .map(|fact| DesktopConversationDisplayGapFact {
+                    kind: match fact.kind {
+                        sigil_desktop::DesktopConversationDisplayGapKind::Retention => "retention",
+                        sigil_desktop::DesktopConversationDisplayGapKind::Replay => "replay",
+                    },
+                    after_session_stream_sequence: fact.after_session_stream_sequence,
+                })
+                .collect(),
+            live_provisional_anchor: value.live_provisional_anchor.map(|anchor| {
+                DesktopConversationLiveProvisionalAnchor {
+                    durable_frontier: anchor.durable_frontier,
+                    run_id: anchor.run_id,
+                    run_sequence: anchor.run_sequence,
+                }
+            }),
+        }
+    }
+}
+
+impl From<NativeConversationDisplayItem> for DesktopConversationDisplayItem {
+    fn from(value: NativeConversationDisplayItem) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            display_id: value.display_id,
+            display_order: DesktopConversationDisplayOrder {
+                session_stream_sequence: value.display_order.session_stream_sequence,
+                subindex: value.display_order.subindex,
+            },
+            source_event_id: value.source_event_id,
+            kind: match value.kind {
+                NativeConversationDisplayItemKind::UserMessage => "user_message",
+                NativeConversationDisplayItemKind::Reasoning => "reasoning",
+                NativeConversationDisplayItemKind::AssistantMessage => "assistant_message",
+                NativeConversationDisplayItemKind::Tool => "tool",
+                NativeConversationDisplayItemKind::Approval => "approval",
+                NativeConversationDisplayItemKind::Checkpoint => "checkpoint",
+                NativeConversationDisplayItemKind::Notice => "notice",
+                NativeConversationDisplayItemKind::Terminal => "terminal",
+            },
+            source: match value.source {
+                NativeConversationDisplaySource::DurableTranscript => "durable_transcript",
+                NativeConversationDisplaySource::DurableRunEvent => "durable_run_event",
+                NativeConversationDisplaySource::LiveTransient => "live_transient",
+            },
+            run_id: value.run_id,
+            run_sequence: value.run_sequence,
+            status: conversation_display_status(value.status),
+            content: value.content.into(),
+            reconciles: value.reconciles,
+        }
+    }
+}
+
+impl From<NativeConversationDisplayContent> for DesktopConversationDisplayContent {
+    fn from(value: NativeConversationDisplayContent) -> Self {
+        match value {
+            NativeConversationDisplayContent::Message {
+                role,
+                text,
+                assistant_phase,
+                image_attachment_count,
+                truncated,
+                original_content_bytes,
+            } => Self::Message {
+                role: match role {
+                    NativeConversationDisplayMessageRole::User => "user",
+                    NativeConversationDisplayMessageRole::Assistant => "assistant",
+                },
+                text,
+                assistant_phase: assistant_phase.map(|phase| match phase {
+                    NativeConversationDisplayAssistantPhase::ToolPreamble => "tool_preamble",
+                    NativeConversationDisplayAssistantPhase::Progress => "progress",
+                    NativeConversationDisplayAssistantPhase::FinalAnswer => "final_answer",
+                }),
+                image_attachment_count,
+                truncated,
+                original_content_bytes,
+            },
+            NativeConversationDisplayContent::Reasoning {
+                text,
+                truncated,
+                original_content_bytes,
+            } => Self::Reasoning {
+                text,
+                truncated,
+                original_content_bytes,
+            },
+            NativeConversationDisplayContent::Tool {
+                call_id,
+                tool_name,
+                output,
+                truncated,
+                original_content_bytes,
+            } => Self::Tool {
+                call_id,
+                tool_name,
+                output,
+                truncated,
+                original_content_bytes,
+            },
+            NativeConversationDisplayContent::Approval {
+                call_id,
+                tool_name,
+                decision,
+            } => Self::Approval {
+                call_id,
+                tool_name,
+                decision: decision.map(|decision| match decision {
+                    NativeConversationDisplayApprovalDecision::Approved => "approved",
+                    NativeConversationDisplayApprovalDecision::ApprovedForSession => {
+                        "approved_for_session"
+                    }
+                    NativeConversationDisplayApprovalDecision::Denied => "denied",
+                }),
+            },
+            NativeConversationDisplayContent::Checkpoint {
+                outcome,
+                checkpoint_id,
+                conflict_reason,
+            } => Self::Checkpoint {
+                outcome: match outcome {
+                    NativeConversationDisplayCheckpointOutcome::Restored => "restored",
+                    NativeConversationDisplayCheckpointOutcome::Conflict => "conflict",
+                },
+                checkpoint_id,
+                conflict_reason: conflict_reason.map(|reason| match reason {
+                    NativeConversationDisplayCheckpointConflictReason::WorkspaceMismatch => {
+                        "workspace_mismatch"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::CurrentHashMismatch => {
+                        "current_hash_mismatch"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::ArtifactUnavailable => {
+                        "artifact_unavailable"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::SensitiveSnapshot => {
+                        "sensitive_snapshot"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::UnsupportedSnapshot => {
+                        "unsupported_snapshot"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::InvalidBinding => {
+                        "invalid_binding"
+                    }
+                }),
+            },
+            NativeConversationDisplayContent::Notice {
+                text,
+                truncated,
+                original_content_bytes,
+            } => Self::Notice {
+                text,
+                truncated,
+                original_content_bytes,
+            },
+            NativeConversationDisplayContent::Terminal {
+                final_message_id,
+                safe_summary,
+                summary_truncated,
+            } => Self::Terminal {
+                final_message_id,
+                safe_summary,
+                summary_truncated,
+            },
+        }
+    }
+}
+
+fn conversation_display_status(status: NativeConversationDisplayStatus) -> &'static str {
+    match status {
+        NativeConversationDisplayStatus::Recorded => "recorded",
+        NativeConversationDisplayStatus::Requested => "requested",
+        NativeConversationDisplayStatus::WaitingForApproval => "waiting_for_approval",
+        NativeConversationDisplayStatus::Approved => "approved",
+        NativeConversationDisplayStatus::Denied => "denied",
+        NativeConversationDisplayStatus::Completed => "completed",
+        NativeConversationDisplayStatus::Succeeded => "succeeded",
+        NativeConversationDisplayStatus::Failed => "failed",
+        NativeConversationDisplayStatus::Cancelled => "cancelled",
+        NativeConversationDisplayStatus::Interrupted => "interrupted",
+        NativeConversationDisplayStatus::Blocked => "blocked",
     }
 }
 

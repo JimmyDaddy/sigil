@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use crate::{
     dto::{
-        DESKTOP_HTTP_PROTOCOL_VERSION, DesktopApprovalCommandReceipt,
-        DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCommandEnvelope,
+        DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION, DESKTOP_HTTP_PROTOCOL_VERSION,
+        DesktopApprovalCommandReceipt, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
+        DesktopCommandEnvelope, DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
         DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
@@ -255,6 +256,43 @@ impl DesktopHttpClient {
             }
         }
         self.get_json(url, StatusCode::OK).await
+    }
+
+    /// Reads one canonical, identity-ordered conversation display page.
+    pub async fn conversation_display(
+        &self,
+        session_id: &str,
+        query: &DesktopConversationDisplayQuery,
+    ) -> Result<DesktopConversationDisplayPage, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        if let Some(cursor) = query.cursor.as_deref() {
+            validate_replay_cursor(cursor)?;
+        }
+        let mut url = self.route(["sessions", session_id, "display"])?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(cursor) = query.cursor.as_deref() {
+                pairs.append_pair("cursor", cursor);
+            }
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+        }
+        let page: DesktopConversationDisplayPage = self.get_json(url, StatusCode::OK).await?;
+        if page.request_scope != session_id
+            || page.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION
+            || page
+                .items
+                .iter()
+                .any(|item| item.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION)
+            || page.has_more != page.next_cursor.is_some()
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(page)
     }
 
     /// Starts a run with an idempotent command identity.

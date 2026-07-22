@@ -22,6 +22,9 @@ use sigil_runtime::application_run::{
     bind_existing_application_session, prepare_application_run,
     record_application_preparation_cancellation, rerun_application_verification,
 };
+use sigil_runtime::conversation_display::{
+    ConversationDisplayProjectionError, conversation_display_page,
+};
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
@@ -31,11 +34,12 @@ use crate::{
     HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
-    HttpApprovalDecisionRecord, HttpContextWindowSource, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
-    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpRunContextView,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpApprovalDecisionRecord, HttpContextWindowSource, HttpConversationDisplayDriverError,
+    HttpConversationDisplayPage, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
+    HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpPermissionMode, HttpRunContextView, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
     HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
     HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
     HttpVerificationView,
@@ -461,6 +465,45 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 .collect(),
             next_before: page.next_before,
         })
+    }
+
+    fn conversation_display_page(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        let page = conversation_display_page(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            cursor,
+            limit,
+        )
+        .map_err(|error| match error {
+            ConversationDisplayProjectionError::InvalidCursor { .. } => {
+                HttpConversationDisplayDriverError::InvalidCursor
+            }
+            ConversationDisplayProjectionError::StaleCursor { .. } => {
+                HttpConversationDisplayDriverError::StaleCursor
+            }
+            ConversationDisplayProjectionError::Unavailable { .. } => {
+                HttpConversationDisplayDriverError::Unavailable
+            }
+        })?;
+        let mut page = HttpConversationDisplayPage::from_runtime(&session.id, page);
+        if let Some(run_id) = session.foreground_run_id.as_deref() {
+            let run_sequence = self
+                .event_bus
+                .latest_run_sequence(&session.durable_session_scope_id, run_id)
+                .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?
+                .unwrap_or(0);
+            page.live_provisional_anchor = Some(crate::HttpConversationLiveProvisionalAnchor {
+                durable_frontier: page.through_session_stream_sequence.clone(),
+                run_id: run_id.to_owned(),
+                run_sequence: run_sequence.to_string(),
+            });
+        }
+        Ok(page)
     }
 
     fn run_context_view(

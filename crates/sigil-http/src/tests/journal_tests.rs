@@ -372,6 +372,26 @@ fn public_journal_append_reapplies_canonical_safe_projection() {
 }
 
 #[test]
+fn public_journal_rejects_a_forged_live_provisional_identity() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize");
+    let mut event = durable_event(1);
+    event.provisional_id = Some(format!("live-v1:{}", "0".repeat(64)));
+
+    assert!(matches!(
+        journal.append(event),
+        Err(HttpProtocolJournalError::Corrupt { .. })
+    ));
+    assert!(
+        journal
+            .replay_run_after("session-1", "run-1", None)
+            .expect("replay should remain readable")
+            .is_empty()
+    );
+}
+
+#[test]
 fn journal_reopen_rejects_a_noncanonical_safe_persistence_bypass() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let path = temp.path().join("journal.json");
@@ -722,6 +742,17 @@ fn durable_live_bus_persists_before_broadcast_and_recovers_with_a_new_bus() {
     first_bus
         .publish_run_event(durable_event(1).run_event)
         .expect("durable event should publish");
+    first_bus
+        .publish_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            2,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        ))
+        .expect("terminal event should publish");
+    assert_eq!(first_bus.active_sequence_watermark_len(), 0);
     drop(first_bus);
 
     let second_journal =
@@ -733,7 +764,13 @@ fn durable_live_bus_persists_before_broadcast_and_recovers_with_a_new_bus() {
             .replay_run_after("session-1", "run-1", None)
             .expect("new bus should use durable replay")
             .len(),
-        1
+        2
+    );
+    assert_eq!(
+        second_bus
+            .latest_run_sequence("session-1", "run-1")
+            .expect("new bus should recover the durable watermark"),
+        Some(2)
     );
 }
 

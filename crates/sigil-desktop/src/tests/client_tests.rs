@@ -114,6 +114,92 @@ fn continuity_decodes_nested_owner_and_redacts_durable_scope_from_debug() {
 }
 
 #[test]
+fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
+    let page: crate::DesktopConversationDisplayPage = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "through_session_stream_sequence": "9007199254740993",
+        "terminal_frontier": {
+            "run_id": "run-1",
+            "session_stream_sequence": "9007199254740994",
+            "status": "succeeded"
+        },
+        "total_items": "9007199254740995",
+        "items": [{
+            "schema_version": 1,
+            "display_id": "display-1",
+            "display_order": {
+                "session_stream_sequence": "9007199254740993",
+                "subindex": 0
+            },
+            "source_event_id": "event-1",
+            "kind": "assistant_message",
+            "source": "durable_transcript",
+            "run_id": "run-1",
+            "run_sequence": "9007199254740996",
+            "status": "completed",
+            "content": {
+                "type": "message",
+                "role": "assistant",
+                "text": "done",
+                "assistant_phase": "final_answer",
+                "image_attachment_count": 0,
+                "truncated": false,
+                "original_content_bytes": 4
+            },
+            "reconciles": ["live-1"]
+        }],
+        "next_cursor": "opaque_CURSOR-1",
+        "has_more": true,
+        "gap_facts": [{
+            "kind": "retention",
+            "after_session_stream_sequence": "9007199254740997"
+        }],
+        "live_provisional_anchor": {
+            "durable_frontier": "9007199254740993",
+            "run_id": "run-live",
+            "run_sequence": "9007199254740998"
+        }
+    }))
+    .expect("canonical display page should decode");
+
+    assert_eq!(page.through_session_stream_sequence, "9007199254740993");
+    assert_eq!(page.total_items, "9007199254740995");
+    assert_eq!(
+        page.items[0].display_order.session_stream_sequence,
+        "9007199254740993"
+    );
+    assert_eq!(
+        page.items[0].run_sequence.as_deref(),
+        Some("9007199254740996")
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("opaque_CURSOR-1"));
+    assert_eq!(
+        page.live_provisional_anchor
+            .as_ref()
+            .map(|anchor| anchor.run_sequence.as_str()),
+        Some("9007199254740998")
+    );
+}
+
+#[test]
+fn conversation_display_rejects_noncanonical_decimal_text() {
+    for invalid in ["01", "18446744073709551616", "-1", "1.0"] {
+        let result =
+            serde_json::from_value::<crate::DesktopConversationDisplayPage>(serde_json::json!({
+                "schema_version": 1,
+                "request_scope": "http-session-1",
+                "through_session_stream_sequence": invalid,
+                "total_items": "0",
+                "items": [],
+                "has_more": false,
+                "gap_facts": []
+            }));
+        assert!(result.is_err(), "{invalid} must be rejected");
+    }
+}
+
+#[test]
 fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
     let activity: crate::DesktopAgentActivityView = serde_json::from_value(serde_json::json!({
         "total_agents": 1,
@@ -296,11 +382,49 @@ async fn transcript_query_rejects_unbounded_renderer_values_before_transport() {
     ));
 }
 
+#[tokio::test]
+async fn conversation_display_query_rejects_unbounded_values_before_transport() {
+    let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        "127.0.0.1:3210".parse().expect("address should parse"),
+        bearer,
+    );
+
+    for query in [
+        DesktopConversationDisplayQuery {
+            cursor: Some(String::new()),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayQuery {
+            cursor: Some("bad\ncursor".to_owned()),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayQuery {
+            cursor: Some("x".repeat(4_097)),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayQuery {
+            cursor: None,
+            limit: Some(0),
+        },
+        DesktopConversationDisplayQuery {
+            cursor: None,
+            limit: Some(101),
+        },
+    ] {
+        assert!(matches!(
+            client.conversation_display("session-1", &query).await,
+            Err(DesktopClientError::InvalidRoute)
+        ));
+    }
+}
+
 #[test]
 fn sse_decoder_accepts_durable_and_transient_frames_and_rejects_gaps() {
     let durable = br#"id: sigil-http-run-v1:session-1:run-1:1
 event: run_event
-data: {"schema_version":1,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     let decoded = decode_sse_frame(durable, "session-1", "run-1")
         .expect("frame should decode")
@@ -308,7 +432,7 @@ data: {"schema_version":1,"event_class":"durable","replay_id":"sigil-http-run-v1
     assert_eq!(decoded.run_event.sequence, 1);
 
     let transient = br#"event: run_event
-data: {"schema_version":1,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":2,"event":{"type":"text_delta","text":"live"}}}
 "#;
     let decoded = decode_sse_frame(transient, "session-1", "run-1")
         .expect("frame should decode")
@@ -328,7 +452,7 @@ data: {"dropped_live_events":1}
 fn sse_decoder_rejects_cursor_or_stream_mismatch() {
     let mismatched_cursor = br#"id: cursor-other
 event: run_event
-data: {"schema_version":1,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     assert!(matches!(
         decode_sse_frame(mismatched_cursor, "session-1", "run-1"),
@@ -336,7 +460,7 @@ data: {"schema_version":1,"event_class":"durable","replay_id":"sigil-http-run-v1
     ));
 
     let wrong_run = br#"event: run_event
-data: {"schema_version":1,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-other","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-other","sequence":2,"event":{"type":"text_delta","text":"live"}}}
 "#;
     assert!(matches!(
         decode_sse_frame(wrong_run, "session-1", "run-1"),

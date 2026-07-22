@@ -316,6 +316,24 @@ model = "deepseek-v4-flash"
         transcript.messages[1].assistant_kind,
         Some(crate::HttpTranscriptAssistantKind::FinalAnswer)
     );
+    let display = registry
+        .conversation_display_page(&opened.id, None, 50)
+        .expect("production canonical display should project");
+    assert_eq!(display.request_scope, opened.id);
+    assert_eq!(display.through_session_stream_sequence, "3");
+    assert_eq!(display.total_items, "2");
+    assert_eq!(display.items.len(), 2);
+    assert_eq!(display.items[1].display_order.session_stream_sequence, "2");
+    assert!(display.live_provisional_anchor.is_none());
+    assert!(
+        !serde_json::to_string(&display)
+            .expect("canonical display should serialize")
+            .contains(&durable_session_id)
+    );
+    assert_eq!(
+        registry.conversation_display_page(&opened.id, Some("e30"), 50),
+        Err(crate::HttpRegistryError::ConversationDisplayCursorInvalid)
+    );
     assert_eq!(
         std::path::Path::new(&opened.session_log_path),
         session_path

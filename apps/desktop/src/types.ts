@@ -266,6 +266,135 @@ export interface TranscriptRequest {
   limit?: number;
 }
 
+export type ConversationDisplayItemKind =
+  | "user_message"
+  | "reasoning"
+  | "assistant_message"
+  | "tool"
+  | "approval"
+  | "checkpoint"
+  | "notice"
+  | "terminal";
+
+export type ConversationDisplaySource =
+  | "durable_transcript"
+  | "durable_run_event"
+  | "live_transient";
+
+export type ConversationDisplayStatus =
+  | "recorded"
+  | "requested"
+  | "waiting_for_approval"
+  | "approved"
+  | "denied"
+  | "completed"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "blocked";
+
+export type ConversationDisplayContent =
+  | {
+      type: "message";
+      role: "user" | "assistant";
+      text?: string;
+      assistantPhase?: "tool_preamble" | "progress" | "final_answer";
+      imageAttachmentCount: number;
+      truncated: boolean;
+      originalContentBytes: number;
+    }
+  | {
+      type: "reasoning";
+      text: string;
+      truncated: boolean;
+      originalContentBytes: number;
+    }
+  | {
+      type: "tool";
+      callId?: string;
+      toolName?: string;
+      output?: string;
+      truncated: boolean;
+      originalContentBytes: number;
+    }
+  | {
+      type: "approval";
+      callId: string;
+      toolName: string;
+      decision?: "approved" | "approved_for_session" | "denied";
+    }
+  | {
+      type: "checkpoint";
+      outcome: "restored" | "conflict";
+      checkpointId?: string;
+      conflictReason?:
+        | "workspace_mismatch"
+        | "current_hash_mismatch"
+        | "artifact_unavailable"
+        | "sensitive_snapshot"
+        | "unsupported_snapshot"
+        | "invalid_binding";
+    }
+  | {
+      type: "notice";
+      text: string;
+      truncated: boolean;
+      originalContentBytes: number;
+    }
+  | {
+      type: "terminal";
+      finalMessageId?: string;
+      safeSummary?: string;
+      summaryTruncated: boolean;
+    };
+
+export interface ConversationDisplayItem {
+  schemaVersion: number;
+  displayId: string;
+  displayOrder: {
+    sessionStreamSequence: string;
+    subindex: number;
+  };
+  sourceEventId: string;
+  kind: ConversationDisplayItemKind;
+  source: ConversationDisplaySource;
+  runId?: string;
+  runSequence?: string;
+  status: ConversationDisplayStatus;
+  content: ConversationDisplayContent;
+  reconciles?: string[];
+}
+
+export interface ConversationDisplayPage {
+  schemaVersion: number;
+  requestScope: string;
+  throughSessionStreamSequence: string;
+  terminalFrontier?: {
+    runId: string;
+    sessionStreamSequence: string;
+    status: ConversationDisplayStatus;
+  };
+  totalItems: string;
+  items: ConversationDisplayItem[];
+  nextCursor?: string;
+  hasMore: boolean;
+  gapFacts: Array<{
+    kind: string;
+    afterSessionStreamSequence: string;
+  }>;
+  liveProvisionalAnchor?: {
+    durableFrontier: string;
+    runId: string;
+    runSequence: string;
+  };
+}
+
+export interface ConversationDisplayRequest {
+  cursor?: string;
+  limit?: number;
+}
+
 export type RunStatus =
   | "starting"
   | "running"
@@ -523,8 +652,11 @@ export interface TimelineEvent {
   sessionId: string;
   runId: string;
   sequence: number;
+  /** Exact decimal form emitted by the native bridge and used for reconciliation ordering. */
+  runSequence: string;
   replayable: boolean;
   replayId?: string;
+  provisionalId?: string;
   kind: TimelineEventKind;
   text?: string;
   itemId?: string;

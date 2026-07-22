@@ -10,6 +10,9 @@ use sigil_runtime::{
     application_run::{
         DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE, MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE,
     },
+    conversation_display::{
+        DEFAULT_CONVERSATION_DISPLAY_PAGE_SIZE, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
+    },
 };
 use thiserror::Error as ThisError;
 use tokio::{
@@ -49,6 +52,7 @@ const HTTP_SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP_GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_SESSION_ID_HEADER: &str = "x-sigil-session-id";
 const HTTP_OWNER_REVISION_HEADER: &str = "x-sigil-owner-revision";
+const HTTP_MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -763,6 +767,28 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/display"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let (cursor, limit) = match parse_conversation_display_query(request.query.as_deref()) {
+            Ok(query) => query,
+            Err(HttpConversationDisplayQueryError::InvalidCursor(message)) => {
+                return http_error_response(400, "invalid_display_cursor", message);
+            }
+            Err(HttpConversationDisplayQueryError::InvalidQuery(message)) => {
+                return http_error_response(400, "invalid_query", message);
+            }
+        };
+        return match registry.conversation_display_page(session_id, cursor.as_deref(), limit) {
+            Ok(page) => json_response(200, json!(page)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/run-context"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
@@ -1208,6 +1234,85 @@ fn parse_transcript_query(raw_query: Option<&str>) -> Result<(Option<u64>, usize
     Ok((before, limit))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HttpConversationDisplayQueryError {
+    InvalidCursor(String),
+    InvalidQuery(String),
+}
+
+fn parse_conversation_display_query(
+    raw_query: Option<&str>,
+) -> Result<(Option<String>, usize), HttpConversationDisplayQueryError> {
+    let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
+        return Ok((None, DEFAULT_CONVERSATION_DISPLAY_PAGE_SIZE));
+    };
+    validate_percent_encoding(raw_query)
+        .map_err(HttpConversationDisplayQueryError::InvalidQuery)?;
+    let mut cursor = None;
+    let mut limit = DEFAULT_CONVERSATION_DISPLAY_PAGE_SIZE;
+    let mut seen = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
+            return Err(HttpConversationDisplayQueryError::InvalidQuery(
+                "query must use valid UTF-8".to_owned(),
+            ));
+        }
+        let name = name.into_owned();
+        if seen.insert(name.clone(), ()).is_some() {
+            let message = format!("query parameter '{name}' must appear at most once");
+            return Err(if name == "cursor" {
+                HttpConversationDisplayQueryError::InvalidCursor(message)
+            } else {
+                HttpConversationDisplayQueryError::InvalidQuery(message)
+            });
+        }
+        let value = value.into_owned();
+        match name.as_str() {
+            "limit" => {
+                limit = value.parse::<usize>().map_err(|_| {
+                    HttpConversationDisplayQueryError::InvalidQuery(
+                        "limit must be a positive integer".to_owned(),
+                    )
+                })?;
+                if !(1..=MAX_CONVERSATION_DISPLAY_PAGE_SIZE).contains(&limit) {
+                    return Err(HttpConversationDisplayQueryError::InvalidQuery(format!(
+                        "limit must be between 1 and {MAX_CONVERSATION_DISPLAY_PAGE_SIZE}"
+                    )));
+                }
+            }
+            "cursor" => {
+                validate_conversation_display_cursor(&value)?;
+                cursor = Some(value);
+            }
+            _ => {
+                return Err(HttpConversationDisplayQueryError::InvalidQuery(format!(
+                    "unsupported query parameter '{name}'"
+                )));
+            }
+        }
+    }
+    Ok((cursor, limit))
+}
+
+fn validate_conversation_display_cursor(
+    cursor: &str,
+) -> Result<(), HttpConversationDisplayQueryError> {
+    if cursor.is_empty() || cursor.len() > HTTP_MAX_CONVERSATION_DISPLAY_CURSOR_BYTES {
+        return Err(HttpConversationDisplayQueryError::InvalidCursor(
+            "display cursor has invalid size".to_owned(),
+        ));
+    }
+    if !cursor
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(HttpConversationDisplayQueryError::InvalidCursor(
+            "display cursor must be unpadded base64url".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_percent_encoding(value: &str) -> Result<(), String> {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -1379,10 +1484,12 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::CommandKeyConflict { .. }
         | HttpRegistryError::RunTerminalConflict { .. }
         | HttpRegistryError::DurableSessionNotReady
-        | HttpRegistryError::DurableSessionIdentityChanged => 409,
+        | HttpRegistryError::DurableSessionIdentityChanged
+        | HttpRegistryError::ConversationDisplayCursorStale => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
-        | HttpRegistryError::InvalidSessionOpenRequest => 400,
+        | HttpRegistryError::InvalidSessionOpenRequest
+        | HttpRegistryError::ConversationDisplayCursorInvalid => 400,
         HttpRegistryError::DriverRejected { .. }
         | HttpRegistryError::DriverPanicked { .. }
         | HttpRegistryError::SessionBindingRejected { .. }
@@ -1392,7 +1499,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::CommandIdentityPersistenceFailed { .. } => 500,
         HttpRegistryError::CommandRegistrySaturated
         | HttpRegistryError::ServerShuttingDown
-        | HttpRegistryError::DurableSessionUnavailable => 503,
+        | HttpRegistryError::DurableSessionUnavailable
+        | HttpRegistryError::ConversationDisplayUnavailable => 503,
     };
     let code = match &error {
         HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
@@ -1402,6 +1510,9 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::DurableSessionUnavailable => "durable_session_unavailable",
         HttpRegistryError::RunNoLongerForeground { .. } => "run_no_longer_foreground",
         HttpRegistryError::RunOwnerChanged { .. } => "run_owner_changed",
+        HttpRegistryError::ConversationDisplayCursorInvalid => "invalid_display_cursor",
+        HttpRegistryError::ConversationDisplayCursorStale => "display_cursor_stale",
+        HttpRegistryError::ConversationDisplayUnavailable => "conversation_display_unavailable",
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())

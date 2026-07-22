@@ -9,6 +9,8 @@ import type {
   CatalogPage,
   CatalogRequest,
   ConversationContinuity,
+  ConversationDisplayPage,
+  ConversationDisplayRequest,
   DesktopBootstrap,
   SessionOpenInput,
   SessionCatalogBatchExecuteInput,
@@ -83,6 +85,11 @@ export interface DesktopBridge {
     sessionId: string,
     request: TranscriptRequest,
   ): Promise<TranscriptPage>;
+  display(
+    workspaceId: string,
+    sessionId: string,
+    request: ConversationDisplayRequest,
+  ): Promise<ConversationDisplayPage>;
   continuity(workspaceId: string, sessionId: string): Promise<ConversationContinuity>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
   agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
@@ -169,6 +176,12 @@ export const desktopBridge: DesktopBridge = {
     }),
   transcript: (workspaceId, sessionId, request) =>
     invoke<TranscriptPage>("desktop_transcript", {
+      workspaceId,
+      sessionId,
+      request,
+    }),
+  display: (workspaceId, sessionId, request) =>
+    invoke<ConversationDisplayPage>("desktop_display", {
       workspaceId,
       sessionId,
       request,

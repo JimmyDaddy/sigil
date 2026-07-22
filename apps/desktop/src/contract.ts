@@ -8,6 +8,8 @@ export type HttpSessionContinuityView =
   components["schemas"]["SessionContinuityView"];
 export type HttpSessionTranscriptPage =
   components["schemas"]["SessionTranscriptPage"];
+export type HttpConversationDisplayPage =
+  components["schemas"]["ConversationDisplayPage"];
 export type HttpRunSnapshot = components["schemas"]["RunSnapshot"];
 export type HttpRunStartCommand =
   components["schemas"]["RunStartCommand"];

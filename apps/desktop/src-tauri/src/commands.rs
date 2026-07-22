@@ -11,8 +11,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopClientError, DesktopLaunchError, DesktopLaunchRequest, DesktopRunCancelRequest,
-    DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
+    DesktopClientError, DesktopConversationDisplayQuery, DesktopLaunchError, DesktopLaunchRequest,
+    DesktopRunCancelRequest, DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
     DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
     DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
     DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
@@ -31,7 +31,8 @@ use crate::{
         DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopConversationContinuity, DesktopExternalUrlInput, DesktopRunAttachInput,
+        DesktopConversationContinuity, DesktopConversationDisplayPage,
+        DesktopConversationDisplayRequest, DesktopExternalUrlInput, DesktopRunAttachInput,
         DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
         DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
         DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
@@ -1149,6 +1150,53 @@ pub(crate) async fn desktop_transcript(
         .map_err(project_client_error)
 }
 
+#[tauri::command]
+pub(crate) async fn desktop_display(
+    workspace_id: String,
+    session_id: String,
+    request: DesktopConversationDisplayRequest,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationDisplayPage, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    validate_conversation_display_request(&request)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .conversation_display(
+            &session_id,
+            &DesktopConversationDisplayQuery {
+                cursor: request.cursor,
+                limit: request.limit,
+            },
+        )
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_display_client_error)
+}
+
+fn validate_conversation_display_request(
+    request: &DesktopConversationDisplayRequest,
+) -> Result<(), DesktopCommandError> {
+    if request
+        .limit
+        .is_some_and(|limit| !(1..=100).contains(&limit))
+        || request.cursor.as_deref().is_some_and(|cursor| {
+            cursor.is_empty() || cursor.len() > 4_096 || cursor.chars().any(char::is_control)
+        })
+    {
+        return Err(DesktopCommandError::new(
+            "conversation_display_query_invalid",
+            "The conversation history query is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_catalog_request(
     request: DesktopCatalogRequest,
 ) -> Result<DesktopCatalogQuery, DesktopCommandError> {
@@ -1561,6 +1609,37 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
             DesktopRecoveryAction::OpenDiagnostics,
             DesktopRecoveryAction::ShowDetails,
         ]),
+    }
+}
+
+fn project_conversation_display_client_error(error: DesktopClientError) -> DesktopCommandError {
+    match error {
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "invalid_display_cursor" => DesktopCommandError::new(
+            "conversation_display_cursor_invalid",
+            "The conversation history cursor is invalid. Refresh from the latest page.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::ShowDetails]),
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "display_cursor_stale" => DesktopCommandError::new(
+            "conversation_display_stale",
+            "Conversation history changed while loading more. Refresh from the latest page.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::ShowDetails]),
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "conversation_display_unavailable" => DesktopCommandError::new(
+            "conversation_display_unavailable",
+            "Canonical conversation history is temporarily unavailable.",
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenDiagnostics,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
+        other => project_client_error(other),
     }
 }
 

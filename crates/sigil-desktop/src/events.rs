@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::DesktopPendingApproval;
 
 /// Current HTTP protocol-event envelope accepted by the desktop client.
-pub const DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 2;
 /// Current public run-event envelope accepted by the desktop client.
 pub const DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 1;
 
@@ -30,6 +30,8 @@ pub struct DesktopProtocolEvent {
     pub replay_id: Option<String>,
     #[serde(default)]
     pub approval_request: Option<DesktopPendingApproval>,
+    #[serde(default)]
+    pub provisional_id: Option<String>,
     pub run_event: DesktopPublicRunEvent,
 }
 
@@ -101,9 +103,13 @@ pub struct DesktopTimelineEvent {
     pub session_id: String,
     pub run_id: String,
     pub sequence: u64,
+    /// Exact decimal representation retained for JavaScript consumers.
+    pub run_sequence: String,
     pub replayable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
     pub kind: DesktopTimelineEventKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -270,8 +276,10 @@ impl DesktopProtocolEvent {
             session_id: bounded_machine_label(renderer_session_id)?,
             run_id: self.run_event.run_id,
             sequence: self.run_event.sequence,
+            run_sequence: self.run_event.sequence.to_string(),
             replayable: self.event_class == DesktopProtocolEventClass::Durable,
             replay_id: self.replay_id,
+            provisional_id: self.provisional_id,
             kind,
             text,
             item_id,
@@ -313,6 +321,11 @@ impl DesktopProtocolEvent {
                 return Err(DesktopProtocolEventError::InvalidReplayCursor);
             }
             DesktopProtocolEventClass::Transient => {}
+        }
+        if let Some(provisional_id) = self.provisional_id.as_deref()
+            && !valid_provisional_id(provisional_id)
+        {
+            return Err(DesktopProtocolEventError::InvalidProvisionalIdentity);
         }
         Ok(())
     }
@@ -464,6 +477,15 @@ fn bounded_cursor(value: &str) -> Result<(), DesktopProtocolEventError> {
     Ok(())
 }
 
+fn valid_provisional_id(value: &str) -> bool {
+    value.strip_prefix("live-v1:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
 fn bounded_text(value: &str) -> String {
     if value.len() <= MAX_TIMELINE_TEXT_BYTES {
         return value.to_owned();
@@ -484,6 +506,8 @@ pub enum DesktopProtocolEventError {
     WrongStream,
     #[error("desktop event replay cursor is invalid")]
     InvalidReplayCursor,
+    #[error("desktop event live provisional identity is invalid")]
+    InvalidProvisionalIdentity,
     #[error("desktop event machine label is invalid")]
     InvalidMachineLabel,
     #[error("desktop event payload is invalid")]

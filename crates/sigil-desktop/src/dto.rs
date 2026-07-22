@@ -1,9 +1,10 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current command-envelope protocol accepted by `sigil serve`.
 pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 2;
+pub(crate) const DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -407,6 +408,288 @@ pub struct DesktopSessionTranscriptPage {
 pub struct DesktopTranscriptQuery {
     pub before: Option<u64>,
     pub limit: Option<u16>,
+}
+
+/// Durable order for one canonical conversation display item.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationDisplayOrder {
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub session_stream_sequence: String,
+    pub subindex: u32,
+}
+
+/// Provider-neutral visual category for one canonical conversation display item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayItemKind {
+    UserMessage,
+    Reasoning,
+    AssistantMessage,
+    Tool,
+    Approval,
+    Checkpoint,
+    Notice,
+    Terminal,
+}
+
+/// Durable evidence class behind one canonical conversation display item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplaySource {
+    DurableTranscript,
+    DurableRunEvent,
+    LiveTransient,
+}
+
+/// Bounded lifecycle status for one canonical conversation display item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayStatus {
+    Recorded,
+    Requested,
+    WaitingForApproval,
+    Approved,
+    Denied,
+    Completed,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+    Blocked,
+}
+
+/// Provider-neutral message author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayMessageRole {
+    User,
+    Assistant,
+}
+
+/// Assistant phase retained for canonical renderer presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayAssistantPhase {
+    ToolPreamble,
+    Progress,
+    FinalAnswer,
+}
+
+/// User decision recorded for one approval item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayApprovalDecision {
+    Approved,
+    ApprovedForSession,
+    Denied,
+}
+
+/// Durable checkpoint outcome shown by the canonical renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayCheckpointOutcome {
+    Restored,
+    Conflict,
+}
+
+/// Bounded checkpoint conflict vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayCheckpointConflictReason {
+    WorkspaceMismatch,
+    CurrentHashMismatch,
+    ArtifactUnavailable,
+    SensitiveSnapshot,
+    UnsupportedSnapshot,
+    InvalidBinding,
+}
+
+/// Typed, secret-safe content carried by one canonical conversation display item.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+pub enum DesktopConversationDisplayContent {
+    Message {
+        role: DesktopConversationDisplayMessageRole,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        assistant_phase: Option<DesktopConversationDisplayAssistantPhase>,
+        image_attachment_count: u64,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Reasoning {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Tool {
+        #[serde(default)]
+        call_id: Option<String>,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Approval {
+        call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        decision: Option<DesktopConversationDisplayApprovalDecision>,
+    },
+    Checkpoint {
+        outcome: DesktopConversationDisplayCheckpointOutcome,
+        #[serde(default)]
+        checkpoint_id: Option<String>,
+        #[serde(default)]
+        conflict_reason: Option<DesktopConversationDisplayCheckpointConflictReason>,
+    },
+    Notice {
+        text: String,
+        truncated: bool,
+        original_content_bytes: u64,
+    },
+    Terminal {
+        #[serde(default)]
+        final_message_id: Option<String>,
+        #[serde(default)]
+        safe_summary: Option<String>,
+        summary_truncated: bool,
+    },
+}
+
+/// One canonical durable conversation item returned by the workspace server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationDisplayItem {
+    pub schema_version: u16,
+    pub display_id: String,
+    pub display_order: DesktopConversationDisplayOrder,
+    pub source_event_id: String,
+    pub kind: DesktopConversationDisplayItemKind,
+    pub source: DesktopConversationDisplaySource,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_decimal_u64")]
+    pub run_sequence: Option<String>,
+    pub status: DesktopConversationDisplayStatus,
+    pub content: DesktopConversationDisplayContent,
+    #[serde(default)]
+    pub reconciles: Option<Vec<String>>,
+}
+
+/// Latest proven terminal boundary at a canonical page's durable frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationTerminalFrontier {
+    pub run_id: String,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub session_stream_sequence: String,
+    pub status: DesktopConversationDisplayStatus,
+}
+
+/// Bounded canonical display gap vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationDisplayGapKind {
+    Retention,
+    Replay,
+}
+
+/// Gap fact retained without exposing journal or filesystem details.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationDisplayGapFact {
+    pub kind: DesktopConversationDisplayGapKind,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub after_session_stream_sequence: String,
+}
+
+/// Process-local run anchor observed after a durable page was projected.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationLiveProvisionalAnchor {
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub durable_frontier: String,
+    pub run_id: String,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub run_sequence: String,
+}
+
+/// Opaque-cursor page over canonical durable conversation display items.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationDisplayPage {
+    pub schema_version: u16,
+    /// Process-local adapter session id; no durable scope is exposed.
+    pub request_scope: String,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub through_session_stream_sequence: String,
+    #[serde(default)]
+    pub terminal_frontier: Option<DesktopConversationTerminalFrontier>,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub total_items: String,
+    pub items: Vec<DesktopConversationDisplayItem>,
+    #[serde(default, deserialize_with = "deserialize_optional_opaque_cursor")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    #[serde(default)]
+    pub gap_facts: Vec<DesktopConversationDisplayGapFact>,
+    #[serde(default)]
+    pub live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
+}
+
+/// Bounded query for one canonical conversation display page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesktopConversationDisplayQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+fn deserialize_decimal_u64<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_decimal_u64(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_decimal_u64<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(validate_decimal_u64)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn validate_decimal_u64(value: String) -> Result<String, &'static str> {
+    if value.is_empty()
+        || value.len() > 20
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+        || value.parse::<u64>().is_err()
+    {
+        return Err("expected canonical decimal u64 text");
+    }
+    Ok(value)
+}
+
+fn deserialize_optional_opaque_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cursor = Option::<String>::deserialize(deserializer)?;
+    if cursor.as_deref().is_some_and(|value| {
+        value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
+    }) {
+        return Err(serde::de::Error::custom("invalid opaque display cursor"));
+    }
+    Ok(cursor)
 }
 
 /// Historical catalog source classification.

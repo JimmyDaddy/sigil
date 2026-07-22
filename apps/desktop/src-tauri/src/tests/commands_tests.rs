@@ -1,8 +1,16 @@
 use super::*;
 use sigil_desktop::{
-    DesktopContinuityRecoveryAction, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
-    DesktopSessionContinuityView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
-    DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopContinuityRecoveryAction, DesktopConversationDisplayAssistantPhase,
+    DesktopConversationDisplayContent, DesktopConversationDisplayGapFact,
+    DesktopConversationDisplayGapKind, DesktopConversationDisplayItem,
+    DesktopConversationDisplayItemKind, DesktopConversationDisplayMessageRole,
+    DesktopConversationDisplayOrder,
+    DesktopConversationDisplayPage as NativeConversationDisplayPage,
+    DesktopConversationDisplaySource, DesktopConversationDisplayStatus,
+    DesktopConversationLiveProvisionalAnchor, DesktopConversationTerminalFrontier,
+    DesktopDurableSessionFrontier, DesktopForegroundRunOwner, DesktopSessionContinuityView,
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopTranscriptAssistantKind, DesktopTranscriptRole,
 };
 
 #[test]
@@ -312,6 +320,158 @@ fn transcript_projection_drops_scope_and_preserves_safe_pagination_fields() {
     assert_eq!(json["messages"][0]["assistantKind"], "final_answer");
     assert_eq!(json["nextBefore"], 2);
     assert!(!json.to_string().contains("durable-secret-scope"));
+}
+
+#[test]
+fn conversation_display_projection_preserves_decimal_text_and_drops_private_identity() {
+    let projected =
+        crate::ipc::DesktopConversationDisplayPage::from(NativeConversationDisplayPage {
+            schema_version: 1,
+            request_scope: "http-session-safe".to_owned(),
+            through_session_stream_sequence: "9007199254740993".to_owned(),
+            terminal_frontier: Some(DesktopConversationTerminalFrontier {
+                run_id: "run-1".to_owned(),
+                session_stream_sequence: "9007199254740994".to_owned(),
+                status: DesktopConversationDisplayStatus::Succeeded,
+            }),
+            total_items: "9007199254740995".to_owned(),
+            items: vec![DesktopConversationDisplayItem {
+                schema_version: 1,
+                display_id: "display-1".to_owned(),
+                display_order: DesktopConversationDisplayOrder {
+                    session_stream_sequence: "9007199254740993".to_owned(),
+                    subindex: 0,
+                },
+                source_event_id: "event-1".to_owned(),
+                kind: DesktopConversationDisplayItemKind::AssistantMessage,
+                source: DesktopConversationDisplaySource::DurableTranscript,
+                run_id: Some("run-1".to_owned()),
+                run_sequence: Some("9007199254740996".to_owned()),
+                status: DesktopConversationDisplayStatus::Completed,
+                content: DesktopConversationDisplayContent::Message {
+                    role: DesktopConversationDisplayMessageRole::Assistant,
+                    text: Some("done".to_owned()),
+                    assistant_phase: Some(DesktopConversationDisplayAssistantPhase::FinalAnswer),
+                    image_attachment_count: 0,
+                    truncated: false,
+                    original_content_bytes: 4,
+                },
+                reconciles: Some(vec!["live-1".to_owned()]),
+            }],
+            next_cursor: Some("opaque_CURSOR-1".to_owned()),
+            has_more: true,
+            gap_facts: vec![DesktopConversationDisplayGapFact {
+                kind: DesktopConversationDisplayGapKind::Retention,
+                after_session_stream_sequence: "9007199254740997".to_owned(),
+            }],
+            live_provisional_anchor: Some(DesktopConversationLiveProvisionalAnchor {
+                durable_frontier: "9007199254740993".to_owned(),
+                run_id: "run-live".to_owned(),
+                run_sequence: "9007199254740998".to_owned(),
+            }),
+        });
+    let json = serde_json::to_value(projected).expect("display page should serialize");
+
+    assert_eq!(
+        json["throughSessionStreamSequence"],
+        serde_json::json!("9007199254740993")
+    );
+    assert_eq!(
+        json["terminalFrontier"]["sessionStreamSequence"],
+        serde_json::json!("9007199254740994")
+    );
+    assert_eq!(json["totalItems"], serde_json::json!("9007199254740995"));
+    assert_eq!(
+        json["items"][0]["displayOrder"]["sessionStreamSequence"],
+        serde_json::json!("9007199254740993")
+    );
+    assert_eq!(
+        json["items"][0]["runSequence"],
+        serde_json::json!("9007199254740996")
+    );
+    assert_eq!(json["items"][0]["content"]["type"], "message");
+    assert_eq!(
+        json["items"][0]["content"]["assistantPhase"],
+        "final_answer"
+    );
+    assert_eq!(json["items"][0]["reconciles"][0], "live-1");
+    assert_eq!(json["nextCursor"], "opaque_CURSOR-1");
+    assert!(json.get("durableSessionScopeId").is_none());
+    assert!(json.get("sessionLogPath").is_none());
+    assert!(json.get("bearer").is_none());
+    assert!(json.get("checksum").is_none());
+    assert!(json["items"][0]["content"].get("assistant_phase").is_none());
+}
+
+#[test]
+fn conversation_display_query_validation_bounds_renderer_values() {
+    assert!(
+        validate_conversation_display_request(&DesktopConversationDisplayRequest {
+            cursor: Some("opaque_CURSOR-1".to_owned()),
+            limit: Some(100),
+        })
+        .is_ok()
+    );
+
+    for request in [
+        DesktopConversationDisplayRequest {
+            cursor: Some(String::new()),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayRequest {
+            cursor: Some("bad\ncursor".to_owned()),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayRequest {
+            cursor: Some("x".repeat(4_097)),
+            limit: Some(50),
+        },
+        DesktopConversationDisplayRequest {
+            cursor: None,
+            limit: Some(0),
+        },
+        DesktopConversationDisplayRequest {
+            cursor: None,
+            limit: Some(101),
+        },
+    ] {
+        let error = validate_conversation_display_request(&request)
+            .expect_err("unbounded display request must fail");
+        assert_eq!(error.code, "conversation_display_query_invalid");
+    }
+}
+
+#[test]
+fn conversation_display_errors_are_distinct_from_catalog_pagination() {
+    let catalog = project_client_error(DesktopClientError::Rejected {
+        status: 409,
+        code: Some("stale_cursor".to_owned()),
+    });
+    assert_eq!(catalog.code, "catalog_stale");
+
+    let display = project_conversation_display_client_error(DesktopClientError::Rejected {
+        status: 409,
+        code: Some("display_cursor_stale".to_owned()),
+    });
+    assert_eq!(display.code, "conversation_display_stale");
+    assert_ne!(display.code, catalog.code);
+
+    let invalid = project_conversation_display_client_error(DesktopClientError::Rejected {
+        status: 400,
+        code: Some("invalid_display_cursor".to_owned()),
+    });
+    assert_eq!(invalid.code, "conversation_display_cursor_invalid");
+
+    let unavailable = project_conversation_display_client_error(DesktopClientError::Rejected {
+        status: 503,
+        code: Some("conversation_display_unavailable".to_owned()),
+    });
+    assert_eq!(unavailable.code, "conversation_display_unavailable");
+    assert!(
+        unavailable
+            .recovery_actions
+            .contains(&DesktopRecoveryAction::OpenDiagnostics)
+    );
 }
 
 #[test]

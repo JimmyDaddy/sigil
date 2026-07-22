@@ -31,7 +31,12 @@ use super::{
     HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource, HttpDurableCommandStore,
+    HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource,
+    HttpConversationDisplayContent, HttpConversationDisplayDriverError,
+    HttpConversationDisplayItem, HttpConversationDisplayItemKind,
+    HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
+    HttpConversationDisplaySource, HttpConversationDisplayStatus,
+    HttpConversationLiveProvisionalAnchor, HttpDurableCommandStore,
     HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
@@ -141,7 +146,7 @@ fn module_split_facade_exports_protocol_auth_sse_and_dto_contracts() {
         .expect("disabled auth should accept missing headers");
 
     assert_eq!(HTTP_RUN_EVENT_SSE_NAME, "run_event");
-    assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 1);
+    assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 2);
     assert_eq!(HttpPermissionMode::ReadOnly.to_string(), "read-only");
 }
 
@@ -981,6 +986,176 @@ async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "invalid_query");
     }
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_pages_canonical_display_without_private_session_fields() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "canonical display"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    driver.set_conversation_display_page(HttpConversationDisplayPage {
+        schema_version: 1,
+        request_scope: session_id.to_owned(),
+        through_session_stream_sequence: "9007199254740993".to_owned(),
+        terminal_frontier: None,
+        total_items: "1".to_owned(),
+        items: vec![HttpConversationDisplayItem {
+            schema_version: 1,
+            display_id: "display-1".to_owned(),
+            display_order: HttpConversationDisplayOrder {
+                session_stream_sequence: "9007199254740993".to_owned(),
+                subindex: 0,
+            },
+            source_event_id: "event-1".to_owned(),
+            kind: HttpConversationDisplayItemKind::UserMessage,
+            source: HttpConversationDisplaySource::DurableTranscript,
+            run_id: Some("run-1".to_owned()),
+            run_sequence: None,
+            status: HttpConversationDisplayStatus::Recorded,
+            content: HttpConversationDisplayContent::Message {
+                role: HttpConversationDisplayMessageRole::User,
+                text: Some("hello".to_owned()),
+                assistant_phase: None,
+                image_attachment_count: 0,
+                truncated: false,
+                original_content_bytes: 5,
+            },
+            reconciles: None,
+        }],
+        next_cursor: Some("eyJjdXJzb3IiOiJmaXhlZCJ9".to_owned()),
+        has_more: true,
+        gap_facts: Vec::new(),
+        live_provisional_anchor: None,
+    });
+
+    let path = format!("/sessions/{session_id}/display?limit=1");
+    let (status, body) = http_raw_request(address, http_get(&path, None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["request_scope"], session_id);
+    assert_eq!(body["through_session_stream_sequence"], "9007199254740993");
+    assert_eq!(
+        body["items"][0]["display_order"]["session_stream_sequence"],
+        "9007199254740993"
+    );
+    assert_eq!(body["items"][0]["content"]["type"], "message");
+    assert!(body.get("durable_session_scope_id").is_none());
+    assert!(body.get("session_log_path").is_none());
+    assert!(body.get("record_checksum").is_none());
+    assert_eq!(driver.conversation_display_queries(), vec![(None, 1)]);
+
+    let start = HttpCommandEnvelope::new(
+        "display-run-command",
+        "desktop-client",
+        session_id,
+        run_start("continue", HttpPermissionMode::Manual),
+    );
+    let (status, receipt) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/runs"),
+            Some("secret-token"),
+            &serde_json::to_string(&start).expect("run command should serialize"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let run_id = receipt["run"]["id"].as_str().expect("run id");
+    driver.set_conversation_display_anchor(HttpConversationLiveProvisionalAnchor {
+        durable_frontier: "9007199254740993".to_owned(),
+        run_id: run_id.to_owned(),
+        run_sequence: "7".to_owned(),
+    });
+    let (status, anchored) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(anchored["live_provisional_anchor"]["run_id"], run_id);
+    assert_eq!(
+        anchored["live_provisional_anchor"]["durable_frontier"],
+        "9007199254740993"
+    );
+    assert_eq!(anchored["live_provisional_anchor"]["run_sequence"], "7");
+    assert_eq!(
+        driver.conversation_display_queries(),
+        vec![(None, 1), (None, 1)]
+    );
+
+    driver.set_conversation_display_anchor(HttpConversationLiveProvisionalAnchor {
+        durable_frontier: "9007199254740993".to_owned(),
+        run_id: "stale-run".to_owned(),
+        run_sequence: "8".to_owned(),
+    });
+    let (status, stale_anchor) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(stale_anchor.get("live_provisional_anchor"), None);
+
+    let malformed = format!("/sessions/{session_id}/display?cursor=not+a+cursor");
+    let (status, body) =
+        http_raw_request(address, http_get(&malformed, Some("secret-token"), None)).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_display_cursor");
+    assert_eq!(
+        driver.conversation_display_queries(),
+        vec![(None, 1), (None, 1), (None, 1)]
+    );
+
+    for invalid in [
+        format!("/sessions/{session_id}/display?limit=0"),
+        format!("/sessions/{session_id}/display?limit=101"),
+        format!("/sessions/{session_id}/display?limit=1&limit=2"),
+        format!("/sessions/{session_id}/display?unknown=1"),
+    ] {
+        let (status, body) =
+            http_raw_request(address, http_get(&invalid, Some("secret-token"), None)).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_query");
+    }
+    assert_eq!(
+        driver.conversation_display_queries(),
+        vec![(None, 1), (None, 1), (None, 1)]
+    );
+
+    driver.reject_conversation_display(HttpConversationDisplayDriverError::InvalidCursor);
+    let invalid_payload = format!("/sessions/{session_id}/display?cursor=e30");
+    let (status, body) = http_raw_request(
+        address,
+        http_get(&invalid_payload, Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_display_cursor");
+
+    driver.reject_conversation_display(HttpConversationDisplayDriverError::StaleCursor);
+    let stale = format!("/sessions/{session_id}/display?cursor=eyJzY2hlbWFfdmVyc2lvbiI6MX0");
+    let (status, body) =
+        http_raw_request(address, http_get(&stale, Some("secret-token"), None)).await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "display_cursor_stale");
+    assert_eq!(
+        driver.conversation_display_queries(),
+        vec![
+            (None, 1),
+            (None, 1),
+            (None, 1),
+            (Some("e30".to_owned()), 50),
+            (Some("eyJzY2hlbWFfdmVyc2lvbiI6MX0".to_owned()), 50),
+        ]
+    );
     let _ = shutdown.send(());
 }
 
@@ -1828,6 +2003,12 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             .is_object()
     );
     assert!(
+        document["paths"]["/sessions/{session_id}/display"]["get"]["responses"]["200"].is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/display"]["get"]["responses"]["409"].is_object()
+    );
+    assert!(
         document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
             .is_object()
     );
@@ -1843,6 +2024,30 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["bounded_transcript_replay"]
             ["type"],
         "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["canonical_conversation_display"]
+            ["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationDisplayPage"]["properties"]["through_session_stream_sequence"]
+            ["$ref"],
+        "#/components/schemas/DecimalSequence"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationDisplayItem"]["properties"]["display_order"]
+            ["$ref"],
+        "#/components/schemas/ConversationDisplayOrder"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationDisplayPage"]["properties"]["items"]["maxItems"],
+        100
+    );
+    assert!(
+        document["components"]["schemas"]["ConversationDisplayPage"]["properties"]
+            .get("durable_session_scope_id")
+            .is_none()
     );
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["run_context"]["type"],
@@ -2042,6 +2247,13 @@ fn protocol_event_view_separates_durable_and_transient_shapes() {
             assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
             assert_eq!(view.replay_id, "sigil-http-run-v1:session-1:run-1:1");
             assert_eq!(view.run_event.sequence, 1);
+            let provisional_id = view
+                .provisional_id
+                .expect("semantic durable event should have a live identity");
+            assert!(provisional_id.starts_with("live-v1:"));
+            assert_eq!(provisional_id.len(), "live-v1:".len() + 64);
+            assert!(!provisional_id.contains("session-1"));
+            assert!(!provisional_id.contains("run-1"));
         }
         HttpProtocolEventView::Transient(_) => panic!("durable event should use durable view"),
     }
@@ -2049,6 +2261,7 @@ fn protocol_event_view_separates_durable_and_transient_shapes() {
         HttpProtocolEventView::Transient(view) => {
             assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
             assert_eq!(view.run_event.sequence, 2);
+            assert_eq!(view.provisional_id, None);
         }
         HttpProtocolEventView::Durable(_) => panic!("transient event should use transient view"),
     }
@@ -2287,6 +2500,11 @@ async fn live_event_bus_delivers_transient_events_without_replay_id() {
             .expect("replay should work")
             .is_empty()
     );
+    assert_eq!(
+        bus.latest_run_sequence("session-1", "run-1")
+            .expect("live watermark should remain readable"),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -2318,6 +2536,12 @@ async fn live_event_bus_treats_tool_progress_as_transient() {
 
     assert_eq!(published.event_class, HttpProtocolEventClass::Transient);
     assert_eq!(published.replay_id, None);
+    assert!(
+        published
+            .provisional_id
+            .as_deref()
+            .is_some_and(|identity| identity.starts_with("live-v1:"))
+    );
     assert!(
         bus.replay_run_after("session-1", "run-1", None)
             .expect("replay should work")
@@ -2377,6 +2601,34 @@ async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].event_class, HttpProtocolEventClass::Durable);
     assert_eq!(replay[0].run_event.sequence, 3);
+}
+
+#[test]
+fn live_event_bus_releases_completed_run_watermarks() {
+    let bus = HttpLiveEventBus::new(4);
+    for index in 0..128 {
+        let run_id = format!("run-{index}");
+        bus.publish_run_event(PublicRunEvent::new(
+            "session-1",
+            &run_id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "hello".to_owned(),
+            },
+        ))
+        .expect("start event should publish");
+        bus.publish_run_event(PublicRunEvent::new(
+            "session-1",
+            &run_id,
+            2,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        ))
+        .expect("terminal event should publish");
+    }
+
+    assert_eq!(bus.active_sequence_watermark_len(), 0);
 }
 
 #[test]
@@ -4283,6 +4535,9 @@ struct RecordingRunDriver {
     verification_reruns: Mutex<Vec<HttpVerificationRerunRequest>>,
     transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
     transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
+    conversation_display_page: Mutex<Option<HttpConversationDisplayPage>>,
+    conversation_display_error: Mutex<Option<HttpConversationDisplayDriverError>>,
+    conversation_display_queries: Mutex<Vec<(Option<String>, usize)>>,
     run_context_view: Mutex<Option<HttpRunContextView>>,
     session_frontier: Mutex<Option<HttpDurableSessionFrontier>>,
 }
@@ -4350,6 +4605,25 @@ impl RecordingRunDriver {
 
     fn transcript_queries(&self) -> Vec<(Option<u64>, usize)> {
         lock(&self.transcript_queries).clone()
+    }
+
+    fn set_conversation_display_page(&self, page: HttpConversationDisplayPage) {
+        *lock(&self.conversation_display_page) = Some(page);
+    }
+
+    fn set_conversation_display_anchor(&self, anchor: HttpConversationLiveProvisionalAnchor) {
+        lock(&self.conversation_display_page)
+            .as_mut()
+            .expect("test conversation display page should exist")
+            .live_provisional_anchor = Some(anchor);
+    }
+
+    fn reject_conversation_display(&self, error: HttpConversationDisplayDriverError) {
+        *lock(&self.conversation_display_error) = Some(error);
+    }
+
+    fn conversation_display_queries(&self) -> Vec<(Option<String>, usize)> {
+        lock(&self.conversation_display_queries).clone()
     }
 
     fn set_run_context_view(&self, view: HttpRunContextView) {
@@ -4447,6 +4721,21 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.transcript_page)
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test transcript page is missing"))
+    }
+
+    fn conversation_display_page(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        lock(&self.conversation_display_queries).push((cursor.map(str::to_owned), limit));
+        if let Some(error) = lock(&self.conversation_display_error).take() {
+            return Err(error);
+        }
+        lock(&self.conversation_display_page)
+            .clone()
+            .ok_or(HttpConversationDisplayDriverError::Unavailable)
     }
 
     fn session_frontier(

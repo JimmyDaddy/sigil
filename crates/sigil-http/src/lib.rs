@@ -27,8 +27,8 @@ pub use disclosure::{
     HttpEgressDisclosureReplayError, HttpReplayEgressDisclosurePresenter,
 };
 pub use driver::{
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpSessionOpenBindingError,
+    HttpConversationDisplayDriverError, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpSessionOpenBindingError,
 };
 pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpAgentActivityItem,
@@ -38,6 +38,13 @@ pub use dto::{
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
     HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
     HttpApprovalDecisionRequest, HttpContextWindowSource, HttpContinuityRecoveryAction,
+    HttpConversationDisplayApprovalDecision, HttpConversationDisplayAssistantPhase,
+    HttpConversationDisplayCheckpointConflictReason, HttpConversationDisplayCheckpointOutcome,
+    HttpConversationDisplayContent, HttpConversationDisplayGapFact, HttpConversationDisplayGapKind,
+    HttpConversationDisplayItem, HttpConversationDisplayItemKind,
+    HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
+    HttpConversationDisplaySource, HttpConversationDisplayStatus,
+    HttpConversationLiveProvisionalAnchor, HttpConversationTerminalFrontier,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
     HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot, HttpRunStartCommandReceipt,

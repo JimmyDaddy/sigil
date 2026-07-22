@@ -13,7 +13,8 @@ use sigil_kernel::{
 
 use crate::conversation_display::{
     ConversationDisplayAssistantPhaseV1, ConversationDisplayContentV1,
-    ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1, ConversationDisplayStatusV1,
+    ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1,
+    ConversationDisplayProjectionError, ConversationDisplayStatusV1,
     ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
     MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
     conversation_display_page, conversation_display_page_from_records,
@@ -412,15 +413,31 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
         )
     }));
 
-    assert!(
-        conversation_display_page(store.path(), "another-scope", Some(&cursor), 2)
-            .expect_err("scope-bound cursor must fail")
-            .to_string()
-            .contains("scope")
-    );
+    assert!(matches!(
+        conversation_display_page(store.path(), "another-scope", Some(&cursor), 2),
+        Err(ConversationDisplayProjectionError::InvalidCursor { .. })
+    ));
     let mut tampered = cursor;
     tampered.push('x');
-    assert!(conversation_display_page(store.path(), &scope, Some(&tampered), 2).is_err());
+    assert!(matches!(
+        conversation_display_page(store.path(), &scope, Some(&tampered), 2),
+        Err(ConversationDisplayProjectionError::InvalidCursor { .. })
+    ));
+    assert!(matches!(
+        conversation_display_page(store.path(), &scope, Some("e30"), 2),
+        Err(ConversationDisplayProjectionError::InvalidCursor { .. })
+    ));
+
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert!(matches!(
+        conversation_display_page_from_records(
+            &records[..2],
+            &scope,
+            Some(&first.next_cursor.expect("cursor")),
+            2
+        ),
+        Err(ConversationDisplayProjectionError::StaleCursor { .. })
+    ));
     Ok(())
 }
 

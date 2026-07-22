@@ -4,7 +4,7 @@ use super::*;
 
 fn valid_server_info() -> DesktopServerInfo {
     serde_json::from_value(serde_json::json!({
-        "schema_version": 5,
+        "schema_version": 6,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -15,6 +15,7 @@ fn valid_server_info() -> DesktopServerInfo {
             "session_catalog": true,
             "durable_session_reopen": true,
             "bounded_transcript_replay": true,
+            "canonical_conversation_display": true,
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,
@@ -46,7 +47,9 @@ fn server_info_requires_exact_loopback_desktop_contract() {
     ));
 
     let mut missing_capability = valid;
-    missing_capability.capabilities.approval = false;
+    missing_capability
+        .capabilities
+        .canonical_conversation_display = false;
     assert!(matches!(
         missing_capability.validate(),
         Err("required desktop capability is unavailable")
@@ -56,7 +59,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
 #[test]
 fn exact_server_info_rejects_unknown_fields() {
     let result = serde_json::from_value::<DesktopServerInfo>(serde_json::json!({
-        "schema_version": 5,
+        "schema_version": 6,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -67,6 +70,7 @@ fn exact_server_info_rejects_unknown_fields() {
             "session_catalog": true,
             "durable_session_reopen": true,
             "bounded_transcript_replay": true,
+            "canonical_conversation_display": true,
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,

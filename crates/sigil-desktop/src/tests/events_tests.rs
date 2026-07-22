@@ -9,6 +9,7 @@ fn envelope(event_class: DesktopProtocolEventClass, event: Value) -> DesktopProt
         replay_id: (event_class == DesktopProtocolEventClass::Durable)
             .then(|| "sigil-http-run-v1:session-1:run-1:1".to_owned()),
         approval_request: None,
+        provisional_id: None,
         run_event: DesktopPublicRunEvent {
             schema_version: DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
             session_id: "session-1".to_owned(),
@@ -175,5 +176,35 @@ fn protocol_projection_rejects_wrong_stream_and_invalid_replay_shape() {
     assert_eq!(
         transient.into_timeline("workspace-1", "session-1", "run-1", "http-session-1"),
         Err(DesktopProtocolEventError::InvalidReplayCursor)
+    );
+}
+
+#[test]
+fn timeline_projection_preserves_exact_sequence_and_opaque_provisional_identity() {
+    let mut event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({"type": "run_started", "prompt": "hello"}),
+    );
+    event.run_event.sequence = 9_007_199_254_740_993;
+    event.provisional_id = Some(format!("live-v1:{}", "a".repeat(64)));
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("event should project");
+    let expected_provisional_id = format!("live-v1:{}", "a".repeat(64));
+    assert_eq!(timeline.run_sequence, "9007199254740993");
+    assert_eq!(
+        timeline.provisional_id.as_deref(),
+        Some(expected_provisional_id.as_str())
+    );
+
+    let mut invalid = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({"type": "run_started", "prompt": "hello"}),
+    );
+    invalid.provisional_id = Some("live-v1:not-hex".to_owned());
+    assert_eq!(
+        invalid.into_timeline("workspace-1", "session-1", "run-1", "http-session-1"),
+        Err(DesktopProtocolEventError::InvalidProvisionalIdentity)
     );
 }

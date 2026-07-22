@@ -912,6 +912,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/display": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one canonical durable conversation display page
+         * @description Returns stable identity/order projection from scope-checked append-only session truth. Durable sequences use decimal strings; raw durable scope, paths, checksums, credentials and tool arguments are excluded.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque backwards cursor bound to one fixed durable frontier */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Canonical conversation display page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversationDisplayPage"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/run-context": {
         parameters: {
             query?: never;
@@ -1367,6 +1417,120 @@ export interface components {
         };
         /** @enum {string} */
         ContinuityRecoveryAction: "retry_current" | "open_another_workspace" | "open_diagnostics" | "show_details" | "continue_read_only";
+        ConversationDisplayContent: {
+            /** @enum {string|null} */
+            assistant_phase?: "tool_preamble" | "progress" | "final_answer" | null;
+            /** Format: uint64 */
+            image_attachment_count: number;
+            /** Format: uint64 */
+            original_content_bytes: number;
+            /** @enum {string} */
+            role: "user" | "assistant";
+            text?: string | null;
+            truncated: boolean;
+            /** @constant */
+            type: "message";
+        } | {
+            /** Format: uint64 */
+            original_content_bytes: number;
+            text: string;
+            truncated: boolean;
+            /** @constant */
+            type: "reasoning";
+        } | {
+            call_id?: string | null;
+            /** Format: uint64 */
+            original_content_bytes: number;
+            output?: string | null;
+            tool_name?: string | null;
+            truncated: boolean;
+            /** @constant */
+            type: "tool";
+        } | {
+            call_id: string;
+            /** @enum {string|null} */
+            decision?: "approved" | "approved_for_session" | "denied" | null;
+            tool_name: string;
+            /** @constant */
+            type: "approval";
+        } | {
+            checkpoint_id?: string | null;
+            /** @enum {string|null} */
+            conflict_reason?: "workspace_mismatch" | "current_hash_mismatch" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding" | null;
+            /** @enum {string} */
+            outcome: "restored" | "conflict";
+            /** @constant */
+            type: "checkpoint";
+        } | {
+            /** Format: uint64 */
+            original_content_bytes: number;
+            text: string;
+            truncated: boolean;
+            /** @constant */
+            type: "notice";
+        } | {
+            final_message_id?: string | null;
+            safe_summary?: string | null;
+            summary_truncated: boolean;
+            /** @constant */
+            type: "terminal";
+        };
+        ConversationDisplayGapFact: {
+            after_session_stream_sequence: components["schemas"]["DecimalSequence"];
+            kind: components["schemas"]["ConversationDisplayGapKind"];
+        };
+        /** @enum {string} */
+        ConversationDisplayGapKind: "retention" | "replay";
+        ConversationDisplayItem: {
+            content: components["schemas"]["ConversationDisplayContent"];
+            display_id: string;
+            display_order: components["schemas"]["ConversationDisplayOrder"];
+            kind: components["schemas"]["ConversationDisplayItemKind"];
+            reconciles?: string[] | null;
+            run_id?: string | null;
+            run_sequence?: components["schemas"]["DecimalSequence"] | null;
+            /** @constant */
+            schema_version: 1;
+            source: components["schemas"]["ConversationDisplaySource"];
+            source_event_id: string;
+            status: components["schemas"]["ConversationDisplayStatus"];
+        };
+        /** @enum {string} */
+        ConversationDisplayItemKind: "user_message" | "reasoning" | "assistant_message" | "tool" | "approval" | "checkpoint" | "notice" | "terminal";
+        ConversationDisplayOrder: {
+            session_stream_sequence: components["schemas"]["DecimalSequence"];
+            /** Format: uint32 */
+            subindex: number;
+        };
+        ConversationDisplayPage: {
+            gap_facts: components["schemas"]["ConversationDisplayGapFact"][];
+            has_more: boolean;
+            items: components["schemas"]["ConversationDisplayItem"][];
+            live_provisional_anchor?: components["schemas"]["ConversationLiveProvisionalAnchor"] | null;
+            next_cursor?: string | null;
+            request_scope: string;
+            /** @constant */
+            schema_version: 1;
+            terminal_frontier?: components["schemas"]["ConversationTerminalFrontier"] | null;
+            through_session_stream_sequence: components["schemas"]["DecimalSequence"];
+            total_items: components["schemas"]["DecimalSequence"];
+        };
+        /** @enum {string} */
+        ConversationDisplaySource: "durable_transcript" | "durable_run_event" | "live_transient";
+        /** @enum {string} */
+        ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "blocked";
+        /** @description Process-local observation only; never a durable display order. */
+        ConversationLiveProvisionalAnchor: {
+            durable_frontier: components["schemas"]["DecimalSequence"];
+            run_id: string;
+            run_sequence: components["schemas"]["DecimalSequence"];
+        };
+        ConversationTerminalFrontier: {
+            run_id: string;
+            session_stream_sequence: components["schemas"]["DecimalSequence"];
+            status: components["schemas"]["ConversationDisplayStatus"];
+        };
+        DecimalSequence: string;
         DisclosureListResponse: {
             disclosures: Record<string, never>[];
         };
@@ -1476,6 +1640,7 @@ export interface components {
             approval: boolean;
             bounded_transcript_replay: boolean;
             cancellation: boolean;
+            canonical_conversation_display: boolean;
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
             live_events: boolean;
@@ -1492,7 +1657,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 5;
+            schema_version: 6;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

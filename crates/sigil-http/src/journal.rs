@@ -17,7 +17,7 @@ use crate::sse::{
     HttpProtocolReplayError,
 };
 
-const HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION: u32 = 2;
+const HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION: u32 = 3;
 pub(crate) const MAX_HTTP_PROTOCOL_JOURNAL_EVENTS: usize = 4_096;
 pub(crate) const MAX_HTTP_PROTOCOL_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 
@@ -138,6 +138,26 @@ impl HttpDurableProtocolJournal {
             })
             .cloned()
             .collect())
+    }
+
+    /// Reads the latest durable protocol sequence for one run without applying retention cursors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable journal state cannot be read safely.
+    pub fn latest_run_sequence(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<u64>, HttpProtocolJournalError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        Ok(state
+            .high_watermarks
+            .get(&HttpProtocolStreamKey::new(session_id, run_id))
+            .map(|watermark| watermark.latest_sequence))
     }
 }
 
@@ -454,6 +474,7 @@ fn canonical_durable_event(
     }
     let replay_id = event.replay_id;
     let approval_request = event.approval_request;
+    let provisional_id = event.provisional_id;
     let mut canonical = HttpProtocolEvent::from_run_event(event.run_event).map_err(|error| {
         HttpProtocolJournalError::Corrupt {
             message: error.to_string(),
@@ -465,6 +486,11 @@ fn canonical_durable_event(
     if canonical.replay_id != replay_id {
         return Err(HttpProtocolJournalError::Corrupt {
             message: "journal event cursor does not match its payload".to_owned(),
+        });
+    }
+    if canonical.provisional_id != provisional_id {
+        return Err(HttpProtocolJournalError::Corrupt {
+            message: "journal event provisional identity does not match its payload".to_owned(),
         });
     }
     canonical.approval_request = approval_request;

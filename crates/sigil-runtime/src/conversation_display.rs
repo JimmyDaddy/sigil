@@ -16,6 +16,7 @@ use sigil_kernel::{
     ToolApprovalUserDecision, TypedDomainEvent, conversation_run_lifecycle_record_from_stream,
     safe_persistence_text,
 };
+use thiserror::Error as ThisError;
 
 /// Schema version for the canonical conversation display projection.
 pub const CONVERSATION_DISPLAY_SCHEMA_VERSION: u16 = 1;
@@ -29,6 +30,45 @@ pub const MAX_CONVERSATION_DISPLAY_CONTENT_BYTES: usize = 64 * 1024;
 pub const MAX_CONVERSATION_DISPLAY_PAGE_BYTES: usize = 512 * 1024;
 const MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
 const MAX_CONVERSATION_DISPLAY_IDENTITY_BYTES: usize = 512;
+
+/// Stable failure classes for canonical conversation display projection.
+#[derive(Debug, ThisError)]
+pub enum ConversationDisplayProjectionError {
+    /// The supplied cursor is malformed or belongs to another request scope.
+    #[error("conversation display cursor is invalid: {source}")]
+    InvalidCursor {
+        #[source]
+        source: anyhow::Error,
+    },
+    /// The cursor was valid when issued but its fixed durable frontier is no longer available.
+    #[error("conversation display cursor is stale: {source}")]
+    StaleCursor {
+        #[source]
+        source: anyhow::Error,
+    },
+    /// Durable projection could not be proven safely for a reason unrelated to cursor admission.
+    #[error("conversation display projection is unavailable: {source}")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl ConversationDisplayProjectionError {
+    fn invalid_cursor(source: anyhow::Error) -> Self {
+        Self::InvalidCursor { source }
+    }
+
+    fn stale_cursor(source: anyhow::Error) -> Self {
+        Self::StaleCursor { source }
+    }
+}
+
+impl From<anyhow::Error> for ConversationDisplayProjectionError {
+    fn from(source: anyhow::Error) -> Self {
+        Self::Unavailable { source }
+    }
+}
 
 /// Durable ordering key. The stream sequence is authoritative; `subindex` is deterministic
 /// within one source event.
@@ -314,7 +354,7 @@ pub fn conversation_display_page(
     expected_scope: &str,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<ConversationDisplayPageV1> {
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     let records = JsonlSessionStore::read_event_records(session_path).with_context(|| {
         format!(
             "failed to read conversation session {}",
@@ -339,12 +379,20 @@ pub fn conversation_display_page_from_records(
     expected_scope: &str,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<ConversationDisplayPageV1> {
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     validate_page_request(expected_scope, limit)?;
-    validate_stream(records, expected_scope)?;
 
-    let decoded_cursor = cursor.map(decode_cursor).transpose()?;
-    let frontier = fixed_frontier(records, expected_scope, decoded_cursor.as_ref())?;
+    let decoded_cursor = cursor
+        .map(decode_cursor)
+        .transpose()
+        .map_err(ConversationDisplayProjectionError::invalid_cursor)?;
+    if let Some(cursor) = decoded_cursor.as_ref() {
+        validate_cursor_request(cursor, expected_scope)
+            .map_err(ConversationDisplayProjectionError::invalid_cursor)?;
+    }
+    validate_stream(records, expected_scope)?;
+    let frontier = fixed_frontier(records, expected_scope, decoded_cursor.as_ref())
+        .map_err(ConversationDisplayProjectionError::stale_cursor)?;
     let before_order = decoded_cursor.as_ref().map(|cursor| cursor.before_order);
     let capacity = limit.saturating_add(1);
     let mut recent = VecDeque::with_capacity(capacity);
@@ -389,7 +437,9 @@ pub fn conversation_display_page_from_records(
         }
     }
     if !cursor_boundary_found {
-        bail!("conversation display cursor boundary is not a projected item");
+        return Err(ConversationDisplayProjectionError::stale_cursor(anyhow!(
+            "conversation display cursor boundary is not a projected item"
+        )));
     }
 
     let mut selected_reversed = Vec::new();
@@ -497,17 +547,6 @@ fn fixed_frontier(
             },
         ));
     };
-    if cursor.schema_version != CONVERSATION_DISPLAY_SCHEMA_VERSION {
-        bail!("unsupported conversation display cursor schema");
-    }
-    if cursor.session_scope_sha256 != scope_sha256(expected_scope) {
-        bail!("conversation display cursor belongs to another session scope");
-    }
-    if cursor.before_order.session_stream_sequence == 0
-        || cursor.before_order.session_stream_sequence > cursor.through_session_stream_sequence
-    {
-        bail!("conversation display cursor order is outside its fixed frontier");
-    }
     let frontier = records
         .iter()
         .find(|record| record.stream_sequence() == cursor.through_session_stream_sequence)
@@ -524,6 +563,24 @@ fn fixed_frontier(
     Ok(FixedFrontier {
         sequence: cursor.through_session_stream_sequence,
     })
+}
+
+fn validate_cursor_request(
+    cursor: &ConversationDisplayCursorV1,
+    expected_scope: &str,
+) -> Result<()> {
+    if cursor.schema_version != CONVERSATION_DISPLAY_SCHEMA_VERSION {
+        bail!("unsupported conversation display cursor schema");
+    }
+    if cursor.session_scope_sha256 != scope_sha256(expected_scope) {
+        bail!("conversation display cursor belongs to another session scope");
+    }
+    if cursor.before_order.session_stream_sequence == 0
+        || cursor.before_order.session_stream_sequence > cursor.through_session_stream_sequence
+    {
+        bail!("conversation display cursor order is outside its fixed frontier");
+    }
+    Ok(())
 }
 
 fn project_record(
