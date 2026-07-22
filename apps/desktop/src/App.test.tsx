@@ -14,6 +14,7 @@ import type {
   CatalogPage,
   ConversationDisplayPage,
   ConversationContinuity,
+  ConversationQueueCommandInput,
   DesktopBootstrap,
   RunContext,
   RunStreamStatus,
@@ -193,6 +194,33 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       foregroundOwner: simulatedOwner,
       recoveryActions: [],
     })),
+    conversationQueue: async (_workspaceId, sessionId) => ({
+      schemaVersion: 1,
+      sessionId,
+      generation: "0",
+      paused: false,
+      totalItems: 0,
+      items: [],
+      truncated: false,
+    }),
+    commandConversationQueue: async (_workspaceId, input) => ({
+      commandId: "queue-command-test",
+      clientId: "sigil-desktop",
+      sessionId: input.sessionId,
+      action: input.action.action,
+      expectedGeneration: input.expectedGeneration,
+      generation: input.expectedGeneration,
+      queue: {
+        schemaVersion: 1,
+        sessionId: input.sessionId,
+        generation: input.expectedGeneration,
+        paused: input.action.action === "pause",
+        totalItems: 0,
+        items: [],
+        truncated: false,
+      },
+      replayed: false,
+    }),
     runContext: async () => defaultRunContext,
     agentActivity: async () => ({
       totalAgents: 0,
@@ -1259,6 +1287,46 @@ describe("desktop workspace and history shell", () => {
   it("reattaches an active run after listeners and restores bounded controls with honest gaps", async () => {
     const user = userEvent.setup();
     const order: string[] = [];
+    const conversationQueue = vi.fn(async () => ({
+      schemaVersion: 1,
+      sessionId: "http-session-active",
+      generation: "queue-v1:0:initial",
+      paused: false,
+      totalItems: 0,
+      items: [],
+      truncated: false,
+    }));
+    const commandConversationQueue = vi.fn(async (
+      _workspaceId: string,
+      input: ConversationQueueCommandInput,
+    ) => ({
+      commandId: "queue-command-active",
+      clientId: "sigil-desktop",
+      sessionId: input.sessionId,
+      action: input.action.action,
+      expectedGeneration: input.expectedGeneration,
+      generation: "queue-v1:1:queued",
+      queue: {
+        schemaVersion: 1,
+        sessionId: input.sessionId,
+        generation: "queue-v1:1:queued",
+        paused: false,
+        totalItems: 1,
+        items: [{
+          entryId: "queue-entry-active",
+          order: 0,
+          kind: "chat" as const,
+          status: "queued" as const,
+          promptPreview: "Follow up after approval",
+          promptPreviewTruncated: false,
+          promptMaterial: "persisted_safe" as const,
+          dispatchable: false,
+          blockedReason: "foreground_run_active" as const,
+        }],
+        truncated: false,
+      },
+      replayed: false,
+    }));
     let eventListener: ((event: TimelineEvent) => void) | undefined;
     let cancelledRun = "";
     const activeEvent: TimelineEvent = {
@@ -1324,6 +1392,8 @@ describe("desktop workspace and history shell", () => {
         },
         recoveryActions: ["retry_current", "continue_read_only"],
       }),
+      conversationQueue,
+      commandConversationQueue,
       subscribeRunEvents: async (listener) => {
         order.push("events");
         eventListener = listener;
@@ -1366,6 +1436,25 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText(/Some live details were not retained/)).toBeTruthy();
     expect(screen.getByText("Review the resumed edit")).toBeTruthy();
     expect(order).toEqual(["events", "status", "attach"]);
+
+    await waitFor(() => expect(conversationQueue).toHaveBeenCalled());
+    const composer = screen.getByRole("textbox", { name: "Message Sigil" });
+    await user.type(composer, "Follow up after approval");
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledWith(
+      workspace.id,
+      {
+        sessionId: "http-session-active",
+        expectedGeneration: "queue-v1:0:initial",
+        action: {
+          action: "enqueue",
+          prompt: "Follow up after approval",
+          kind: "chat",
+          reasoningEffort: undefined,
+        },
+      },
+    ));
+    expect(screen.getByText("Review the resumed edit")).toBeTruthy();
 
     act(() => eventListener?.(activeEvent));
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);

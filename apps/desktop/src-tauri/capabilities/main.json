@@ -15,6 +15,7 @@
     "allow-desktop-session-batch",
     "allow-desktop-session",
     "allow-desktop-run",
+    "allow-desktop-conversation-queue",
     "allow-desktop-approval",
     "allow-desktop-verification",
     "allow-desktop-support",

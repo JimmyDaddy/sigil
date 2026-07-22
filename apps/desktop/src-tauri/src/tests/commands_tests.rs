@@ -7,10 +7,14 @@ use sigil_desktop::{
     DesktopConversationDisplayOrder,
     DesktopConversationDisplayPage as NativeConversationDisplayPage,
     DesktopConversationDisplaySource, DesktopConversationDisplayStatus,
-    DesktopConversationLiveProvisionalAnchor, DesktopConversationTerminalFrontier,
-    DesktopDurableSessionFrontier, DesktopForegroundRunOwner, DesktopSessionContinuityView,
-    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopConversationLiveProvisionalAnchor, DesktopConversationQueueBlockedReason,
+    DesktopConversationQueueGeneration,
+    DesktopConversationQueueItem as NativeConversationQueueItem, DesktopConversationQueueItemKind,
+    DesktopConversationQueueItemStatus, DesktopConversationQueuePromptMaterial,
+    DesktopConversationQueueView as NativeConversationQueueView,
+    DesktopConversationTerminalFrontier, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
+    DesktopSessionContinuityView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
+    DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
 };
 
 #[test]
@@ -472,6 +476,107 @@ fn conversation_display_errors_are_distinct_from_catalog_pagination() {
             .recovery_actions
             .contains(&DesktopRecoveryAction::OpenDiagnostics)
     );
+}
+
+#[test]
+fn conversation_queue_projection_is_bounded_camel_case_and_secret_free() {
+    let projected = crate::ipc::DesktopConversationQueueView::from(NativeConversationQueueView {
+        schema_version: 1,
+        session_id: "session-queue".to_owned(),
+        generation: DesktopConversationQueueGeneration("queue-v1:8:event-8".to_owned()),
+        paused: false,
+        total_items: 1,
+        items: vec![NativeConversationQueueItem {
+            entry_id: "queue-entry-1".to_owned(),
+            order: 0,
+            kind: DesktopConversationQueueItemKind::Chat,
+            status: DesktopConversationQueueItemStatus::Queued,
+            prompt_preview: "Prompt must be re-entered".to_owned(),
+            prompt_preview_truncated: true,
+            prompt_material: DesktopConversationQueuePromptMaterial::RequiresReentry,
+            dispatchable: false,
+            blocked_reason: Some(DesktopConversationQueueBlockedReason::RequiresReentry),
+            created_at_ms: Some(1_784_419_200_000),
+            updated_at_ms: None,
+        }],
+        truncated: false,
+        next_dispatchable_entry_id: None,
+    });
+
+    let json = serde_json::to_value(projected).expect("queue view should serialize");
+    let encoded = serde_json::to_string(&json).expect("queue view should encode");
+    assert_eq!(json["generation"], "queue-v1:8:event-8");
+    assert_eq!(json["items"][0]["promptMaterial"], "requires_reentry");
+    assert_eq!(json["items"][0]["blockedReason"], "requires_reentry");
+    assert!(json["items"][0].get("prompt_material").is_none());
+    for forbidden in ["exactPrompt", "promptHash", "sessionLogPath", "bearer"] {
+        assert!(!encoded.contains(forbidden));
+    }
+}
+
+#[test]
+fn conversation_queue_action_validation_rejects_lossy_or_stale_shapes() {
+    let valid: crate::ipc::DesktopConversationQueueCommandInput =
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "session-queue",
+            "expectedGeneration": "queue-v1:8:event-8",
+            "action": {
+                "action": "enqueue",
+                "prompt": "Run focused tests",
+                "kind": "chat",
+                "reasoningEffort": "high"
+            }
+        }))
+        .expect("bounded queue input should decode");
+    validate_queue_generation(&valid.expected_generation)
+        .expect("bounded generation should validate");
+    validate_queue_action(&valid.action).expect("chat enqueue should validate");
+
+    let unknown_kind: crate::ipc::DesktopConversationQueueCommandInput =
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "session-queue",
+            "expectedGeneration": "queue-v1:8:event-8",
+            "action": {
+                "action": "enqueue",
+                "prompt": "Run focused tests",
+                "kind": "unknown"
+            }
+        }))
+        .expect("unknown input kind should decode before validation");
+    assert_eq!(
+        validate_queue_action(&unknown_kind.action)
+            .expect_err("unknown queue kind must fail")
+            .code,
+        "conversation_queue_action_invalid"
+    );
+
+    let self_reorder: crate::ipc::DesktopConversationQueueCommandInput =
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "session-queue",
+            "expectedGeneration": "queue-v1:8:event-8",
+            "action": {
+                "action": "reorder",
+                "entryId": "queue-entry-1",
+                "afterEntryId": "queue-entry-1"
+            }
+        }))
+        .expect("reorder shape should decode before validation");
+    assert_eq!(
+        validate_queue_action(&self_reorder.action)
+            .expect_err("self reorder must fail")
+            .code,
+        "conversation_queue_action_invalid"
+    );
+
+    let unknown_field = serde_json::from_value::<crate::ipc::DesktopConversationQueueCommandInput>(
+        serde_json::json!({
+            "sessionId": "session-queue",
+            "expectedGeneration": "queue-v1:8:event-8",
+            "unexpected": "private",
+            "action": { "action": "pause" }
+        }),
+    );
+    assert!(unknown_field.is_err());
 }
 
 #[test]

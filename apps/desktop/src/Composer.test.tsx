@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -193,8 +193,14 @@ const context: RunContext = {
 };
 
 function renderComposer(overrides: {
+  active?: boolean;
   submissionBlocked?: boolean;
+  queueCount?: number;
+  queuePaused?: boolean;
+  queueBusy?: boolean;
   onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
+  onInterruptAndRunNext?: (prompt: string) => Promise<boolean>;
+  onOpenQueue?: () => void;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
   onOpenSessionPicker?: (query: string) => void;
@@ -207,6 +213,8 @@ function renderComposer(overrides: {
     _skillBinding?: SkillBinding,
     _agentBinding?: AgentBinding,
   ) => true);
+  const onInterruptAndRunNext = overrides.onInterruptAndRunNext ?? vi.fn(async (_prompt: string) => true);
+  const onOpenQueue = overrides.onOpenQueue ?? vi.fn(() => undefined);
   const onReasoningEffortChange = overrides.onReasoningEffortChange ?? vi.fn((_effort: ReasoningEffort) => undefined);
   const onOpenAgentWorkbench = overrides.onOpenAgentWorkbench ?? vi.fn((_query: string) => undefined);
   const onOpenSessionPicker = overrides.onOpenSessionPicker ?? vi.fn((_query: string) => undefined);
@@ -217,7 +225,7 @@ function renderComposer(overrides: {
     <LocaleProvider>
       <Composer
         draftKey="composer-test"
-        active={false}
+        active={overrides.active ?? false}
         submissionBlocked={overrides.submissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
@@ -227,6 +235,9 @@ function renderComposer(overrides: {
         selectedModelName={context.modelName}
         permissionMode="manual"
         reasoningEffort="max"
+        queueCount={overrides.queueCount ?? 0}
+        queuePaused={overrides.queuePaused ?? false}
+        queueBusy={overrides.queueBusy ?? false}
         onModelChange={() => undefined}
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
@@ -235,13 +246,25 @@ function renderComposer(overrides: {
         onOpenSettings={onOpenSettings}
         onOpenSupport={onOpenSupport}
         onOpenAgentWorkbench={onOpenAgentWorkbench}
+        onOpenQueue={onOpenQueue}
         onNotice={onNotice}
         onSubmit={onSubmit}
+        onInterruptAndRunNext={onInterruptAndRunNext}
         onCancel={() => undefined}
       />
     </LocaleProvider>,
   );
-  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onOpenSessionPicker, onOpenSettings, onOpenSupport, onNotice };
+  return {
+    onSubmit,
+    onInterruptAndRunNext,
+    onOpenQueue,
+    onReasoningEffortChange,
+    onOpenAgentWorkbench,
+    onOpenSessionPicker,
+    onOpenSettings,
+    onOpenSupport,
+    onNotice,
+  };
 }
 
 describe("structured composer", () => {
@@ -385,5 +408,58 @@ describe("structured composer", () => {
       true,
     );
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("queues Enter submissions by default while a run is active", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onInterruptAndRunNext } = renderComposer({ active: true });
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "Run this after the current task");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("Run this after the current task", undefined, undefined);
+    expect(onInterruptAndRunNext).not.toHaveBeenCalled();
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("does not queue an IME composition Enter", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ active: true });
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "继续执行");
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("继续执行");
+  });
+
+  it("requires confirmation before interrupting and clears only after durable success", async () => {
+    const user = userEvent.setup();
+    const onInterruptAndRunNext = vi.fn(async (_prompt: string) => false);
+    renderComposer({ active: true, onInterruptAndRunNext });
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "Urgent follow-up");
+    await user.click(screen.getByRole("button", { name: "Interrupt and run next" }));
+    expect(onInterruptAndRunNext).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Interrupt and run next" }));
+    expect(onInterruptAndRunNext).toHaveBeenCalledWith("Urgent follow-up");
+    expect((input as HTMLTextAreaElement).value).toBe("Urgent follow-up");
+  });
+
+  it("opens the durable queue without changing the draft", async () => {
+    const user = userEvent.setup();
+    const { onOpenQueue } = renderComposer({ active: true, queueCount: 2 });
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "Keep this draft");
+    await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
+
+    expect(onOpenQueue).toHaveBeenCalledOnce();
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
   });
 });

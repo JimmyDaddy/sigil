@@ -11,7 +11,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopClientError, DesktopConversationDisplayQuery, DesktopLaunchError, DesktopLaunchRequest,
+    DesktopClientError, DesktopConversationDisplayQuery, DesktopConversationQueueCommandRequest,
+    DesktopConversationQueueGeneration, DesktopLaunchError, DesktopLaunchRequest,
     DesktopRunCancelRequest, DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
     DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
     DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
@@ -32,17 +33,19 @@ use crate::{
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
         DesktopConversationContinuity, DesktopConversationDisplayPage,
-        DesktopConversationDisplayRequest, DesktopExternalUrlInput, DesktopRunAttachInput,
-        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
-        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
-        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
-        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
-        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
-        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
-        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
-        DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
-        DesktopSupportSaveSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopConversationDisplayRequest, DesktopConversationQueueCommandInput,
+        DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
+        DesktopExternalUrlInput, DesktopRunAttachInput, DesktopRunAttachment,
+        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
+        DesktopSessionCatalogBatchExecuteInput, DesktopSessionCatalogBatchPlanInput,
+        DesktopSessionCatalogBatchPlanSummary, DesktopSessionCatalogBatchReceiptSummary,
+        DesktopSessionCreateInput, DesktopSessionDeleteInput,
+        DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
+        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
+        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
+        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTranscriptPage,
+        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -608,6 +611,56 @@ pub(crate) async fn desktop_continuity(
         .await
         .map(Into::into)
         .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_conversation_queue(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationQueueView, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .conversation_queue(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_queue_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_command_conversation_queue(
+    workspace_id: String,
+    input: DesktopConversationQueueCommandInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationQueueCommandReceipt, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_queue_generation(&input.expected_generation)?;
+    validate_queue_action(&input.action)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .command_conversation_queue(
+            &input.session_id,
+            DesktopConversationQueueCommandRequest {
+                expected_generation: DesktopConversationQueueGeneration(input.expected_generation),
+                action: input.action.into_native(),
+            },
+        )
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_queue_client_error)
 }
 
 #[tauri::command]
@@ -1398,6 +1451,68 @@ fn validate_prompt(value: &str) -> Result<(), DesktopCommandError> {
     Ok(())
 }
 
+fn validate_queue_generation(value: &str) -> Result<(), DesktopCommandError> {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(DesktopCommandError::new(
+            "conversation_queue_generation_invalid",
+            "The conversation queue changed or returned an invalid revision.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_queue_action(
+    action: &crate::ipc::DesktopConversationQueueActionInput,
+) -> Result<(), DesktopCommandError> {
+    use crate::ipc::{
+        DesktopConversationQueueActionInput as Action,
+        DesktopConversationQueueItemKindInput as Kind,
+    };
+
+    match action {
+        Action::Enqueue { prompt, kind, .. } => {
+            validate_prompt(prompt)?;
+            if matches!(kind, Kind::Unknown) {
+                return Err(DesktopCommandError::new(
+                    "conversation_queue_action_invalid",
+                    "The conversation queue item kind is not supported.",
+                ));
+            }
+        }
+        Action::Edit {
+            entry_id, prompt, ..
+        } => {
+            validate_session_id(entry_id)?;
+            validate_prompt(prompt)?;
+        }
+        Action::Remove { entry_id } => validate_session_id(entry_id)?,
+        Action::Reorder {
+            entry_id,
+            after_entry_id,
+        } => {
+            validate_session_id(entry_id)?;
+            if let Some(after_entry_id) = after_entry_id {
+                validate_session_id(after_entry_id)?;
+                if entry_id == after_entry_id {
+                    return Err(DesktopCommandError::new(
+                        "conversation_queue_action_invalid",
+                        "A conversation queue item cannot be ordered after itself.",
+                    ));
+                }
+            }
+        }
+        Action::Pause | Action::Resume => {}
+        Action::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => {
+            validate_session_id(foreground_run_id)?;
+            validate_owner_revision(foreground_owner_revision)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_verification_rerun(
     input: &DesktopVerificationRerunInput,
 ) -> Result<(), DesktopCommandError> {
@@ -1641,6 +1756,62 @@ fn project_conversation_display_client_error(error: DesktopClientError) -> Deskt
         ]),
         other => project_client_error(other),
     }
+}
+
+fn project_conversation_queue_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
+    {
+        let projected = match code.as_str() {
+            "invalid_queue_command" => DesktopCommandError::new(
+                "conversation_queue_action_invalid",
+                "The conversation queue action is invalid.",
+            ),
+            "queue_generation_stale" => DesktopCommandError::new(
+                "conversation_queue_stale",
+                "The conversation queue changed. Review its latest state and try again.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "queue_entry_terminal" => DesktopCommandError::new(
+                "conversation_queue_item_terminal",
+                "This queued message is no longer editable.",
+            ),
+            "queue_owner_lost" => DesktopCommandError::new(
+                "conversation_queue_owner_lost",
+                "The active run changed before it could be interrupted.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "queue_permission_required" => DesktopCommandError::new(
+                "conversation_queue_permission_required",
+                "Current policy does not permit this queue action.",
+            ),
+            "queue_conflict" => DesktopCommandError::new(
+                "conversation_queue_conflict",
+                "The queued message changed before this action completed.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "queue_requires_reentry" => DesktopCommandError::new(
+                "conversation_queue_requires_reentry",
+                "Enter the exact prompt again before this queued message can run.",
+            ),
+            "queue_action_unsupported" => DesktopCommandError::new(
+                "conversation_queue_action_unsupported",
+                "This queue action is not supported by the current runtime.",
+            ),
+            "conversation_queue_unavailable" => DesktopCommandError::new(
+                "conversation_queue_unavailable",
+                "The durable conversation queue is temporarily unavailable.",
+            )
+            .with_recovery_actions([
+                DesktopRecoveryAction::RetryCurrent,
+                DesktopRecoveryAction::OpenDiagnostics,
+            ]),
+            _ => return project_client_error(error),
+        };
+        return projected;
+    }
+    project_client_error(error)
 }
 
 fn project_session_mutation_client_error(error: DesktopClientError) -> DesktopCommandError {

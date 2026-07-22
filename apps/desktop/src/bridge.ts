@@ -9,6 +9,9 @@ import type {
   CatalogPage,
   CatalogRequest,
   ConversationContinuity,
+  ConversationQueueCommandInput,
+  ConversationQueueCommandReceipt,
+  ConversationQueueView,
   ConversationDisplayPage,
   ConversationDisplayRequest,
   DesktopBootstrap,
@@ -91,6 +94,11 @@ export interface DesktopBridge {
     request: ConversationDisplayRequest,
   ): Promise<ConversationDisplayPage>;
   continuity(workspaceId: string, sessionId: string): Promise<ConversationContinuity>;
+  conversationQueue(workspaceId: string, sessionId: string): Promise<ConversationQueueView>;
+  commandConversationQueue(
+    workspaceId: string,
+    input: ConversationQueueCommandInput,
+  ): Promise<ConversationQueueCommandReceipt>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
   agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
   startRun(
@@ -188,6 +196,13 @@ export const desktopBridge: DesktopBridge = {
     }),
   continuity: (workspaceId, sessionId) =>
     invoke<ConversationContinuity>("desktop_continuity", { workspaceId, sessionId }),
+  conversationQueue: (workspaceId, sessionId) =>
+    invoke<ConversationQueueView>("desktop_conversation_queue", { workspaceId, sessionId }),
+  commandConversationQueue: (workspaceId, input) =>
+    invoke<ConversationQueueCommandReceipt>("desktop_command_conversation_queue", {
+      workspaceId,
+      input,
+    }),
   runContext: (workspaceId, sessionId) =>
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
   agentActivity: (workspaceId, sessionId) =>

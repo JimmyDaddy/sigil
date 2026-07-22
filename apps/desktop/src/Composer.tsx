@@ -12,7 +12,7 @@ import type {
 } from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
-import { Button, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
+import { Button, Dialog, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
 const MAX_COMPOSER_HEIGHT = 176;
@@ -32,6 +32,9 @@ export function Composer({
   reasoningEffort,
   requestedSkill,
   requestedAgent,
+  queueCount,
+  queuePaused,
+  queueBusy,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -40,8 +43,10 @@ export function Composer({
   onOpenSettings,
   onOpenSupport,
   onOpenAgentWorkbench,
+  onOpenQueue,
   onNotice,
   onSubmit,
+  onInterruptAndRunNext,
   onCancel,
 }: {
   draftKey: string;
@@ -58,6 +63,9 @@ export function Composer({
   reasoningEffort?: ReasoningEffort;
   requestedSkill?: SkillCatalogEntry;
   requestedAgent?: AgentCatalogEntry;
+  queueCount: number;
+  queuePaused: boolean;
+  queueBusy: boolean;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -66,8 +74,10 @@ export function Composer({
   onOpenSettings: () => void;
   onOpenSupport: () => void;
   onOpenAgentWorkbench: (query: string) => void;
+  onOpenQueue: () => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
+  onInterruptAndRunNext: (prompt: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
   const { t } = useLocale();
@@ -76,6 +86,7 @@ export function Composer({
   const [selectedAgent, setSelectedAgent] = useState<AgentCatalogEntry>();
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
+  const [interruptPrompt, setInterruptPrompt] = useState<string>();
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
@@ -110,7 +121,7 @@ export function Composer({
 
   const submit = async () => {
     let nextPrompt = prompt.trim();
-    if (nextPrompt === "" || active || submissionBlocked || submitting) return;
+    if (nextPrompt === "" || submissionBlocked || submitting || (active && queueBusy)) return;
     const command = resolveCommand(runContext, nextPrompt);
     if (command !== undefined) {
       if (await executeCommand(command.suggestion, command.argument)) clearComposer();
@@ -142,9 +153,22 @@ export function Composer({
       onNotice(agent.unavailableReason ?? t("agentExecutionUnavailable"), true);
       return;
     }
+    if (active && (skill !== undefined || agent !== undefined)) {
+      onNotice(t("queueExtensionBindingUnavailable"), true);
+      return;
+    }
     if (await onSubmit(nextPrompt, skill?.binding, agent?.binding)) {
       clearComposer();
     }
+  };
+  const requestInterruptAndRunNext = () => {
+    const nextPrompt = prompt.trim();
+    if (nextPrompt === "" || !active || submissionBlocked || submitting || queueBusy) return;
+    if (/^[/$@]/u.test(nextPrompt) || selectedSkill !== undefined || selectedAgent !== undefined) {
+      onNotice(t("queueExtensionBindingUnavailable"), true);
+      return;
+    }
+    setInterruptPrompt(nextPrompt);
   };
   const clearComposer = () => {
       setPrompt("");
@@ -260,6 +284,7 @@ export function Composer({
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
 
   return (
+    <>
     <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       {suggestionsOpen ? (
         <ComposerSuggestions
@@ -402,17 +427,54 @@ export function Composer({
             ) : null}
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
-          {active ? (
-            <Tooltip label={submissionBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
+          <div className="composer-actions">
+            <Tooltip label={queuePaused ? t("conversationQueuePaused") : t("openConversationQueue")}>
               <IconButton
-                className="composer-submit composer-stop"
+                className={`composer-queue-trigger${queueCount > 0 ? " has-items" : ""}`}
                 type="button"
-                aria-label={t("stopRun")}
-                icon={<Icon name="stop" />}
-                disabled={controlBusy || submissionBlocked}
-                onClick={onCancel}
+                aria-label={t("openConversationQueueCount", { count: queueCount })}
+                icon={(
+                  <>
+                    <Icon name="queue" />
+                    {queueCount > 0 ? <span className="composer-queue-count" aria-hidden="true">{queueCount}</span> : null}
+                  </>
+                )}
+                onClick={onOpenQueue}
               />
             </Tooltip>
+          {active ? (
+            <>
+              <Tooltip label={t("interruptAndRunNextHint")}>
+                <IconButton
+                  className="composer-submit composer-interrupt-next"
+                  type="button"
+                  aria-label={t("interruptAndRunNext")}
+                  icon={<Icon name="interrupt-next" />}
+                  disabled={prompt.trim() === "" || submissionBlocked || submitting || queueBusy}
+                  onClick={requestInterruptAndRunNext}
+                />
+              </Tooltip>
+              <Tooltip label={submissionBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
+                <IconButton
+                  className="composer-submit composer-stop"
+                  type="button"
+                  aria-label={t("stopRun")}
+                  icon={<Icon name="stop" />}
+                  disabled={controlBusy || submissionBlocked}
+                  onClick={onCancel}
+                />
+              </Tooltip>
+              <Tooltip label={queueBusy ? t("queueingMessage") : t("queueMessageHint")}>
+                <IconButton
+                  className="composer-submit sg-icon-button-primary"
+                  type="submit"
+                  aria-label={t("queueMessage")}
+                  icon={<Icon name="queue" />}
+                  disabled={prompt.trim() === "" || submissionBlocked || submitting || queueBusy}
+                  aria-busy={queueBusy || undefined}
+                />
+              </Tooltip>
+            </>
           ) : (
             <Tooltip label={submissionBlocked ? t("sendBlockedUntilContinuityChecked") : submitting ? t("startingRun") : t("sendMessageHint")}>
               <IconButton
@@ -425,9 +487,42 @@ export function Composer({
               />
             </Tooltip>
           )}
+          </div>
         </div>
       </div>
     </form>
+    <Dialog
+      open={interruptPrompt !== undefined}
+      title={t("interruptAndRunNextQuestion")}
+      description={t("interruptAndRunNextDetail")}
+      returnFocusRef={composerRef}
+      onOpenChange={(open) => {
+        if (!open && !queueBusy) setInterruptPrompt(undefined);
+      }}
+    >
+      <p className="interrupt-next-preview">{interruptPrompt}</p>
+      <div className="confirmation-actions">
+        <Button type="button" data-initial-focus disabled={queueBusy} onClick={() => setInterruptPrompt(undefined)}>
+          {t("keepCurrentRun")}
+        </Button>
+        <Button
+          type="button"
+          variant="danger"
+          busy={queueBusy}
+          onClick={() => {
+            if (interruptPrompt === undefined) return;
+            void onInterruptAndRunNext(interruptPrompt).then((completed) => {
+              if (!completed) return;
+              setInterruptPrompt(undefined);
+              clearComposer();
+            });
+          }}
+        >
+          {t("interruptAndRunNext")}
+        </Button>
+      </div>
+    </Dialog>
+    </>
   );
 }
 

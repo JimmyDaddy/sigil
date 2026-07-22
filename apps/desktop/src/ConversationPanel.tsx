@@ -4,6 +4,7 @@ import { ApprovalDock } from "./ApprovalDock";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
+import { ConversationQueuePanel } from "./ConversationQueuePanel";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { useLocale, type Translate } from "./i18n";
@@ -15,6 +16,8 @@ import type {
   AgentCatalogEntry,
   ApprovalAction,
   ContinuityRecoveryAction,
+  ConversationQueueCommandAction,
+  ConversationQueueView,
   PermissionMode,
   ReasoningEffort,
   RunContext,
@@ -133,6 +136,12 @@ export function ConversationPanel({
   const [extensionWorkbenchQuery, setExtensionWorkbenchQuery] = useState("");
   const [requestedSkill, setRequestedSkill] = useState<SkillCatalogEntry>();
   const [requestedAgent, setRequestedAgent] = useState<AgentCatalogEntry>();
+  const [conversationQueue, setConversationQueue] = useState<ConversationQueueView>();
+  const [conversationQueueBusy, setConversationQueueBusy] = useState(false);
+  const [conversationQueueLoading, setConversationQueueLoading] = useState(false);
+  const [conversationQueueError, setConversationQueueError] = useState(false);
+  const [conversationQueueReload, setConversationQueueReload] = useState(0);
+  const [conversationQueueOpen, setConversationQueueOpen] = useState(false);
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const pendingTimelineAnchor = useRef<TimelineAnchor | undefined>(undefined);
@@ -145,6 +154,7 @@ export function ConversationPanel({
   const canonicalRefreshRunId = useRef<string | undefined>(undefined);
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
   const pendingPromptCounter = useRef(0);
+  const conversationQueueEpoch = useRef(0);
   const initialRunContextSessionId = useRef<string | undefined>(undefined);
   const initialDisplaySessionId = useRef<string | undefined>(undefined);
   const initialContinuitySessionId = useRef<string | undefined>(undefined);
@@ -197,6 +207,12 @@ export function ConversationPanel({
     setExtensionWorkbenchQuery("");
     setRequestedSkill(undefined);
     setRequestedAgent(undefined);
+    setConversationQueue(undefined);
+    setConversationQueueBusy(false);
+    setConversationQueueLoading(false);
+    setConversationQueueError(false);
+    setConversationQueueOpen(false);
+    conversationQueueEpoch.current += 1;
     activeRunIdRef.current = undefined;
     canonicalRefreshAttempts.current = 0;
     canonicalRefreshRunId.current = undefined;
@@ -207,6 +223,33 @@ export function ConversationPanel({
     initialContinuitySessionId.current = undefined;
     initialLoadReportedSessionId.current = undefined;
   }, [session.id, workspaceId]);
+
+  useEffect(() => {
+    if (conversationQueueBusy) return;
+    let disposed = false;
+    const requestEpoch = conversationQueueEpoch.current + 1;
+    conversationQueueEpoch.current = requestEpoch;
+    setConversationQueueLoading(true);
+    void bridge.conversationQueue(workspaceId, session.id)
+      .then((queue) => {
+        if (disposed || conversationQueueEpoch.current !== requestEpoch) return;
+        setConversationQueue(queue);
+        setConversationQueueError(false);
+      })
+      .catch(() => {
+        if (!disposed && conversationQueueEpoch.current === requestEpoch) {
+          setConversationQueueError(true);
+        }
+      })
+      .finally(() => {
+        if (!disposed && conversationQueueEpoch.current === requestEpoch) {
+          setConversationQueueLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, conversationQueueBusy, conversationQueueReload, run?.id, session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -403,6 +446,7 @@ export function ConversationPanel({
       const terminal = terminalSignalFromTimelineEvent(event);
       if (terminal !== undefined) {
         setPendingPrompt(undefined);
+        setConversationQueueReload((value) => value + 1);
         dispatchContinuity({
           type: "terminal_observed",
           sessionId: session.id,
@@ -444,6 +488,7 @@ export function ConversationPanel({
           enterRecovery(status.message ?? t("liveControlsUnavailable"));
         }
         if (status.state === "terminal") {
+          setConversationQueueReload((value) => value + 1);
           dispatchContinuity({
             type: "terminal_transport_observed",
             sessionId: session.id,
@@ -716,12 +761,120 @@ export function ConversationPanel({
     }
   };
 
+  const refreshConversationQueue = () => {
+    setConversationQueueReload((value) => value + 1);
+  };
+
+  const commandConversationQueue = async (
+    action: ConversationQueueCommandAction,
+  ): Promise<boolean> => {
+    if (conversationQueueBusy) return false;
+    if (conversationQueue === undefined) {
+      onNotice(t("conversationQueueUnavailable"), true);
+      refreshConversationQueue();
+      return false;
+    }
+    conversationQueueEpoch.current += 1;
+    setConversationQueueBusy(true);
+    try {
+      const receipt = await bridge.commandConversationQueue(workspaceId, {
+        sessionId: session.id,
+        expectedGeneration: conversationQueue.generation,
+        action,
+      });
+      setConversationQueue(receipt.queue);
+      setConversationQueueError(false);
+      return true;
+    } catch {
+      setConversationQueueError(true);
+      refreshConversationQueue();
+      onNotice(t("conversationQueueCommandFailed"), true);
+      return false;
+    } finally {
+      setConversationQueueBusy(false);
+    }
+  };
+
+  const interruptAndRunNext = async (nextPrompt: string): Promise<boolean> => {
+    const owner = continuityState.owner;
+    if (
+      conversationQueue === undefined
+      || conversationQueueBusy
+      || !active
+      || run === undefined
+      || owner.foregroundRunId !== run.id
+      || owner.ownerRevision === undefined
+    ) {
+      onNotice(t("interruptAndRunNextUnavailable"), true);
+      refreshConversationQueue();
+      return false;
+    }
+    conversationQueueEpoch.current += 1;
+    setConversationQueueBusy(true);
+    try {
+      const enqueued = await bridge.commandConversationQueue(workspaceId, {
+        sessionId: session.id,
+        expectedGeneration: conversationQueue.generation,
+        action: {
+          action: "enqueue",
+          prompt: nextPrompt,
+          kind: "chat",
+          reasoningEffort,
+        },
+      });
+      setConversationQueue(enqueued.queue);
+      try {
+        const interrupted = await bridge.commandConversationQueue(workspaceId, {
+          sessionId: session.id,
+          expectedGeneration: enqueued.queue.generation,
+          action: {
+            action: "interrupt_and_run_next",
+            foregroundRunId: run.id,
+            foregroundOwnerRevision: owner.ownerRevision,
+          },
+        });
+        setConversationQueue(interrupted.queue);
+        setConversationQueueError(false);
+      } catch {
+        setConversationQueueError(true);
+        refreshConversationQueue();
+        onNotice(t("interruptFailedMessageQueued"), true);
+      }
+      return true;
+    } catch {
+      setConversationQueueError(true);
+      refreshConversationQueue();
+      onNotice(t("conversationQueueCommandFailed"), true);
+      return false;
+    } finally {
+      setConversationQueueBusy(false);
+    }
+  };
+
   const submit = async (
     nextPrompt: string,
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
   ): Promise<boolean> => {
-    if (nextPrompt === "" || active || submissionBlocked || submitting) return false;
+    if (
+      nextPrompt === ""
+      || submissionBlocked
+      || submitting
+      || conversationQueueBusy
+      || (active && conversationQueueLoading)
+    ) return false;
+    if (active) {
+      if (skillBinding !== undefined || agentBinding !== undefined) {
+        onNotice(t("queueExtensionBindingUnavailable"), true);
+        return false;
+      }
+      return commandConversationQueue({
+        action: "enqueue",
+        prompt: nextPrompt,
+        kind: "chat",
+        reasoningEffort,
+      });
+    }
     timelinePinnedToEnd.current = true;
     pendingPromptCounter.current += 1;
     setPendingPrompt({
@@ -1079,6 +1232,9 @@ export function ConversationPanel({
         reasoningEffort={reasoningEffort}
         requestedSkill={requestedSkill}
         requestedAgent={requestedAgent}
+        queueCount={conversationQueue?.totalItems ?? 0}
+        queuePaused={conversationQueue?.paused ?? false}
+        queueBusy={conversationQueueBusy || conversationQueueLoading}
         onModelChange={(modelName) => {
           setSelectedModelName(modelName);
           const modelOption = runContext?.modelOptions.find(
@@ -1101,8 +1257,13 @@ export function ConversationPanel({
           setExtensionWorkbenchQuery(query);
           setExtensionWorkbenchOpen(true);
         }}
+        onOpenQueue={() => {
+          setConversationQueueOpen(true);
+          refreshConversationQueue();
+        }}
         onNotice={onNotice}
         onSubmit={submit}
+        onInterruptAndRunNext={interruptAndRunNext}
         onCancel={() => void cancel()}
       />
       </section>
@@ -1119,6 +1280,23 @@ export function ConversationPanel({
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active || submissionBlocked} onRerun={() => void rerunVerification()} />
         </Drawer>
       ) : null}
+      <Drawer
+        id="conversation-queue-inspector"
+        open={conversationQueueOpen}
+        title={t("conversationQueue")}
+        description={t("conversationQueueDetail")}
+        returnFocusRef={composerRef}
+        onOpenChange={setConversationQueueOpen}
+      >
+        <ConversationQueuePanel
+          queue={conversationQueue}
+          busy={conversationQueueBusy || conversationQueueLoading}
+          error={conversationQueueError}
+          reasoningEffort={reasoningEffort}
+          onRefresh={refreshConversationQueue}
+          onCommand={commandConversationQueue}
+        />
+      </Drawer>
       <Drawer
         id="agent-activity-inspector"
         open={agentActivityOpen}

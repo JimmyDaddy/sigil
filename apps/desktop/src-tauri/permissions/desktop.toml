@@ -49,6 +49,11 @@ description = "Allows the main local window to start, reattach, or cooperatively
 commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run"]
 
 [[permission]]
+identifier = "allow-desktop-conversation-queue"
+description = "Allows the main local window to inspect and mutate one bounded durable follow-up queue through generation-guarded commands."
+commands.allow = ["desktop_conversation_queue", "desktop_command_conversation_queue"]
+
+[[permission]]
 identifier = "allow-desktop-approval"
 description = "Allows the main local window to resolve one exact server-guarded approval request."
 commands.allow = ["desktop_resolve_approval"]

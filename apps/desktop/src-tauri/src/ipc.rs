@@ -13,17 +13,23 @@ use sigil_desktop::{
     DesktopConversationDisplayPage as NativeConversationDisplayPage,
     DesktopConversationDisplaySource as NativeConversationDisplaySource,
     DesktopConversationDisplayStatus as NativeConversationDisplayStatus,
-    DesktopModelSelectionPolicy, DesktopPermissionMode, DesktopReasoningEffort,
-    DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogBatchAction,
-    DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
-    DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
-    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
-    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopSupportCheck, DesktopSupportDoctorReport, DesktopSupportEnvironment,
-    DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary, DesktopTimelineEvent,
-    DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
-    DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
-    DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
+    DesktopConversationQueueCommandAction as NativeConversationQueueCommandAction,
+    DesktopConversationQueueCommandActionKind as NativeConversationQueueCommandActionKind,
+    DesktopConversationQueueCommandReceipt as NativeConversationQueueCommandReceipt,
+    DesktopConversationQueueItem as NativeConversationQueueItem,
+    DesktopConversationQueueItemKind as NativeConversationQueueItemKind,
+    DesktopConversationQueueView as NativeConversationQueueView, DesktopModelSelectionPolicy,
+    DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
+    DesktopRunStatus, DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
+    DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanStatus,
+    DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
+    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
+    DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
+    DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
+    DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationRerunRequest,
+    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
+    DesktopWorkspaceSummary,
 };
 
 use crate::{
@@ -419,6 +425,161 @@ pub(crate) struct DesktopConversationContinuity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) foreground_owner: Option<DesktopForegroundRunOwnerSummary>,
     pub(crate) recovery_actions: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationQueueView {
+    pub(crate) schema_version: u16,
+    pub(crate) session_id: String,
+    pub(crate) generation: String,
+    pub(crate) paused: bool,
+    pub(crate) total_items: u32,
+    pub(crate) items: Vec<DesktopConversationQueueItem>,
+    pub(crate) truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_dispatchable_entry_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationQueueItem {
+    pub(crate) entry_id: String,
+    pub(crate) order: u32,
+    pub(crate) kind: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) prompt_preview: String,
+    pub(crate) prompt_preview_truncated: bool,
+    pub(crate) prompt_material: &'static str,
+    pub(crate) dispatchable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blocked_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) updated_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopConversationQueueCommandInput {
+    pub(crate) session_id: String,
+    pub(crate) expected_generation: String,
+    pub(crate) action: DesktopConversationQueueActionInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "action",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub(crate) enum DesktopConversationQueueActionInput {
+    Enqueue {
+        prompt: String,
+        kind: DesktopConversationQueueItemKindInput,
+        reasoning_effort: Option<DesktopReasoningEffort>,
+    },
+    Edit {
+        entry_id: String,
+        prompt: String,
+        reasoning_effort: Option<DesktopReasoningEffort>,
+    },
+    Remove {
+        entry_id: String,
+    },
+    Reorder {
+        entry_id: String,
+        after_entry_id: Option<String>,
+    },
+    Pause,
+    Resume,
+    InterruptAndRunNext {
+        foreground_run_id: String,
+        foreground_owner_revision: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopConversationQueueItemKindInput {
+    Chat,
+    PlanPrompt,
+    AgentMention,
+    AgentMessage,
+    Unknown,
+}
+
+impl DesktopConversationQueueActionInput {
+    pub(crate) fn into_native(self) -> NativeConversationQueueCommandAction {
+        match self {
+            Self::Enqueue {
+                prompt,
+                kind,
+                reasoning_effort,
+            } => NativeConversationQueueCommandAction::Enqueue {
+                prompt,
+                kind: kind.into(),
+                reasoning_effort,
+            },
+            Self::Edit {
+                entry_id,
+                prompt,
+                reasoning_effort,
+            } => NativeConversationQueueCommandAction::Edit {
+                entry_id,
+                prompt,
+                reasoning_effort,
+            },
+            Self::Remove { entry_id } => NativeConversationQueueCommandAction::Remove { entry_id },
+            Self::Reorder {
+                entry_id,
+                after_entry_id,
+            } => NativeConversationQueueCommandAction::Reorder {
+                entry_id,
+                after_entry_id,
+            },
+            Self::Pause => NativeConversationQueueCommandAction::Pause,
+            Self::Resume => NativeConversationQueueCommandAction::Resume,
+            Self::InterruptAndRunNext {
+                foreground_run_id,
+                foreground_owner_revision,
+            } => NativeConversationQueueCommandAction::InterruptAndRunNext {
+                foreground_run_id,
+                foreground_owner_revision,
+            },
+        }
+    }
+}
+
+impl From<DesktopConversationQueueItemKindInput> for NativeConversationQueueItemKind {
+    fn from(value: DesktopConversationQueueItemKindInput) -> Self {
+        match value {
+            DesktopConversationQueueItemKindInput::Chat => Self::Chat,
+            DesktopConversationQueueItemKindInput::PlanPrompt => Self::PlanPrompt,
+            DesktopConversationQueueItemKindInput::AgentMention => Self::AgentMention,
+            DesktopConversationQueueItemKindInput::AgentMessage => Self::AgentMessage,
+            DesktopConversationQueueItemKindInput::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationQueueCommandReceipt {
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
+    pub(crate) action: &'static str,
+    pub(crate) expected_generation: String,
+    pub(crate) generation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) interrupt_owner: Option<DesktopForegroundRunOwnerSummary>,
+    pub(crate) queue: DesktopConversationQueueView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) replayed: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1046,6 +1207,145 @@ impl From<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationCo
                 })
                 .collect(),
         }
+    }
+}
+
+impl From<NativeConversationQueueView> for DesktopConversationQueueView {
+    fn from(value: NativeConversationQueueView) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            session_id: value.session_id,
+            generation: value.generation.0,
+            paused: value.paused,
+            total_items: value.total_items,
+            items: value.items.into_iter().map(Into::into).collect(),
+            truncated: value.truncated,
+            next_dispatchable_entry_id: value.next_dispatchable_entry_id,
+        }
+    }
+}
+
+impl From<NativeConversationQueueItem> for DesktopConversationQueueItem {
+    fn from(value: NativeConversationQueueItem) -> Self {
+        Self {
+            entry_id: value.entry_id,
+            order: value.order,
+            kind: conversation_queue_item_kind_label(value.kind),
+            status: conversation_queue_item_status_label(value.status),
+            prompt_preview: value.prompt_preview,
+            prompt_preview_truncated: value.prompt_preview_truncated,
+            prompt_material: conversation_queue_prompt_material_label(value.prompt_material),
+            dispatchable: value.dispatchable,
+            blocked_reason: value
+                .blocked_reason
+                .map(conversation_queue_blocked_reason_label),
+            created_at_ms: value.created_at_ms,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+impl From<NativeConversationQueueCommandReceipt> for DesktopConversationQueueCommandReceipt {
+    fn from(value: NativeConversationQueueCommandReceipt) -> Self {
+        Self {
+            command_id: value.command_id,
+            client_id: value.client_id,
+            session_id: value.session_id,
+            action: conversation_queue_action_kind_label(value.action),
+            expected_generation: value.expected_generation.0,
+            generation: value.generation.0,
+            interrupt_owner: value
+                .interrupt_owner
+                .map(|owner| DesktopForegroundRunOwnerSummary {
+                    run_id: owner.run_id,
+                    owner_revision: owner.owner_revision,
+                }),
+            queue: value.queue.into(),
+            correlation_id: value.correlation_id,
+            replayed: value.replayed,
+        }
+    }
+}
+
+fn conversation_queue_item_kind_label(value: NativeConversationQueueItemKind) -> &'static str {
+    match value {
+        NativeConversationQueueItemKind::Chat => "chat",
+        NativeConversationQueueItemKind::PlanPrompt => "plan_prompt",
+        NativeConversationQueueItemKind::AgentMention => "agent_mention",
+        NativeConversationQueueItemKind::AgentMessage => "agent_message",
+        NativeConversationQueueItemKind::Unknown => "unknown",
+    }
+}
+
+fn conversation_queue_item_status_label(
+    value: sigil_desktop::DesktopConversationQueueItemStatus,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopConversationQueueItemStatus::Queued => "queued",
+        sigil_desktop::DesktopConversationQueueItemStatus::Dispatching => "dispatching",
+        sigil_desktop::DesktopConversationQueueItemStatus::Delivered => "delivered",
+        sigil_desktop::DesktopConversationQueueItemStatus::Rejected => "rejected",
+        sigil_desktop::DesktopConversationQueueItemStatus::Cancelled => "cancelled",
+        sigil_desktop::DesktopConversationQueueItemStatus::Stale => "stale",
+        sigil_desktop::DesktopConversationQueueItemStatus::Unknown => "unknown",
+    }
+}
+
+fn conversation_queue_prompt_material_label(
+    value: sigil_desktop::DesktopConversationQueuePromptMaterial,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopConversationQueuePromptMaterial::PersistedSafe => "persisted_safe",
+        sigil_desktop::DesktopConversationQueuePromptMaterial::AvailableProcessLocal => {
+            "available_process_local"
+        }
+        sigil_desktop::DesktopConversationQueuePromptMaterial::RequiresReentry => {
+            "requires_reentry"
+        }
+    }
+}
+
+fn conversation_queue_blocked_reason_label(
+    value: sigil_desktop::DesktopConversationQueueBlockedReason,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopConversationQueueBlockedReason::QueuePaused => "queue_paused",
+        sigil_desktop::DesktopConversationQueueBlockedReason::RequiresReentry => "requires_reentry",
+        sigil_desktop::DesktopConversationQueueBlockedReason::ForegroundRunActive => {
+            "foreground_run_active"
+        }
+        sigil_desktop::DesktopConversationQueueBlockedReason::WaitingForTerminalFrontier => {
+            "waiting_for_terminal_frontier"
+        }
+        sigil_desktop::DesktopConversationQueueBlockedReason::ForegroundOwnerLost => {
+            "foreground_owner_lost"
+        }
+        sigil_desktop::DesktopConversationQueueBlockedReason::PermissionRequired => {
+            "permission_required"
+        }
+        sigil_desktop::DesktopConversationQueueBlockedReason::Conflict => "conflict",
+        sigil_desktop::DesktopConversationQueueBlockedReason::Stale => "stale",
+        sigil_desktop::DesktopConversationQueueBlockedReason::Terminal => "terminal",
+        sigil_desktop::DesktopConversationQueueBlockedReason::UnsupportedTarget => {
+            "unsupported_target"
+        }
+        sigil_desktop::DesktopConversationQueueBlockedReason::MaterialUnavailable => {
+            "material_unavailable"
+        }
+    }
+}
+
+fn conversation_queue_action_kind_label(
+    value: NativeConversationQueueCommandActionKind,
+) -> &'static str {
+    match value {
+        NativeConversationQueueCommandActionKind::Enqueue => "enqueue",
+        NativeConversationQueueCommandActionKind::Edit => "edit",
+        NativeConversationQueueCommandActionKind::Remove => "remove",
+        NativeConversationQueueCommandActionKind::Reorder => "reorder",
+        NativeConversationQueueCommandActionKind::Pause => "pause",
+        NativeConversationQueueCommandActionKind::Resume => "resume",
+        NativeConversationQueueCommandActionKind::InterruptAndRunNext => "interrupt_and_run_next",
     }
 }
 

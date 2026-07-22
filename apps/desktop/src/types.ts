@@ -133,6 +133,109 @@ export interface ConversationContinuity {
   recoveryActions: ContinuityRecoveryAction[];
 }
 
+export type ConversationQueueItemKind =
+  | "chat"
+  | "plan_prompt"
+  | "agent_mention"
+  | "agent_message"
+  | "unknown";
+
+export type ConversationQueueItemStatus =
+  | "queued"
+  | "dispatching"
+  | "delivered"
+  | "rejected"
+  | "cancelled"
+  | "stale"
+  | "unknown";
+
+export type ConversationQueuePromptMaterial =
+  | "persisted_safe"
+  | "available_process_local"
+  | "requires_reentry";
+
+export type ConversationQueueBlockedReason =
+  | "queue_paused"
+  | "requires_reentry"
+  | "foreground_run_active"
+  | "waiting_for_terminal_frontier"
+  | "foreground_owner_lost"
+  | "permission_required"
+  | "conflict"
+  | "stale"
+  | "terminal"
+  | "unsupported_target"
+  | "material_unavailable";
+
+export interface ConversationQueueItem {
+  entryId: string;
+  order: number;
+  kind: ConversationQueueItemKind;
+  status: ConversationQueueItemStatus;
+  promptPreview: string;
+  promptPreviewTruncated: boolean;
+  promptMaterial: ConversationQueuePromptMaterial;
+  dispatchable: boolean;
+  blockedReason?: ConversationQueueBlockedReason;
+  createdAtMs?: number;
+  updatedAtMs?: number;
+}
+
+export interface ConversationQueueView {
+  schemaVersion: number;
+  sessionId: string;
+  generation: string;
+  paused: boolean;
+  totalItems: number;
+  items: ConversationQueueItem[];
+  truncated: boolean;
+  nextDispatchableEntryId?: string;
+}
+
+export type ConversationQueueCommandAction =
+  | {
+      action: "enqueue";
+      prompt: string;
+      kind: ConversationQueueItemKind;
+      reasoningEffort?: ReasoningEffort;
+    }
+  | {
+      action: "edit";
+      entryId: string;
+      prompt: string;
+      reasoningEffort?: ReasoningEffort;
+    }
+  | { action: "remove"; entryId: string }
+  | { action: "reorder"; entryId: string; afterEntryId?: string }
+  | { action: "pause" }
+  | { action: "resume" }
+  | {
+      action: "interrupt_and_run_next";
+      foregroundRunId: string;
+      foregroundOwnerRevision: string;
+    };
+
+export interface ConversationQueueCommandInput {
+  sessionId: string;
+  expectedGeneration: string;
+  action: ConversationQueueCommandAction;
+}
+
+export type ConversationQueueCommandActionKind = ConversationQueueCommandAction["action"];
+
+export interface ConversationQueueCommandReceipt {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
+  action: ConversationQueueCommandActionKind;
+  expectedGeneration: string;
+  generation: string;
+  interruptOwner?: ForegroundRunOwner;
+  queue: ConversationQueueView;
+  correlationId?: string;
+  replayed: boolean;
+}
+
 export interface SessionOpenInput {
   sessionRef: string;
   sessionId: string;

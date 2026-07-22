@@ -169,16 +169,21 @@ function FixtureSurface({
             permissionMode={permissionMode}
             reasoningEffort={reasoningEffort}
             requestedSkill={undefined}
+            queueCount={0}
+            queuePaused={false}
+            queueBusy={false}
             onModelChange={() => undefined}
             onNewSession={() => Promise.resolve(true)}
             onOpenSessionPicker={() => undefined}
             onOpenSettings={() => undefined}
             onOpenSupport={() => undefined}
             onOpenAgentWorkbench={() => undefined}
+            onOpenQueue={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}
             onReasoningEffortChange={setReasoningEffort}
             onSubmit={async () => false}
+            onInterruptAndRunNext={async () => false}
             onCancel={() => undefined}
           />
         </div>
