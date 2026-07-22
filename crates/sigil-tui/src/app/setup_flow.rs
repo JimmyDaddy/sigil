@@ -6,14 +6,16 @@ use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
     WorkspaceConfig,
 };
-use sigil_runtime::{DEFAULT_SETUP_API_KEY_ENV, DEFAULT_SETUP_PROVIDER_KEY};
+use sigil_runtime::{
+    default_provider_config_fields, provider_api_key_env_name, set_provider_config_fields,
+    supported_provider_name,
+};
 
 use super::{
     AppAction, AppState, SetupField, SetupState,
     formatting::persisted_root_config,
     modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
 };
-use sigil_runtime::deepseek_provider_value_for_setup;
 
 impl AppState {
     pub fn setup_lines(&self) -> Vec<String> {
@@ -24,14 +26,16 @@ impl AppState {
         let mut lines = vec![
             "Quick setup".to_owned(),
             "[workspace]".to_owned(),
-            render_setup_toggle_row(
-                SetupField::TrustCurrentFolder,
-                state.selected_field,
-                "trust_current_folder",
-                state.trusted_current_folder,
-            ),
+            "Saving starts Sigil and trusts the current folder.".to_owned(),
             String::new(),
             "[runtime]".to_owned(),
+            render_setup_value_row(
+                SetupField::Provider,
+                state.selected_field,
+                "provider",
+                &state.provider_name,
+                Some("Enter switch"),
+            ),
             render_setup_value_row(
                 SetupField::Model,
                 state.selected_field,
@@ -46,7 +50,11 @@ impl AppState {
                 &state.masked_api_key(),
                 Some("Enter input"),
             ),
-            render_setup_action_row(SetupField::Save, state.selected_field, "save and start"),
+            render_setup_action_row(
+                SetupField::Save,
+                state.selected_field,
+                "trust folder, save and start",
+            ),
             String::new(),
             "[notes]".to_owned(),
             format!("auth={}", state.auth_summary()),
@@ -59,8 +67,9 @@ impl AppState {
         }
 
         lines.push(String::new());
+        let env_name = state.api_key_env_name().unwrap_or("unavailable");
         lines.push(format!(
-            "Tab move  Enter open/toggle  Ctrl-S save  Ctrl-C quit  env={DEFAULT_SETUP_API_KEY_ENV}"
+            "Tab move  Enter open/switch  Ctrl-S trust+save  Ctrl-C quit  env={env_name}"
         ));
         lines
     }
@@ -115,17 +124,14 @@ impl AppState {
                 return Ok(None);
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Enter
-                if matches!(selected_field, SetupField::TrustCurrentFolder) =>
+                if matches!(selected_field, SetupField::Provider) =>
             {
                 let state = self
                     .setup_state
                     .as_mut()
                     .expect("setup state was checked before setup key handling");
-                state.trusted_current_folder = !state.trusted_current_folder;
-                self.last_notice = Some(format!(
-                    "trust current folder {}",
-                    setup_bool_label(state.trusted_current_folder)
-                ));
+                state.cycle_provider();
+                self.last_notice = Some(format!("provider -> {}", state.provider_name));
                 return Ok(None);
             }
             KeyCode::Enter if matches!(selected_field, SetupField::Save) => {
@@ -189,7 +195,7 @@ impl AppState {
                 state.api_key = value;
                 self.last_notice = Some("updated api key".to_owned());
             }
-            SetupField::TrustCurrentFolder | SetupField::Save => {}
+            SetupField::Provider | SetupField::Save => {}
         }
     }
 
@@ -226,15 +232,11 @@ impl AppState {
 
 fn setup_field_label(field: SetupField) -> &'static str {
     match field {
-        SetupField::TrustCurrentFolder => "trust_current_folder",
+        SetupField::Provider => "provider",
         SetupField::Model => "model",
         SetupField::ApiKey => "api_key",
         SetupField::Save => "save",
     }
-}
-
-fn setup_bool_label(enabled: bool) -> &'static str {
-    if enabled { "on" } else { "off" }
 }
 
 fn render_setup_value_row(
@@ -262,21 +264,6 @@ fn render_setup_value_row(
     }
 }
 
-fn render_setup_toggle_row(
-    field: SetupField,
-    selected_field: SetupField,
-    label: &str,
-    enabled: bool,
-) -> String {
-    render_setup_value_row(
-        field,
-        selected_field,
-        label,
-        setup_bool_label(enabled),
-        None,
-    )
-}
-
 fn render_setup_action_row(field: SetupField, selected_field: SetupField, label: &str) -> String {
     format!(
         "{} [{}]",
@@ -286,45 +273,42 @@ fn render_setup_action_row(field: SetupField, selected_field: SetupField, label:
 }
 
 pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
-    if !state.trusted_current_folder {
-        return Some("trust the current folder before starting sigil".to_owned());
+    if let Err(error) = supported_provider_name(&state.provider_name) {
+        return Some(error.to_string());
     }
     if state.model.trim().is_empty() {
         return Some("model cannot be empty".to_owned());
     }
-    if state.api_key.trim().is_empty() && env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
-        return Some(format!(
-            "provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}"
-        ));
+    let Some(env_name) = provider_api_key_env_name(&state.provider_name) else {
+        return Some(format!("unsupported provider {}", state.provider_name));
+    };
+    if state.api_key.trim().is_empty() && env::var(env_name).is_err() {
+        return Some(format!("provide api_key or export {env_name}"));
     }
 
     None
 }
 
 pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
-    if !state.trusted_current_folder {
-        bail!("trust the current folder before starting sigil");
-    }
+    let provider_name = supported_provider_name(&state.provider_name)?;
     let model = state.model.trim();
     if model.is_empty() {
         bail!("model cannot be empty");
     }
-    if state.api_key.trim().is_empty() && env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
-        bail!("provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}");
+    let env_name = provider_api_key_env_name(provider_name)
+        .ok_or_else(|| anyhow::anyhow!("unsupported provider {provider_name}"))?;
+    if state.api_key.trim().is_empty() && env::var(env_name).is_err() {
+        bail!("provide api_key or export {env_name}");
     }
 
-    let provider_value = deepseek_provider_value_for_setup(
-        model,
-        (!state.api_key.trim().is_empty()).then_some(state.api_key.as_str()),
-    )?;
-    Ok(RootConfig {
+    let mut root_config = RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
         storage: Default::default(),
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: DEFAULT_SETUP_PROVIDER_KEY.to_owned(),
+            provider: provider_name.to_owned(),
             model: model.to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -346,11 +330,12 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: std::collections::BTreeMap::from([(
-            DEFAULT_SETUP_PROVIDER_KEY.to_owned(),
-            provider_value,
-        )]),
+        providers: std::collections::BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
-    })
+    };
+    let mut provider_fields = default_provider_config_fields(provider_name, model);
+    provider_fields.api_key = state.api_key.trim().to_owned();
+    set_provider_config_fields(&mut root_config, provider_name, &provider_fields, None)?;
+    Ok(root_config)
 }

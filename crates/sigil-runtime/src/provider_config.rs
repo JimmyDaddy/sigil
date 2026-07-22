@@ -143,7 +143,20 @@ pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
 
 #[must_use]
 pub fn default_setup_provider_model() -> String {
-    DeepSeekProviderConfig::default().model
+    default_provider_model(DEFAULT_SETUP_PROVIDER_KEY)
+        .expect("default setup provider must have a default model")
+}
+
+#[must_use]
+pub fn default_provider_model(provider: &str) -> Option<String> {
+    match normalize_provider_name(provider) {
+        DEEPSEEK_PROVIDER_KEY => Some(DeepSeekProviderConfig::default().model),
+        OPENAI_COMPAT_PROVIDER_KEY => Some(OpenAiCompatibleProviderConfig::default().model),
+        OPENAI_RESPONSES_PROVIDER_KEY => Some(OpenAiResponsesProviderConfig::default().model),
+        ANTHROPIC_PROVIDER_KEY => Some(AnthropicProviderConfig::default().model),
+        GEMINI_PROVIDER_KEY => Some(GeminiProviderConfig::default().model),
+        _ => None,
+    }
 }
 
 #[must_use]

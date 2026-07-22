@@ -16,8 +16,9 @@ use ratatui::{
 };
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, EventHandler, JsonlSessionStore, MemoryConfig, ModelMessage,
-    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig,
+    AgentConfig, CompactionConfig, ControlEntry, EventHandler, JsonlSessionStore, MemoryConfig,
+    ModelMessage, PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
+    WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
 };
 
 use super::{
@@ -1337,9 +1338,12 @@ fn process_app_action_forwards_runtime_commands_to_worker() -> Result<()> {
 fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
     let mut app = AppState::from_setup(
-        PathBuf::from("sigil.toml"),
-        PathBuf::from("."),
+        config_path.clone(),
+        temp.path().to_path_buf(),
         Some("missing".to_owned()),
     );
     app.set_support_build_info(sigil_runtime::support::SupportBuildInfo::new(
@@ -1354,8 +1358,8 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
         &mut app,
         &mut worker,
         AppAction::SetupCompleted {
-            config_path: PathBuf::from("sigil.toml"),
-            root_config: Box::new(test_config()),
+            config_path,
+            root_config: Box::new(root_config),
         },
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;
@@ -1364,6 +1368,18 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
     assert!(worker.is_some());
     assert_eq!(app.runtime.provider_name, "deepseek");
     assert_eq!(app.support_build_info().commit, "setup-commit");
+    let workspace_id = stable_workspace_id(temp.path())?;
+    let entries = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision))
+                if decision.workspace_id == workspace_id
+                    && decision.trust == WorkspaceTrust::Trusted
+                    && decision.reason.as_deref()
+                        == Some("trusted by user during quick setup")
+        )
+    }));
     Ok(())
 }
 

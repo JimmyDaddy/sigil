@@ -199,7 +199,7 @@ pub use provider_config::{
     ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
     PROVIDER_KEYS, ProviderConfigFields, ProviderStatusConfig, ProviderStrictToolsMode,
     deepseek_provider_config_fields, deepseek_provider_status_config,
-    deepseek_provider_value_for_setup, default_provider_config_fields,
+    deepseek_provider_value_for_setup, default_provider_config_fields, default_provider_model,
     default_setup_provider_model, model_request_config_fields, next_provider_name,
     normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
     provider_balance_status_config, provider_config_fields, provider_model_status_config,

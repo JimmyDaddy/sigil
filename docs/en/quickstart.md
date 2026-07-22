@@ -30,7 +30,7 @@ The launch directory becomes the normal active workspace when Quick Setup saves 
 
 ## 3. Complete Quick Setup
 
-When configuration is missing, confirm the workspace, choose a provider and model, and add authentication. For temporary use, prefer the environment variable listed in the [provider guide](providers.md#authentication-priority). A key saved through Quick Setup or `/config` is plaintext in the local config file; never commit a real `sigil.toml`.
+When configuration is missing, choose the provider first, then choose its model and add authentication. `Trust folder, save and start` is the explicit confirmation that the launch directory may be used as the workspace; there is no separate trust toggle. Press Enter on Provider to switch services in Quick Setup or later in `/config`. For temporary use, prefer the environment variable listed in the [provider guide](providers.md#authentication-priority). A key saved through Quick Setup or `/config` is plaintext in the local config file; never commit a real `sigil.toml`.
 
 ## 4. Run The First Checks
 

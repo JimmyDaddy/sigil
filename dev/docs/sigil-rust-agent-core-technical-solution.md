@@ -1449,7 +1449,7 @@ pub struct ProviderCapabilities {
 - 右侧信息区 + composer 下状态行：展示写权限、subagent 状态、cache 命中、上下文压力、花费与余额；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起
 - 模态或侧栏审批区：展示工具预览、写操作 diff、允许/拒绝动作
 - 会话控制区：新会话、恢复会话、切换 workspace、查看错误详情
-- setup 模式：当没有可用配置时，TUI 内部直接承载首启配置流，而不是把用户赶回命令行手写配置
+- setup 模式：当没有可用配置时，TUI 内部直接承载首启配置流，而不是把用户赶回命令行手写配置；Provider 作为第一项可直接切换，最终的 `Trust folder, save and start` 同时表达当前启动目录的显式信任与配置保存，不再使用独立且默认关闭的信任开关阻塞启动
 - provider 视图：不仅展示当前 provider-visible context，还应承载 compaction preview 这类“提交前先解释后果”的上下文操作
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。

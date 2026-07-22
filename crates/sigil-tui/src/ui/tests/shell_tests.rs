@@ -404,8 +404,8 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("Provider 1/13"));
-    assert!(rendered.contains("▸ Model"));
-    assert!(rendered.contains("key model"));
+    assert!(rendered.contains("▸ Provider"));
+    assert!(rendered.contains("key provider"));
     assert!(rendered.contains("keys Tab section"));
     assert!(rendered.contains("actions Down to actions"));
     assert!(rendered.contains("✓ saved"));
@@ -693,7 +693,7 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/13", "▸ Model"),
+            (0, "Provider 1/13", "▸ Provider"),
             (3, "Memory 5/13", "▸ Memory"),
             (4, "Compaction 6/13", "▸ Auto compact"),
         ] {
@@ -813,7 +813,7 @@ fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
 
     assert!(title_row.contains("Provider"));
     assert!(title_row.contains(" saved "));
-    assert!(title_row.contains("field: Model"));
+    assert!(title_row.contains("field: Provider"));
     assert!(!title_row.contains("Provider · saved"));
     assert!(file_row.contains("note opened config"));
     Ok(())
@@ -920,6 +920,7 @@ fn render_config_screen_uses_subtle_sections_and_full_selected_row() -> anyhow::
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1004,6 +1005,7 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let backend = TestBackend::new(132, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1154,6 +1156,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1232,6 +1235,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1250,6 +1254,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
 fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
@@ -1296,6 +1301,7 @@ fn render_config_model_picker_uses_config_palette() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1318,6 +1324,7 @@ fn render_config_model_picker_uses_focus_row_and_command_tokens() -> anyhow::Res
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1372,7 +1379,7 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("details"));
     assert!(!rendered.contains("Details"));
-    assert!(rendered.contains("▸ Model"));
+    assert!(rendered.contains("▸ Provider"));
     Ok(())
 }
 
@@ -1389,7 +1396,7 @@ fn render_config_header_truncates_long_status_summary() -> anyhow::Result<()> {
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Sigil config"));
-    assert!(rendered.contains("field: Model"));
+    assert!(rendered.contains("field: Provider"));
     assert!(rendered.contains("..."));
     assert!(!rendered.contains(long_config_name));
     Ok(())
@@ -1400,6 +1407,7 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let backend = TestBackend::new(48, 32);
     let mut terminal = Terminal::new(backend)?;
 

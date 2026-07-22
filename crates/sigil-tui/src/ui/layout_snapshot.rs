@@ -493,7 +493,7 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
         return None;
     }
 
-    let field_rows = [2usize, 5, 6, 7];
+    let field_rows = [5usize, 6, 7, 8];
     let fields = field_rows
         .into_iter()
         .enumerate()

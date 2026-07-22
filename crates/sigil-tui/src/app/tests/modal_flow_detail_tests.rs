@@ -41,12 +41,14 @@ fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
         None,
     );
     if let Some(state) = setup_app.setup_state.as_mut() {
+        state.provider_name = "openai_compat".to_owned();
         state.api_key = "setup-secret".to_owned();
     }
     let setup_provider = setup_app
         .provider_status_config_for_model_picker(ModelPickerTarget::Setup, "setup-model")
         .expect("setup provider status config should resolve");
     assert_eq!(setup_provider.api_key.as_deref(), Some("setup-secret"));
+    assert_eq!(setup_provider.base_url, "https://api.openai.com/v1");
 
     let snapshot_provider =
         AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config)
@@ -216,7 +218,7 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
     ));
     assert_eq!(ModelPickerTarget::ProviderFim.title(), "FIM Model");
     assert_eq!(
-        SecretInputTarget::SetupApiKey.summary(),
+        SecretInputTarget::SetupApiKey.summary("SIGIL_API_KEY"),
         "Saved as plaintext with setup. SIGIL_API_KEY can override at runtime."
     );
     assert_eq!(
@@ -257,6 +259,21 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
     assert!(secret_lines.contains("SIGIL_API_KEY can override"));
     assert!(secret_lines.contains("api_key: ***|"));
     assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 3, 4)));
+
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let mut setup_app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().join("workspace"),
+        None,
+    );
+    setup_app
+        .setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .provider_name = "openai_compat".to_owned();
+    setup_app.open_secret_input(SecretInputTarget::SetupApiKey, "");
+    let openai_secret_lines = setup_app.modal_lines().join("\n");
+    assert!(openai_secret_lines.contains("SIGIL_OPENAI_COMPATIBLE_API_KEY can override"));
 
     app.open_text_input(TextInputTarget::SetupModel, "flash");
     assert_eq!(app.modal_title(), Some("Model ID"));
@@ -536,7 +553,7 @@ fn modal_helper_edge_cases_cover_refresh_defaults_and_empty_values() {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
 
     assert_eq!(
-        SecretInputTarget::ConfigProviderApiKey.summary(),
+        SecretInputTarget::ConfigProviderApiKey.summary("SIGIL_API_KEY"),
         "Saved as plaintext on Ctrl-S. SIGIL_API_KEY can override at runtime."
     );
 

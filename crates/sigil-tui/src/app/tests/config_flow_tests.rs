@@ -432,7 +432,7 @@ fn config_command_opens_first_editable_step() -> Result<()> {
     assert!(action.is_none());
     assert!(app.is_config_mode());
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
     assert_eq!(app.config_status_summary(), "Provider · saved · sigil.toml");
     let nav = app.config_nav_lines().join("\n");
     assert!(nav.contains("Tab section"));
@@ -446,13 +446,13 @@ fn config_up_down_moves_between_fields_in_current_step() -> Result<()> {
     app.open_config_panel();
 
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("API key"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
     Ok(())
 }
 
@@ -460,6 +460,7 @@ fn config_up_down_moves_between_fields_in_current_step() -> Result<()> {
 fn config_enter_on_provider_name_cycles_provider() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
     app.config_state
         .as_mut()
         .expect("config state should still exist")
@@ -482,10 +483,12 @@ fn config_enter_on_provider_name_cycles_provider() -> Result<()> {
 fn config_down_to_footer_focuses_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
-    app.config_state
-        .as_mut()
-        .expect("config state should still exist")
-        .selected_field = Some(ConfigField::ProviderName);
+    assert!(
+        app.config_state
+            .as_mut()
+            .expect("config state should still exist")
+            .focus_last_field()
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
@@ -500,7 +503,10 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("save"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(
+        app.config_selected_field_label(),
+        Some("Stream idle timeout")
+    );
     Ok(())
 }
 
@@ -1073,7 +1079,7 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
     Ok(())
 }
 
@@ -1082,6 +1088,7 @@ fn config_enter_starts_and_commits_text_edit() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
 
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.has_modal());
     assert_eq!(app.modal_title(), Some("Model"));
@@ -1103,6 +1110,7 @@ fn config_direct_typing_replaces_selected_text_value() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
 
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
     assert!(app.has_modal());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))?;
@@ -1139,8 +1147,8 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert!(detail.contains("[endpoint]"));
     assert!(detail.contains("[advanced]"));
     assert!(detail.contains("[details]"));
-    assert!(detail.contains("selected: Model"));
-    assert!(detail.contains("key: model"));
+    assert!(detail.contains("selected: Provider"));
+    assert!(detail.contains("key: provider"));
     assert!(detail.contains("controls: Tab section · Up/Down field · Enter edit"));
     assert!(detail.contains("actions: Down to actions · Ctrl-S save · Esc close"));
     assert!(!lines.iter().take(3).any(|line| line.contains("Tab")));
@@ -3843,7 +3851,7 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.selected_field = Some(ConfigField::ProviderName);
+    state.focus_last_field();
     state.draft.provider_api_key = "saved-from-footer".to_owned();
     state.dirty = true;
 
@@ -3967,8 +3975,6 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
 
     assert!(app.is_setup_mode());
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
     app.setup_state
         .as_mut()
         .expect("setup state should exist in setup mode")
@@ -4057,7 +4063,6 @@ fn setup_save_requires_credentials() -> Result<()> {
         .as_mut()
         .expect("setup state should exist in setup mode");
     state.selected_field = SetupField::Save;
-    state.trusted_current_folder = true;
     state.api_key.clear();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -4850,7 +4855,7 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Provider);
-        state.selected_field = Some(ConfigField::ProviderName);
+        state.focus_last_field();
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));

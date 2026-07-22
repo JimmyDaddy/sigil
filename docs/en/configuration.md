@@ -28,7 +28,7 @@ Quick Setup writes the user config. A workspace `sigil.toml` is not loaded autom
 
 ## Minimal Path
 
-Open the repository and run `sigil`. Quick Setup handles the workspace, provider, model, and authentication. A minimal hand-written base is:
+Open the repository and run `sigil`. Quick Setup handles the workspace, provider, model, and authentication; saving also explicitly trusts the launch directory. Provider is the first field in Quick Setup and `/config`, and Enter switches between supported services. A minimal hand-written base is:
 
 ```toml
 [workspace]

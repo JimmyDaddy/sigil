@@ -121,13 +121,13 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         .expect("setup hit areas should render")
         .fields;
     assert_eq!(setup_fields.len(), 4);
-    let trust_area = setup_fields
+    let provider_area = setup_fields
         .iter()
         .find(|area| area.index == 0)
-        .expect("trust field should be clickable")
+        .expect("provider field should be clickable")
         .area;
     assert_eq!(
-        setup.hit_target(trust_area.x, trust_area.y),
+        setup.hit_target(provider_area.x, provider_area.y),
         HitTarget::SetupField { index: 0 }
     );
 

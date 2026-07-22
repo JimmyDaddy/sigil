@@ -5,10 +5,11 @@ use super::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
     GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
     ProviderConfigFields, ProviderStrictToolsMode, deepseek_provider_config_fields,
-    default_provider_config_fields, next_provider_name, normalize_provider_model_alias,
-    normalize_provider_name, provider_api_key_env_name, provider_balance_status_config,
-    provider_config_fields, provider_model_status_config, provider_model_status_config_from_fields,
-    provider_status_config_from_fields, set_provider_config_fields,
+    default_provider_config_fields, default_provider_model, next_provider_name,
+    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
+    provider_balance_status_config, provider_config_fields, provider_model_status_config,
+    provider_model_status_config_from_fields, provider_status_config_from_fields,
+    set_provider_config_fields,
 };
 
 fn test_root_config() -> RootConfig {
@@ -103,6 +104,31 @@ fn provider_cycling_is_runtime_owned() {
     assert_eq!(next_provider_name("anthropic"), "gemini");
     assert_eq!(next_provider_name("gemini"), "deepseek");
     assert_eq!(next_provider_name("unknown"), "deepseek");
+}
+
+#[test]
+fn provider_defaults_are_available_to_provider_neutral_setup_flows() {
+    assert_eq!(
+        default_provider_model("deepseek").as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        default_provider_model("openai_compat").as_deref(),
+        Some("gpt-4.1")
+    );
+    assert_eq!(
+        default_provider_model("openai_responses").as_deref(),
+        Some("gpt-4.1")
+    );
+    assert_eq!(
+        default_provider_model("anthropic").as_deref(),
+        Some("claude-sonnet-4-5")
+    );
+    assert_eq!(
+        default_provider_model("gemini").as_deref(),
+        Some("gemini-2.5-pro")
+    );
+    assert_eq!(default_provider_model("unknown"), None);
 }
 
 #[test]

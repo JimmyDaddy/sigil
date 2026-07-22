@@ -929,7 +929,6 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
             .setup_state
             .as_mut()
             .expect("setup state should exist in setup mode");
-        state.trusted_current_folder = true;
         state.selected_field = SetupField::ApiKey;
     }
 

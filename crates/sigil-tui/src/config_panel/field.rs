@@ -74,11 +74,11 @@ pub(crate) enum ConfigField {
 
 impl ConfigField {
     const PROVIDER_FIELDS: [Self; 5] = [
+        Self::ProviderName,
         Self::ProviderModel,
         Self::ProviderApiKey,
         Self::ModelRequestTimeoutSecs,
         Self::ModelRequestStreamIdleTimeoutSecs,
-        Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
     const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionMode];
@@ -376,7 +376,7 @@ impl ConfigField {
     pub(crate) fn action_label(self) -> &'static str {
         match self {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
-            Self::ProviderName => "Enter cycle",
+            Self::ProviderName => "Enter switch",
             Self::ProviderApiKey => "Enter input",
             Self::PermissionMode
             | Self::WebNetworkMode

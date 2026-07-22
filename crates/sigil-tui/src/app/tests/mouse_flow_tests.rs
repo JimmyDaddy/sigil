@@ -351,6 +351,7 @@ fn mouse_click_setup_field_selects_then_activates() -> Result<()> {
 
 #[test]
 fn mouse_click_setup_save_runs_validation() -> Result<()> {
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let temp = tempdir()?;
     let mut app = AppState::from_setup(
         temp.path().join("sigil.toml"),
@@ -366,7 +367,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.last_notice(),
-        Some("trust the current folder before starting sigil")
+        Some("provide api_key or export SIGIL_API_KEY")
     );
     assert_eq!(
         app.setup_state
@@ -410,25 +411,24 @@ fn mouse_click_config_field_selects_then_activates() -> Result<()> {
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let provider_index = ConfigField::fields_for_section(ConfigSection::Provider)
+    let model_index = ConfigField::fields_for_section(ConfigSection::Provider)
         .iter()
-        .position(|field| *field == ConfigField::ProviderName)
-        .expect("expected provider field index");
-    let (column, row) = config_field_point(&layout, provider_index);
+        .position(|field| *field == ConfigField::ProviderModel)
+        .expect("expected model field index");
+    let (column, row) = config_field_point(&layout, model_index);
 
     let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(first, AppMouseOutcome::Redraw));
     let state = app.config_state.as_ref().expect("expected config state");
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderModel));
     assert!(!state.dirty);
+    assert!(!app.has_modal());
 
     let second = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(second, AppMouseOutcome::Redraw));
-    let state = app.config_state.as_ref().expect("expected config state");
-    assert_eq!(state.draft.provider_name, "openai_compat");
-    assert!(state.dirty);
+    assert!(app.has_modal());
     Ok(())
 }
 

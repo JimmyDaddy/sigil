@@ -239,7 +239,7 @@ fn compaction_context_field_uses_short_fallback_label() {
 
 #[test]
 fn config_rows_do_not_pre_pad_labels() {
-    let state = ConfigState::from_root_config(&RootConfig {
+    let mut state = ConfigState::from_root_config(&RootConfig {
         workspace: Default::default(),
         storage: Default::default(),
         session: Default::default(),
@@ -264,6 +264,7 @@ fn config_rows_do_not_pre_pad_labels() {
         web: Default::default(),
         mcp_servers: Vec::new(),
     });
+    assert!(state.focus_field(ConfigField::ProviderModel));
 
     assert_eq!(
         render_config_value_row(&state, ConfigField::ProviderModel),
@@ -1124,7 +1125,7 @@ fn config_state_handles_plugin_collection_navigation() {
 fn config_state_moves_fields_and_footer_boundaries() {
     let mut state = ConfigState::from_root_config(&test_root_config());
 
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderModel));
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
     assert_eq!(state.move_field(false), ConfigFieldMove::Boundary);
     assert!(state.focus_field(ConfigField::ProviderApiKey));
     assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
@@ -1145,7 +1146,10 @@ fn config_state_moves_fields_and_footer_boundaries() {
     state.move_footer_action(false);
     assert_eq!(state.selected_footer_action, ConfigFooterAction::Save);
     assert!(state.focus_last_field());
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+    assert_eq!(
+        state.selected_field,
+        Some(ConfigField::ModelRequestStreamIdleTimeoutSecs)
+    );
     assert!(!state.footer_selected);
 
     state.set_section(ConfigSection::Mcp);

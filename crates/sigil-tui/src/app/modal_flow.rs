@@ -3,7 +3,8 @@ use sigil_kernel::ModelRequestConfig;
 use sigil_runtime::{
     DEFAULT_SETUP_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse,
     ProviderConfigFields, ProviderStatusConfig, default_provider_config_fields,
-    provider_model_status_config, provider_model_status_config_from_fields,
+    provider_api_key_env_name, provider_model_status_config,
+    provider_model_status_config_from_fields,
 };
 
 use super::{
@@ -74,13 +75,13 @@ impl SecretInputTarget {
         }
     }
 
-    fn summary(self) -> &'static str {
+    fn summary(self, env_name: &str) -> String {
         match self {
             Self::SetupApiKey => {
-                "Saved as plaintext with setup. SIGIL_API_KEY can override at runtime."
+                format!("Saved as plaintext with setup. {env_name} can override at runtime.")
             }
             Self::ConfigProviderApiKey => {
-                "Saved as plaintext on Ctrl-S. SIGIL_API_KEY can override at runtime."
+                format!("Saved as plaintext on Ctrl-S. {env_name} can override at runtime.")
             }
         }
     }
@@ -90,6 +91,7 @@ impl SecretInputTarget {
 pub(super) struct SecretInputState {
     pub(super) target: SecretInputTarget,
     pub(super) buffer: String,
+    pub(super) summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +258,7 @@ impl AppState {
                 lines
             }
             Some(ModalState::SecretInput(state)) => vec![
-                state.target.summary().to_owned(),
+                state.summary.clone(),
                 "key: api_key".to_owned(),
                 "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
                 String::new(),
@@ -491,15 +493,15 @@ impl AppState {
         }
 
         if let Some(state) = &self.setup_state {
-            let defaults =
-                default_provider_config_fields(DEFAULT_SETUP_PROVIDER_KEY, current.trim());
+            let provider_name = state.provider_name.as_str();
+            let defaults = default_provider_config_fields(provider_name, current.trim());
             let fields = ProviderConfigFields {
                 model: current.trim().to_owned(),
                 api_key: state.api_key.trim().to_owned(),
                 base_url: defaults.base_url,
             };
             return provider_model_status_config_from_fields(
-                DEFAULT_SETUP_PROVIDER_KEY,
+                provider_name,
                 &fields,
                 &ModelRequestConfig::default(),
             )?
@@ -520,9 +522,11 @@ impl AppState {
     }
 
     pub(super) fn open_secret_input(&mut self, target: SecretInputTarget, current: &str) {
+        let summary = self.secret_input_summary(target);
         self.modal_state = Some(ModalState::SecretInput(SecretInputState {
             target,
             buffer: current.to_owned(),
+            summary,
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
     }
@@ -532,11 +536,34 @@ impl AppState {
         target: SecretInputTarget,
         character: char,
     ) {
+        let summary = self.secret_input_summary(target);
         self.modal_state = Some(ModalState::SecretInput(SecretInputState {
             target,
             buffer: character.to_string(),
+            summary,
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
+    }
+
+    fn secret_input_summary(&self, target: SecretInputTarget) -> String {
+        let provider_name = match target {
+            SecretInputTarget::SetupApiKey => self
+                .setup_state
+                .as_ref()
+                .map(|state| state.provider_name.as_str()),
+            SecretInputTarget::ConfigProviderApiKey => self
+                .config_state
+                .as_ref()
+                .map(|state| state.draft.provider_name.as_str())
+                .or_else(|| {
+                    self.config_snapshot
+                        .as_ref()
+                        .map(|config| config.agent.provider.as_str())
+                }),
+        }
+        .unwrap_or(DEFAULT_SETUP_PROVIDER_KEY);
+        let env_name = provider_api_key_env_name(provider_name).unwrap_or("provider API key env");
+        target.summary(env_name)
     }
 
     pub(super) fn open_text_input(&mut self, target: TextInputTarget, current: &str) {

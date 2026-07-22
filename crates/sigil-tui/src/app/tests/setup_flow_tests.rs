@@ -34,6 +34,9 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
         Path::new(".").to_path_buf(),
         None,
     );
+    let lines = app.setup_lines().join("\n");
+    assert!(lines.contains("> provider              : deepseek  [Enter switch]"));
+
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.selected_field = SetupField::Model;
     let lines = app.setup_lines().join("\n");
@@ -52,28 +55,32 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
         .expect("setup state should exist")
         .selected_field = SetupField::Save;
     let lines = app.setup_lines().join("\n");
-    assert!(lines.contains("> [save and start]"));
+    assert!(lines.contains("> [trust folder, save and start]"));
+    assert!(lines.contains("Saving starts Sigil and trusts the current folder."));
 }
 
 #[test]
-fn setup_ctrl_s_requires_trust_before_completion() -> Result<()> {
-    let mut app = AppState::from_setup(
-        Path::new("sigil.toml").to_path_buf(),
-        Path::new(".").to_path_buf(),
-        None,
-    );
+fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("sigil.toml");
+    let mut app = AppState::from_setup(config_path.clone(), temp.path().to_path_buf(), None);
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .api_key = "test-key".to_owned();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("trust the current folder before starting sigil")
-    );
-    assert!(app.events.iter().any(|event| {
-        event.label == "setup:error"
-            && event.detail == "trust the current folder before starting sigil"
-    }));
+    let Some(AppAction::SetupCompleted {
+        config_path: saved_path,
+        root_config,
+    }) = action
+    else {
+        panic!("Ctrl-S should complete setup")
+    };
+    assert_eq!(saved_path, config_path);
+    assert_eq!(root_config.agent.provider, "deepseek");
+    assert!(saved_path.exists());
     Ok(())
 }
 
@@ -99,7 +106,7 @@ fn setup_ctrl_c_and_missing_state_guards_are_noops() -> Result<()> {
 }
 
 #[test]
-fn setup_navigation_and_trust_toggle_update_state() -> Result<()> {
+fn setup_navigation_and_provider_switch_update_state() -> Result<()> {
     let mut app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
         Path::new(".").to_path_buf(),
@@ -111,16 +118,17 @@ fn setup_navigation_and_trust_toggle_update_state() -> Result<()> {
         .setup_state
         .as_ref()
         .expect("setup state should exist in setup mode");
-    assert_eq!(state.selected_field, SetupField::TrustCurrentFolder);
-    assert!(!state.trusted_current_folder);
+    assert_eq!(state.selected_field, SetupField::Provider);
+    assert_eq!(state.provider_name, "deepseek");
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let state = app
         .setup_state
         .as_ref()
-        .expect("setup state should exist after toggling trust");
-    assert!(state.trusted_current_folder);
-    assert_eq!(app.last_notice(), Some("trust current folder on"));
+        .expect("setup state should exist after switching provider");
+    assert_eq!(state.provider_name, "openai_compat");
+    assert_eq!(state.model, "gpt-4.1");
+    assert_eq!(app.last_notice(), Some("provider -> openai_compat"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("setup field model"));
@@ -131,12 +139,12 @@ fn setup_navigation_and_trust_toggle_update_state() -> Result<()> {
     assert_eq!(state.selected_field, SetupField::Model);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
-    assert_eq!(app.last_notice(), Some("setup field trust_current_folder"));
+    assert_eq!(app.last_notice(), Some("setup field provider"));
     let state = app
         .setup_state
         .as_ref()
         .expect("setup state should exist after reverse navigation");
-    assert_eq!(state.selected_field, SetupField::TrustCurrentFolder);
+    assert_eq!(state.selected_field, SetupField::Provider);
     Ok(())
 }
 
@@ -289,7 +297,6 @@ fn setup_paste_updates_model_and_api_key_fields() {
 #[test]
 fn setup_validation_and_builder_reject_empty_model_and_auth() {
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
-    state.trusted_current_folder = true;
     state.model = "  ".to_owned();
     state.api_key = "test-key".to_owned();
 
@@ -322,19 +329,39 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
         );
     }
 
-    state.trusted_current_folder = false;
-    state.model = "deepseek-v4-flash".to_owned();
-    state.api_key = "test-key".to_owned();
-    assert_eq!(
-        build_setup_root_config(&state)
-            .expect_err("untrusted folder should fail")
-            .to_string(),
-        "trust the current folder before starting sigil"
+    state.provider_name = "unsupported".to_owned();
+    assert!(
+        validate_setup_state(&state)
+            .expect("unsupported provider should fail validation")
+            .contains("unsupported provider")
     );
 }
 
 #[test]
-fn setup_screen_toggles_trust_and_opens_inline_field_modals() -> Result<()> {
+fn setup_builder_persists_the_selected_provider() -> Result<()> {
+    let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
+    state.provider_name = "anthropic".to_owned();
+    state.model = "claude-sonnet-4-5".to_owned();
+    state.api_key = "anthropic-test-key".to_owned();
+
+    let root_config = build_setup_root_config(&state)?;
+
+    assert_eq!(root_config.agent.provider, "anthropic");
+    assert_eq!(root_config.agent.model, "claude-sonnet-4-5");
+    assert_eq!(
+        root_config
+            .providers
+            .get("anthropic")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("anthropic-test-key")
+    );
+    assert!(!root_config.providers.contains_key("deepseek"));
+    Ok(())
+}
+
+#[test]
+fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let temp = tempdir()?;
@@ -353,7 +380,7 @@ fn setup_screen_toggles_trust_and_opens_inline_field_modals() -> Result<()> {
     assert!(setup_lines.contains(&format!("env={DEFAULT_SETUP_API_KEY_ENV}")));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("trust current folder on"));
+    assert_eq!(app.last_notice(), Some("provider -> openai_compat"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("setup field model"));
