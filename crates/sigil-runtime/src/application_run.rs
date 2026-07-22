@@ -11,7 +11,9 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentProfileId, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput,
     AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
-    AssistantMessageKind, ControlEntry, EgressDisclosurePresenter, EventHandler, InteractionMode,
+    AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
+    ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler, InteractionMode,
     JsonlSessionStore, McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder,
     NoopEventHandler, PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
     RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
@@ -455,6 +457,8 @@ impl PreparedApplicationRun {
 pub struct ApplicationRunControl {
     owner: RunCancellationOwner,
     recorder: RunCancellationRecorder,
+    conversation_lifecycle: ConversationRunLifecycleRecorder,
+    conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
     _session_lease: Arc<ApplicationSessionLease>,
 }
@@ -525,6 +529,9 @@ impl ApplicationRunControl {
             quiescence_deadline_ms: requested_at_ms
                 .saturating_add(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
         };
+        let conversation_start = self
+            .conversation_lifecycle
+            .append_started(&self.conversation_start);
         let append = self.recorder.append_requested(&request);
         let activated = self.owner.activate_reserved_cancel();
         debug_assert!(
@@ -532,19 +539,21 @@ impl ApplicationRunControl {
             "reserved cancellation must activate exactly once"
         );
         unblock_approval();
-        match append {
-            Ok(_) => Ok(ApplicationCancellationTicket {
-                request,
-                deadline,
-                request_recorded: true,
-            }),
-            Err(error) => Err(ApplicationCancellationRequestError::with_ticket(
+        let ticket = ApplicationCancellationTicket {
+            request,
+            deadline,
+            request_recorded: append.is_ok(),
+            conversation_start_recorded: conversation_start.is_ok(),
+        };
+        match (conversation_start, append) {
+            (Ok(_), Ok(_)) => Ok(ticket),
+            (Err(error), _) => Err(ApplicationCancellationRequestError::with_ticket(
+                error.context("failed to persist application conversation run start"),
+                ticket,
+            )),
+            (_, Err(error)) => Err(ApplicationCancellationRequestError::with_ticket(
                 error.context("failed to persist application cancellation request"),
-                ApplicationCancellationTicket {
-                    request,
-                    deadline,
-                    request_recorded: false,
-                },
+                ticket,
             )),
         }
     }
@@ -565,11 +574,29 @@ impl ApplicationRunControl {
     where
         H: ApplicationRunEventHandler,
     {
+        let conversation_start = if ticket.conversation_start_recorded {
+            Ok(())
+        } else {
+            self.conversation_lifecycle
+                .append_started(&self.conversation_start)
+                .map(|_| ())
+                .context("failed to recover application conversation run start")
+        };
         if !ticket.request_recorded {
             let _ = self
                 .owner
                 .wait_for_quiescence(ticket.remaining_timeout())
                 .await;
+            if conversation_start.is_ok() {
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    self.conversation_start.run_id(),
+                    ConversationRunTerminalStatusV1::Interrupted,
+                    None,
+                    Some("cancellation request could not be durably audited"),
+                    &sigil_kernel::SecretRedactor::empty(),
+                )?;
+            }
             self.events.emit(
                 handler,
                 PublicRunEventKind::RunFailed {
@@ -577,6 +604,7 @@ impl ApplicationRunControl {
                         .to_owned(),
                 },
             )?;
+            conversation_start?;
             bail!("application cancellation request was not durably recorded");
         }
         let quiescence = self
@@ -625,6 +653,25 @@ impl ApplicationRunControl {
                 finalized_at_ms: current_unix_time_ms(),
             })
             .context("failed to persist application cancellation terminal")?;
+        conversation_start?;
+        let (conversation_status, conversation_summary) = match outcome {
+            RunCancellationTerminalOutcome::Cancelled => (
+                ConversationRunTerminalStatusV1::Cancelled,
+                "cancellation quiescence confirmed",
+            ),
+            RunCancellationTerminalOutcome::Interrupted => (
+                ConversationRunTerminalStatusV1::Interrupted,
+                "cancellation cleanup could not be confirmed",
+            ),
+        };
+        append_application_conversation_terminal(
+            &self.conversation_lifecycle,
+            self.conversation_start.run_id(),
+            conversation_status,
+            None,
+            Some(conversation_summary),
+            &sigil_kernel::SecretRedactor::empty(),
+        )?;
         let terminal = match outcome {
             RunCancellationTerminalOutcome::Cancelled => PublicRunEventKind::RunCancelled,
             RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunFailed {
@@ -642,6 +689,7 @@ pub struct ApplicationCancellationTicket {
     request: RunCancellationRequestedEntry,
     deadline: Instant,
     request_recorded: bool,
+    conversation_start_recorded: bool,
 }
 
 impl ApplicationCancellationTicket {
@@ -707,6 +755,8 @@ pub struct ApplicationRunExecution {
     warnings: Vec<String>,
     redactor: sigil_kernel::SecretRedactor,
     interaction: ApplicationRunInteraction,
+    conversation_lifecycle: ConversationRunLifecycleRecorder,
+    conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
     _session_lease: Arc<ApplicationSessionLease>,
 }
@@ -807,12 +857,37 @@ impl ApplicationRunExecution {
         A: ApprovalHandler + Send,
     {
         let _root_task_guard = self.root_task_guard;
+        self.conversation_lifecycle
+            .append_started(&self.conversation_start)
+            .context("failed to persist application conversation run start")?;
         let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler);
-        bridge.emit(PublicRunEventKind::RunStarted {
+        if let Err(error) = bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.prompt.clone(),
-        })?;
+        }) {
+            let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+            append_application_conversation_terminal(
+                &self.conversation_lifecycle,
+                &self.run_id,
+                ConversationRunTerminalStatusV1::Failed,
+                None,
+                Some(&safe_error),
+                &self.redactor,
+            )?;
+            return Err(error).context("application run start event delivery failed");
+        }
         for warning in std::mem::take(&mut self.warnings) {
-            bridge.emit(PublicRunEventKind::Notice { message: warning })?;
+            if let Err(error) = bridge.emit(PublicRunEventKind::Notice { message: warning }) {
+                let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    &self.run_id,
+                    ConversationRunTerminalStatusV1::Failed,
+                    None,
+                    Some(&safe_error),
+                    &self.redactor,
+                )?;
+                return Err(error).context("application run notice delivery failed");
+            }
         }
         let run = match self.kind {
             ApplicationRunExecutionKind::Main { agent, input } => {
@@ -846,6 +921,32 @@ impl ApplicationRunExecution {
             Ok(agent_output) => {
                 let (terminal_status, terminal_event) =
                     application_terminal_projection(&agent_output);
+                let durable_status = match terminal_status {
+                    ApplicationRunTerminalStatus::Succeeded => {
+                        ConversationRunTerminalStatusV1::Succeeded
+                    }
+                    ApplicationRunTerminalStatus::Interrupted => {
+                        ConversationRunTerminalStatusV1::Interrupted
+                    }
+                    ApplicationRunTerminalStatus::Blocked => {
+                        ConversationRunTerminalStatusV1::Blocked
+                    }
+                };
+                let summary = match &terminal_event {
+                    PublicRunEventKind::RunFailed { error } => Some(error.as_str()),
+                    _ => None,
+                };
+                let final_message_id = (terminal_status == ApplicationRunTerminalStatus::Succeeded)
+                    .then(|| agent_output.result.final_message_id.clone())
+                    .flatten();
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    &self.run_id,
+                    durable_status,
+                    final_message_id,
+                    summary,
+                    &self.redactor,
+                )?;
                 bridge.emit(terminal_event)?;
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
@@ -859,6 +960,14 @@ impl ApplicationRunExecution {
                 .context("application run cancellation is pending terminal cleanup confirmation"),
             Err(error) => {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    &self.run_id,
+                    ConversationRunTerminalStatusV1::Failed,
+                    None,
+                    Some(&safe_error),
+                    &self.redactor,
+                )?;
                 bridge.emit(PublicRunEventKind::RunFailed { error: safe_error })?;
                 Err(error)
             }
@@ -962,6 +1071,11 @@ pub async fn prepare_application_run(
             message: "run id must not be empty".to_owned(),
         });
     }
+    let conversation_start =
+        ConversationRunStartedEntryV1::new(request.run_id.clone(), current_unix_time_ms())
+            .map_err(|error| ApplicationRunPrepareError::InvalidInvocation {
+                message: safe_persistence_text(&error.to_string()),
+            })?;
     let session_leases = Arc::clone(&services.session_leases);
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking(request, session_leases)
@@ -1058,6 +1172,9 @@ pub async fn prepare_application_run(
             .map_err(ApplicationRunPrepareError::execution)?;
     }
     let session_id = session.session_scope_id().to_owned();
+    let conversation_lifecycle = session
+        .conversation_run_lifecycle_recorder()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
     let kind = if let Some((registry_snapshot, profile_id)) = agent_invocation {
         let supervisor = crate::AgentSupervisor::new(
@@ -1094,12 +1211,16 @@ pub async fn prepare_application_run(
             warnings,
             redactor,
             interaction,
+            conversation_lifecycle: conversation_lifecycle.clone(),
+            conversation_start: conversation_start.clone(),
             events: events.clone(),
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
             owner: cancellation_owner,
             recorder: cancellation_recorder,
+            conversation_lifecycle,
+            conversation_start,
             events,
             _session_lease: session_lease,
         },
@@ -1877,6 +1998,12 @@ fn prepare_application_run_blocking(
         &workspace_root,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
+    let conversation_lifecycle = session
+        .conversation_run_lifecycle_recorder()
+        .map_err(ApplicationRunPrepareError::execution)?;
+    conversation_lifecycle
+        .reconcile_unfinished(current_unix_time_ms())
+        .map_err(ApplicationRunPrepareError::execution)?;
     admit_application_model_selection(&request, &mut session)?;
     root_config.agent.provider = session.provider_name().to_owned();
     root_config.agent.model = session.model_name().to_owned();
@@ -2363,6 +2490,28 @@ fn application_terminal_projection(
             },
         ),
     }
+}
+
+fn append_application_conversation_terminal(
+    recorder: &ConversationRunLifecycleRecorder,
+    run_id: &str,
+    status: ConversationRunTerminalStatusV1,
+    final_message_id: Option<String>,
+    summary: Option<&str>,
+    redactor: &sigil_kernel::SecretRedactor,
+) -> Result<()> {
+    let terminal = ConversationRunFinalizedEntryV1::new(
+        run_id,
+        status,
+        final_message_id,
+        summary,
+        current_unix_time_ms(),
+        redactor,
+    )?;
+    recorder
+        .append_finalized(&terminal)
+        .context("failed to persist application conversation run terminal")?;
+    Ok(())
 }
 
 fn optional_eager_mcp_warning(

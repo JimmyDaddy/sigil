@@ -1,19 +1,23 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
-    AssistantMessageKind, AutoApproveHandler, ControlEntry, DisclosurePresentationError,
+    AssistantMessageKind, AutoApproveHandler, ControlEntry, ConversationRunLifecycleRecordV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
     DisclosurePresentationReceipt, EgressDisclosurePresenter, JsonlSessionStore, ModelMessage,
     PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
     RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
     TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall,
     ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats,
+    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
 };
 
 use super::{
@@ -32,6 +36,15 @@ use super::{
     optional_eager_mcp_warning, record_application_preparation_cancellation,
     rerun_application_verification, validate_execution_contract,
 };
+
+fn application_conversation_lifecycle(
+    path: &Path,
+) -> Result<Vec<ConversationRunLifecycleRecordV1>> {
+    JsonlSessionStore::read_event_records(path)?
+        .iter()
+        .filter_map(|record| conversation_run_lifecycle_record_from_stream(record).transpose())
+        .collect()
+}
 
 #[test]
 fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
@@ -1203,7 +1216,8 @@ fn non_final_kernel_terminals_do_not_project_as_run_finished() {
 #[tokio::test]
 async fn cancellation_control_persists_request_then_terminal_after_quiescence() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
     let session = Session::load_from_store("deepseek", "model", store)?;
     let recorder = session.run_cancellation_recorder()?;
     let owner = RunCancellationOwner::new();
@@ -1212,6 +1226,8 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
     let control = ApplicationRunControl {
         owner,
         recorder,
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
             session.session_scope_id().to_owned(),
             "run-1".to_owned(),
@@ -1248,6 +1264,14 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
         events.0.last().map(|event| &event.event),
         Some(PublicRunEventKind::RunCancelled)
     ));
+    let lifecycle = application_conversation_lifecycle(&store_path)?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Cancelled
+    ));
     Ok(())
 }
 
@@ -1264,6 +1288,8 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
     let control = ApplicationRunControl {
         owner,
         recorder,
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
             session.session_scope_id().to_owned(),
             "run-1".to_owned(),
@@ -1296,6 +1322,14 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
         events.0.last().map(|event| &event.event),
         Some(PublicRunEventKind::RunFailed { .. })
     ));
+    let lifecycle = application_conversation_lifecycle(&store_path)?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Interrupted
+    ));
     let durable = std::fs::read_to_string(store_path)?;
     assert!(durable.contains("\"outcome\":\"interrupted\""));
     Ok(())
@@ -1314,6 +1348,8 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
     let control = ApplicationRunControl {
         owner,
         recorder,
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
             session.session_scope_id().to_owned(),
             "run-1".to_owned(),

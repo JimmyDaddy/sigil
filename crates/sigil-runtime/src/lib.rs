@@ -58,6 +58,10 @@ mod reasoning_effort_tests;
 #[path = "tests/application_catalog_tests.rs"]
 mod application_catalog_tests;
 
+#[cfg(test)]
+#[path = "tests/conversation_display_tests.rs"]
+mod conversation_display_tests;
+
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
@@ -72,6 +76,7 @@ pub mod application_catalog;
 pub mod application_run;
 pub mod context;
 pub mod context_window;
+pub mod conversation_display;
 pub mod doctor;
 pub mod egress_ordering;
 mod exa_text_v1;
