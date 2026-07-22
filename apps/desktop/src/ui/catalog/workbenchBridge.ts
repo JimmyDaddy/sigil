@@ -318,6 +318,28 @@ export function createCatalogWorkbenchBridge(
       },
       replayed: false,
     }),
+    conversationRecovery: async () => ({ checkpoints: [], forkPoints: [], throughStreamSequence: 0 }),
+    conversationCompactionPreview: async () => ({
+      foldedEventCount: 0,
+      retainedEventCount: 0,
+      admission: { kind: "no_foldable_history", durableMessageCount: 0, configuredTailMessageCount: 12 },
+    }),
+    checkpointRestorePreview: async (_workspaceId, input) => ({
+      checkpointId: input.checkpointId,
+      checkpointDigest: input.checkpointDigest,
+      files: [],
+      reverseDiffs: [],
+      unknownMutationCount: 0,
+      ready: true,
+    }),
+    commandConversationRecovery: async (_workspaceId, input) => ({
+      commandId: "catalog-recovery-command",
+      clientId: "sigil-desktop-catalog",
+      sessionId: input.sessionId,
+      action: input.action.kind,
+      recovery: { checkpoints: [], forkPoints: [], throughStreamSequence: 0 },
+      replayed: false,
+    }),
     runContext: async () => runContext,
     agentActivity: async () => ({
       totalAgents: 0,

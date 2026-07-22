@@ -2,8 +2,10 @@ use crate::{
     HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION, HttpConversationQueueCommandActionKind,
     HttpConversationQueueCommandReceipt, HttpConversationQueueGeneration,
     HttpConversationQueueItem, HttpConversationQueueItemKind, HttpConversationQueueItemStatus,
-    HttpConversationQueuePromptMaterial, HttpConversationQueueView, HttpPermissionMode,
-    HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStatus,
+    HttpConversationQueuePromptMaterial, HttpConversationQueueView,
+    HttpConversationRecoveryCommandActionKind, HttpConversationRecoveryCommandReceipt,
+    HttpConversationRecoveryView, HttpPermissionMode, HttpRunSnapshot, HttpRunStartCommandReceipt,
+    HttpRunStatus,
     command_store::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpDurableCommandStore, HttpStoredCommandClaim,
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
@@ -25,6 +27,12 @@ fn identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
 fn queue_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
     let mut identity = identity(command_id, fingerprint);
     identity.kind = "queue".to_owned();
+    identity
+}
+
+fn recovery_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
+    let mut identity = identity(command_id, fingerprint);
+    identity.kind = "recovery".to_owned();
     identity
 }
 
@@ -83,6 +91,25 @@ fn queue_receipt(
             }],
             truncated: false,
             next_dispatchable_entry_id: Some("queue-1".to_owned()),
+        },
+        correlation_id: Some("correlation-1".to_owned()),
+        replayed: false,
+    }
+}
+
+fn recovery_receipt(command_id: &str) -> HttpConversationRecoveryCommandReceipt {
+    HttpConversationRecoveryCommandReceipt {
+        command_id: command_id.to_owned(),
+        client_id: "client-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        action: HttpConversationRecoveryCommandActionKind::ForkConversation,
+        compaction: None,
+        restore: None,
+        fork: None,
+        recovery: HttpConversationRecoveryView {
+            checkpoints: Vec::new(),
+            fork_points: Vec::new(),
+            through_stream_sequence: 9,
         },
         correlation_id: Some("correlation-1".to_owned()),
         replayed: false,
@@ -186,6 +213,38 @@ fn durable_command_store_round_trips_queue_completion_without_prompt_material() 
     }
     assert!(matches!(
         store.reserve(queue_identity("queue-command-1", 'd')),
+        Ok(HttpStoredCommandClaim::Conflict)
+    ));
+}
+
+#[test]
+fn durable_command_store_round_trips_recovery_completion() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let stored = recovery_identity("recovery-command-1", 'f');
+    let expected = recovery_receipt("recovery-command-1");
+    {
+        let store = HttpDurableCommandStore::open(&path, 8).expect("store should open");
+        assert!(matches!(
+            store.reserve(stored.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(
+                &stored,
+                HttpStoredCommandCompletion::Recovery(Box::new(expected.clone())),
+            )
+            .expect("recovery completion should persist");
+    }
+
+    let store = HttpDurableCommandStore::open(&path, 8).expect("store should reopen");
+    assert!(matches!(
+        store.reserve(stored),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::Recovery(Box::new(expected))
+    ));
+    assert!(matches!(
+        store.reserve(recovery_identity("recovery-command-1", 'a')),
         Ok(HttpStoredCommandClaim::Conflict)
     ));
 }

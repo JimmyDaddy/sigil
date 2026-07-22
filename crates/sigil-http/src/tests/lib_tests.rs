@@ -31,7 +31,8 @@ use super::{
     HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource,
+    HttpAuthValidator, HttpCommandEnvelope, HttpCompactionAdmission, HttpCompactionEconomics,
+    HttpCompactionReceipt, HttpCompactionReview, HttpContextWindowSource,
     HttpConversationDisplayContent, HttpConversationDisplayDriverError,
     HttpConversationDisplayItem, HttpConversationDisplayItemKind,
     HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
@@ -42,21 +43,23 @@ use super::{
     HttpConversationQueueDriverCommand, HttpConversationQueueDriverError,
     HttpConversationQueueGeneration, HttpConversationQueueItem, HttpConversationQueueItemKind,
     HttpConversationQueueItemStatus, HttpConversationQueuePromptMaterial,
-    HttpConversationQueueView, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
-    HttpDurableProtocolJournal, HttpDurableSessionFrontier, HttpForegroundRunOwner,
-    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
-    HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
-    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
-    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
-    HttpSseEvent, HttpSupportContext, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HttpConversationQueueView, HttpConversationRecoveryCommandAction,
+    HttpConversationRecoveryDriverCommand, HttpConversationRecoveryDriverError,
+    HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
+    HttpForegroundRunOwner, HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer,
+    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent,
+    HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
+    HttpProtocolReplayError, HttpProtocolVersionError, HttpQueuedRunAdmission,
+    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -1333,6 +1336,89 @@ fn verification_rerun_never_overlaps_a_foreground_agent_run() {
         })
     );
     assert!(driver.verification_reruns().is_empty());
+}
+
+#[test]
+fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let review = HttpCompactionReview {
+        preview_id: Some("preview-1".to_owned()),
+        folded_event_count: 8,
+        retained_event_count: 4,
+        admission: HttpCompactionAdmission::Ready {
+            economics: HttpCompactionEconomics {
+                before_input_tokens: 1_000,
+                target_input_tokens: 600,
+                context_window_tokens: 8_000,
+                output_tokens: 512,
+                safety_buffer_tokens: 256,
+                savings_tokens: 400,
+                savings_ratio_ppm: 400_000,
+                minimum_savings_tokens: 200,
+                minimum_savings_ratio_ppm: 100_000,
+            },
+        },
+    };
+    driver.set_compaction_review(review.clone());
+    assert_eq!(
+        registry
+            .conversation_compaction_review(&session.id)
+            .expect("preview should route"),
+        review
+    );
+
+    let recovery = HttpConversationRecoveryView {
+        checkpoints: Vec::new(),
+        fork_points: Vec::new(),
+        through_stream_sequence: 14,
+    };
+    driver.set_recovery_output(HttpConversationRecoveryDriverOutput {
+        compaction: Some(HttpCompactionReceipt {
+            compaction_id: "compaction-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            task_memory_id: "memory-1".to_owned(),
+            folded_event_count: 8,
+            tool_output_projection_recorded: true,
+        }),
+        restore: None,
+        fork: None,
+        recovery,
+    });
+    let command = HttpCommandEnvelope::new(
+        "compact-command-1",
+        "desktop-client",
+        &session.id,
+        HttpConversationRecoveryCommandAction::ApplyCompaction {
+            preview_id: "preview-1".to_owned(),
+        },
+    );
+    let first = registry
+        .command_conversation_recovery(&session.id, command.clone())
+        .expect("apply should route");
+    let replay = registry
+        .command_conversation_recovery(&session.id, command)
+        .expect("same command identity should replay");
+
+    assert_eq!(
+        first.action,
+        super::HttpConversationRecoveryCommandActionKind::ApplyCompaction
+    );
+    assert_eq!(
+        first
+            .compaction
+            .as_ref()
+            .map(|receipt| receipt.folded_event_count),
+        Some(8)
+    );
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    assert_eq!(driver.recovery_commands().len(), 1);
+    assert!(matches!(
+        &driver.recovery_commands()[0].action,
+        HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id }
+            if preview_id == "preview-1"
+    ));
 }
 
 #[tokio::test]
@@ -5747,6 +5833,9 @@ struct RecordingRunDriver {
     conversation_display_queries: Mutex<Vec<(Option<String>, usize)>>,
     run_context_view: Mutex<Option<HttpRunContextView>>,
     session_frontier: Mutex<Option<HttpDurableSessionFrontier>>,
+    compaction_review: Mutex<Option<HttpCompactionReview>>,
+    recovery_output: Mutex<Option<HttpConversationRecoveryDriverOutput>>,
+    recovery_commands: Mutex<Vec<HttpConversationRecoveryDriverCommand>>,
 }
 
 impl RecordingRunDriver {
@@ -5845,6 +5934,18 @@ impl RecordingRunDriver {
         *lock(&self.session_frontier) = Some(HttpDurableSessionFrontier {
             through_stream_sequence,
         });
+    }
+
+    fn set_compaction_review(&self, review: HttpCompactionReview) {
+        *lock(&self.compaction_review) = Some(review);
+    }
+
+    fn set_recovery_output(&self, output: HttpConversationRecoveryDriverOutput) {
+        *lock(&self.recovery_output) = Some(output);
+    }
+
+    fn recovery_commands(&self) -> Vec<HttpConversationRecoveryDriverCommand> {
+        lock(&self.recovery_commands).clone()
     }
 }
 
@@ -5969,6 +6070,26 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.run_context_view)
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test run context is missing"))
+    }
+
+    fn conversation_compaction_review(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<HttpCompactionReview, HttpConversationRecoveryDriverError> {
+        lock(&self.compaction_review)
+            .clone()
+            .ok_or(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    fn mutate_conversation_recovery(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        command: &HttpConversationRecoveryDriverCommand,
+    ) -> Result<HttpConversationRecoveryDriverOutput, HttpConversationRecoveryDriverError> {
+        lock(&self.recovery_commands).push(command.clone());
+        lock(&self.recovery_output)
+            .clone()
+            .ok_or(HttpConversationRecoveryDriverError::Unavailable)
     }
 
     fn rerun_verification(

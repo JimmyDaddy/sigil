@@ -178,7 +178,8 @@ function FixtureSurface({
             onOpenSettings={() => undefined}
             onOpenSupport={() => undefined}
             onOpenAgentWorkbench={() => undefined}
-            onOpenQueue={() => undefined}
+          onOpenQueue={() => undefined}
+          onPreviewCompaction={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}
             onReasoningEffortChange={setReasoningEffort}

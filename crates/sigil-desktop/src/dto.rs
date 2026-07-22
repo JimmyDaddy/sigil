@@ -789,6 +789,7 @@ pub enum DesktopContextWindowSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopApplicationClientAction {
+    PreviewCompaction,
     NewSession,
     FocusEffort,
     FocusModel,
@@ -1223,6 +1224,237 @@ pub struct DesktopConversationQueueCommandReceipt {
     #[serde(default)]
     pub interrupt_owner: Option<DesktopForegroundRunOwner>,
     pub queue: DesktopConversationQueueView,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCheckpointRestoreKind {
+    RestoreContent,
+    RemoveCreatedFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCheckpointFileAvailability {
+    Restorable,
+    Sensitive,
+    Unsupported,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointFileView {
+    pub path: String,
+    pub restore_kind: DesktopCheckpointRestoreKind,
+    pub availability: DesktopCheckpointFileAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointView {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    pub turn_index: usize,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    pub files: Vec<DesktopCheckpointFileView>,
+    pub unknown_mutation_count: usize,
+    pub fully_restorable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationForkPointView {
+    pub source_turn_index: usize,
+    pub source_turn_digest: String,
+    pub source_boundary_stream_sequence: u64,
+    pub source_finalized_stream_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationRecoveryView {
+    pub checkpoints: Vec<DesktopCheckpointView>,
+    pub fork_points: Vec<DesktopConversationForkPointView>,
+    pub through_stream_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionEconomics {
+    pub before_input_tokens: u64,
+    pub target_input_tokens: u64,
+    pub context_window_tokens: u64,
+    pub output_tokens: u64,
+    pub safety_buffer_tokens: u64,
+    pub savings_tokens: u64,
+    pub savings_ratio_ppm: u32,
+    pub minimum_savings_tokens: u64,
+    pub minimum_savings_ratio_ppm: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum DesktopCompactionAdmission {
+    Ready {
+        economics: DesktopCompactionEconomics,
+    },
+    NoFoldableHistory {
+        durable_message_count: usize,
+        configured_tail_message_count: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionReview {
+    #[serde(default)]
+    pub preview_id: Option<String>,
+    pub folded_event_count: usize,
+    pub retained_event_count: usize,
+    pub admission: DesktopCompactionAdmission,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointRestoreRequest {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCheckpointRestoreConflictReason {
+    WorkspaceMismatch,
+    CurrentHashMismatch,
+    ArtifactUnavailable,
+    SensitiveSnapshot,
+    UnsupportedSnapshot,
+    InvalidBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointRestorePreviewFile {
+    pub path: String,
+    pub restore_kind: DesktopCheckpointRestoreKind,
+    #[serde(default)]
+    pub expected_current_hash: Option<String>,
+    #[serde(default)]
+    pub actual_current_hash: Option<String>,
+    #[serde(default)]
+    pub conflict_reason: Option<DesktopCheckpointRestoreConflictReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointReverseDiff {
+    pub path: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub original_line_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointRestoreReview {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    pub files: Vec<DesktopCheckpointRestorePreviewFile>,
+    pub reverse_diffs: Vec<DesktopCheckpointReverseDiff>,
+    pub unknown_mutation_count: usize,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopConversationRecoveryCommandActionKind {
+    ApplyCompaction,
+    RestoreCheckpoint,
+    ForkConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopConversationRecoveryCommandAction {
+    ApplyCompaction {
+        preview_id: String,
+    },
+    RestoreCheckpoint {
+        checkpoint_id: String,
+        checkpoint_digest: String,
+    },
+    ForkConversation {
+        source_turn_digest: String,
+    },
+}
+
+impl DesktopConversationRecoveryCommandAction {
+    #[must_use]
+    pub const fn kind(&self) -> DesktopConversationRecoveryCommandActionKind {
+        match self {
+            Self::ApplyCompaction { .. } => {
+                DesktopConversationRecoveryCommandActionKind::ApplyCompaction
+            }
+            Self::RestoreCheckpoint { .. } => {
+                DesktopConversationRecoveryCommandActionKind::RestoreCheckpoint
+            }
+            Self::ForkConversation { .. } => {
+                DesktopConversationRecoveryCommandActionKind::ForkConversation
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionReceipt {
+    pub compaction_id: String,
+    pub attempt_id: String,
+    pub task_memory_id: String,
+    pub folded_event_count: usize,
+    pub tool_output_projection_recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCheckpointRestoreReceipt {
+    pub checkpoint_id: String,
+    pub batch_id: String,
+    pub restored_file_count: usize,
+    pub verification_stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationForkReceipt {
+    pub session_ref: String,
+    pub session_id: String,
+    pub copied_message_count: usize,
+    pub copied_external_provenance_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationRecoveryCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub action: DesktopConversationRecoveryCommandActionKind,
+    #[serde(default)]
+    pub compaction: Option<DesktopCompactionReceipt>,
+    #[serde(default)]
+    pub restore: Option<DesktopCheckpointRestoreReceipt>,
+    #[serde(default)]
+    pub fork: Option<DesktopConversationForkReceipt>,
+    pub recovery: DesktopConversationRecoveryView,
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub replayed: bool,

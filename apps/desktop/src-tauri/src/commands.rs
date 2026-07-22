@@ -11,14 +11,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopClientError, DesktopConversationDisplayQuery, DesktopConversationQueueCommandRequest,
-    DesktopConversationQueueGeneration, DesktopLaunchError, DesktopLaunchRequest,
-    DesktopRunCancelRequest, DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
-    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
-    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
-    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopTranscriptQuery,
-    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopCheckpointRestoreRequest, DesktopClientError, DesktopConversationDisplayQuery,
+    DesktopConversationQueueCommandRequest, DesktopConversationQueueGeneration, DesktopLaunchError,
+    DesktopLaunchRequest, DesktopRunCancelRequest, DesktopRunStartRequest,
+    DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchItem,
+    DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
+    DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
+    DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -32,20 +33,22 @@ use crate::{
         DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
-        DesktopConversationContinuity, DesktopConversationDisplayPage,
+        DesktopCheckpointRestorePreviewInput, DesktopCheckpointRestoreReview,
+        DesktopCompactionReview, DesktopConversationContinuity, DesktopConversationDisplayPage,
         DesktopConversationDisplayRequest, DesktopConversationQueueCommandInput,
         DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
-        DesktopExternalUrlInput, DesktopRunAttachInput, DesktopRunAttachment,
-        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
-        DesktopSessionCatalogBatchExecuteInput, DesktopSessionCatalogBatchPlanInput,
-        DesktopSessionCatalogBatchPlanSummary, DesktopSessionCatalogBatchReceiptSummary,
-        DesktopSessionCreateInput, DesktopSessionDeleteInput,
-        DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
-        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
-        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
-        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTranscriptPage,
-        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection,
+        DesktopConversationRecoveryCommandInput, DesktopConversationRecoveryCommandReceipt,
+        DesktopConversationRecoveryView, DesktopExternalUrlInput, DesktopRunAttachInput,
+        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
+        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
+        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
+        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
+        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
+        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
+        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
+        DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
+        DesktopSupportSaveSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -661,6 +664,99 @@ pub(crate) async fn desktop_command_conversation_queue(
         .await
         .map(Into::into)
         .map_err(project_conversation_queue_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_conversation_recovery(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationRecoveryView, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .conversation_recovery(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_checkpoint_restore_preview(
+    workspace_id: String,
+    input: DesktopCheckpointRestorePreviewInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopCheckpointRestoreReview, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_recovery_token(&input.checkpoint_id)?;
+    validate_recovery_token(&input.checkpoint_digest)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .checkpoint_restore_review(
+            &input.session_id,
+            DesktopCheckpointRestoreRequest {
+                checkpoint_id: input.checkpoint_id,
+                checkpoint_digest: input.checkpoint_digest,
+            },
+        )
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_conversation_compaction_preview(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopCompactionReview, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .conversation_compaction_review(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_command_conversation_recovery(
+    workspace_id: String,
+    input: DesktopConversationRecoveryCommandInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationRecoveryCommandReceipt, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_recovery_action(&input.action)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .command_conversation_recovery(&input.session_id, input.action.into_native())
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
 }
 
 #[tauri::command]
@@ -1513,6 +1609,37 @@ fn validate_queue_action(
     Ok(())
 }
 
+fn validate_recovery_action(
+    action: &crate::ipc::DesktopConversationRecoveryActionInput,
+) -> Result<(), DesktopCommandError> {
+    match action {
+        crate::ipc::DesktopConversationRecoveryActionInput::ApplyCompaction { preview_id } => {
+            validate_recovery_token(preview_id)
+        }
+        crate::ipc::DesktopConversationRecoveryActionInput::RestoreCheckpoint {
+            checkpoint_id,
+            checkpoint_digest,
+        } => {
+            validate_recovery_token(checkpoint_id)?;
+            validate_recovery_token(checkpoint_digest)
+        }
+        crate::ipc::DesktopConversationRecoveryActionInput::ForkConversation {
+            source_turn_digest,
+        } => validate_recovery_token(source_turn_digest),
+    }
+}
+
+fn validate_recovery_token(value: &str) -> Result<(), DesktopCommandError> {
+    if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        Err(DesktopCommandError::new(
+            "conversation_recovery_action_invalid",
+            "The recovery action contains an invalid durable binding.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_verification_rerun(
     input: &DesktopVerificationRerunInput,
 ) -> Result<(), DesktopCommandError> {
@@ -1802,6 +1929,41 @@ fn project_conversation_queue_client_error(error: DesktopClientError) -> Desktop
             "conversation_queue_unavailable" => DesktopCommandError::new(
                 "conversation_queue_unavailable",
                 "The durable conversation queue is temporarily unavailable.",
+            )
+            .with_recovery_actions([
+                DesktopRecoveryAction::RetryCurrent,
+                DesktopRecoveryAction::OpenDiagnostics,
+            ]),
+            _ => return project_client_error(error),
+        };
+        return projected;
+    }
+    project_client_error(error)
+}
+
+fn project_conversation_recovery_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
+    {
+        let projected = match code.as_str() {
+            "invalid_recovery_command" => DesktopCommandError::new(
+                "conversation_recovery_action_invalid",
+                "The recovery action contains an invalid durable binding.",
+            ),
+            "recovery_binding_stale" => DesktopCommandError::new(
+                "conversation_recovery_stale",
+                "Recovery history changed. Review the latest checkpoint or turn and try again.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "recovery_conflict" => DesktopCommandError::new(
+                "conversation_recovery_conflict",
+                "Current file or session state no longer matches this recovery preview.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "conversation_recovery_unavailable" => DesktopCommandError::new(
+                "conversation_recovery_unavailable",
+                "Durable recovery controls are temporarily unavailable.",
             )
             .with_recovery_actions([
                 DesktopRecoveryAction::RetryCurrent,

@@ -23,8 +23,15 @@ use sigil_kernel::{
     project_user_message_for_persistence_with_nonce_and_issued_at, stable_event_uuid,
     tool_approval_session_grant_available_for_facets,
 };
+use sigil_runtime::application_compaction::{
+    PendingApplicationCompaction, prepare_application_compaction,
+};
 use sigil_runtime::application_queue::{
     ApplicationQueuedPromptMaterial, ApplicationQueuedRunRequest, prepare_application_queued_run,
+};
+use sigil_runtime::application_recovery::{
+    application_conversation_recovery_view, application_recovery_workspace_root,
+    preview_application_checkpoint_restore, restore_application_checkpoint,
 };
 use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
@@ -48,12 +55,16 @@ use crate::{
     HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
-    HttpApprovalDecisionRecord, HttpContextWindowSource, HttpConversationDisplayDriverError,
-    HttpConversationDisplayPage, HttpConversationQueueBlockedReason,
-    HttpConversationQueueCommandAction, HttpConversationQueueDriverCommand,
-    HttpConversationQueueDriverError, HttpConversationQueueGeneration, HttpConversationQueueItem,
-    HttpConversationQueueItemKind, HttpConversationQueueItemStatus,
-    HttpConversationQueuePromptMaterial, HttpConversationQueueView, HttpDurableCommandStore,
+    HttpApprovalDecisionRecord, HttpCheckpointRestoreReceipt, HttpCheckpointRestoreReview,
+    HttpCompactionReceipt, HttpCompactionReview, HttpContextWindowSource,
+    HttpConversationDisplayDriverError, HttpConversationDisplayPage, HttpConversationForkReceipt,
+    HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
+    HttpConversationQueueDriverCommand, HttpConversationQueueDriverError,
+    HttpConversationQueueGeneration, HttpConversationQueueItem, HttpConversationQueueItemKind,
+    HttpConversationQueueItemStatus, HttpConversationQueuePromptMaterial,
+    HttpConversationQueueView, HttpConversationRecoveryCommandAction,
+    HttpConversationRecoveryDriverCommand, HttpConversationRecoveryDriverError,
+    HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
     HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
     HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission,
     HttpQueuedRunDriverStart, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
@@ -67,6 +78,7 @@ const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_HTTP_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP_EXACT_QUEUE_PROMPTS: usize = 128;
 const MAX_HTTP_QUEUE_PREVIEW_CHARS: usize = 240;
+const MAX_HTTP_PENDING_COMPACTION_PREVIEWS: usize = 32;
 
 /// Runtime inputs and bounded waits owned by the production HTTP driver.
 #[derive(Debug, Clone)]
@@ -158,6 +170,7 @@ pub struct HttpProductionRunDriver {
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
+    pending_compactions: Arc<Mutex<BTreeMap<String, PendingApplicationCompaction>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -263,6 +276,7 @@ impl HttpProductionRunDriver {
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
             exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -711,6 +725,12 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         exact_prompts.retain(|key, _| key.session_scope_id != durable_session_scope_id);
+        let mut pending_compactions = self
+            .pending_compactions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending_compactions
+            .retain(|_, pending| pending.session_scope_id() != durable_session_scope_id);
     }
 
     fn session_frontier(
@@ -948,6 +968,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         argument_hint: entry.argument_hint,
                         completes_with_space: entry.completes_with_space,
                         client_action: entry.client_action.map(|action| match action {
+                            sigil_runtime::ApplicationClientAction::PreviewCompaction => {
+                                HttpApplicationClientAction::PreviewCompaction
+                            }
                             sigil_runtime::ApplicationClientAction::NewSession => {
                                 HttpApplicationClientAction::NewSession
                             }
@@ -1120,6 +1143,196 @@ impl HttpRunDriver for HttpProductionRunDriver {
             &state,
             &exact_prompts,
         ))
+    }
+
+    fn conversation_recovery_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<HttpConversationRecoveryView, HttpConversationRecoveryDriverError> {
+        application_conversation_recovery_view(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map(Into::into)
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    fn conversation_compaction_review(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<HttpCompactionReview, HttpConversationRecoveryDriverError> {
+        let (review, pending) = self
+            .runtime
+            .block_on(prepare_application_compaction(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+            ))
+            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        let mut previews = self
+            .pending_compactions
+            .lock()
+            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        previews.retain(|_, item| item.session_scope_id() != session.durable_session_scope_id);
+        if let Some(pending) = pending {
+            if previews.len() >= MAX_HTTP_PENDING_COMPACTION_PREVIEWS {
+                let oldest = previews.keys().next().cloned();
+                if let Some(oldest) = oldest {
+                    previews.remove(&oldest);
+                }
+            }
+            previews.insert(pending.preview_id().to_owned(), pending);
+        }
+        Ok(review.into())
+    }
+
+    fn checkpoint_restore_review(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &crate::HttpCheckpointRestoreRequest,
+    ) -> Result<HttpCheckpointRestoreReview, HttpConversationRecoveryDriverError> {
+        let recovery = self.conversation_recovery_view(session)?;
+        if !recovery.checkpoints.iter().any(|checkpoint| {
+            checkpoint.checkpoint_id == request.checkpoint_id
+                && checkpoint.checkpoint_digest == request.checkpoint_digest
+        }) {
+            return Err(HttpConversationRecoveryDriverError::StaleBinding);
+        }
+        let workspace_root = application_recovery_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        preview_application_checkpoint_restore(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &workspace_root,
+            &request.into(),
+        )
+        .map(Into::into)
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    fn mutate_conversation_recovery(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        command: &HttpConversationRecoveryDriverCommand,
+    ) -> Result<HttpConversationRecoveryDriverOutput, HttpConversationRecoveryDriverError> {
+        let mut compaction_receipt = None;
+        let mut restore_receipt = None;
+        let mut fork_receipt = None;
+        match &command.action {
+            HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
+                let pending = self
+                    .pending_compactions
+                    .lock()
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+                    .remove(preview_id)
+                    .ok_or(HttpConversationRecoveryDriverError::StaleBinding)?;
+                let receipt = pending
+                    .apply(
+                        Path::new(&session.session_log_path),
+                        &session.durable_session_scope_id,
+                        preview_id,
+                    )
+                    .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)?;
+                compaction_receipt = Some(HttpCompactionReceipt {
+                    compaction_id: receipt.compaction_id,
+                    attempt_id: receipt.attempt_id,
+                    task_memory_id: receipt.task_memory_id,
+                    folded_event_count: receipt.folded_event_count,
+                    tool_output_projection_recorded: receipt.tool_output_projection_recorded,
+                });
+            }
+            HttpConversationRecoveryCommandAction::RestoreCheckpoint {
+                checkpoint_id,
+                checkpoint_digest,
+            } => {
+                let review = self.checkpoint_restore_review(
+                    session,
+                    &crate::HttpCheckpointRestoreRequest {
+                        checkpoint_id: checkpoint_id.clone(),
+                        checkpoint_digest: checkpoint_digest.clone(),
+                    },
+                )?;
+                if !review.ready {
+                    return Err(HttpConversationRecoveryDriverError::Conflict);
+                }
+                let workspace_root = application_recovery_workspace_root(
+                    &self.options.config_path,
+                    &self.options.launch_cwd,
+                )
+                .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let output = restore_application_checkpoint(
+                    Path::new(&session.session_log_path),
+                    &session.durable_session_scope_id,
+                    &workspace_root,
+                    &sigil_kernel::ControlledCheckpointRestoreRequest {
+                        checkpoint_id: checkpoint_id.clone(),
+                        checkpoint_digest: checkpoint_digest.clone(),
+                    },
+                )
+                .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                restore_receipt = Some(HttpCheckpointRestoreReceipt {
+                    checkpoint_id: output.preview.checkpoint_id,
+                    batch_id: output.batch_id,
+                    restored_file_count: output.restored.len(),
+                    verification_stale: true,
+                });
+            }
+            HttpConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
+                let recovery = self.conversation_recovery_view(session)?;
+                if !recovery
+                    .fork_points
+                    .iter()
+                    .any(|point| point.source_turn_digest == *source_turn_digest)
+                {
+                    return Err(HttpConversationRecoveryDriverError::StaleBinding);
+                }
+                let lifecycle = self
+                    .options
+                    .session_lifecycle
+                    .as_ref()
+                    .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+                let source_ref = SessionRef::new_relative(
+                    Path::new(&session.session_log_path)
+                        .file_name()
+                        .ok_or(HttpConversationRecoveryDriverError::Unavailable)?,
+                )
+                .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let output = lifecycle
+                    .fork_session_at_turn(
+                        &source_ref,
+                        &session.durable_session_scope_id,
+                        source_turn_digest,
+                        &format!("{}:{}", command.client_id, command.command_id),
+                    )
+                    .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                fork_receipt = Some(HttpConversationForkReceipt {
+                    session_ref: output
+                        .destination_session_ref
+                        .as_path()
+                        .to_string_lossy()
+                        .into_owned(),
+                    session_id: output.destination_session_id,
+                    copied_message_count: output.copied_message_count,
+                    copied_external_provenance_count: output.copied_external_provenance_count,
+                });
+            }
+        }
+        let recovery = application_conversation_recovery_view(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map(Into::into)
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        Ok(HttpConversationRecoveryDriverOutput {
+            compaction: compaction_receipt,
+            restore: restore_receipt,
+            fork: fork_receipt,
+            recovery,
+        })
     }
 
     fn mutate_conversation_queue(

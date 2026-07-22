@@ -30,6 +30,10 @@ fn agent_command_opens_the_shared_agent_workbench() {
 
 #[test]
 fn desktop_equivalent_commands_have_explicit_client_routes() {
+    let compact = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/compact")
+        .expect("compact command");
     let config = APPLICATION_COMMANDS
         .iter()
         .find(|command| command.canonical == "/config")
@@ -51,6 +55,10 @@ fn desktop_equivalent_commands_have_explicit_client_routes() {
         .find(|command| command.canonical == "/feedback")
         .expect("feedback command");
 
+    assert_eq!(
+        compact.client_action,
+        Some(crate::ApplicationClientAction::PreviewCompaction)
+    );
     assert_eq!(
         config.client_action,
         Some(crate::ApplicationClientAction::OpenSettings)

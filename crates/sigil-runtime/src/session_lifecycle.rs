@@ -13,9 +13,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AssistantMessageKind, ControlEntry, ConversationForkProjection, ExternalProvenanceEntry,
+    AssistantMessageKind, ControlEntry, ConversationForkOutput, ConversationForkProjection,
+    ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
     JsonlSessionStore, MessageRole, ModelMessage, SessionLogEntry, SessionRef,
-    SessionStreamCompatibilityError, SessionStreamRecord, safe_persistence_text,
+    SessionStreamCompatibilityError, SessionStreamRecord, fork_conversation_at_turn,
+    safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -581,6 +583,68 @@ impl LocalSessionLifecycleService {
         })
     }
 
+    /// Forks one exact finalized conversation turn into a new direct session child.
+    ///
+    /// The source stream and workspace files remain unchanged. Only the safe conversation prefix
+    /// and rebound external provenance are copied into the destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source identity or turn digest is stale, the source is not a
+    /// ready V2 stream, or the destination cannot be created safely.
+    pub fn fork_session_at_turn(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        source_turn_digest: &str,
+        destination_key: &str,
+    ) -> Result<ConversationForkOutput> {
+        if source_turn_digest.trim().is_empty() || destination_key.trim().is_empty() {
+            bail!("conversation fork turn digest and destination key must not be empty");
+        }
+        let binding = self
+            .resolve_session_for_reopen(session_ref, expected_session_id)
+            .map_err(|error| anyhow!(error))?;
+        let records = JsonlSessionStore::read_event_records(&binding.session_log_path)
+            .with_context(|| format!("failed to read {}", binding.session_log_path.display()))?;
+        let projection = project_records(&records)?;
+        let provider_name = projection
+            .provider_name
+            .ok_or_else(|| anyhow!("source session has no provider identity"))?;
+        let model_name = projection
+            .model_name
+            .ok_or_else(|| anyhow!("source session has no model identity"))?;
+        let parent = binding
+            .session_log_path
+            .parent()
+            .ok_or_else(|| anyhow!("source session has no parent directory"))?;
+        let destination_path = conversation_fork_path(
+            parent,
+            expected_session_id,
+            source_turn_digest,
+            destination_key,
+        );
+        if destination_path.exists() {
+            return recover_conversation_fork_output(
+                &destination_path,
+                expected_session_id,
+                source_turn_digest,
+            );
+        }
+        let store = JsonlSessionStore::new(&binding.session_log_path)?;
+        fork_conversation_at_turn(
+            &store,
+            &records,
+            &ConversationTurnForkRequest {
+                source_turn_digest: source_turn_digest.to_owned(),
+                source_session_ref: binding.session_ref,
+                destination_path,
+                provider_name,
+                model_name,
+            },
+        )
+    }
+
     /// Writes a content-bound safe transcript artifact without overwriting an existing path.
     ///
     /// `destination=None` allocates a unique file under the service export directory.
@@ -1138,6 +1202,55 @@ impl LocalSessionLifecycleService {
             Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
         }
     }
+}
+
+fn conversation_fork_path(
+    parent: &Path,
+    source_session_id: &str,
+    source_turn_digest: &str,
+    destination_key: &str,
+) -> PathBuf {
+    let identity = sigil_kernel::stable_event_uuid(
+        "sigil-runtime-conversation-fork-path",
+        &format!("{source_session_id}:{source_turn_digest}:{destination_key}"),
+    );
+    parent.join(format!("session-fork-{identity}.jsonl"))
+}
+
+fn recover_conversation_fork_output(
+    destination_path: &Path,
+    expected_source_session_id: &str,
+    expected_source_turn_digest: &str,
+) -> Result<ConversationForkOutput> {
+    let records = JsonlSessionStore::read_event_records(destination_path)?;
+    let (fork_event, forked) = records
+        .iter()
+        .find_map(|record| {
+            let SessionStreamRecord::Stored(event) = record;
+            (event.event_kind() == Some(DurableEventType::ConversationForked)).then(|| {
+                serde_json::from_value::<ConversationForked>(event.payload.clone())
+                    .map(|forked| (event.clone(), forked))
+            })
+        })
+        .transpose()?
+        .context("existing conversation fork has no durable fork receipt")?;
+    if forked.source_session_id != expected_source_session_id
+        || forked.source_turn_digest != expected_source_turn_digest
+    {
+        bail!("existing conversation fork destination belongs to another source binding");
+    }
+    Ok(ConversationForkOutput {
+        destination_session_ref: SessionRef::new_relative(
+            destination_path
+                .file_name()
+                .context("conversation fork destination has no file name")?,
+        )?,
+        destination_path: destination_path.to_path_buf(),
+        destination_session_id: forked.destination_session_id,
+        fork_event,
+        copied_message_count: forked.copied_message_count,
+        copied_external_provenance_count: forked.copied_external_provenance_count,
+    })
 }
 
 fn map_session_reopen_mutation_error(error: LocalSessionReopenError) -> LocalSessionMutationError {

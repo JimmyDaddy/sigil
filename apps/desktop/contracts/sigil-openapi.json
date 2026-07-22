@@ -324,6 +324,7 @@
       },
       "ApplicationClientAction": {
         "enum": [
+          "preview_compaction",
           "new_session",
           "focus_effort",
           "focus_model",
@@ -669,6 +670,266 @@
         ],
         "type": "object"
       },
+      "CheckpointFileAvailability": {
+        "enum": [
+          "restorable",
+          "sensitive",
+          "unsupported",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "CheckpointFileView": {
+        "additionalProperties": false,
+        "properties": {
+          "availability": {
+            "$ref": "#/components/schemas/CheckpointFileAvailability"
+          },
+          "path": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "restore_kind": {
+            "$ref": "#/components/schemas/CheckpointRestoreKind"
+          }
+        },
+        "required": [
+          "path",
+          "restore_kind",
+          "availability"
+        ],
+        "type": "object"
+      },
+      "CheckpointRestoreConflictReason": {
+        "enum": [
+          "workspace_mismatch",
+          "current_hash_mismatch",
+          "artifact_unavailable",
+          "sensitive_snapshot",
+          "unsupported_snapshot",
+          "invalid_binding"
+        ],
+        "type": "string"
+      },
+      "CheckpointRestoreKind": {
+        "enum": [
+          "restore_content",
+          "remove_created_file"
+        ],
+        "type": "string"
+      },
+      "CheckpointRestorePreviewFile": {
+        "additionalProperties": false,
+        "properties": {
+          "actual_current_hash": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "conflict_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointRestoreConflictReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_current_hash": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "restore_kind": {
+            "$ref": "#/components/schemas/CheckpointRestoreKind"
+          }
+        },
+        "required": [
+          "path",
+          "restore_kind"
+        ],
+        "type": "object"
+      },
+      "CheckpointRestoreReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "restored_file_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verification_stale": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "batch_id",
+          "restored_file_count",
+          "verification_stale"
+        ],
+        "type": "object"
+      },
+      "CheckpointRestoreRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "checkpoint_digest"
+        ],
+        "type": "object"
+      },
+      "CheckpointRestoreReview": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/CheckpointRestorePreviewFile"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "reverse_diffs": {
+            "items": {
+              "$ref": "#/components/schemas/CheckpointReverseDiff"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "unknown_mutation_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "checkpoint_digest",
+          "files",
+          "reverse_diffs",
+          "unknown_mutation_count",
+          "ready"
+        ],
+        "type": "object"
+      },
+      "CheckpointReverseDiff": {
+        "additionalProperties": false,
+        "properties": {
+          "diff": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "original_line_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "diff",
+          "truncated",
+          "original_line_count"
+        ],
+        "type": "object"
+      },
+      "CheckpointView": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/CheckpointFileView"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "fully_restorable": {
+            "type": "boolean"
+          },
+          "prompt": {
+            "maxLength": 32768,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turn_index": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "unknown_mutation_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "checkpoint_digest",
+          "turn_index",
+          "files",
+          "unknown_mutation_count",
+          "fully_restorable"
+        ],
+        "type": "object"
+      },
       "CommandEnvelopeBase": {
         "properties": {
           "client_id": {
@@ -704,6 +965,202 @@
           "client_id",
           "session_id",
           "payload"
+        ],
+        "type": "object"
+      },
+      "CompactionAdmissionNoHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_tail_message_count": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "durable_message_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "const": "no_foldable_history",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "durable_message_count",
+          "configured_tail_message_count"
+        ],
+        "type": "object"
+      },
+      "CompactionAdmissionReady": {
+        "additionalProperties": false,
+        "properties": {
+          "economics": {
+            "$ref": "#/components/schemas/CompactionEconomics"
+          },
+          "kind": {
+            "const": "ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "economics"
+        ],
+        "type": "object"
+      },
+      "CompactionAdmissionUnavailable": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "unavailable",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "CompactionEconomics": {
+        "additionalProperties": false,
+        "properties": {
+          "before_input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "context_window_tokens": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minimum_savings_ratio_ppm": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minimum_savings_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "safety_buffer_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "savings_ratio_ppm": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "savings_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "before_input_tokens",
+          "target_input_tokens",
+          "context_window_tokens",
+          "output_tokens",
+          "safety_buffer_tokens",
+          "savings_tokens",
+          "savings_ratio_ppm",
+          "minimum_savings_tokens",
+          "minimum_savings_ratio_ppm"
+        ],
+        "type": "object"
+      },
+      "CompactionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "compaction_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "folded_event_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "task_memory_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "tool_output_projection_recorded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "compaction_id",
+          "attempt_id",
+          "task_memory_id",
+          "folded_event_count",
+          "tool_output_projection_recorded"
+        ],
+        "type": "object"
+      },
+      "CompactionReview": {
+        "additionalProperties": false,
+        "properties": {
+          "admission": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CompactionAdmissionReady"
+              },
+              {
+                "$ref": "#/components/schemas/CompactionAdmissionNoHistory"
+              },
+              {
+                "$ref": "#/components/schemas/CompactionAdmissionUnavailable"
+              }
+            ]
+          },
+          "folded_event_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "preview_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retained_event_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "folded_event_count",
+          "retained_event_count",
+          "admission"
         ],
         "type": "object"
       },
@@ -1197,6 +1654,68 @@
         ],
         "type": "string"
       },
+      "ConversationForkPointView": {
+        "additionalProperties": false,
+        "properties": {
+          "source_boundary_stream_sequence": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source_finalized_stream_sequence": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source_turn_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_turn_index": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_turn_index",
+          "source_turn_digest",
+          "source_boundary_stream_sequence",
+          "source_finalized_stream_sequence"
+        ],
+        "type": "object"
+      },
+      "ConversationForkReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "copied_external_provenance_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "copied_message_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "session_ref": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id",
+          "copied_message_count",
+          "copied_external_provenance_count"
+        ],
+        "type": "object"
+      },
       "ConversationLiveProvisionalAnchor": {
         "additionalProperties": false,
         "description": "Process-local observation only; never a durable display order.",
@@ -1685,6 +2204,203 @@
           "total_items",
           "items",
           "truncated"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/ConversationRecoveryCommandAction"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ConversationRecoveryCommandAction": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ConversationRecoveryCompactionAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationRecoveryRestoreAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationRecoveryForkAction"
+          }
+        ]
+      },
+      "ConversationRecoveryCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "apply_compaction",
+              "restore_checkpoint",
+              "fork_conversation"
+            ],
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "compaction": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CompactionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fork": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConversationForkReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/ConversationRecoveryView"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "restore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointRestoreReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "action",
+          "recovery",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryCompactionAction": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "apply_compaction",
+            "type": "string"
+          },
+          "preview_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "preview_id"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryForkAction": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "fork_conversation",
+            "type": "string"
+          },
+          "source_turn_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source_turn_digest"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryRestoreAction": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "restore_checkpoint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "checkpoint_id",
+          "checkpoint_digest"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryView": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/CheckpointView"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "fork_points": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationForkPointView"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "through_stream_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "checkpoints",
+          "fork_points",
+          "through_stream_sequence"
         ],
         "type": "object"
       },
@@ -2223,6 +2939,9 @@
           "canonical_conversation_display": {
             "type": "boolean"
           },
+          "conversation_recovery": {
+            "type": "boolean"
+          },
           "durable_event_replay": {
             "type": "boolean"
           },
@@ -2250,6 +2969,7 @@
           "durable_session_reopen",
           "bounded_transcript_replay",
           "canonical_conversation_display",
+          "conversation_recovery",
           "durable_event_replay",
           "live_events",
           "approval",
@@ -2281,7 +3001,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 6,
+            "const": 7,
             "type": "integer"
           },
           "server_version": {
@@ -4546,6 +5266,172 @@
           }
         },
         "summary": "Apply one exact follow-up queue command"
+      }
+    },
+    "/sessions/{session_id}/recovery": {
+      "get": {
+        "description": "Projects exact digest-bound recovery choices without mutating files or session truth.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationRecoveryView"
+                }
+              }
+            },
+            "description": "Current durable recovery projection"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read durable checkpoint and conversation-fork choices"
+      }
+    },
+    "/sessions/{session_id}/recovery/checkpoint-preview": {
+      "post": {
+        "description": "Revalidates checkpoint digest, current file hashes, restorable snapshots, and bounded reverse diffs. No mutation is applied.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckpointRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointRestoreReview"
+                }
+              }
+            },
+            "description": "Fresh restore review"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Preview one exact controlled-file checkpoint restore"
+      }
+    },
+    "/sessions/{session_id}/recovery/commands": {
+      "post": {
+        "description": "Routes one idempotent exactly-bound recovery command under durable session mutation exclusion. Restore affects only controlled durable file mutations; shell, network, remote, manual, and external side effects are not undone.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationRecoveryCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationRecoveryCommandReceipt"
+                }
+              }
+            },
+            "description": "Durable recovery command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Apply one exact compaction, checkpoint restore, or conversation fork"
+      }
+    },
+    "/sessions/{session_id}/recovery/compaction-preview": {
+      "post": {
+        "description": "Builds and locally proves the exact post-compaction provider request without appending a compaction lifecycle attempt. A ready preview is process-local and must be explicitly applied before it becomes stale.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactionReview"
+                }
+              }
+            },
+            "description": "Fresh compaction review"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Preview one exact portable context compaction"
       }
     },
     "/sessions/{session_id}/run-context": {

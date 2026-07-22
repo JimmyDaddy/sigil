@@ -483,6 +483,66 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/recovery": {
+                "get": {
+                    "summary": "Read durable checkpoint and conversation-fork choices",
+                    "description": "Projects exact digest-bound recovery choices without mutating files or session truth.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": { "description": "Current durable recovery projection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationRecoveryView" } } } },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/recovery/checkpoint-preview": {
+                "post": {
+                    "summary": "Preview one exact controlled-file checkpoint restore",
+                    "description": "Revalidates checkpoint digest, current file hashes, restorable snapshots, and bounded reverse diffs. No mutation is applied.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckpointRestoreRequest" } } } },
+                    "responses": {
+                        "200": { "description": "Fresh restore review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckpointRestoreReview" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/recovery/compaction-preview": {
+                "post": {
+                    "summary": "Preview one exact portable context compaction",
+                    "description": "Builds and locally proves the exact post-compaction provider request without appending a compaction lifecycle attempt. A ready preview is process-local and must be explicitly applied before it becomes stale.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": { "description": "Fresh compaction review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompactionReview" } } } },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/recovery/commands": {
+                "post": {
+                    "summary": "Apply one exact compaction, checkpoint restore, or conversation fork",
+                    "description": "Routes one idempotent exactly-bound recovery command under durable session mutation exclusion. Restore affects only controlled durable file mutations; shell, network, remote, manual, and external side effects are not undone.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationRecoveryCommand" } } } },
+                    "responses": {
+                        "200": { "description": "Durable recovery command receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConversationRecoveryCommandReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}/runs": {
                 "post": {
                     "summary": "Start a run in a session",
@@ -763,12 +823,13 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
                         "bounded_transcript_replay": { "type": "boolean" },
                         "canonical_conversation_display": { "type": "boolean" },
+                        "conversation_recovery": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
@@ -1390,6 +1451,263 @@ pub fn http_openapi_document() -> Value {
                         "replayed": { "type": "boolean" }
                     }
                 },
+                "CheckpointRestoreKind": {
+                    "type": "string",
+                    "enum": ["restore_content", "remove_created_file"]
+                },
+                "CheckpointFileAvailability": {
+                    "type": "string",
+                    "enum": ["restorable", "sensitive", "unsupported", "unavailable"]
+                },
+                "CheckpointFileView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "restore_kind", "availability"],
+                    "properties": {
+                        "path": { "type": "string", "maxLength": 4096 },
+                        "restore_kind": { "$ref": "#/components/schemas/CheckpointRestoreKind" },
+                        "availability": { "$ref": "#/components/schemas/CheckpointFileAvailability" }
+                    }
+                },
+                "CheckpointView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["checkpoint_id", "checkpoint_digest", "turn_index", "files", "unknown_mutation_count", "fully_restorable"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "checkpoint_digest": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "turn_index": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "prompt": { "type": ["string", "null"], "maxLength": 32768 },
+                        "files": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointFileView" } },
+                        "unknown_mutation_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "fully_restorable": { "type": "boolean" }
+                    }
+                },
+                "ConversationForkPointView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["source_turn_index", "source_turn_digest", "source_boundary_stream_sequence", "source_finalized_stream_sequence"],
+                    "properties": {
+                        "source_turn_index": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "source_turn_digest": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "source_boundary_stream_sequence": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "source_finalized_stream_sequence": { "type": "integer", "format": "uint64", "minimum": 1 }
+                    }
+                },
+                "ConversationRecoveryView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["checkpoints", "fork_points", "through_stream_sequence"],
+                    "properties": {
+                        "checkpoints": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointView" } },
+                        "fork_points": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/ConversationForkPointView" } },
+                        "through_stream_sequence": { "type": "integer", "format": "uint64", "minimum": 0 }
+                    }
+                },
+                "CheckpointRestoreRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["checkpoint_id", "checkpoint_digest"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "checkpoint_digest": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "CompactionEconomics": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["before_input_tokens", "target_input_tokens", "context_window_tokens", "output_tokens", "safety_buffer_tokens", "savings_tokens", "savings_ratio_ppm", "minimum_savings_tokens", "minimum_savings_ratio_ppm"],
+                    "properties": {
+                        "before_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "target_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "context_window_tokens": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "output_tokens": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "safety_buffer_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "savings_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "savings_ratio_ppm": { "type": "integer", "format": "uint32", "minimum": 0 },
+                        "minimum_savings_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "minimum_savings_ratio_ppm": { "type": "integer", "format": "uint32", "minimum": 0 }
+                    }
+                },
+                "CompactionAdmissionReady": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "economics"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "ready" },
+                        "economics": { "$ref": "#/components/schemas/CompactionEconomics" }
+                    }
+                },
+                "CompactionAdmissionNoHistory": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "durable_message_count", "configured_tail_message_count"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "no_foldable_history" },
+                        "durable_message_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "configured_tail_message_count": { "type": "integer", "format": "uint64", "minimum": 1 }
+                    }
+                },
+                "CompactionAdmissionUnavailable": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "reason"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "unavailable" },
+                        "reason": { "type": "string", "maxLength": 4096 }
+                    }
+                },
+                "CompactionReview": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["folded_event_count", "retained_event_count", "admission"],
+                    "properties": {
+                        "preview_id": { "type": ["string", "null"], "maxLength": 512 },
+                        "folded_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "retained_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "admission": { "oneOf": [
+                            { "$ref": "#/components/schemas/CompactionAdmissionReady" },
+                            { "$ref": "#/components/schemas/CompactionAdmissionNoHistory" },
+                            { "$ref": "#/components/schemas/CompactionAdmissionUnavailable" }
+                        ] }
+                    }
+                },
+                "CheckpointRestoreConflictReason": {
+                    "type": "string",
+                    "enum": ["workspace_mismatch", "current_hash_mismatch", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding"]
+                },
+                "CheckpointRestorePreviewFile": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "restore_kind"],
+                    "properties": {
+                        "path": { "type": "string", "maxLength": 4096 },
+                        "restore_kind": { "$ref": "#/components/schemas/CheckpointRestoreKind" },
+                        "expected_current_hash": { "type": ["string", "null"], "maxLength": 512 },
+                        "actual_current_hash": { "type": ["string", "null"], "maxLength": 512 },
+                        "conflict_reason": { "oneOf": [{ "$ref": "#/components/schemas/CheckpointRestoreConflictReason" }, { "type": "null" }] }
+                    }
+                },
+                "CheckpointReverseDiff": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "diff", "truncated", "original_line_count"],
+                    "properties": {
+                        "path": { "type": "string", "maxLength": 4096 },
+                        "diff": { "type": "string", "maxLength": 65536 },
+                        "truncated": { "type": "boolean" },
+                        "original_line_count": { "type": "integer", "format": "uint64", "minimum": 0 }
+                    }
+                },
+                "CheckpointRestoreReview": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["checkpoint_id", "checkpoint_digest", "files", "reverse_diffs", "unknown_mutation_count", "ready"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "checkpoint_digest": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "files": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointRestorePreviewFile" } },
+                        "reverse_diffs": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointReverseDiff" } },
+                        "unknown_mutation_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "ready": { "type": "boolean" }
+                    }
+                },
+                "ConversationRecoveryRestoreAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "checkpoint_id", "checkpoint_digest"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "restore_checkpoint" },
+                        "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "checkpoint_digest": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationRecoveryCompactionAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "preview_id"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "apply_compaction" },
+                        "preview_id": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationRecoveryForkAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "source_turn_digest"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "fork_conversation" },
+                        "source_turn_digest": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationRecoveryCommandAction": {
+                    "oneOf": [
+                        { "$ref": "#/components/schemas/ConversationRecoveryCompactionAction" },
+                        { "$ref": "#/components/schemas/ConversationRecoveryRestoreAction" },
+                        { "$ref": "#/components/schemas/ConversationRecoveryForkAction" }
+                    ]
+                },
+                "ConversationRecoveryCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": { "payload": { "$ref": "#/components/schemas/ConversationRecoveryCommandAction" } }
+                        }
+                    ]
+                },
+                "CheckpointRestoreReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["checkpoint_id", "batch_id", "restored_file_count", "verification_stale"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string" },
+                        "batch_id": { "type": "string" },
+                        "restored_file_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "verification_stale": { "type": "boolean" }
+                    }
+                },
+                "CompactionReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["compaction_id", "attempt_id", "task_memory_id", "folded_event_count", "tool_output_projection_recorded"],
+                    "properties": {
+                        "compaction_id": { "type": "string", "maxLength": 512 },
+                        "attempt_id": { "type": "string", "maxLength": 512 },
+                        "task_memory_id": { "type": "string", "maxLength": 512 },
+                        "folded_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "tool_output_projection_recorded": { "type": "boolean" }
+                    }
+                },
+                "ConversationForkReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "session_id", "copied_message_count", "copied_external_provenance_count"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 512 },
+                        "session_id": { "type": "string", "maxLength": 512 },
+                        "copied_message_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "copied_external_provenance_count": { "type": "integer", "format": "uint64", "minimum": 0 }
+                    }
+                },
+                "ConversationRecoveryCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "action", "recovery", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "action": { "type": "string", "enum": ["apply_compaction", "restore_checkpoint", "fork_conversation"] },
+                        "compaction": { "oneOf": [{ "$ref": "#/components/schemas/CompactionReceipt" }, { "type": "null" }] },
+                        "restore": { "oneOf": [{ "$ref": "#/components/schemas/CheckpointRestoreReceipt" }, { "type": "null" }] },
+                        "fork": { "oneOf": [{ "$ref": "#/components/schemas/ConversationForkReceipt" }, { "type": "null" }] },
+                        "recovery": { "$ref": "#/components/schemas/ConversationRecoveryView" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
                 "DecimalSequence": {
                     "type": "string",
                     "maxLength": 20,
@@ -1694,7 +2012,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationClientAction": {
                     "type": "string",
-                    "enum": ["new_session", "focus_effort", "focus_model", "open_session_picker", "open_agent_workbench", "open_settings", "open_support"]
+                    "enum": ["preview_compaction", "new_session", "focus_effort", "focus_model", "open_session_picker", "open_agent_workbench", "open_settings", "open_support"]
                 },
                 "ApplicationCommandCatalogEntry": {
                     "type": "object",

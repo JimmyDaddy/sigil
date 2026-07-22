@@ -114,6 +114,83 @@ fn continuity_decodes_nested_owner_and_redacts_durable_scope_from_debug() {
 }
 
 #[test]
+fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
+    let review: crate::DesktopCompactionReview =
+        serde_json::from_value(serde_json::json!({
+            "preview_id": "compact-preview-1",
+            "folded_event_count": 8,
+            "retained_event_count": 4,
+            "admission": {
+                "kind": "ready",
+                "economics": {
+                    "before_input_tokens": 12_000,
+                    "target_input_tokens": 4_000,
+                    "context_window_tokens": 128_000,
+                    "output_tokens": 8_000,
+                    "safety_buffer_tokens": 2_000,
+                    "savings_tokens": 8_000,
+                    "savings_ratio_ppm": 666_666,
+                    "minimum_savings_tokens": 1_000,
+                    "minimum_savings_ratio_ppm": 100_000
+                }
+            }
+        }))
+        .expect("compaction review should decode");
+
+    assert_eq!(review.preview_id.as_deref(), Some("compact-preview-1"));
+    assert!(matches!(
+        review.admission,
+        crate::DesktopCompactionAdmission::Ready { .. }
+    ));
+    assert_eq!(
+        serde_json::to_value(crate::DesktopConversationRecoveryCommandAction::ApplyCompaction {
+            preview_id: "compact-preview-1".to_owned(),
+        })
+        .expect("compaction action should encode"),
+        serde_json::json!({
+            "kind": "apply_compaction",
+            "preview_id": "compact-preview-1"
+        })
+    );
+}
+
+#[test]
+fn recovery_receipt_decodes_compaction_without_weakening_durable_identity() {
+    let receipt: crate::DesktopConversationRecoveryCommandReceipt =
+        serde_json::from_value(serde_json::json!({
+            "command_id": "command-1",
+            "client_id": "desktop-1",
+            "session_id": "session-1",
+            "action": "apply_compaction",
+            "compaction": {
+                "compaction_id": "compaction-1",
+                "attempt_id": "attempt-1",
+                "task_memory_id": "memory-1",
+                "folded_event_count": 8,
+                "tool_output_projection_recorded": true
+            },
+            "recovery": {
+                "checkpoints": [],
+                "fork_points": [],
+                "through_stream_sequence": 42
+            },
+            "correlation_id": "correlation-1",
+            "replayed": false
+        }))
+        .expect("recovery receipt should decode");
+
+    assert_eq!(
+        receipt
+            .compaction
+            .as_ref()
+            .map(|compaction| compaction.compaction_id.as_str()),
+        Some("compaction-1")
+    );
+    assert_eq!(receipt.recovery.through_stream_sequence, 42);
+    assert!(!receipt.replayed);
+}
+
+#[test]
 fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
     let page: crate::DesktopConversationDisplayPage = serde_json::from_value(serde_json::json!({
         "schema_version": 1,

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopAgentActivityStatus, DesktopAgentActivityView, DesktopAgentHandoffStatus,
-    DesktopApplicationClientAction, DesktopApprovalDecisionRecord, DesktopContextWindowSource,
+    DesktopApplicationClientAction, DesktopApprovalDecisionRecord,
+    DesktopCheckpointRestoreReview as NativeCheckpointRestoreReview,
+    DesktopCompactionAdmission as NativeCompactionAdmission,
+    DesktopCompactionReview as NativeCompactionReview, DesktopContextWindowSource,
     DesktopConversationDisplayApprovalDecision as NativeConversationDisplayApprovalDecision,
     DesktopConversationDisplayAssistantPhase as NativeConversationDisplayAssistantPhase,
     DesktopConversationDisplayCheckpointConflictReason as NativeConversationDisplayCheckpointConflictReason,
@@ -18,7 +21,11 @@ use sigil_desktop::{
     DesktopConversationQueueCommandReceipt as NativeConversationQueueCommandReceipt,
     DesktopConversationQueueItem as NativeConversationQueueItem,
     DesktopConversationQueueItemKind as NativeConversationQueueItemKind,
-    DesktopConversationQueueView as NativeConversationQueueView, DesktopModelSelectionPolicy,
+    DesktopConversationQueueView as NativeConversationQueueView,
+    DesktopConversationRecoveryCommandAction as NativeConversationRecoveryCommandAction,
+    DesktopConversationRecoveryCommandActionKind as NativeConversationRecoveryCommandActionKind,
+    DesktopConversationRecoveryCommandReceipt as NativeConversationRecoveryCommandReceipt,
+    DesktopConversationRecoveryView as NativeConversationRecoveryView, DesktopModelSelectionPolicy,
     DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
     DesktopRunStatus, DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
     DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanStatus,
@@ -580,6 +587,222 @@ pub(crate) struct DesktopConversationQueueCommandReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) correlation_id: Option<String>,
     pub(crate) replayed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationRecoveryView {
+    pub(crate) checkpoints: Vec<DesktopCheckpointView>,
+    pub(crate) fork_points: Vec<DesktopConversationForkPointView>,
+    pub(crate) through_stream_sequence: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionReview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_id: Option<String>,
+    pub(crate) folded_event_count: usize,
+    pub(crate) retained_event_count: usize,
+    pub(crate) admission: DesktopCompactionAdmission,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DesktopCompactionAdmission {
+    Ready {
+        economics: DesktopCompactionEconomics,
+    },
+    NoFoldableHistory {
+        durable_message_count: usize,
+        configured_tail_message_count: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionEconomics {
+    pub(crate) before_input_tokens: u64,
+    pub(crate) target_input_tokens: u64,
+    pub(crate) context_window_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) safety_buffer_tokens: u64,
+    pub(crate) savings_tokens: u64,
+    pub(crate) savings_ratio_ppm: u32,
+    pub(crate) minimum_savings_tokens: u64,
+    pub(crate) minimum_savings_ratio_ppm: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointView {
+    pub(crate) checkpoint_id: String,
+    pub(crate) checkpoint_digest: String,
+    pub(crate) turn_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
+    pub(crate) files: Vec<DesktopCheckpointFileView>,
+    pub(crate) unknown_mutation_count: usize,
+    pub(crate) fully_restorable: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointFileView {
+    pub(crate) path: String,
+    pub(crate) restore_kind: &'static str,
+    pub(crate) availability: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationForkPointView {
+    pub(crate) source_turn_index: usize,
+    pub(crate) source_turn_digest: String,
+    pub(crate) source_boundary_stream_sequence: u64,
+    pub(crate) source_finalized_stream_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopCheckpointRestorePreviewInput {
+    pub(crate) session_id: String,
+    pub(crate) checkpoint_id: String,
+    pub(crate) checkpoint_digest: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointRestoreReview {
+    pub(crate) checkpoint_id: String,
+    pub(crate) checkpoint_digest: String,
+    pub(crate) files: Vec<DesktopCheckpointRestorePreviewFile>,
+    pub(crate) reverse_diffs: Vec<DesktopCheckpointReverseDiff>,
+    pub(crate) unknown_mutation_count: usize,
+    pub(crate) ready: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointRestorePreviewFile {
+    pub(crate) path: String,
+    pub(crate) restore_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_current_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) actual_current_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) conflict_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointReverseDiff {
+    pub(crate) path: String,
+    pub(crate) diff: String,
+    pub(crate) truncated: bool,
+    pub(crate) original_line_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopConversationRecoveryCommandInput {
+    pub(crate) session_id: String,
+    pub(crate) action: DesktopConversationRecoveryActionInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub(crate) enum DesktopConversationRecoveryActionInput {
+    ApplyCompaction {
+        preview_id: String,
+    },
+    RestoreCheckpoint {
+        checkpoint_id: String,
+        checkpoint_digest: String,
+    },
+    ForkConversation {
+        source_turn_digest: String,
+    },
+}
+
+impl DesktopConversationRecoveryActionInput {
+    pub(crate) fn into_native(self) -> NativeConversationRecoveryCommandAction {
+        match self {
+            Self::ApplyCompaction { preview_id } => {
+                NativeConversationRecoveryCommandAction::ApplyCompaction { preview_id }
+            }
+            Self::RestoreCheckpoint {
+                checkpoint_id,
+                checkpoint_digest,
+            } => NativeConversationRecoveryCommandAction::RestoreCheckpoint {
+                checkpoint_id,
+                checkpoint_digest,
+            },
+            Self::ForkConversation { source_turn_digest } => {
+                NativeConversationRecoveryCommandAction::ForkConversation { source_turn_digest }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationRecoveryCommandReceipt {
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
+    pub(crate) action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compaction: Option<DesktopCompactionReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restore: Option<DesktopCheckpointRestoreReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fork: Option<DesktopConversationForkReceipt>,
+    pub(crate) recovery: DesktopConversationRecoveryView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) replayed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionReceipt {
+    pub(crate) compaction_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) task_memory_id: String,
+    pub(crate) folded_event_count: usize,
+    pub(crate) tool_output_projection_recorded: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCheckpointRestoreReceipt {
+    pub(crate) checkpoint_id: String,
+    pub(crate) batch_id: String,
+    pub(crate) restored_file_count: usize,
+    pub(crate) verification_stale: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationForkReceipt {
+    pub(crate) session_ref: String,
+    pub(crate) session_id: String,
+    pub(crate) copied_message_count: usize,
+    pub(crate) copied_external_provenance_count: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1349,6 +1572,202 @@ fn conversation_queue_action_kind_label(
     }
 }
 
+impl From<NativeConversationRecoveryView> for DesktopConversationRecoveryView {
+    fn from(value: NativeConversationRecoveryView) -> Self {
+        Self {
+            checkpoints: value
+                .checkpoints
+                .into_iter()
+                .map(|checkpoint| DesktopCheckpointView {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    checkpoint_digest: checkpoint.checkpoint_digest,
+                    turn_index: checkpoint.turn_index,
+                    prompt: checkpoint.prompt,
+                    files: checkpoint
+                        .files
+                        .into_iter()
+                        .map(|file| DesktopCheckpointFileView {
+                            path: file.path,
+                            restore_kind: checkpoint_restore_kind_label(file.restore_kind),
+                            availability: checkpoint_availability_label(file.availability),
+                        })
+                        .collect(),
+                    unknown_mutation_count: checkpoint.unknown_mutation_count,
+                    fully_restorable: checkpoint.fully_restorable,
+                })
+                .collect(),
+            fork_points: value
+                .fork_points
+                .into_iter()
+                .map(|point| DesktopConversationForkPointView {
+                    source_turn_index: point.source_turn_index,
+                    source_turn_digest: point.source_turn_digest,
+                    source_boundary_stream_sequence: point.source_boundary_stream_sequence,
+                    source_finalized_stream_sequence: point.source_finalized_stream_sequence,
+                })
+                .collect(),
+            through_stream_sequence: value.through_stream_sequence,
+        }
+    }
+}
+
+impl From<NativeCompactionReview> for DesktopCompactionReview {
+    fn from(value: NativeCompactionReview) -> Self {
+        Self {
+            preview_id: value.preview_id,
+            folded_event_count: value.folded_event_count,
+            retained_event_count: value.retained_event_count,
+            admission: match value.admission {
+                NativeCompactionAdmission::Ready { economics } => {
+                    DesktopCompactionAdmission::Ready {
+                        economics: DesktopCompactionEconomics {
+                            before_input_tokens: economics.before_input_tokens,
+                            target_input_tokens: economics.target_input_tokens,
+                            context_window_tokens: economics.context_window_tokens,
+                            output_tokens: economics.output_tokens,
+                            safety_buffer_tokens: economics.safety_buffer_tokens,
+                            savings_tokens: economics.savings_tokens,
+                            savings_ratio_ppm: economics.savings_ratio_ppm,
+                            minimum_savings_tokens: economics.minimum_savings_tokens,
+                            minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
+                        },
+                    }
+                }
+                NativeCompactionAdmission::NoFoldableHistory {
+                    durable_message_count,
+                    configured_tail_message_count,
+                } => DesktopCompactionAdmission::NoFoldableHistory {
+                    durable_message_count,
+                    configured_tail_message_count,
+                },
+                NativeCompactionAdmission::Unavailable { reason } => {
+                    DesktopCompactionAdmission::Unavailable { reason }
+                }
+            },
+        }
+    }
+}
+
+impl From<NativeCheckpointRestoreReview> for DesktopCheckpointRestoreReview {
+    fn from(value: NativeCheckpointRestoreReview) -> Self {
+        Self {
+            checkpoint_id: value.checkpoint_id,
+            checkpoint_digest: value.checkpoint_digest,
+            files: value
+                .files
+                .into_iter()
+                .map(|file| DesktopCheckpointRestorePreviewFile {
+                    path: file.path,
+                    restore_kind: checkpoint_restore_kind_label(file.restore_kind),
+                    expected_current_hash: file.expected_current_hash,
+                    actual_current_hash: file.actual_current_hash,
+                    conflict_reason: file.conflict_reason.map(checkpoint_conflict_reason_label),
+                })
+                .collect(),
+            reverse_diffs: value
+                .reverse_diffs
+                .into_iter()
+                .map(|diff| DesktopCheckpointReverseDiff {
+                    path: diff.path,
+                    diff: diff.diff,
+                    truncated: diff.truncated,
+                    original_line_count: diff.original_line_count,
+                })
+                .collect(),
+            unknown_mutation_count: value.unknown_mutation_count,
+            ready: value.ready,
+        }
+    }
+}
+
+impl From<NativeConversationRecoveryCommandReceipt> for DesktopConversationRecoveryCommandReceipt {
+    fn from(value: NativeConversationRecoveryCommandReceipt) -> Self {
+        Self {
+            command_id: value.command_id,
+            client_id: value.client_id,
+            session_id: value.session_id,
+            action: conversation_recovery_action_kind_label(value.action),
+            compaction: value.compaction.map(|receipt| DesktopCompactionReceipt {
+                compaction_id: receipt.compaction_id,
+                attempt_id: receipt.attempt_id,
+                task_memory_id: receipt.task_memory_id,
+                folded_event_count: receipt.folded_event_count,
+                tool_output_projection_recorded: receipt.tool_output_projection_recorded,
+            }),
+            restore: value
+                .restore
+                .map(|receipt| DesktopCheckpointRestoreReceipt {
+                    checkpoint_id: receipt.checkpoint_id,
+                    batch_id: receipt.batch_id,
+                    restored_file_count: receipt.restored_file_count,
+                    verification_stale: receipt.verification_stale,
+                }),
+            fork: value.fork.map(|receipt| DesktopConversationForkReceipt {
+                session_ref: receipt.session_ref,
+                session_id: receipt.session_id,
+                copied_message_count: receipt.copied_message_count,
+                copied_external_provenance_count: receipt.copied_external_provenance_count,
+            }),
+            recovery: value.recovery.into(),
+            correlation_id: value.correlation_id,
+            replayed: value.replayed,
+        }
+    }
+}
+
+fn checkpoint_restore_kind_label(
+    value: sigil_desktop::DesktopCheckpointRestoreKind,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopCheckpointRestoreKind::RestoreContent => "restore_content",
+        sigil_desktop::DesktopCheckpointRestoreKind::RemoveCreatedFile => "remove_created_file",
+    }
+}
+
+fn checkpoint_availability_label(
+    value: sigil_desktop::DesktopCheckpointFileAvailability,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopCheckpointFileAvailability::Restorable => "restorable",
+        sigil_desktop::DesktopCheckpointFileAvailability::Sensitive => "sensitive",
+        sigil_desktop::DesktopCheckpointFileAvailability::Unsupported => "unsupported",
+        sigil_desktop::DesktopCheckpointFileAvailability::Unavailable => "unavailable",
+    }
+}
+
+fn checkpoint_conflict_reason_label(
+    value: sigil_desktop::DesktopCheckpointRestoreConflictReason,
+) -> &'static str {
+    match value {
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::WorkspaceMismatch => {
+            "workspace_mismatch"
+        }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::CurrentHashMismatch => {
+            "current_hash_mismatch"
+        }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::ArtifactUnavailable => {
+            "artifact_unavailable"
+        }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::SensitiveSnapshot => {
+            "sensitive_snapshot"
+        }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::UnsupportedSnapshot => {
+            "unsupported_snapshot"
+        }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::InvalidBinding => "invalid_binding",
+    }
+}
+
+fn conversation_recovery_action_kind_label(
+    value: NativeConversationRecoveryCommandActionKind,
+) -> &'static str {
+    match value {
+        NativeConversationRecoveryCommandActionKind::ApplyCompaction => "apply_compaction",
+        NativeConversationRecoveryCommandActionKind::RestoreCheckpoint => "restore_checkpoint",
+        NativeConversationRecoveryCommandActionKind::ForkConversation => "fork_conversation",
+    }
+}
+
 impl From<DesktopSessionTranscriptPage> for DesktopTranscriptPage {
     fn from(value: DesktopSessionTranscriptPage) -> Self {
         Self {
@@ -1780,6 +2199,7 @@ fn agent_handoff_status_label(status: DesktopAgentHandoffStatus) -> &'static str
 
 fn application_client_action_label(value: DesktopApplicationClientAction) -> &'static str {
     match value {
+        DesktopApplicationClientAction::PreviewCompaction => "preview_compaction",
         DesktopApplicationClientAction::NewSession => "new_session",
         DesktopApplicationClientAction::FocusEffort => "focus_effort",
         DesktopApplicationClientAction::FocusModel => "focus_model",

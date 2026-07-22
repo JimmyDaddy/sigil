@@ -7,6 +7,12 @@ pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
     TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
 };
+use sigil_runtime::application_compaction::{
+    ApplicationCompactionAdmission, ApplicationCompactionReview,
+};
+use sigil_runtime::application_recovery::{
+    ApplicationCheckpointRestoreReview, ApplicationConversationRecoveryView,
+};
 use sigil_runtime::conversation_display::{
     ConversationDisplayApprovalDecisionV1, ConversationDisplayAssistantPhaseV1,
     ConversationDisplayCheckpointConflictReasonV1, ConversationDisplayCheckpointOutcomeV1,
@@ -20,7 +26,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 6;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 7;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +62,8 @@ pub struct HttpServerCapabilities {
     pub run_context: bool,
     /// Bound sessions expose a safe, bounded child-agent lifecycle and handoff projection.
     pub agent_activity: bool,
+    /// Bound sessions expose exact compact/checkpoint/fork recovery controls.
+    pub conversation_recovery: bool,
     /// Redacted local diagnostics and an explicit private support-bundle export are available.
     pub support_diagnostics: bool,
 }
@@ -76,6 +84,7 @@ impl HttpServerCapabilities {
             verification: true,
             run_context: true,
             agent_activity: true,
+            conversation_recovery: true,
             support_diagnostics: true,
         }
     }
@@ -1189,6 +1198,7 @@ pub enum HttpContextWindowSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpApplicationClientAction {
+    PreviewCompaction,
     NewSession,
     FocusEffort,
     FocusModel,
@@ -1673,6 +1683,428 @@ pub struct HttpConversationQueueCommandReceipt {
 }
 
 impl HttpConversationQueueCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Restore operation applied to one controlled checkpoint file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCheckpointRestoreKind {
+    RestoreContent,
+    RemoveCreatedFile,
+}
+
+/// Whether durable evidence can restore one controlled checkpoint file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCheckpointFileAvailability {
+    Restorable,
+    Sensitive,
+    Unsupported,
+    Unavailable,
+}
+
+/// Bounded renderer-safe file binding for one checkpoint row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointFileView {
+    pub path: String,
+    pub restore_kind: HttpCheckpointRestoreKind,
+    pub availability: HttpCheckpointFileAvailability,
+}
+
+/// Exact renderer-safe checkpoint binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointView {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    pub turn_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub files: Vec<HttpCheckpointFileView>,
+    pub unknown_mutation_count: usize,
+    pub fully_restorable: bool,
+}
+
+/// Exact finalized-turn binding available for a conversation-only fork.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationForkPointView {
+    pub source_turn_index: usize,
+    pub source_turn_digest: String,
+    pub source_boundary_stream_sequence: u64,
+    pub source_finalized_stream_sequence: u64,
+}
+
+/// Durable checkpoint/fork projection for one bound adapter session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationRecoveryView {
+    pub checkpoints: Vec<HttpCheckpointView>,
+    pub fork_points: Vec<HttpConversationForkPointView>,
+    pub through_stream_sequence: u64,
+}
+
+/// Exact token economics shown before explicit portable compaction apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCompactionEconomics {
+    pub before_input_tokens: u64,
+    pub target_input_tokens: u64,
+    pub context_window_tokens: u64,
+    pub output_tokens: u64,
+    pub safety_buffer_tokens: u64,
+    pub savings_tokens: u64,
+    pub savings_ratio_ppm: u32,
+    pub minimum_savings_tokens: u64,
+    pub minimum_savings_ratio_ppm: u32,
+}
+
+/// Typed portable-compaction admission returned by a read-only preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum HttpCompactionAdmission {
+    Ready {
+        economics: HttpCompactionEconomics,
+    },
+    NoFoldableHistory {
+        durable_message_count: usize,
+        configured_tail_message_count: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// Read-only exact compaction review. `preview_id` is process-local and required for apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCompactionReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_id: Option<String>,
+    pub folded_event_count: usize,
+    pub retained_event_count: usize,
+    pub admission: HttpCompactionAdmission,
+}
+
+impl From<ApplicationCompactionReview> for HttpCompactionReview {
+    fn from(review: ApplicationCompactionReview) -> Self {
+        Self {
+            preview_id: review.preview_id,
+            folded_event_count: review.folded_event_count,
+            retained_event_count: review.retained_event_count,
+            admission: match review.admission {
+                ApplicationCompactionAdmission::Ready { economics } => {
+                    HttpCompactionAdmission::Ready {
+                        economics: HttpCompactionEconomics {
+                            before_input_tokens: economics.before_input_tokens,
+                            target_input_tokens: economics.target_input_tokens,
+                            context_window_tokens: economics.context_window_tokens,
+                            output_tokens: economics.output_tokens,
+                            safety_buffer_tokens: economics.safety_buffer_tokens,
+                            savings_tokens: economics.savings_tokens,
+                            savings_ratio_ppm: economics.savings_ratio_ppm,
+                            minimum_savings_tokens: economics.minimum_savings_tokens,
+                            minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
+                        },
+                    }
+                }
+                ApplicationCompactionAdmission::NoFoldableHistory {
+                    durable_message_count,
+                    configured_tail_message_count,
+                } => HttpCompactionAdmission::NoFoldableHistory {
+                    durable_message_count,
+                    configured_tail_message_count,
+                },
+                ApplicationCompactionAdmission::Unavailable { reason } => {
+                    HttpCompactionAdmission::Unavailable { reason }
+                }
+            },
+        }
+    }
+}
+
+impl From<ApplicationConversationRecoveryView> for HttpConversationRecoveryView {
+    fn from(view: ApplicationConversationRecoveryView) -> Self {
+        Self {
+            checkpoints: view
+                .checkpoints
+                .into_iter()
+                .map(|checkpoint| HttpCheckpointView {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    checkpoint_digest: checkpoint.checkpoint_digest,
+                    turn_index: checkpoint.turn_index,
+                    prompt: checkpoint.prompt,
+                    files: checkpoint
+                        .files
+                        .into_iter()
+                        .map(|file| HttpCheckpointFileView {
+                            path: file.path.to_string_lossy().into_owned(),
+                            restore_kind: match file.restore_kind {
+                                sigil_kernel::ControlledCheckpointRestoreKind::RestoreContent => {
+                                    HttpCheckpointRestoreKind::RestoreContent
+                                }
+                                sigil_kernel::ControlledCheckpointRestoreKind::RemoveCreatedFile => {
+                                    HttpCheckpointRestoreKind::RemoveCreatedFile
+                                }
+                            },
+                            availability: match file.availability {
+                                sigil_kernel::ControlledCheckpointFileAvailability::Restorable => {
+                                    HttpCheckpointFileAvailability::Restorable
+                                }
+                                sigil_kernel::ControlledCheckpointFileAvailability::Sensitive => {
+                                    HttpCheckpointFileAvailability::Sensitive
+                                }
+                                sigil_kernel::ControlledCheckpointFileAvailability::Unsupported => {
+                                    HttpCheckpointFileAvailability::Unsupported
+                                }
+                                sigil_kernel::ControlledCheckpointFileAvailability::Unavailable => {
+                                    HttpCheckpointFileAvailability::Unavailable
+                                }
+                            },
+                        })
+                        .collect(),
+                    unknown_mutation_count: checkpoint.unknown_mutation_count,
+                    fully_restorable: checkpoint.fully_restorable,
+                })
+                .collect(),
+            fork_points: view
+                .fork_points
+                .into_iter()
+                .map(|point| HttpConversationForkPointView {
+                    source_turn_index: point.source_turn_index,
+                    source_turn_digest: point.source_turn_digest,
+                    source_boundary_stream_sequence: point.source_boundary_stream_sequence,
+                    source_finalized_stream_sequence: point.source_finalized_stream_sequence,
+                })
+                .collect(),
+            through_stream_sequence: view.through_stream_sequence,
+        }
+    }
+}
+
+/// Exact checkpoint binding submitted for read-only restore preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointRestoreRequest {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+}
+
+impl From<&HttpCheckpointRestoreRequest> for sigil_kernel::ControlledCheckpointRestoreRequest {
+    fn from(request: &HttpCheckpointRestoreRequest) -> Self {
+        Self {
+            checkpoint_id: request.checkpoint_id.clone(),
+            checkpoint_digest: request.checkpoint_digest.clone(),
+        }
+    }
+}
+
+/// File-level conflict direction returned by a fresh restore preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCheckpointRestoreConflictReason {
+    WorkspaceMismatch,
+    CurrentHashMismatch,
+    ArtifactUnavailable,
+    SensitiveSnapshot,
+    UnsupportedSnapshot,
+    InvalidBinding,
+}
+
+/// Fresh file preflight for one checkpoint restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointRestorePreviewFile {
+    pub path: String,
+    pub restore_kind: HttpCheckpointRestoreKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_current_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_current_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reason: Option<HttpCheckpointRestoreConflictReason>,
+}
+
+/// Bounded reverse diff captured for one controlled checkpoint file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointReverseDiff {
+    pub path: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub original_line_count: usize,
+}
+
+/// Exact restore review returned without mutating durable or workspace truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointRestoreReview {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    pub files: Vec<HttpCheckpointRestorePreviewFile>,
+    pub reverse_diffs: Vec<HttpCheckpointReverseDiff>,
+    pub unknown_mutation_count: usize,
+    pub ready: bool,
+}
+
+impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
+    fn from(review: ApplicationCheckpointRestoreReview) -> Self {
+        let preview = review.preview;
+        Self {
+            checkpoint_id: preview.checkpoint_id,
+            checkpoint_digest: preview.checkpoint_digest,
+            files: preview
+                .files
+                .into_iter()
+                .map(|file| HttpCheckpointRestorePreviewFile {
+                    path: file.path.to_string_lossy().into_owned(),
+                    restore_kind: match file.restore_kind {
+                        sigil_kernel::ControlledCheckpointRestoreKind::RestoreContent => {
+                            HttpCheckpointRestoreKind::RestoreContent
+                        }
+                        sigil_kernel::ControlledCheckpointRestoreKind::RemoveCreatedFile => {
+                            HttpCheckpointRestoreKind::RemoveCreatedFile
+                        }
+                    },
+                    expected_current_hash: file.expected_current_hash,
+                    actual_current_hash: file.actual_current_hash,
+                    conflict_reason: file.conflict_reason.map(|reason| match reason {
+                        sigil_kernel::CheckpointRestoreConflictReason::WorkspaceMismatch => {
+                            HttpCheckpointRestoreConflictReason::WorkspaceMismatch
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::CurrentHashMismatch => {
+                            HttpCheckpointRestoreConflictReason::CurrentHashMismatch
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::ArtifactUnavailable => {
+                            HttpCheckpointRestoreConflictReason::ArtifactUnavailable
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::SensitiveSnapshot => {
+                            HttpCheckpointRestoreConflictReason::SensitiveSnapshot
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::UnsupportedSnapshot => {
+                            HttpCheckpointRestoreConflictReason::UnsupportedSnapshot
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::InvalidBinding => {
+                            HttpCheckpointRestoreConflictReason::InvalidBinding
+                        }
+                    }),
+                })
+                .collect(),
+            reverse_diffs: review
+                .reverse_diffs
+                .into_iter()
+                .map(|diff| HttpCheckpointReverseDiff {
+                    path: diff.path.to_string_lossy().into_owned(),
+                    diff: diff.diff,
+                    truncated: diff.truncated,
+                    original_line_count: diff.original_line_count,
+                })
+                .collect(),
+            unknown_mutation_count: preview.unknown_mutation_count,
+            ready: preview.ready,
+        }
+    }
+}
+
+/// Exact recovery mutation requested under an envelope command id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum HttpConversationRecoveryCommandAction {
+    ApplyCompaction {
+        preview_id: String,
+    },
+    RestoreCheckpoint {
+        checkpoint_id: String,
+        checkpoint_digest: String,
+    },
+    ForkConversation {
+        source_turn_digest: String,
+    },
+}
+
+/// Stable action kind echoed by a recovery command receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpConversationRecoveryCommandActionKind {
+    ApplyCompaction,
+    RestoreCheckpoint,
+    ForkConversation,
+}
+
+impl HttpConversationRecoveryCommandAction {
+    #[must_use]
+    pub fn kind(&self) -> HttpConversationRecoveryCommandActionKind {
+        match self {
+            Self::ApplyCompaction { .. } => {
+                HttpConversationRecoveryCommandActionKind::ApplyCompaction
+            }
+            Self::RestoreCheckpoint { .. } => {
+                HttpConversationRecoveryCommandActionKind::RestoreCheckpoint
+            }
+            Self::ForkConversation { .. } => {
+                HttpConversationRecoveryCommandActionKind::ForkConversation
+            }
+        }
+    }
+}
+
+/// Durable portable-compaction receipt fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCompactionReceipt {
+    pub compaction_id: String,
+    pub attempt_id: String,
+    pub task_memory_id: String,
+    pub folded_event_count: usize,
+    pub tool_output_projection_recorded: bool,
+}
+
+/// Durable restore-specific receipt fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpCheckpointRestoreReceipt {
+    pub checkpoint_id: String,
+    pub batch_id: String,
+    pub restored_file_count: usize,
+    pub verification_stale: bool,
+}
+
+/// Durable fork-specific receipt fields. The returned reference must be reopened explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationForkReceipt {
+    pub session_ref: String,
+    pub session_id: String,
+    pub copied_message_count: usize,
+    pub copied_external_provenance_count: usize,
+}
+
+/// Durable idempotent receipt for one restore or conversation-fork command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationRecoveryCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub action: HttpConversationRecoveryCommandActionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<HttpCompactionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<HttpCheckpointRestoreReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<HttpConversationForkReceipt>,
+    pub recovery: HttpConversationRecoveryView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub replayed: bool,
+}
+
+impl HttpConversationRecoveryCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

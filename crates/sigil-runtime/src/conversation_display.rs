@@ -10,12 +10,12 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AssistantMessageKind, CheckpointRestoreConflictReason, CheckpointRestored, ControlEntry,
-    ConversationInputPromotedEntry, ConversationRunLifecycleRecordV1,
-    ConversationRunTerminalStatusV1, DurableEventType, JsonlSessionStore, MessageRole,
-    ModelMessage, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, TypedDomainEvent, conversation_run_lifecycle_record_from_stream,
-    safe_persistence_text,
+    AssistantMessageKind, CheckpointRestoreConflictReason, CheckpointRestored, CompactionAppliedV2,
+    ControlEntry, ConversationForked, ConversationInputPromotedEntry,
+    ConversationRunLifecycleRecordV1, ConversationRunTerminalStatusV1, DurableEventType,
+    JsonlSessionStore, MessageRole, ModelMessage, SessionLogEntry, SessionStreamRecord,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, TypedDomainEvent,
+    conversation_run_lifecycle_record_from_stream, safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -619,6 +619,30 @@ fn project_record(
         // `session_log_entry` already performed the fail-closed critical decode.
         return Ok(Vec::new());
     };
+    if event_type == DurableEventType::CompactionAppliedV2 {
+        let _: CompactionAppliedV2 = serde_json::from_value(record.stored_event().payload.clone())
+            .context("failed to decode context compaction display source")?;
+        return Ok(vec![new_notice_item(
+            expected_scope,
+            record,
+            active_run_id(active_run),
+            "Context compaction applied. Durable task memory now carries the folded history.",
+        )]);
+    }
+    if event_type == DurableEventType::ConversationForked {
+        let fork: ConversationForked =
+            serde_json::from_value(record.stored_event().payload.clone())
+                .context("failed to decode conversation fork display source")?;
+        return Ok(vec![new_notice_item(
+            expected_scope,
+            record,
+            active_run_id(active_run),
+            &format!(
+                "Conversation fork created from turn {}. The original conversation and workspace files were not changed.",
+                fork.source_turn_index
+            ),
+        )]);
+    }
     if event_type == DurableEventType::CheckpointRestored {
         let _: CheckpointRestored =
             serde_json::from_value(record.stored_event().payload.clone())
@@ -657,6 +681,29 @@ fn project_record(
         )]);
     }
     Ok(Vec::new())
+}
+
+fn new_notice_item(
+    expected_scope: &str,
+    record: &SessionStreamRecord,
+    run_id: Option<String>,
+    text: &str,
+) -> ConversationDisplayItemV1 {
+    let text = project_text(text);
+    new_item(
+        expected_scope,
+        record,
+        0,
+        ConversationDisplayItemKindV1::Notice,
+        ConversationDisplaySourceV1::DurableRunEvent,
+        run_id,
+        ConversationDisplayStatusV1::Completed,
+        ConversationDisplayContentV1::Notice {
+            text: text.text,
+            truncated: text.truncated,
+            original_content_bytes: text.original_bytes,
+        },
+    )
 }
 
 fn project_lifecycle(

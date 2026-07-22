@@ -9,22 +9,25 @@ use crate::{
     dto::{
         DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION, DESKTOP_CONVERSATION_QUEUE_SCHEMA_VERSION,
         DESKTOP_HTTP_PROTOCOL_VERSION, DesktopApprovalCommandReceipt,
-        DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCommandEnvelope,
+        DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCheckpointRestoreRequest,
+        DesktopCheckpointRestoreReview, DesktopCommandEnvelope, DesktopCompactionReview,
         DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
         DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
-        DesktopConversationQueueCommandRequest, DesktopConversationQueueView, DesktopErrorResponse,
-        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
-        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
-        DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
-        DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
-        DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
-        DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteReceipt,
-        DesktopSessionInvalidSourceDeleteRequest, DesktopSessionListResponse,
-        DesktopSessionMutationReceipt, DesktopSessionOpenRequest, DesktopSessionQuarantineReceipt,
-        DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopSessionSnapshot,
-        DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
-        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
-        DesktopVerificationRerunRequest, DesktopVerificationView,
+        DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
+        DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
+        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopRunCancelCommandReceipt,
+        DesktopRunCancelRequest, DesktopRunSnapshot, DesktopRunStartCommandReceipt,
+        DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
+        DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanRequest,
+        DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogPage, DesktopSessionContinuityView,
+        DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+        DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
+        DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
+        DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
+        DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
+        DesktopSupportBundleExport, DesktopSupportDoctorReport, DesktopTranscriptQuery,
+        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
+        DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -368,6 +371,95 @@ impl DesktopHttpClient {
         if receipt.generation != receipt.queue.generation {
             return Err(DesktopClientError::InvalidResponse);
         }
+        Ok(receipt)
+    }
+
+    /// Reads exact durable checkpoint and conversation-fork choices.
+    pub async fn conversation_recovery(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopConversationRecoveryView, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let view: DesktopConversationRecoveryView = self
+            .get_json(
+                self.route(["sessions", session_id, "recovery"])?,
+                StatusCode::OK,
+            )
+            .await?;
+        validate_conversation_recovery_view(&view)?;
+        Ok(view)
+    }
+
+    /// Revalidates one checkpoint and returns a bounded reverse-diff preview.
+    pub async fn checkpoint_restore_review(
+        &self,
+        session_id: &str,
+        request: DesktopCheckpointRestoreRequest,
+    ) -> Result<DesktopCheckpointRestoreReview, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_recovery_token(&request.checkpoint_id)?;
+        validate_recovery_token(&request.checkpoint_digest)?;
+        let review: DesktopCheckpointRestoreReview = self
+            .post_json(
+                self.route(["sessions", session_id, "recovery", "checkpoint-preview"])?,
+                &request,
+                StatusCode::OK,
+            )
+            .await?;
+        if review.checkpoint_id != request.checkpoint_id
+            || review.checkpoint_digest != request.checkpoint_digest
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(review)
+    }
+
+    /// Builds one exact portable compaction preview without applying it.
+    pub async fn conversation_compaction_review(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopCompactionReview, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let review: DesktopCompactionReview = self
+            .post_json(
+                self.route(["sessions", session_id, "recovery", "compaction-preview"])?,
+                &serde_json::json!({}),
+                StatusCode::OK,
+            )
+            .await?;
+        if let Some(preview_id) = review.preview_id.as_deref() {
+            validate_recovery_token(preview_id).map_err(|_| DesktopClientError::InvalidResponse)?;
+        }
+        Ok(review)
+    }
+
+    /// Applies one exact restore or conversation fork under an idempotent command identity.
+    pub async fn command_conversation_recovery(
+        &self,
+        session_id: &str,
+        action: DesktopConversationRecoveryCommandAction,
+    ) -> Result<DesktopConversationRecoveryCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_conversation_recovery_action(&action)?;
+        let expected_action = action.kind();
+        let command = self.command(session_id, None, action);
+        let expected_command_id = command.command_id.clone();
+        let expected_client_id = command.client_id.clone();
+        let receipt: DesktopConversationRecoveryCommandReceipt = self
+            .post_json(
+                self.route(["sessions", session_id, "recovery", "commands"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != expected_command_id
+            || receipt.client_id != expected_client_id
+            || receipt.session_id != session_id
+            || receipt.action != expected_action
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_conversation_recovery_view(&receipt.recovery)?;
         Ok(receipt)
     }
 
@@ -834,6 +926,62 @@ fn validate_conversation_queue_view(
         }
     }
     Ok(())
+}
+
+fn validate_conversation_recovery_view(
+    view: &DesktopConversationRecoveryView,
+) -> Result<(), DesktopClientError> {
+    if view.checkpoints.len() > 256 || view.fork_points.len() > 256 {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    for checkpoint in &view.checkpoints {
+        validate_recovery_token(&checkpoint.checkpoint_id)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        validate_recovery_token(&checkpoint.checkpoint_digest)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        if checkpoint.turn_index == 0 || checkpoint.files.len() > 256 {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    for point in &view.fork_points {
+        validate_recovery_token(&point.source_turn_digest)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        if point.source_turn_index == 0
+            || point.source_boundary_stream_sequence == 0
+            || point.source_finalized_stream_sequence < point.source_boundary_stream_sequence
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    Ok(())
+}
+
+fn validate_conversation_recovery_action(
+    action: &DesktopConversationRecoveryCommandAction,
+) -> Result<(), DesktopClientError> {
+    match action {
+        DesktopConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
+            validate_recovery_token(preview_id)
+        }
+        DesktopConversationRecoveryCommandAction::RestoreCheckpoint {
+            checkpoint_id,
+            checkpoint_digest,
+        } => {
+            validate_recovery_token(checkpoint_id)?;
+            validate_recovery_token(checkpoint_digest)
+        }
+        DesktopConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
+            validate_recovery_token(source_turn_digest)
+        }
+    }
+}
+
+fn validate_recovery_token(value: &str) -> Result<(), DesktopClientError> {
+    if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        Err(DesktopClientError::InvalidRoute)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_conversation_queue_command(

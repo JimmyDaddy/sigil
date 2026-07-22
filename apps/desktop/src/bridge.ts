@@ -12,6 +12,12 @@ import type {
   ConversationQueueCommandInput,
   ConversationQueueCommandReceipt,
   ConversationQueueView,
+  CompactionReview,
+  CheckpointRestorePreviewInput,
+  CheckpointRestoreReview,
+  ConversationRecoveryCommandInput,
+  ConversationRecoveryCommandReceipt,
+  ConversationRecoveryView,
   ConversationDisplayPage,
   ConversationDisplayRequest,
   DesktopBootstrap,
@@ -99,6 +105,16 @@ export interface DesktopBridge {
     workspaceId: string,
     input: ConversationQueueCommandInput,
   ): Promise<ConversationQueueCommandReceipt>;
+  conversationRecovery(workspaceId: string, sessionId: string): Promise<ConversationRecoveryView>;
+  conversationCompactionPreview(workspaceId: string, sessionId: string): Promise<CompactionReview>;
+  checkpointRestorePreview(
+    workspaceId: string,
+    input: CheckpointRestorePreviewInput,
+  ): Promise<CheckpointRestoreReview>;
+  commandConversationRecovery(
+    workspaceId: string,
+    input: ConversationRecoveryCommandInput,
+  ): Promise<ConversationRecoveryCommandReceipt>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
   agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
   startRun(
@@ -200,6 +216,17 @@ export const desktopBridge: DesktopBridge = {
     invoke<ConversationQueueView>("desktop_conversation_queue", { workspaceId, sessionId }),
   commandConversationQueue: (workspaceId, input) =>
     invoke<ConversationQueueCommandReceipt>("desktop_command_conversation_queue", {
+      workspaceId,
+      input,
+    }),
+  conversationRecovery: (workspaceId, sessionId) =>
+    invoke<ConversationRecoveryView>("desktop_conversation_recovery", { workspaceId, sessionId }),
+  conversationCompactionPreview: (workspaceId, sessionId) =>
+    invoke<CompactionReview>("desktop_conversation_compaction_preview", { workspaceId, sessionId }),
+  checkpointRestorePreview: (workspaceId, input) =>
+    invoke<CheckpointRestoreReview>("desktop_checkpoint_restore_preview", { workspaceId, input }),
+  commandConversationRecovery: (workspaceId, input) =>
+    invoke<ConversationRecoveryCommandReceipt>("desktop_command_conversation_recovery", {
       workspaceId,
       input,
     }),

@@ -24,19 +24,23 @@ use crate::{
     },
     driver::{
         HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
-        HttpConversationQueueDriverError, HttpQueuedRunDriverStart, HttpRunDriver,
+        HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
+        HttpConversationRecoveryDriverError, HttpQueuedRunDriverStart, HttpRunDriver,
         HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
         HttpSessionOpenBindingError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
-        HttpApprovalDecisionRequest, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
+        HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest, HttpCheckpointRestoreReview,
+        HttpCompactionReview, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
         HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
         HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
-        HttpConversationQueuePromptMaterial, HttpConversationQueueView, HttpForegroundRunOwner,
-        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
-        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
+        HttpConversationQueuePromptMaterial, HttpConversationQueueView,
+        HttpConversationRecoveryCommandAction, HttpConversationRecoveryCommandReceipt,
+        HttpConversationRecoveryView, HttpForegroundRunOwner, HttpPendingApproval,
+        HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
+        HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
+        HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
         HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
         HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
         HttpVerificationRerunRequest, HttpVerificationView,
@@ -50,6 +54,7 @@ const MAX_SESSION_OPEN_ID_BYTES: usize = 512;
 const MAX_SESSION_OPEN_LABEL_BYTES: usize = 160;
 const MAX_CONVERSATION_QUEUE_ID_BYTES: usize = 512;
 const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_CONVERSATION_RECOVERY_ID_BYTES: usize = 512;
 const QUEUE_INTERRUPT_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
 
@@ -156,6 +161,18 @@ pub enum HttpRegistryError {
     /// Durable queue truth or its application owner is unavailable.
     #[error("conversation queue is unavailable")]
     ConversationQueueUnavailable,
+    /// The recovery command contains an empty or over-bounded exact identity.
+    #[error("conversation recovery command is invalid")]
+    ConversationRecoveryInvalidCommand,
+    /// The checkpoint digest or fork turn digest no longer matches durable truth.
+    #[error("conversation recovery binding is stale")]
+    ConversationRecoveryStaleBinding,
+    /// Fresh workspace or lifecycle truth prevents the requested recovery mutation.
+    #[error("conversation recovery conflicts with current durable state")]
+    ConversationRecoveryConflict,
+    /// Durable recovery truth or its application owner is unavailable.
+    #[error("conversation recovery is unavailable")]
+    ConversationRecoveryUnavailable,
     /// The driver unwound after the registry had published a tentative operation.
     #[error("http driver panicked during {operation} for run {run_id}")]
     DriverPanicked {
@@ -729,6 +746,145 @@ impl HttpSessionRunRegistry {
             run_id: session_id.to_owned(),
             message: error.message,
         })
+    }
+
+    /// Projects checkpoint restore and conversation-fork choices from durable session truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the adapter session is unknown or the application owner cannot
+    /// validate the durable recovery stream.
+    pub fn conversation_recovery(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpConversationRecoveryView, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.conversation_recovery_view(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "conversation recovery view",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(recovery_driver_registry_error)
+    }
+
+    /// Produces a fresh reverse-diff and conflict review without mutating workspace truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown sessions, active durable mutations, stale checkpoint
+    /// bindings, or unavailable application recovery state.
+    pub fn checkpoint_restore_review(
+        &self,
+        session_id: &str,
+        request: HttpCheckpointRestoreRequest,
+    ) -> Result<HttpCheckpointRestoreReview, HttpRegistryError> {
+        validate_checkpoint_restore_request(&request)?;
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.checkpoint_restore_review(&session, &request)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "checkpoint restore preview",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(recovery_driver_registry_error);
+        guard.finish(false);
+        result
+    }
+
+    /// Builds one fresh portable compaction preview without appending a lifecycle attempt.
+    ///
+    /// The driver retains exact process-local target material only when the returned admission is
+    /// ready. A later apply must echo that opaque preview binding through the durable command
+    /// route.
+    pub fn conversation_compaction_review(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpCompactionReview, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.conversation_compaction_review(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "conversation compaction preview",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(recovery_driver_registry_error);
+        guard.finish(false);
+        result
+    }
+
+    /// Applies one exactly-bound compaction, restore, or conversation fork under durable mutation
+    /// exclusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for protocol or identity conflicts, stale recovery bindings, active
+    /// session ownership, fresh restore conflicts, or unavailable lifecycle state.
+    pub fn command_conversation_recovery(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpConversationRecoveryCommandAction>,
+    ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        validate_conversation_recovery_command(&command.payload)?;
+
+        let request = HttpReservedCommand::recovery(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_recovery(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let action = command.payload.kind();
+        let result = (|| {
+            let session = self.get_session(session_id)?;
+            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+            let driver_command = HttpConversationRecoveryDriverCommand {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                action: command.payload.clone(),
+            };
+            let output = catch_unwind(AssertUnwindSafe(|| {
+                self.driver
+                    .mutate_conversation_recovery(&session, &driver_command)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "conversation recovery mutation",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(recovery_driver_registry_error);
+            guard.finish(false);
+            let output = output?;
+            Ok(HttpConversationRecoveryCommandReceipt {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                session_id: command.session_id.clone(),
+                action,
+                compaction: output.compaction,
+                restore: output.restore,
+                fork: output.fork,
+                recovery: output.recovery,
+                correlation_id: command.correlation_id.clone(),
+                replayed: false,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::Recovery(Box::new(result.clone())))?;
+        result
     }
 
     /// Projects the bounded durable follow-up queue for one adapter session.
@@ -2163,6 +2319,7 @@ enum HttpCommandKind {
     Approval,
     Verification,
     Queue,
+    Recovery,
 }
 
 impl HttpCommandKind {
@@ -2173,6 +2330,7 @@ impl HttpCommandKind {
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Queue => b"queue",
+            Self::Recovery => b"recovery",
         }
     }
 
@@ -2183,6 +2341,7 @@ impl HttpCommandKind {
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Queue => "queue",
+            Self::Recovery => "recovery",
         }
     }
 }
@@ -2229,6 +2388,13 @@ impl HttpReservedCommand {
     ) -> Result<Self, HttpRegistryError> {
         let encoded = secret_safe_queue_command_fingerprint_payload(command)?;
         Self::new_encoded(HttpCommandKind::Queue, &[path_session_id], &encoded)
+    }
+
+    fn recovery(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpConversationRecoveryCommandAction>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::Recovery, &[path_session_id], command)
     }
 
     fn new<T>(
@@ -2281,6 +2447,7 @@ enum HttpCommandCompletion {
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
+    Recovery(Box<Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError>>),
     Aborted,
 }
 
@@ -2337,11 +2504,23 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Queue(Box::new(receipt))
             }
+            Self::Recovery(result) if result.is_ok() => {
+                let mut receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful recovery completion should contain a receipt")
+                    .clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Recovery(Box::new(receipt))
+            }
             Self::Start(Err(_))
             | Self::Cancel(Err(_))
             | Self::Approval(Err(_))
             | Self::Verification(_)
             | Self::Queue(_)
+            | Self::Recovery(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
         }
     }
@@ -2355,6 +2534,9 @@ impl HttpCommandCompletion {
                 Self::Verification(Box::new(Ok(*receipt)))
             }
             HttpStoredCommandCompletion::Queue(receipt) => Self::Queue(Box::new(Ok(*receipt))),
+            HttpStoredCommandCompletion::Recovery(receipt) => {
+                Self::Recovery(Box::new(Ok(*receipt)))
+            }
             HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => {
                 Self::Aborted
             }
@@ -2544,6 +2726,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -2557,6 +2740,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -2570,6 +2754,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -2585,6 +2770,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -2598,6 +2784,23 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_recovery(
+        &self,
+    ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::Recovery(result) => {
+                (*result).map(HttpConversationRecoveryCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3060,6 +3263,20 @@ fn queue_driver_registry_error(error: HttpConversationQueueDriverError) -> HttpR
     }
 }
 
+fn recovery_driver_registry_error(error: HttpConversationRecoveryDriverError) -> HttpRegistryError {
+    match error {
+        HttpConversationRecoveryDriverError::StaleBinding => {
+            HttpRegistryError::ConversationRecoveryStaleBinding
+        }
+        HttpConversationRecoveryDriverError::Conflict => {
+            HttpRegistryError::ConversationRecoveryConflict
+        }
+        HttpConversationRecoveryDriverError::Unavailable => {
+            HttpRegistryError::ConversationRecoveryUnavailable
+        }
+    }
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -3138,6 +3355,46 @@ fn validate_conversation_queue_command(
     valid
         .then_some(())
         .ok_or(HttpRegistryError::ConversationQueueInvalidCommand)
+}
+
+fn validate_checkpoint_restore_request(
+    request: &HttpCheckpointRestoreRequest,
+) -> Result<(), HttpRegistryError> {
+    if is_bounded_recovery_token(&request.checkpoint_id)
+        && is_bounded_recovery_token(&request.checkpoint_digest)
+    {
+        Ok(())
+    } else {
+        Err(HttpRegistryError::ConversationRecoveryInvalidCommand)
+    }
+}
+
+fn validate_conversation_recovery_command(
+    action: &HttpConversationRecoveryCommandAction,
+) -> Result<(), HttpRegistryError> {
+    let valid = match action {
+        HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
+            is_bounded_recovery_token(preview_id)
+        }
+        HttpConversationRecoveryCommandAction::RestoreCheckpoint {
+            checkpoint_id,
+            checkpoint_digest,
+        } => {
+            is_bounded_recovery_token(checkpoint_id) && is_bounded_recovery_token(checkpoint_digest)
+        }
+        HttpConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
+            is_bounded_recovery_token(source_turn_digest)
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(HttpRegistryError::ConversationRecoveryInvalidCommand)
+}
+
+fn is_bounded_recovery_token(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_CONVERSATION_RECOVERY_ID_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 fn is_bounded_queue_token(value: &str) -> bool {

@@ -44,6 +44,7 @@ export function Composer({
   onOpenSupport,
   onOpenAgentWorkbench,
   onOpenQueue,
+  onPreviewCompaction,
   onNotice,
   onSubmit,
   onInterruptAndRunNext,
@@ -75,6 +76,7 @@ export function Composer({
   onOpenSupport: () => void;
   onOpenAgentWorkbench: (query: string) => void;
   onOpenQueue: () => void;
+  onPreviewCompaction: () => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onInterruptAndRunNext: (prompt: string) => Promise<boolean>;
@@ -209,6 +211,9 @@ export function Composer({
   };
   const executeCommand = async (suggestion: ComposerSuggestion, argument: string) => {
     switch (suggestion.clientAction) {
+      case "preview_compaction":
+        onPreviewCompaction();
+        return true;
       case "new_session":
         return onNewSession();
       case "focus_effort": {

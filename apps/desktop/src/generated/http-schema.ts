@@ -1043,6 +1043,196 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read durable checkpoint and conversation-fork choices
+         * @description Projects exact digest-bound recovery choices without mutating files or session truth.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current durable recovery projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversationRecoveryView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/recovery/checkpoint-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview one exact controlled-file checkpoint restore
+         * @description Revalidates checkpoint digest, current file hashes, restorable snapshots, and bounded reverse diffs. No mutation is applied.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CheckpointRestoreRequest"];
+                };
+            };
+            responses: {
+                /** @description Fresh restore review */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CheckpointRestoreReview"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/recovery/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply one exact compaction, checkpoint restore, or conversation fork
+         * @description Routes one idempotent exactly-bound recovery command under durable session mutation exclusion. Restore affects only controlled durable file mutations; shell, network, remote, manual, and external side effects are not undone.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConversationRecoveryCommand"];
+                };
+            };
+            responses: {
+                /** @description Durable recovery command receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversationRecoveryCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/recovery/compaction-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview one exact portable context compaction
+         * @description Builds and locally proves the exact post-compaction provider request without appending a compaction lifecycle attempt. A ready preview is process-local and must be explicitly applied before it becomes stale.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Fresh compaction review */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CompactionReview"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/run-context": {
         parameters: {
             query?: never;
@@ -1413,7 +1603,7 @@ export interface components {
             user_invocable: boolean;
         };
         /** @enum {string} */
-        ApplicationClientAction: "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
+        ApplicationClientAction: "preview_compaction" | "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
         ApplicationCommandCatalogEntry: {
             aliases: string[];
             argument_hint?: string | null;
@@ -1486,6 +1676,62 @@ export interface components {
             reason?: string | null;
             tool_call_hash: string;
         };
+        /** @enum {string} */
+        CheckpointFileAvailability: "restorable" | "sensitive" | "unsupported" | "unavailable";
+        CheckpointFileView: {
+            availability: components["schemas"]["CheckpointFileAvailability"];
+            path: string;
+            restore_kind: components["schemas"]["CheckpointRestoreKind"];
+        };
+        /** @enum {string} */
+        CheckpointRestoreConflictReason: "workspace_mismatch" | "current_hash_mismatch" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding";
+        /** @enum {string} */
+        CheckpointRestoreKind: "restore_content" | "remove_created_file";
+        CheckpointRestorePreviewFile: {
+            actual_current_hash?: string | null;
+            conflict_reason?: components["schemas"]["CheckpointRestoreConflictReason"] | null;
+            expected_current_hash?: string | null;
+            path: string;
+            restore_kind: components["schemas"]["CheckpointRestoreKind"];
+        };
+        CheckpointRestoreReceipt: {
+            batch_id: string;
+            checkpoint_id: string;
+            /** Format: uint64 */
+            restored_file_count: number;
+            verification_stale: boolean;
+        };
+        CheckpointRestoreRequest: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+        };
+        CheckpointRestoreReview: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+            files: components["schemas"]["CheckpointRestorePreviewFile"][];
+            ready: boolean;
+            reverse_diffs: components["schemas"]["CheckpointReverseDiff"][];
+            /** Format: uint64 */
+            unknown_mutation_count: number;
+        };
+        CheckpointReverseDiff: {
+            diff: string;
+            /** Format: uint64 */
+            original_line_count: number;
+            path: string;
+            truncated: boolean;
+        };
+        CheckpointView: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+            files: components["schemas"]["CheckpointFileView"][];
+            fully_restorable: boolean;
+            prompt?: string | null;
+            /** Format: uint64 */
+            turn_index: number;
+            /** Format: uint64 */
+            unknown_mutation_count: number;
+        };
         CommandEnvelopeBase: {
             client_id: string;
             command_id: string;
@@ -1495,6 +1741,60 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             session_id: string;
+        };
+        CompactionAdmissionNoHistory: {
+            /** Format: uint64 */
+            configured_tail_message_count: number;
+            /** Format: uint64 */
+            durable_message_count: number;
+            /** @constant */
+            kind: "no_foldable_history";
+        };
+        CompactionAdmissionReady: {
+            economics: components["schemas"]["CompactionEconomics"];
+            /** @constant */
+            kind: "ready";
+        };
+        CompactionAdmissionUnavailable: {
+            /** @constant */
+            kind: "unavailable";
+            reason: string;
+        };
+        CompactionEconomics: {
+            /** Format: uint64 */
+            before_input_tokens: number;
+            /** Format: uint64 */
+            context_window_tokens: number;
+            /** Format: uint32 */
+            minimum_savings_ratio_ppm: number;
+            /** Format: uint64 */
+            minimum_savings_tokens: number;
+            /** Format: uint64 */
+            output_tokens: number;
+            /** Format: uint64 */
+            safety_buffer_tokens: number;
+            /** Format: uint32 */
+            savings_ratio_ppm: number;
+            /** Format: uint64 */
+            savings_tokens: number;
+            /** Format: uint64 */
+            target_input_tokens: number;
+        };
+        CompactionReceipt: {
+            attempt_id: string;
+            compaction_id: string;
+            /** Format: uint64 */
+            folded_event_count: number;
+            task_memory_id: string;
+            tool_output_projection_recorded: boolean;
+        };
+        CompactionReview: {
+            admission: components["schemas"]["CompactionAdmissionReady"] | components["schemas"]["CompactionAdmissionNoHistory"] | components["schemas"]["CompactionAdmissionUnavailable"];
+            /** Format: uint64 */
+            folded_event_count: number;
+            preview_id?: string | null;
+            /** Format: uint64 */
+            retained_event_count: number;
         };
         /** @enum {string} */
         ContinuityRecoveryAction: "retry_current" | "open_another_workspace" | "open_diagnostics" | "show_details" | "continue_read_only";
@@ -1600,6 +1900,23 @@ export interface components {
         ConversationDisplaySource: "durable_transcript" | "durable_run_event" | "live_transient";
         /** @enum {string} */
         ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "blocked";
+        ConversationForkPointView: {
+            /** Format: uint64 */
+            source_boundary_stream_sequence: number;
+            /** Format: uint64 */
+            source_finalized_stream_sequence: number;
+            source_turn_digest: string;
+            /** Format: uint64 */
+            source_turn_index: number;
+        };
+        ConversationForkReceipt: {
+            /** Format: uint64 */
+            copied_external_provenance_count: number;
+            /** Format: uint64 */
+            copied_message_count: number;
+            session_id: string;
+            session_ref: string;
+        };
         /** @description Process-local observation only; never a durable display order. */
         ConversationLiveProvisionalAnchor: {
             durable_frontier: components["schemas"]["DecimalSequence"];
@@ -1704,6 +2021,45 @@ export interface components {
             /** Format: uint32 */
             total_items: number;
             truncated: boolean;
+        };
+        ConversationRecoveryCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["ConversationRecoveryCommandAction"];
+        };
+        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"];
+        ConversationRecoveryCommandReceipt: {
+            /** @enum {string} */
+            action: "apply_compaction" | "restore_checkpoint" | "fork_conversation";
+            client_id: string;
+            command_id: string;
+            compaction?: components["schemas"]["CompactionReceipt"] | null;
+            correlation_id?: string | null;
+            fork?: components["schemas"]["ConversationForkReceipt"] | null;
+            recovery: components["schemas"]["ConversationRecoveryView"];
+            replayed: boolean;
+            restore?: components["schemas"]["CheckpointRestoreReceipt"] | null;
+            session_id: string;
+        };
+        ConversationRecoveryCompactionAction: {
+            /** @constant */
+            kind: "apply_compaction";
+            preview_id: string;
+        };
+        ConversationRecoveryForkAction: {
+            /** @constant */
+            kind: "fork_conversation";
+            source_turn_digest: string;
+        };
+        ConversationRecoveryRestoreAction: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+            /** @constant */
+            kind: "restore_checkpoint";
+        };
+        ConversationRecoveryView: {
+            checkpoints: components["schemas"]["CheckpointView"][];
+            fork_points: components["schemas"]["ConversationForkPointView"][];
+            /** Format: uint64 */
+            through_stream_sequence: number;
         };
         ConversationTerminalFrontier: {
             run_id: string;
@@ -1821,6 +2177,7 @@ export interface components {
             bounded_transcript_replay: boolean;
             cancellation: boolean;
             canonical_conversation_display: boolean;
+            conversation_recovery: boolean;
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
             live_events: boolean;
@@ -1837,7 +2194,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 6;
+            schema_version: 7;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

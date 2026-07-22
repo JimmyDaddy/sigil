@@ -5,6 +5,7 @@ import { AgentActivityPanel } from "./AgentActivityPanel";
 import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
 import { ConversationQueuePanel } from "./ConversationQueuePanel";
+import { ConversationRecoveryPanel } from "./ConversationRecoveryPanel";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { useLocale, type Translate } from "./i18n";
@@ -18,6 +19,10 @@ import type {
   ContinuityRecoveryAction,
   ConversationQueueCommandAction,
   ConversationQueueView,
+  CompactionReview,
+  CheckpointRestoreReview,
+  CheckpointView,
+  ConversationRecoveryView,
   PermissionMode,
   ReasoningEffort,
   RunContext,
@@ -65,6 +70,7 @@ interface ConversationPanelProps {
   onOpenSessionPicker: (query: string) => void;
   onOpenSettings: () => void;
   onOpenSupport: () => void;
+  onOpenFork: (sessionRef: string, sessionId: string) => Promise<void>;
 }
 
 interface PendingPrompt {
@@ -89,6 +95,7 @@ export function ConversationPanel({
   onOpenSessionPicker,
   onOpenSettings,
   onOpenSupport,
+  onOpenFork,
 }: ConversationPanelProps) {
   const { t } = useLocale();
   const { notify } = useNotifications();
@@ -142,6 +149,13 @@ export function ConversationPanel({
   const [conversationQueueError, setConversationQueueError] = useState(false);
   const [conversationQueueReload, setConversationQueueReload] = useState(0);
   const [conversationQueueOpen, setConversationQueueOpen] = useState(false);
+  const [conversationRecovery, setConversationRecovery] = useState<ConversationRecoveryView>();
+  const [compactionReview, setCompactionReview] = useState<CompactionReview>();
+  const [checkpointRestorePreview, setCheckpointRestorePreview] = useState<CheckpointRestoreReview>();
+  const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
+  const [conversationRecoveryLoading, setConversationRecoveryLoading] = useState(false);
+  const [conversationRecoveryError, setConversationRecoveryError] = useState(false);
+  const [conversationRecoveryOpen, setConversationRecoveryOpen] = useState(false);
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const pendingTimelineAnchor = useRef<TimelineAnchor | undefined>(undefined);
@@ -150,6 +164,7 @@ export function ConversationPanel({
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
+  const recoveryTriggerRef = useRef<HTMLButtonElement>(null);
   const canonicalRefreshAttempts = useRef(0);
   const canonicalRefreshRunId = useRef<string | undefined>(undefined);
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
@@ -212,6 +227,12 @@ export function ConversationPanel({
     setConversationQueueLoading(false);
     setConversationQueueError(false);
     setConversationQueueOpen(false);
+    setConversationRecovery(undefined);
+    setCheckpointRestorePreview(undefined);
+    setConversationRecoveryBusy(false);
+    setConversationRecoveryLoading(false);
+    setConversationRecoveryError(false);
+    setConversationRecoveryOpen(false);
     conversationQueueEpoch.current += 1;
     activeRunIdRef.current = undefined;
     canonicalRefreshAttempts.current = 0;
@@ -981,6 +1002,137 @@ export function ConversationPanel({
     }
   };
 
+  const refreshConversationRecovery = useCallback(() => {
+    if (conversationRecoveryLoading || conversationRecoveryBusy) return;
+    setConversationRecoveryLoading(true);
+    setConversationRecoveryError(false);
+    void bridge.conversationRecovery(workspaceId, session.id)
+      .then((view) => {
+        setConversationRecovery(view);
+        setCheckpointRestorePreview(undefined);
+      })
+      .catch(() => setConversationRecoveryError(true))
+      .finally(() => setConversationRecoveryLoading(false));
+  }, [bridge, conversationRecoveryBusy, conversationRecoveryLoading, session.id, workspaceId]);
+
+  const previewCompaction = useCallback(() => {
+    if (conversationRecoveryBusy || conversationRecoveryLoading) return;
+    setConversationRecoveryOpen(true);
+    setConversationRecoveryBusy(true);
+    setConversationRecoveryError(false);
+    if (conversationRecovery === undefined) {
+      void bridge.conversationRecovery(workspaceId, session.id)
+        .then((view) => setConversationRecovery(view))
+        .catch(() => setConversationRecoveryError(true));
+    }
+    void bridge.conversationCompactionPreview(workspaceId, session.id)
+      .then((review) => setCompactionReview(review))
+      .catch(() => {
+        setCompactionReview(undefined);
+        setConversationRecoveryError(true);
+        notify({ message: t("compactionPreviewFailed"), tone: "error" });
+      })
+      .finally(() => setConversationRecoveryBusy(false));
+  }, [bridge, conversationRecovery, conversationRecoveryBusy, conversationRecoveryLoading, notify, session.id, t, workspaceId]);
+
+  const applyCompaction = async () => {
+    const previewId = compactionReview?.previewId;
+    if (
+      conversationRecoveryBusy
+      || compactionReview?.admission.kind !== "ready"
+      || previewId === undefined
+    ) return;
+    setConversationRecoveryBusy(true);
+    try {
+      const receipt = await bridge.commandConversationRecovery(workspaceId, {
+        sessionId: session.id,
+        action: { kind: "apply_compaction", previewId },
+      });
+      setConversationRecovery(receipt.recovery);
+      setCompactionReview(undefined);
+      setDisplayReload((value) => value + 1);
+      setRunContextReload((value) => value + 1);
+      notify({ message: t("compactionApplied"), tone: "success" });
+    } catch {
+      setCompactionReview(undefined);
+      setConversationRecoveryError(true);
+      notify({ message: t("compactionPreviewStale"), tone: "error" });
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
+  const previewCheckpointRestore = async (checkpoint: CheckpointView) => {
+    if (conversationRecoveryBusy) return;
+    setConversationRecoveryBusy(true);
+    try {
+      setCheckpointRestorePreview(await bridge.checkpointRestorePreview(workspaceId, {
+        sessionId: session.id,
+        checkpointId: checkpoint.checkpointId,
+        checkpointDigest: checkpoint.checkpointDigest,
+      }));
+      setConversationRecoveryError(false);
+    } catch {
+      setCheckpointRestorePreview(undefined);
+      setConversationRecoveryError(true);
+      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
+  const restoreCheckpoint = async (checkpoint: CheckpointView) => {
+    if (conversationRecoveryBusy || checkpointRestorePreview?.ready !== true) return;
+    setConversationRecoveryBusy(true);
+    try {
+      const receipt = await bridge.commandConversationRecovery(workspaceId, {
+        sessionId: session.id,
+        action: {
+          kind: "restore_checkpoint",
+          checkpointId: checkpoint.checkpointId,
+          checkpointDigest: checkpoint.checkpointDigest,
+        },
+      });
+      setConversationRecovery(receipt.recovery);
+      setCheckpointRestorePreview(undefined);
+      setDisplayReload((value) => value + 1);
+      try {
+        setVerification(await bridge.verification(workspaceId, session.id));
+      } catch {
+        setVerification(undefined);
+      }
+      notify({ message: t("restoreCompleted"), tone: "success" });
+    } catch {
+      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
+      setConversationRecoveryError(true);
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
+  const forkConversation = async (sourceTurnDigest: string) => {
+    if (conversationRecoveryBusy) return undefined;
+    setConversationRecoveryBusy(true);
+    try {
+      const receipt = await bridge.commandConversationRecovery(workspaceId, {
+        sessionId: session.id,
+        action: { kind: "fork_conversation", sourceTurnDigest },
+      });
+      setConversationRecovery(receipt.recovery);
+      if (receipt.fork !== undefined) {
+        notify({ message: t("forkCreated"), tone: "success" });
+        await onOpenFork(receipt.fork.sessionRef, receipt.fork.sessionId);
+      }
+      return receipt.fork;
+    } catch {
+      notify({ message: t("conversationRecoveryChanged"), tone: "error" });
+      setConversationRecoveryError(true);
+      return undefined;
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
   return (
     <div className="conversation-layout">
       <section className="conversation-panel" aria-labelledby="conversation-title">
@@ -1027,6 +1179,21 @@ export function ConversationPanel({
                 setExtensionWorkbenchKind("skills");
                 setExtensionWorkbenchQuery("");
                 setExtensionWorkbenchOpen(true);
+              }}
+            />
+          </Tooltip>
+          <Tooltip label={t("openConversationRecovery")}>
+            <IconButton
+              className="recovery-trigger"
+              ref={recoveryTriggerRef}
+              type="button"
+              aria-label={t("openConversationRecovery")}
+              aria-controls="conversation-recovery-inspector"
+              aria-expanded={conversationRecoveryOpen}
+              icon={<Icon name="history" />}
+              onClick={() => {
+                setConversationRecoveryOpen(true);
+                if (conversationRecovery === undefined) refreshConversationRecovery();
               }}
             />
           </Tooltip>
@@ -1261,6 +1428,7 @@ export function ConversationPanel({
           setConversationQueueOpen(true);
           refreshConversationQueue();
         }}
+        onPreviewCompaction={previewCompaction}
         onNotice={onNotice}
         onSubmit={submit}
         onInterruptAndRunNext={interruptAndRunNext}
@@ -1295,6 +1463,28 @@ export function ConversationPanel({
           reasoningEffort={reasoningEffort}
           onRefresh={refreshConversationQueue}
           onCommand={commandConversationQueue}
+        />
+      </Drawer>
+      <Drawer
+        id="conversation-recovery-inspector"
+        open={conversationRecoveryOpen}
+        title={t("conversationRecovery")}
+        description={t("conversationRecoveryDetail")}
+        returnFocusRef={recoveryTriggerRef}
+        onOpenChange={setConversationRecoveryOpen}
+      >
+        <ConversationRecoveryPanel
+          recovery={conversationRecovery}
+          compaction={compactionReview}
+          preview={checkpointRestorePreview}
+          busy={conversationRecoveryBusy || conversationRecoveryLoading}
+          error={conversationRecoveryError}
+          onRefresh={refreshConversationRecovery}
+          onPreviewCompaction={previewCompaction}
+          onApplyCompaction={applyCompaction}
+          onPreview={previewCheckpointRestore}
+          onRestore={restoreCheckpoint}
+          onFork={forkConversation}
         />
       </Drawer>
       <Drawer

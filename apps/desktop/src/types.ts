@@ -236,6 +236,149 @@ export interface ConversationQueueCommandReceipt {
   replayed: boolean;
 }
 
+export type CheckpointRestoreKind = "restore_content" | "remove_created_file";
+export type CheckpointFileAvailability = "restorable" | "sensitive" | "unsupported" | "unavailable";
+
+export interface CheckpointFileView {
+  path: string;
+  restoreKind: CheckpointRestoreKind;
+  availability: CheckpointFileAvailability;
+}
+
+export interface CheckpointView {
+  checkpointId: string;
+  checkpointDigest: string;
+  turnIndex: number;
+  prompt?: string;
+  files: CheckpointFileView[];
+  unknownMutationCount: number;
+  fullyRestorable: boolean;
+}
+
+export interface ConversationForkPointView {
+  sourceTurnIndex: number;
+  sourceTurnDigest: string;
+  sourceBoundaryStreamSequence: number;
+  sourceFinalizedStreamSequence: number;
+}
+
+export interface ConversationRecoveryView {
+  checkpoints: CheckpointView[];
+  forkPoints: ConversationForkPointView[];
+  throughStreamSequence: number;
+}
+
+export interface CompactionEconomics {
+  beforeInputTokens: number;
+  targetInputTokens: number;
+  contextWindowTokens: number;
+  outputTokens: number;
+  safetyBufferTokens: number;
+  savingsTokens: number;
+  savingsRatioPpm: number;
+  minimumSavingsTokens: number;
+  minimumSavingsRatioPpm: number;
+}
+
+export type CompactionAdmission =
+  | { kind: "ready"; economics: CompactionEconomics }
+  | {
+      kind: "no_foldable_history";
+      durableMessageCount: number;
+      configuredTailMessageCount: number;
+    }
+  | { kind: "unavailable"; reason: string };
+
+export interface CompactionReview {
+  previewId?: string;
+  foldedEventCount: number;
+  retainedEventCount: number;
+  admission: CompactionAdmission;
+}
+
+export interface CheckpointRestorePreviewInput {
+  sessionId: string;
+  checkpointId: string;
+  checkpointDigest: string;
+}
+
+export type CheckpointRestoreConflictReason =
+  | "workspace_mismatch"
+  | "current_hash_mismatch"
+  | "artifact_unavailable"
+  | "sensitive_snapshot"
+  | "unsupported_snapshot"
+  | "invalid_binding";
+
+export interface CheckpointRestorePreviewFile {
+  path: string;
+  restoreKind: CheckpointRestoreKind;
+  expectedCurrentHash?: string;
+  actualCurrentHash?: string;
+  conflictReason?: CheckpointRestoreConflictReason;
+}
+
+export interface CheckpointReverseDiff {
+  path: string;
+  diff: string;
+  truncated: boolean;
+  originalLineCount: number;
+}
+
+export interface CheckpointRestoreReview {
+  checkpointId: string;
+  checkpointDigest: string;
+  files: CheckpointRestorePreviewFile[];
+  reverseDiffs: CheckpointReverseDiff[];
+  unknownMutationCount: number;
+  ready: boolean;
+}
+
+export type ConversationRecoveryAction =
+  | { kind: "apply_compaction"; previewId: string }
+  | { kind: "restore_checkpoint"; checkpointId: string; checkpointDigest: string }
+  | { kind: "fork_conversation"; sourceTurnDigest: string };
+
+export interface ConversationRecoveryCommandInput {
+  sessionId: string;
+  action: ConversationRecoveryAction;
+}
+
+export interface CheckpointRestoreReceipt {
+  checkpointId: string;
+  batchId: string;
+  restoredFileCount: number;
+  verificationStale: boolean;
+}
+
+export interface CompactionReceipt {
+  compactionId: string;
+  attemptId: string;
+  taskMemoryId: string;
+  foldedEventCount: number;
+  toolOutputProjectionRecorded: boolean;
+}
+
+export interface ConversationForkReceipt {
+  sessionRef: string;
+  sessionId: string;
+  copiedMessageCount: number;
+  copiedExternalProvenanceCount: number;
+}
+
+export interface ConversationRecoveryCommandReceipt {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
+  action: ConversationRecoveryAction["kind"];
+  compaction?: CompactionReceipt;
+  restore?: CheckpointRestoreReceipt;
+  fork?: ConversationForkReceipt;
+  recovery: ConversationRecoveryView;
+  correlationId?: string;
+  replayed: boolean;
+}
+
 export interface SessionOpenInput {
   sessionRef: string;
   sessionId: string;
@@ -512,6 +655,7 @@ export type RunStatus =
 export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
 export type ApplicationClientAction =
+  | "preview_compaction"
   | "new_session"
   | "focus_effort"
   | "focus_model"

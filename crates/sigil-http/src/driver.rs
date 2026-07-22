@@ -5,11 +5,14 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpAgentActivityView, HttpApplicationAgentBinding, HttpApplicationSkillBinding,
-    HttpApprovalDecisionRecord, HttpConversationDisplayPage, HttpConversationQueueCommandRequest,
-    HttpConversationQueueGeneration, HttpConversationQueueView, HttpDurableSessionFrontier,
-    HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort, HttpRunContextView,
-    HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpApprovalDecisionRecord, HttpCheckpointRestoreReceipt, HttpCheckpointRestoreRequest,
+    HttpCheckpointRestoreReview, HttpCompactionReceipt, HttpCompactionReview,
+    HttpConversationDisplayPage, HttpConversationForkReceipt, HttpConversationQueueCommandRequest,
+    HttpConversationQueueGeneration, HttpConversationQueueView,
+    HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
+    HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort,
+    HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
+    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -97,6 +100,23 @@ pub struct HttpConversationQueueDriverCommand {
     pub client_id: String,
     /// Exact queue generation and requested mutation.
     pub request: HttpConversationQueueCommandRequest,
+}
+
+/// Idempotent identity and exact payload for one durable conversation recovery command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConversationRecoveryDriverCommand {
+    pub command_id: String,
+    pub client_id: String,
+    pub action: HttpConversationRecoveryCommandAction,
+}
+
+/// Driver-owned durable outcome of one recovery mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConversationRecoveryDriverOutput {
+    pub compaction: Option<HttpCompactionReceipt>,
+    pub restore: Option<HttpCheckpointRestoreReceipt>,
+    pub fork: Option<HttpConversationForkReceipt>,
+    pub recovery: HttpConversationRecoveryView,
 }
 
 /// Driver interface used by the HTTP registry.
@@ -263,6 +283,40 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpConversationQueueDriverError::Unavailable)
     }
 
+    /// Projects exact checkpoint and finalized-turn recovery bindings.
+    fn conversation_recovery_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpConversationRecoveryView, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    /// Builds one no-write portable compaction review and retains its exact process-local target.
+    fn conversation_compaction_review(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpCompactionReview, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    /// Revalidates one exact checkpoint binding and returns its reverse-diff review.
+    fn checkpoint_restore_review(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpCheckpointRestoreRequest,
+    ) -> Result<HttpCheckpointRestoreReview, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    /// Applies one exact restore or conversation-fork mutation.
+    fn mutate_conversation_recovery(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _command: &HttpConversationRecoveryDriverCommand,
+    ) -> Result<HttpConversationRecoveryDriverOutput, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
     /// Applies one exact queue CAS mutation and returns the resulting bounded view.
     ///
     /// The implementation owns secret-safe projection and any process-local exact prompt cache.
@@ -385,6 +439,20 @@ pub enum HttpConversationDisplayDriverError {
     StaleCursor,
     /// Durable projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
+    Unavailable,
+}
+
+/// Typed rejection surface for checkpoint and conversation-fork recovery operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpConversationRecoveryDriverError {
+    /// The exact checkpoint digest or finalized-turn digest is stale or unavailable.
+    #[error("conversation recovery binding is stale")]
+    StaleBinding,
+    /// Fresh workspace or durable truth conflicts with the requested mutation.
+    #[error("conversation recovery conflicts with current state")]
+    Conflict,
+    /// Current durable projection or recovery owner is unavailable.
+    #[error("conversation recovery is unavailable")]
     Unavailable,
 }
 

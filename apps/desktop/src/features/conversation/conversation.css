@@ -17,7 +17,7 @@
 .agent-activity-trigger.is-active { color: var(--sg-domain-color-on-success); }
 .agent-activity-trigger-count { display: grid; position: absolute; top: -3px; right: -3px; min-width: 16px; height: 16px; padding: 0 4px; place-items: center; border: 2px solid var(--sg-sys-color-canvas); border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-primary); background: var(--sg-sys-color-primary); font-size: 8px; font-weight: 800; line-height: 1; }
 .review-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
-.extension-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
+.extension-trigger, .recovery-trigger { color: var(--sg-sys-color-on-surface-variant); background: transparent; }
 .review-passed { color: var(--sg-domain-color-on-success); }
 .review-failed, .review-missing, .review-inconclusive { color: var(--sg-domain-color-on-danger); }
 .review-pending, .review-stale { color: var(--sg-domain-color-on-warning); }
@@ -386,4 +386,197 @@
   .evidence-row { grid-template-columns: 54px minmax(0, 1fr); }
   .evidence-row button { grid-column: 2; justify-self: start; }
 }
+}
+.conversation-recovery-panel {
+  display: grid;
+  gap: var(--sg-sys-space-5);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conversation-recovery-safety {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sg-sys-space-3);
+  padding: var(--sg-sys-space-4);
+  border: 1px solid var(--sg-domain-color-on-warning);
+  border-radius: var(--sg-sys-radius-lg);
+  background: var(--sg-domain-color-warning);
+}
+
+.conversation-recovery-safety p,
+.conversation-recovery-section p,
+.checkpoint-restore-review p {
+  margin: var(--sg-sys-space-1) 0 0;
+  color: var(--sg-sys-color-on-surface-variant);
+}
+
+.conversation-recovery-section,
+.checkpoint-restore-review {
+  display: grid;
+  gap: var(--sg-sys-space-3);
+  min-width: 0;
+}
+
+.conversation-recovery-section > header,
+.checkpoint-restore-review > header,
+.checkpoint-diff > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sg-sys-space-3);
+}
+
+.conversation-recovery-section h3,
+.checkpoint-restore-review h3 {
+  margin: 0;
+}
+
+.compaction-review {
+  padding: var(--sg-sys-space-4);
+  border: 1px solid var(--sg-sys-color-outline);
+  border-radius: var(--sg-sys-radius-lg);
+  background: var(--sg-sys-color-surface-container-low);
+}
+
+.compaction-admission {
+  display: grid;
+  gap: var(--sg-sys-space-3);
+  padding: var(--sg-sys-space-3);
+  border-radius: var(--sg-sys-radius-md);
+  background: var(--sg-sys-color-surface-container);
+}
+
+.compaction-admission.is-ready {
+  border-inline-start: 3px solid var(--sg-domain-color-on-success);
+}
+
+.compaction-admission.is-unavailable {
+  border-inline-start: 3px solid var(--sg-domain-color-on-danger);
+}
+
+.compaction-admission dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sg-sys-space-2);
+  margin: 0;
+}
+
+.compaction-admission dl > div {
+  display: grid;
+  gap: var(--sg-sys-space-1);
+}
+
+.compaction-admission dt {
+  color: var(--sg-sys-color-on-surface-variant);
+}
+
+.compaction-admission dd {
+  margin: 0;
+  font: var(--sg-sys-type-title-small);
+}
+
+.compaction-admission button {
+  justify-self: end;
+}
+
+.conversation-recovery-list {
+  display: grid;
+  gap: var(--sg-sys-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-recovery-list > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sg-sys-space-3);
+  min-width: 0;
+  padding: var(--sg-sys-space-3);
+  border: 1px solid var(--sg-sys-color-outline);
+  border-radius: var(--sg-sys-radius-md);
+  background: var(--sg-sys-color-surface-container);
+}
+
+.conversation-recovery-list > li.is-selected {
+  border-color: var(--sg-sys-color-primary);
+  background: var(--sg-sys-color-surface-hover);
+}
+
+.conversation-recovery-list > li > div {
+  min-width: 0;
+}
+
+.conversation-recovery-list p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.checkpoint-restore-review {
+  padding: var(--sg-sys-space-4);
+  border: 1px solid var(--sg-sys-color-outline);
+  border-radius: var(--sg-sys-radius-lg);
+  background: var(--sg-sys-color-surface-container-low);
+}
+
+.checkpoint-restore-review .is-ready {
+  color: var(--sg-domain-color-on-success);
+}
+
+.checkpoint-restore-review .is-conflict,
+.checkpoint-conflicts span {
+  color: var(--sg-domain-color-on-danger);
+}
+
+.checkpoint-conflicts {
+  display: grid;
+  gap: var(--sg-sys-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.checkpoint-conflicts li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sg-sys-space-3);
+}
+
+.checkpoint-diff {
+  min-width: 0;
+}
+
+.checkpoint-diff pre {
+  max-height: 22rem;
+  margin: var(--sg-sys-space-2) 0 0;
+  padding: var(--sg-sys-space-3);
+  overflow: auto;
+  border-radius: var(--sg-sys-radius-md);
+  background: var(--sg-sys-color-canvas);
+  white-space: pre;
+}
+
+.conversation-recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.conversation-recovery-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--sg-sys-space-3);
+  padding: var(--sg-sys-space-6) var(--sg-sys-space-4);
+  color: var(--sg-sys-color-on-surface-variant);
+  text-align: center;
+}
+
+.conversation-recovery-empty-copy {
+  padding: var(--sg-sys-space-4);
+  border: 1px dashed var(--sg-sys-color-outline);
+  border-radius: var(--sg-sys-radius-md);
+  text-align: center;
 }

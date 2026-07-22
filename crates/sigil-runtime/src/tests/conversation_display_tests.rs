@@ -4,7 +4,7 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
-    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationInputKind,
+    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationForked, ConversationInputKind,
     ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
     ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
@@ -449,6 +449,42 @@ fn legacy_messages_remain_unbound_and_do_not_synthesize_terminal_items() -> Resu
             .all(|item| item.kind != ConversationDisplayItemKindV1::Terminal)
     );
     assert!(page.terminal_frontier.is_none());
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_receipt_projects_as_a_safe_timeline_notice() -> Result<()> {
+    let (_temp, store, session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let fork = ConversationForked {
+        fork_id: "fork-1".to_owned(),
+        parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+        source_session_id: "source-scope".to_owned(),
+        source_turn_index: 3,
+        source_boundary_event_id: "boundary-1".to_owned(),
+        source_boundary_stream_sequence: 7,
+        source_turn_digest: "turn-digest".to_owned(),
+        source_checkpoint_id: None,
+        source_checkpoint_digest: None,
+        destination_session_id: scope.clone(),
+        copied_message_count: 6,
+        copied_external_provenance_count: 0,
+    };
+    store.append_event(
+        DurableEventType::ConversationForked,
+        EventClass::Critical,
+        serde_json::to_value(fork)?,
+    )?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].kind, ConversationDisplayItemKindV1::Notice);
+    assert_eq!(page.items[0].status, ConversationDisplayStatusV1::Completed);
+    assert!(matches!(
+        &page.items[0].content,
+        ConversationDisplayContentV1::Notice { text, .. }
+            if text.contains("turn 3") && text.contains("workspace files were not changed")
+    ));
     Ok(())
 }
 

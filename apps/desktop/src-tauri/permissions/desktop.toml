@@ -54,6 +54,11 @@ description = "Allows the main local window to inspect and mutate one bounded du
 commands.allow = ["desktop_conversation_queue", "desktop_command_conversation_queue"]
 
 [[permission]]
+identifier = "allow-desktop-conversation-recovery"
+description = "Allows the main local window to preview and apply exact durable context compaction, inspect checkpoints, preview controlled-file reverse diffs, restore controlled files, or fork conversation history."
+commands.allow = ["desktop_conversation_recovery", "desktop_conversation_compaction_preview", "desktop_checkpoint_restore_preview", "desktop_command_conversation_recovery"]
+
+[[permission]]
 identifier = "allow-desktop-approval"
 description = "Allows the main local window to resolve one exact server-guarded approval request."
 commands.allow = ["desktop_resolve_approval"]

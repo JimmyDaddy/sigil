@@ -29,6 +29,7 @@ pub struct ApplicationCommandSpec {
 /// Client-owned action selected by a shared application command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationClientAction {
+    PreviewCompaction,
     NewSession,
     FocusEffort,
     FocusModel,
@@ -47,7 +48,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "preview V2 context compaction",
         argument_hint: None,
         completes_with_space: false,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::PreviewCompaction),
     },
     ApplicationCommandSpec {
         canonical: "/config",

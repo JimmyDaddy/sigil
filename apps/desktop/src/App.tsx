@@ -545,6 +545,36 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
+  const openForkSession = async (sessionRef: string, sessionId: string) => {
+    if (activeWorkspaceId === undefined) return;
+    setSessionActionState("working");
+    setConversationNavigation({
+      kind: "opening",
+      sessionRef,
+      title: t("forkCreated"),
+    });
+    try {
+      const session = await bridge.openSession(activeWorkspaceId, {
+        sessionRef,
+        sessionId,
+        label: t("forkCreated"),
+      });
+      setConversationNavigation((current) => current?.kind === "opening"
+        ? { ...current, targetSessionId: session.id }
+        : current);
+      setSelectedSession(session);
+      setSelectedDurableSessionId(sessionId);
+      setNavigationOpen(false);
+      setSessionActionState("idle");
+      setSessionMessage(undefined);
+      await loadHistory(activeWorkspaceId);
+    } catch {
+      setSessionActionState("error");
+      setSessionMessage(t("conversationOpenFailed"));
+      setConversationNavigation(undefined);
+    }
+  };
+
   const renameSession = async () => {
     if (activeWorkspaceId === undefined || pendingSessionRename === undefined) return;
     const displayName = pendingSessionRename.displayName.trim();
@@ -904,6 +934,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 }}
                 onOpenSettings={() => navigate("settings")}
                 onOpenSupport={() => navigate("support")}
+                onOpenFork={openForkSession}
               />
             </div>
           )}

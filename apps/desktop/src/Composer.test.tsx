@@ -124,8 +124,8 @@ const context: RunContext = {
         label: "Compact context",
         description: "preview V2 context compaction",
         completesWithSpace: false,
-        available: false,
-        unavailableReason: "This command does not yet have a desktop application route.",
+        clientAction: "preview_compaction",
+        available: true,
       },
     ],
     skills: [
@@ -206,6 +206,7 @@ function renderComposer(overrides: {
   onOpenSessionPicker?: (query: string) => void;
   onOpenSettings?: () => void;
   onOpenSupport?: () => void;
+  onPreviewCompaction?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
 } = {}) {
   const onSubmit = overrides.onSubmit ?? vi.fn(async (
@@ -220,6 +221,7 @@ function renderComposer(overrides: {
   const onOpenSessionPicker = overrides.onOpenSessionPicker ?? vi.fn((_query: string) => undefined);
   const onOpenSettings = overrides.onOpenSettings ?? vi.fn(() => undefined);
   const onOpenSupport = overrides.onOpenSupport ?? vi.fn(() => undefined);
+  const onPreviewCompaction = overrides.onPreviewCompaction ?? vi.fn(() => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   render(
     <LocaleProvider>
@@ -247,6 +249,7 @@ function renderComposer(overrides: {
         onOpenSupport={onOpenSupport}
         onOpenAgentWorkbench={onOpenAgentWorkbench}
         onOpenQueue={onOpenQueue}
+        onPreviewCompaction={onPreviewCompaction}
         onNotice={onNotice}
         onSubmit={onSubmit}
         onInterruptAndRunNext={onInterruptAndRunNext}
@@ -263,6 +266,7 @@ function renderComposer(overrides: {
     onOpenSessionPicker,
     onOpenSettings,
     onOpenSupport,
+    onPreviewCompaction,
     onNotice,
   };
 }
@@ -357,18 +361,30 @@ describe("structured composer", () => {
     });
   });
 
-  it("routes /resume to conversation search and hides unsupported commands", async () => {
+  it("routes /resume to conversation search and keeps compact available", async () => {
     const user = userEvent.setup();
     const { onOpenSessionPicker } = renderComposer();
     const input = screen.getByRole("textbox");
 
     await user.type(input, "/");
-    expect(screen.queryByRole("option", { name: /Compact context/ })).toBeNull();
+    expect(screen.getByRole("option", { name: /Compact context/ })).not.toBeNull();
     await user.clear(input);
     await user.type(input, "/resume typo");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenSessionPicker).toHaveBeenCalledWith("typo");
+  });
+
+  it("routes /compact to an explicit desktop preview instead of the model", async () => {
+    const user = userEvent.setup();
+    const { onPreviewCompaction, onSubmit } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "/compact");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onPreviewCompaction).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("routes /config to the desktop settings page", async () => {
