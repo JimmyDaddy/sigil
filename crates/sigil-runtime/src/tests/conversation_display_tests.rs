@@ -4,18 +4,20 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
-    AssistantMessageKind, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
-    ModelMessage, SecretRedactor, Session, SessionLogEntry, SessionStreamRecord, StoredEvent,
-    ToolCall,
+    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
+    JsonlSessionStore, MessageRole, ModelMessage, PermissionRisk, SecretRedactor, Session,
+    SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
 };
 
 use crate::conversation_display::{
     ConversationDisplayAssistantPhaseV1, ConversationDisplayContentV1,
     ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1, ConversationDisplayStatusV1,
-    MAX_CONVERSATION_DISPLAY_CONTENT_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_BYTES,
-    MAX_CONVERSATION_DISPLAY_PAGE_SIZE, conversation_display_page,
-    conversation_display_page_from_records,
+    ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
+    MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
+    conversation_display_page, conversation_display_page_from_records,
+    conversation_live_provisional_id,
 };
 
 fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
@@ -23,6 +25,36 @@ fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> 
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let session = Session::new("provider", "model").with_store(store.clone());
     Ok((temp, store, session))
+}
+
+fn approval_entry(
+    action: ToolApprovalAuditAction,
+    user_decision: Option<ToolApprovalUserDecision>,
+) -> ToolApprovalEntry {
+    ToolApprovalEntry {
+        action,
+        call_id: "approval-call".to_owned(),
+        tool_name: "bash".to_owned(),
+        access: ToolAccess::Execute,
+        network_effect: None,
+        local_policy_decision: ApprovalMode::Ask,
+        network_policy_decision: ApprovalMode::Allow,
+        source_policy_decision: ApprovalMode::Allow,
+        operation: Some(ToolOperation::ExecuteUnknownCommand),
+        risk: Some(PermissionRisk::Medium),
+        subjects: Vec::new(),
+        subject_zones: Vec::new(),
+        policy_decision: ApprovalMode::Ask,
+        external_directory_required: false,
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        allow_source: None,
+        grant_call_id: None,
+        user_decision,
+        reason: None,
+        preview_hash: None,
+    }
 }
 
 #[test]
@@ -49,7 +81,7 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
     recorder.append_finalized(&ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Succeeded,
-        Some(final_message_id),
+        Some(final_message_id.clone()),
         Some("complete"),
         20,
         &SecretRedactor::empty(),
@@ -112,6 +144,77 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
         1,
         "terminal evidence must not duplicate the final assistant answer"
     );
+    let expected_user = conversation_live_provisional_id(
+        &scope,
+        "run-1",
+        &ConversationLiveProvisionalSlotV1::User,
+    )?;
+    let expected_final = conversation_live_provisional_id(
+        &scope,
+        "run-1",
+        &ConversationLiveProvisionalSlotV1::AssistantMessage {
+            message_id: final_message_id,
+        },
+    )?;
+    let expected_tool = conversation_live_provisional_id(
+        &scope,
+        "run-1",
+        &ConversationLiveProvisionalSlotV1::Tool {
+            call_id: "call-1".to_owned(),
+        },
+    )?;
+    let expected_terminal = conversation_live_provisional_id(
+        &scope,
+        "run-1",
+        &ConversationLiveProvisionalSlotV1::Terminal,
+    )?;
+    let user = first
+        .items
+        .iter()
+        .find(|item| item.kind == ConversationDisplayItemKindV1::UserMessage)
+        .expect("durable user item");
+    assert_eq!(user.reconciles.as_deref(), Some(&[expected_user][..]));
+    let final_answer = first
+        .items
+        .iter()
+        .find(|item| {
+            matches!(
+                item.content,
+                ConversationDisplayContentV1::Message {
+                    assistant_phase: Some(ConversationDisplayAssistantPhaseV1::FinalAnswer),
+                    ..
+                }
+            )
+        })
+        .expect("durable final answer");
+    assert_eq!(
+        final_answer.reconciles.as_deref(),
+        Some(&[expected_final][..])
+    );
+    let tools = first
+        .items
+        .iter()
+        .filter(|item| item.kind == ConversationDisplayItemKindV1::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(
+        tools[0].reconciles.as_deref(),
+        Some(&[expected_tool.clone()][..])
+    );
+    assert_eq!(
+        tools[1].reconciles.as_deref(),
+        Some(&[tools[0].display_id.clone(), expected_tool][..]),
+        "completed tool evidence must replace both the earlier durable request and live slot"
+    );
+    let terminal = first
+        .items
+        .iter()
+        .find(|item| item.kind == ConversationDisplayItemKindV1::Terminal)
+        .expect("durable terminal evidence");
+    assert_eq!(
+        terminal.reconciles.as_deref(),
+        Some(&[expected_terminal][..])
+    );
     assert_eq!(
         first
             .terminal_frontier
@@ -169,6 +272,54 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
             .expect_err("one run cannot project two durable final assistants")
             .to_string()
             .contains("more than one")
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+    recorder.append_started(&ConversationRunStartedEntryV1::new("run-approval", 10)?)?;
+    session.append_control(ControlEntry::ToolApproval(approval_entry(
+        ToolApprovalAuditAction::Requested,
+        None,
+    )))?;
+    session.append_control(ControlEntry::ToolApproval(approval_entry(
+        ToolApprovalAuditAction::Resolved,
+        Some(ToolApprovalUserDecision::Approved),
+    )))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let approvals = page
+        .items
+        .iter()
+        .filter(|item| item.kind == ConversationDisplayItemKindV1::Approval)
+        .collect::<Vec<_>>();
+    assert_eq!(approvals.len(), 2);
+    let live_id = conversation_live_provisional_id(
+        &scope,
+        "run-approval",
+        &ConversationLiveProvisionalSlotV1::Approval {
+            call_id: "approval-call".to_owned(),
+        },
+    )?;
+    assert_eq!(
+        approvals[0].reconciles.as_deref(),
+        Some(&[live_id.clone()][..])
+    );
+    assert_eq!(
+        approvals[1].reconciles.as_deref(),
+        Some(&[approvals[0].display_id.clone(), live_id][..])
+    );
+    assert!(
+        approvals[1]
+            .reconciles
+            .as_ref()
+            .expect("resolved approval reconciliation")
+            .iter()
+            .all(|identity| !identity.contains(&scope) && !identity.contains("approval-call"))
     );
     Ok(())
 }

@@ -120,6 +120,19 @@ pub enum ConversationDisplayCheckpointConflictReasonV1 {
     InvalidBinding,
 }
 
+/// Stable semantic slot used to correlate one live protocol item with its durable successor.
+///
+/// The public identifier derived from this slot is a one-way digest; it never exposes the durable
+/// session scope, run id, message id, or tool call id to a renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationLiveProvisionalSlotV1 {
+    User,
+    AssistantMessage { message_id: String },
+    Tool { call_id: String },
+    Approval { call_id: String },
+    Terminal,
+}
+
 /// Typed, secret-safe content carried by one display item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
@@ -242,6 +255,54 @@ struct ActiveRunProjection {
     final_message_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ToolProjection {
+    name: String,
+    requested_display_id: String,
+}
+
+/// Derives an opaque renderer identity for one live semantic slot.
+///
+/// # Errors
+///
+/// Returns an error when the durable scope, run id, or slot identity is empty or unbounded.
+pub fn conversation_live_provisional_id(
+    session_scope: &str,
+    run_id: &str,
+    slot: &ConversationLiveProvisionalSlotV1,
+) -> Result<String> {
+    validate_provisional_identity("session scope", session_scope)?;
+    validate_provisional_identity("run id", run_id)?;
+    let (slot_kind, slot_identity) = match slot {
+        ConversationLiveProvisionalSlotV1::User => ("user", None),
+        ConversationLiveProvisionalSlotV1::AssistantMessage { message_id } => {
+            validate_provisional_identity("assistant message id", message_id)?;
+            ("assistant_message", Some(message_id.as_str()))
+        }
+        ConversationLiveProvisionalSlotV1::Tool { call_id } => {
+            validate_provisional_identity("tool call id", call_id)?;
+            ("tool", Some(call_id.as_str()))
+        }
+        ConversationLiveProvisionalSlotV1::Approval { call_id } => {
+            validate_provisional_identity("approval call id", call_id)?;
+            ("approval", Some(call_id.as_str()))
+        }
+        ConversationLiveProvisionalSlotV1::Terminal => ("terminal", None),
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-conversation-live-v1\0");
+    digest.update(session_scope.as_bytes());
+    digest.update(b"\0");
+    digest.update(run_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(slot_kind.as_bytes());
+    if let Some(identity) = slot_identity {
+        digest.update(b"\0");
+        digest.update(identity.as_bytes());
+    }
+    Ok(format!("live-v1:{:x}", digest.finalize()))
+}
+
 /// Reads a validated JSONL session and projects one canonical display page.
 ///
 /// # Errors
@@ -288,7 +349,8 @@ pub fn conversation_display_page_from_records(
     let capacity = limit.saturating_add(1);
     let mut recent = VecDeque::with_capacity(capacity);
     let mut active_run: Option<ActiveRunProjection> = None;
-    let mut tool_names = HashMap::<String, String>::new();
+    let mut tools = HashMap::<String, ToolProjection>::new();
+    let mut approval_items = HashMap::<String, String>::new();
     let mut terminal_frontier = None;
     let mut total_items = 0_u64;
     let mut eligible_items = 0_u64;
@@ -302,7 +364,8 @@ pub fn conversation_display_page_from_records(
             record,
             expected_scope,
             &mut active_run,
-            &mut tool_names,
+            &mut tools,
+            &mut approval_items,
             &mut terminal_frontier,
         )?;
         projected.sort_by_key(|item| item.display_order);
@@ -393,6 +456,13 @@ fn validate_page_request(expected_scope: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_provisional_identity(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_CONVERSATION_DISPLAY_IDENTITY_BYTES {
+        bail!("conversation live provisional {label} must be bounded and non-empty");
+    }
+    Ok(())
+}
+
 fn validate_stream(records: &[SessionStreamRecord], expected_scope: &str) -> Result<()> {
     let mut previous = 0_u64;
     for record in records {
@@ -460,7 +530,8 @@ fn project_record(
     record: &SessionStreamRecord,
     expected_scope: &str,
     active_run: &mut Option<ActiveRunProjection>,
-    tool_names: &mut HashMap<String, String>,
+    tools: &mut HashMap<String, ToolProjection>,
+    approval_items: &mut HashMap<String, String>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     if let Some(lifecycle) = conversation_run_lifecycle_record_from_stream(record)? {
@@ -469,13 +540,21 @@ fn project_record(
             expected_scope,
             lifecycle,
             active_run,
-            tool_names,
+            tools,
+            approval_items,
             terminal_frontier,
         );
     }
 
     if let Some(entry) = record.session_log_entry()? {
-        return project_session_entry(record, expected_scope, entry, active_run, tool_names);
+        return project_session_entry(
+            record,
+            expected_scope,
+            entry,
+            active_run,
+            tools,
+            approval_items,
+        );
     }
 
     let Some(event_type) = record.stored_event().event_kind() else {
@@ -527,7 +606,8 @@ fn project_lifecycle(
     expected_scope: &str,
     lifecycle: ConversationRunLifecycleRecordV1,
     active_run: &mut Option<ActiveRunProjection>,
-    tool_names: &mut HashMap<String, String>,
+    tools: &mut HashMap<String, ToolProjection>,
+    approval_items: &mut HashMap<String, String>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match lifecycle {
@@ -535,7 +615,8 @@ fn project_lifecycle(
             if active_run.is_some() {
                 bail!("conversation display encountered overlapping durable runs");
             }
-            tool_names.clear();
+            tools.clear();
+            approval_items.clear();
             *active_run = Some(ActiveRunProjection {
                 run_id: started.run_id().to_owned(),
                 final_message_id: None,
@@ -573,21 +654,28 @@ fn project_lifecycle(
                 status,
             });
             *active_run = None;
-            tool_names.clear();
-            Ok(vec![new_item(
+            tools.clear();
+            approval_items.clear();
+            let mut item = new_item(
                 expected_scope,
                 record,
                 0,
                 ConversationDisplayItemKindV1::Terminal,
                 ConversationDisplaySourceV1::DurableRunEvent,
-                Some(run_id),
+                Some(run_id.clone()),
                 status,
                 ConversationDisplayContentV1::Terminal {
                     final_message_id: finalized.final_message_id().map(ToOwned::to_owned),
                     safe_summary: finalized.safe_summary().map(ToOwned::to_owned),
                     summary_truncated: finalized.summary_truncated(),
                 },
-            )])
+            );
+            item.reconciles = Some(vec![conversation_live_provisional_id(
+                expected_scope,
+                &run_id,
+                &ConversationLiveProvisionalSlotV1::Terminal,
+            )?]);
+            Ok(vec![item])
         }
     }
 }
@@ -597,38 +685,37 @@ fn project_session_entry(
     expected_scope: &str,
     entry: SessionLogEntry,
     active_run: &mut Option<ActiveRunProjection>,
-    tool_names: &mut HashMap<String, String>,
+    tools: &mut HashMap<String, ToolProjection>,
+    approval_items: &mut HashMap<String, String>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match entry {
         SessionLogEntry::User(message) => {
             if message.role != MessageRole::User {
                 bail!("conversation display user entry has a non-user role");
             }
-            let Some(content) = project_optional_text(message.content.as_deref()) else {
-                if message.image_attachments.is_empty() {
-                    return Ok(Vec::new());
-                }
-                return Ok(vec![new_message_item(
-                    expected_scope,
-                    record,
-                    0,
-                    active_run_id(active_run),
-                    ConversationDisplayMessageRoleV1::User,
-                    None,
-                    None,
-                    message.image_attachments.len(),
-                )]);
-            };
-            Ok(vec![new_message_item(
+            let content = project_optional_text(message.content.as_deref());
+            if content.is_none() && message.image_attachments.is_empty() {
+                return Ok(Vec::new());
+            }
+            let run_id = active_run_id(active_run);
+            let mut item = new_message_item(
                 expected_scope,
                 record,
                 0,
-                active_run_id(active_run),
+                run_id.clone(),
                 ConversationDisplayMessageRoleV1::User,
-                Some(content),
+                content,
                 None,
                 message.image_attachments.len(),
-            )])
+            );
+            if let Some(run_id) = run_id {
+                item.reconciles = Some(vec![conversation_live_provisional_id(
+                    expected_scope,
+                    &run_id,
+                    &ConversationLiveProvisionalSlotV1::User,
+                )?]);
+            }
+            Ok(vec![item])
         }
         SessionLogEntry::Assistant(message) => {
             if message.role != MessageRole::Assistant {
@@ -643,35 +730,52 @@ fn project_session_entry(
             {
                 bail!("conversation run contains more than one durable final assistant");
             }
+            let run_id = active_run_id(active_run);
+            let assistant_provisional = run_id
+                .as_deref()
+                .map(|run_id| {
+                    conversation_live_provisional_id(
+                        expected_scope,
+                        run_id,
+                        &ConversationLiveProvisionalSlotV1::AssistantMessage {
+                            message_id: message.id.clone(),
+                        },
+                    )
+                })
+                .transpose()?;
             let mut items = Vec::new();
             let mut subindex = 0_u32;
             if let Some(content) = project_optional_text(message.content.as_deref()) {
                 if message.assistant_kind == Some(AssistantMessageKind::ReasoningTrace) {
-                    items.push(new_item(
+                    let mut item = new_item(
                         expected_scope,
                         record,
                         subindex,
                         ConversationDisplayItemKindV1::Reasoning,
                         ConversationDisplaySourceV1::DurableTranscript,
-                        active_run_id(active_run),
+                        run_id.clone(),
                         ConversationDisplayStatusV1::Recorded,
                         ConversationDisplayContentV1::Reasoning {
                             text: content.text,
                             truncated: content.truncated,
                             original_content_bytes: content.original_bytes,
                         },
-                    ));
+                    );
+                    item.reconciles = assistant_provisional.clone().map(|id| vec![id]);
+                    items.push(item);
                 } else {
-                    items.push(new_message_item(
+                    let mut item = new_message_item(
                         expected_scope,
                         record,
                         subindex,
-                        active_run_id(active_run),
+                        run_id.clone(),
                         ConversationDisplayMessageRoleV1::Assistant,
                         Some(content),
                         map_assistant_phase(message.assistant_kind),
                         message.image_attachments.len(),
-                    ));
+                    );
+                    item.reconciles = assistant_provisional.clone().map(|id| vec![id]);
+                    items.push(item);
                 }
                 subindex = subindex
                     .checked_add(1)
@@ -681,23 +785,39 @@ fn project_session_entry(
                 let tool_name_key = call.id.clone();
                 let call_id = bound_identity(&call.id);
                 let tool_name = bound_identity(&call.name);
-                tool_names.insert(tool_name_key, tool_name.clone());
-                items.push(new_item(
+                let mut item = new_item(
                     expected_scope,
                     record,
                     subindex,
                     ConversationDisplayItemKindV1::Tool,
                     ConversationDisplaySourceV1::DurableTranscript,
-                    active_run_id(active_run),
+                    run_id.clone(),
                     ConversationDisplayStatusV1::Requested,
                     ConversationDisplayContentV1::Tool {
                         call_id: Some(call_id),
-                        tool_name: Some(tool_name),
+                        tool_name: Some(tool_name.clone()),
                         output: None,
                         truncated: false,
                         original_content_bytes: 0,
                     },
-                ));
+                );
+                if let Some(run_id) = run_id.as_deref() {
+                    item.reconciles = Some(vec![conversation_live_provisional_id(
+                        expected_scope,
+                        run_id,
+                        &ConversationLiveProvisionalSlotV1::Tool {
+                            call_id: call.id.clone(),
+                        },
+                    )?]);
+                }
+                tools.insert(
+                    tool_name_key,
+                    ToolProjection {
+                        name: tool_name,
+                        requested_display_id: item.display_id.clone(),
+                    },
+                );
+                items.push(item);
                 subindex = subindex
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("conversation display subindex overflow"))?;
@@ -708,32 +828,52 @@ fn project_session_entry(
             if message.role != MessageRole::Tool {
                 bail!("conversation display tool entry has a non-tool role");
             }
-            let tool_name = message
+            let tool = message
                 .tool_call_id
                 .as_ref()
-                .and_then(|call_id| tool_names.get(call_id))
+                .and_then(|call_id| tools.get(call_id))
                 .cloned();
             let call_id = message.tool_call_id.as_deref().map(bound_identity);
             let output = project_optional_text(message.content.as_deref());
-            Ok(vec![new_item(
+            let run_id = active_run_id(active_run);
+            let mut item = new_item(
                 expected_scope,
                 record,
                 0,
                 ConversationDisplayItemKindV1::Tool,
                 ConversationDisplaySourceV1::DurableTranscript,
-                active_run_id(active_run),
+                run_id.clone(),
                 ConversationDisplayStatusV1::Completed,
                 ConversationDisplayContentV1::Tool {
                     call_id,
-                    tool_name,
+                    tool_name: tool.as_ref().map(|tool| tool.name.clone()),
                     output: output.as_ref().map(|output| output.text.clone()),
                     truncated: output.as_ref().is_some_and(|output| output.truncated),
                     original_content_bytes: output.map_or(0, |output| output.original_bytes),
                 },
-            )])
+            );
+            let mut reconciles = tool
+                .as_ref()
+                .map(|tool| vec![tool.requested_display_id.clone()])
+                .unwrap_or_default();
+            if let (Some(run_id), Some(call_id)) =
+                (run_id.as_deref(), message.tool_call_id.as_ref())
+            {
+                reconciles.push(conversation_live_provisional_id(
+                    expected_scope,
+                    run_id,
+                    &ConversationLiveProvisionalSlotV1::Tool {
+                        call_id: call_id.clone(),
+                    },
+                )?);
+            }
+            if !reconciles.is_empty() {
+                item.reconciles = Some(reconciles);
+            }
+            Ok(vec![item])
         }
         SessionLogEntry::Control(control) => {
-            project_control(record, expected_scope, control, active_run)
+            project_control(record, expected_scope, control, active_run, approval_items)
         }
     }
 }
@@ -743,6 +883,7 @@ fn project_control(
     expected_scope: &str,
     control: ControlEntry,
     active_run: &Option<ActiveRunProjection>,
+    approval_items: &mut HashMap<String, String>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match control {
         ControlEntry::Note { kind, data } if kind == "reasoning_trace" => {
@@ -768,6 +909,7 @@ fn project_control(
         ControlEntry::ToolApproval(approval)
             if approval.action != ToolApprovalAuditAction::PolicyEvaluated =>
         {
+            let raw_call_id = approval.call_id.clone();
             let (status, decision) = match approval.action {
                 ToolApprovalAuditAction::Requested => {
                     (ConversationDisplayStatusV1::WaitingForApproval, None)
@@ -788,20 +930,43 @@ fn project_control(
                 }
                 ToolApprovalAuditAction::PolicyEvaluated => unreachable!(),
             };
-            Ok(vec![new_item(
+            let run_id = active_run_id(active_run);
+            let mut item = new_item(
                 expected_scope,
                 record,
                 0,
                 ConversationDisplayItemKindV1::Approval,
                 ConversationDisplaySourceV1::DurableRunEvent,
-                active_run_id(active_run),
+                run_id.clone(),
                 status,
                 ConversationDisplayContentV1::Approval {
                     call_id: bound_identity(&approval.call_id),
                     tool_name: bound_identity(&approval.tool_name),
                     decision,
                 },
-            )])
+            );
+            let mut reconciles = Vec::new();
+            if approval.action != ToolApprovalAuditAction::Requested
+                && let Some(requested) = approval_items.get(&raw_call_id)
+            {
+                reconciles.push(requested.clone());
+            }
+            if let Some(run_id) = run_id.as_deref() {
+                reconciles.push(conversation_live_provisional_id(
+                    expected_scope,
+                    run_id,
+                    &ConversationLiveProvisionalSlotV1::Approval {
+                        call_id: raw_call_id.clone(),
+                    },
+                )?);
+            }
+            if !reconciles.is_empty() {
+                item.reconciles = Some(reconciles);
+            }
+            if approval.action == ToolApprovalAuditAction::Requested {
+                approval_items.insert(raw_call_id, item.display_id.clone());
+            }
+            Ok(vec![item])
         }
         _ => Ok(Vec::new()),
     }
