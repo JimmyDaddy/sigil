@@ -33,8 +33,9 @@ use super::{
     application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, default_application_session_path,
-    optional_eager_mcp_warning, record_application_preparation_cancellation,
-    rerun_application_verification, validate_execution_contract,
+    optional_eager_mcp_warning, prepare_application_run_blocking,
+    record_application_preparation_cancellation, rerun_application_verification,
+    validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -153,6 +154,54 @@ fn session_lease_rejects_overlapping_foreground_runs_and_releases_on_drop() -> R
     drop(first);
     let reacquired = manager.acquire(&path)?;
     drop(reacquired);
+    Ok(())
+}
+
+#[test]
+fn preparation_recovers_an_orphan_run_after_exclusive_lease_before_next_admission() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/orphan.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let session = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&binding.session_log_path)?,
+    )?;
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new("orphan-run", 1)?)?;
+
+    let mut request =
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "continue", "next-run");
+    request.session_path = Some(binding.session_log_path.clone());
+    let prepared =
+        prepare_application_run_blocking(request, Arc::new(ApplicationSessionLeaseManager::new()))?;
+
+    let lifecycle = application_conversation_lifecycle(&binding.session_log_path)?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if started.run_id() == "orphan-run"
+            && finalized.run_id() == "orphan-run"
+            && finalized.status() == ConversationRunTerminalStatusV1::Interrupted
+    ));
+    drop(prepared);
     Ok(())
 }
 
