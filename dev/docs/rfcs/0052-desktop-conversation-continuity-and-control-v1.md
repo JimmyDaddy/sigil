@@ -1,6 +1,6 @@
 # RFC-0052 Desktop Conversation Continuity and Control V1
 
-状态：active / R52.0 contract frozen; R52.1 planned
+状态：complete / R52.0-R52.9 delivered 2026-07-23
 
 创建日期：2026-07-22
 
@@ -285,3 +285,10 @@ R52.1/R52.3/R52.5/R52.6 -> R52.7 -> R52.8 -> R52.9
 - Complete provider credential/endpoint/MCP/plugin configuration requires a separate settings contract.
 - RFC-0051 Intent Stack is independent and remains deferred while conversation continuity is active.
 - This RFC does not add remote daemon、multi-user、cloud scheduler、generic terminal/file browser or arbitrary session JSONL editing.
+
+## 9. Completion evidence
+
+- R52.1-R52.7 已交付 actionable recovery、canonical display、fresh continuity admission、durable follow-up queue、compact/checkpoint/fork route 与 attention/accessibility polish。
+- R52.8 真实 `sigil serve` dogfood 覆盖 restart/reopen、model/effort binding、single-final ordering、queue restart dispatch、checkpoint restore 与 bearer boundary；`f0014d23` 修复重启队列的 fresh effort binding。
+- 原生收尾发现并由 `ae7a4593` 修复 protocol journal schema 2→3 缺少迁移的问题；真实 424-event journal 原地迁移后，release sidecar 和 macOS 应用成功自动重开 `turbods` 并投影 30 条会话。
+- Desktop 138 tests/type/UI/contract/build、full workspace fmt/check/test/strict Clippy、`sigil-http` 154 tests、900/1280 catalog scroll/AX gate 与两轮 contract/UI audit 通过；截至关闭未发现剩余 R52 P1/P2。
