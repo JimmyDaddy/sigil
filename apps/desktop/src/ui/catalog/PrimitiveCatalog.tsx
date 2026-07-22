@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { PaginationControl } from "../feedback";
 import { Icon } from "../icons";
 import {
   Button,
@@ -35,7 +36,9 @@ export function PrimitiveCatalog() {
       <Menu label="Actions"><MenuItem>Open</MenuItem><MenuItem disabled>Unavailable</MenuItem></Menu>
       <Tooltip label="Nonessential detail"><span tabIndex={0}>Focus for hint</span></Tooltip>
       <Collapsible label="Evidence" summary="2 items">Receipt and snapshot</Collapsible>
-      <Toast>Saved locally</Toast>
+      <PaginationControl label="Load more" loadingLabel="Loading" loading={false} onLoadMore={() => undefined} />
+      <PaginationControl label="Load more" loadingLabel="Loading" loading onLoadMore={() => undefined} />
+      <Toast tone="success" title="Done" timeoutMs={4_000} onDismiss={() => undefined}>Saved locally</Toast>
       <Dialog open={dialogOpen} title="Representative dialog" onOpenChange={setDialogOpen}><Button>Continue</Button></Dialog>
       <Drawer open={drawerOpen} title="Representative drawer" onOpenChange={setDrawerOpen}><Button>Session row</Button></Drawer>
     </section>

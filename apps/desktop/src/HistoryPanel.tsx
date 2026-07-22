@@ -3,6 +3,7 @@ import { useEffect, useRef, type MouseEvent } from "react";
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
 import { useLocale } from "./i18n";
 import { ErrorCard } from "./ErrorCard";
+import { PaginationControl } from "./ui/feedback";
 import { Icon } from "./ui/icons";
 import { Button, Menu, MenuItem, Popover } from "./ui/primitives";
 
@@ -22,6 +23,7 @@ export function HistoryContent({
   onOpen,
   onRename,
   onDelete,
+  onDeleteInvalidSource,
   onQuarantine,
   selectedSessionId,
   navigationBusy,
@@ -34,6 +36,7 @@ export function HistoryContent({
   onOpen: (entry: CatalogEntry) => void;
   onRename: (entry: CatalogEntry) => void;
   onDelete: (entry: CatalogEntry) => void;
+  onDeleteInvalidSource: (entry: CatalogEntry) => void;
   onQuarantine: (entry: CatalogEntry) => void;
   selectedSessionId?: string;
   navigationBusy?: boolean;
@@ -49,7 +52,25 @@ export function HistoryContent({
     if (pendingSessionOpen.current !== undefined) window.clearTimeout(pendingSessionOpen.current);
   }, []);
   if (state === "loading") {
-    return <div className="history-notice busy">{t("loadingConversations")}</div>;
+    return (
+      <div
+        className="history-skeleton"
+        role="status"
+        aria-label={t("loadingConversations")}
+        aria-live="polite"
+        aria-busy="true"
+      >
+        <span className="history-skeleton-label">{t("loadingConversations")}</span>
+        <span className="history-skeleton-meta" aria-hidden="true" />
+        <span className="history-skeleton-group" aria-hidden="true" />
+        {Array.from({ length: 6 }, (_, index) => (
+          <span className="history-skeleton-row" aria-hidden="true" key={index}>
+            <span />
+            <span />
+          </span>
+        ))}
+      </div>
+    );
   }
   if (state === "error" || state === "stale") {
     return (
@@ -201,6 +222,11 @@ export function HistoryContent({
                             >
                               {entry.sourceState === "invalid" ? t("quarantineInvalid") : t("noSafeAction")}
                             </MenuItem>
+                            {entry.sourceState === "invalid" ? (
+                              <MenuItem onSelect={() => onDeleteInvalidSource(entry)}>
+                                {t("deleteInvalidSource")}
+                              </MenuItem>
+                            ) : null}
                           </Menu>
                         </div>
                       )}
@@ -213,9 +239,13 @@ export function HistoryContent({
         </div>
       )}
       {page.nextCursor !== undefined ? (
-        <Button className="load-more" type="button" onClick={onLoadMore} disabled={state === "loading_more"}>
-          {state === "loading_more" ? t("loading") : t("loadMore")}
-        </Button>
+        <PaginationControl
+          className="history-pagination"
+          label={t("loadMore")}
+          loadingLabel={t("loading")}
+          loading={state === "loading_more"}
+          onLoadMore={onLoadMore}
+        />
       ) : null}
     </div>
   );

@@ -25,16 +25,22 @@ use crate::{
     disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
         HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionMutationReceipt,
-        HttpSessionOpenRequest, HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest,
-        HttpSessionRenameRequest, HttpVerificationRerunRequest,
+        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
+        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
+        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
+        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
+        HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
+    session_catalog_batch::{
+        SessionCatalogBatchError, execute_session_catalog_batch, plan_session_catalog_batch,
+    },
     sse::{
         HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpLiveEventRecvError, HttpProtocolEvent,
         HttpSseEvent,
     },
+    support::HttpSupportContext,
 };
 
 const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -152,6 +158,7 @@ pub struct HttpLocalServer {
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     server_info: Option<HttpServerInfo>,
+    support_context: Option<Arc<HttpSupportContext>>,
 }
 
 impl HttpLocalServer {
@@ -259,7 +266,15 @@ impl HttpLocalServer {
             disclosure_journal,
             session_catalog,
             server_info,
+            support_context: None,
         })
+    }
+
+    /// Attaches process-private support projection inputs to an already bound server.
+    #[must_use]
+    pub fn with_support_context(mut self, support_context: HttpSupportContext) -> Self {
+        self.support_context = Some(Arc::new(support_context));
+        self
     }
 
     /// Returns the actual bound address.
@@ -300,6 +315,7 @@ impl HttpLocalServer {
                     let disclosure_journal = self.disclosure_journal.clone();
                     let session_catalog = self.session_catalog.clone();
                     let server_info = self.server_info.clone();
+                    let support_context = self.support_context.clone();
                     let connection_shutdown = connection_shutdown.subscribe();
                     connections.spawn(async move {
                         handle_http_connection(
@@ -310,6 +326,7 @@ impl HttpLocalServer {
                             disclosure_journal,
                             session_catalog,
                             server_info,
+                            support_context,
                             connection_shutdown,
                         )
                         .await
@@ -354,6 +371,7 @@ async fn handle_http_connection(
     disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     server_info: Option<HttpServerInfo>,
+    support_context: Option<Arc<HttpSupportContext>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), HttpListenerError> {
     let request = tokio::select! {
@@ -384,6 +402,7 @@ async fn handle_http_connection(
                     disclosure_journal.as_deref(),
                     session_catalog.as_deref(),
                     server_info.as_ref(),
+                    support_context.as_deref(),
                 )
             })
             .await
@@ -412,6 +431,7 @@ fn route_http_request(
     disclosure_journal: Option<&HttpDurableEgressDisclosureJournal>,
     session_catalog: Option<&SessionCatalogProjectionService>,
     server_info: Option<&HttpServerInfo>,
+    support_context: Option<&HttpSupportContext>,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -437,6 +457,42 @@ fn route_http_request(
             },
             |server_info| json_response(200, json!(server_info)),
         );
+    }
+
+    if request.method == "GET" && request.path == "/support/doctor" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "support_unavailable",
+                "desktop support diagnostics are unavailable",
+            );
+        };
+        return match support_context.doctor_report() {
+            Ok(report) => json_response(200, json!(report)),
+            Err(_) => http_error_response(
+                503,
+                "support_unavailable",
+                "desktop support diagnostics could not be projected",
+            ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/support/bundle" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "support_unavailable",
+                "desktop support bundle export is unavailable",
+            );
+        };
+        return match support_context.support_bundle() {
+            Ok(bundle) => json_response(200, json!(bundle)),
+            Err(_) => http_error_response(
+                503,
+                "support_unavailable",
+                "desktop support bundle could not be projected",
+            ),
+        };
     }
 
     if request.method == "GET" && request.path == "/session-catalog" {
@@ -469,6 +525,49 @@ fn route_http_request(
                 "session_catalog_unavailable",
                 "durable historical session catalog is unavailable",
             ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/batch/plan" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionCatalogBatchPlanRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_session_batch_request",
+                "invalid session catalog batch plan body",
+            );
+        };
+        return match plan_session_catalog_batch(session_catalog, registry, &body) {
+            Ok(plan) => json_response(200, json!(plan)),
+            Err(error) => session_catalog_batch_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/batch/execute" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionCatalogBatchExecuteRequest>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "invalid_session_batch_request",
+                "invalid session catalog batch execute body",
+            );
+        };
+        return match execute_session_catalog_batch(session_catalog, registry, &body) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => session_catalog_batch_error_response(error),
         };
     }
 
@@ -553,6 +652,35 @@ fn route_http_request(
             body.source_modified_at_unix_ms,
         ) {
             Ok(receipt) => json_response(200, json!(HttpSessionQuarantineReceipt::from(receipt))),
+            Err(error) => session_mutation_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/session-catalog/delete-invalid-source" {
+        let Some(session_catalog) = session_catalog else {
+            return http_error_response(
+                503,
+                "session_catalog_unavailable",
+                "durable historical session catalog is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpSessionInvalidSourceDeleteRequest>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session source delete body",
+            );
+        };
+        return match session_catalog.delete_invalid_source(
+            &body.session_ref,
+            body.source_bytes,
+            body.source_modified_at_unix_ms,
+        ) {
+            Ok(receipt) => json_response(
+                200,
+                json!(HttpSessionInvalidSourceDeleteReceipt::from(receipt)),
+            ),
             Err(error) => session_mutation_error_response(error),
         };
     }
@@ -643,6 +771,19 @@ fn route_http_request(
                 "verification_not_found",
                 "session has no task verification projection",
             ),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/agent-activity"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.agent_activity_view(session_id) {
+            Ok(view) => json_response(200, json!(view)),
             Err(error) => registry_error_response(error),
         };
     }
@@ -1214,6 +1355,24 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
     http_error_response(status, code, error.to_string())
 }
 
+fn session_catalog_batch_error_response(error: SessionCatalogBatchError) -> HttpResponse {
+    match error {
+        SessionCatalogBatchError::InvalidRequest(message) => {
+            http_error_response(400, "invalid_session_batch_request", message)
+        }
+        SessionCatalogBatchError::StalePlan => http_error_response(
+            409,
+            "session_batch_plan_stale",
+            "session catalog changed after the batch preview; review the selection again",
+        ),
+        SessionCatalogBatchError::Unavailable => http_error_response(
+            503,
+            "session_catalog_unavailable",
+            "durable historical session catalog is unavailable",
+        ),
+    }
+}
+
 fn session_mutation_error_response(error: LocalSessionMutationError) -> HttpResponse {
     match error {
         LocalSessionMutationError::InvalidRequest => http_error_response(
@@ -1241,11 +1400,14 @@ fn session_mutation_error_response(error: LocalSessionMutationError) -> HttpResp
             "durable_session_pinned",
             "unpin the saved conversation before deleting it",
         ),
-        LocalSessionMutationError::Unavailable { .. } => http_error_response(
-            503,
-            "durable_session_mutation_unavailable",
-            "the saved conversation could not be changed safely",
-        ),
+        LocalSessionMutationError::Unavailable { source } => {
+            eprintln!("session catalog mutation unavailable: {source:#}");
+            http_error_response(
+                503,
+                "durable_session_mutation_unavailable",
+                "the saved conversation could not be changed safely",
+            )
+        }
     }
 }
 

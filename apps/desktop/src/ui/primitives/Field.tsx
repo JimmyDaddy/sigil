@@ -85,16 +85,19 @@ export const Select = forwardRef<HTMLSelectElement, SharedFieldProps & SelectHTM
     const describedBy = description !== undefined || error !== undefined ? `${id}-message` : undefined;
     return (
       <FieldFrame id={id} label={label} description={description} error={error} labelHidden={labelHidden} className={containerClassName}>
-        <select
-          ref={ref}
-          id={id}
-          className={`sg-field-control ${className}`.trim()}
-          aria-describedby={describedBy}
-          aria-invalid={error === undefined ? undefined : true}
-          {...props}
-        >
-          {children}
-        </select>
+        <span className="sg-select-control">
+          <select
+            ref={ref}
+            id={id}
+            className={`sg-field-control ${className}`.trim()}
+            aria-describedby={describedBy}
+            aria-invalid={error === undefined ? undefined : true}
+            {...props}
+          >
+            {children}
+          </select>
+          <span className="sg-select-indicator" aria-hidden="true" />
+        </span>
       </FieldFrame>
     );
   },

@@ -30,6 +30,10 @@ fn agent_command_opens_the_shared_agent_workbench() {
 
 #[test]
 fn desktop_equivalent_commands_have_explicit_client_routes() {
+    let config = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/config")
+        .expect("config command");
     let plan = APPLICATION_COMMANDS
         .iter()
         .find(|command| command.canonical == "/plan")
@@ -38,7 +42,19 @@ fn desktop_equivalent_commands_have_explicit_client_routes() {
         .iter()
         .find(|command| command.canonical == "/resume")
         .expect("resume command");
+    let doctor = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/doctor")
+        .expect("doctor command");
+    let feedback = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/feedback")
+        .expect("feedback command");
 
+    assert_eq!(
+        config.client_action,
+        Some(crate::ApplicationClientAction::OpenSettings)
+    );
     assert_eq!(
         plan.client_action,
         Some(crate::ApplicationClientAction::OpenAgentWorkbench)
@@ -46,5 +62,13 @@ fn desktop_equivalent_commands_have_explicit_client_routes() {
     assert_eq!(
         resume.client_action,
         Some(crate::ApplicationClientAction::OpenSessionPicker)
+    );
+    assert_eq!(
+        doctor.client_action,
+        Some(crate::ApplicationClientAction::OpenSupport)
+    );
+    assert_eq!(
+        feedback.client_action,
+        Some(crate::ApplicationClientAction::OpenSupport)
     );
 }

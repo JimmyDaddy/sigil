@@ -26,8 +26,9 @@ use crate::{
     activate_eager_remote_mcp_server, attach_remote_mcp_activation_presenter,
     attach_session_url_capability_store,
     build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
-    context_candidates_from_safe_sources, current_unix_time_ms, resolve_sigil_paths,
-    secret_redactor_for_root_config, unsupported_mcp_elicitation_handler,
+    context_candidates_from_safe_sources, current_unix_time_ms,
+    product_view::{ApplicationAgentActivityView, agent_activity_product_view_from_entries},
+    resolve_sigil_paths, secret_redactor_for_root_config, unsupported_mcp_elicitation_handler,
     unsupported_mcp_runtime_event_handler,
 };
 
@@ -1284,61 +1285,50 @@ pub fn application_run_context_view(
         bail!("expected run-context session scope must not be empty");
     }
     let mut root_config = RootConfig::load(config_path)?;
-    let store = JsonlSessionStore::new(session_path)?;
-    let session =
-        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)?;
-    if session.session_scope_id() != expected_session_scope_id {
-        bail!("durable run-context session scope does not match the bound session");
-    }
-    root_config.agent.provider = session.provider_name().to_owned();
-    root_config.agent.model = session.model_name().to_owned();
-    let resolved = crate::resolve_context_window_tokens(
-        session.provider_name(),
-        session.model_name(),
-        root_config.compaction.context_window_tokens,
-    );
-    let has_usage = session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::UsageSnapshot(_))
+    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    let (provider_name, model_name) = application_session_identity(&entries).unwrap_or_else(|| {
+        (
+            root_config.agent.provider.clone(),
+            root_config.agent.model.clone(),
         )
     });
-    let last_prompt_tokens = if has_usage {
-        session
-            .try_usage_stats_from_durable()?
-            .map(|stats| stats.last_prompt_tokens)
-    } else {
-        None
-    };
-    let available_reasoning_efforts = crate::reasoning_effort::supported_reasoning_efforts(
-        session.provider_name(),
-        session.model_name(),
+    root_config.agent.provider = provider_name.clone();
+    root_config.agent.model = model_name.clone();
+    let resolved = crate::resolve_context_window_tokens(
+        &provider_name,
+        &model_name,
+        root_config.compaction.context_window_tokens,
     );
+    let last_prompt_tokens = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) => {
+                Some(usage.prompt_tokens)
+            }
+            _ => None,
+        })
+        .next_back();
+    let available_reasoning_efforts =
+        crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name);
     let default_reasoning_effort =
         crate::reasoning_effort::configured_default_reasoning_effort(&root_config);
     let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
-        session.provider_name(),
-        session.model_name(),
+        &provider_name,
+        &model_name,
         &available_reasoning_efforts,
     );
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
-    let extension_catalog = crate::application_extension_catalog_view(
-        &root_config,
-        &workspace_root,
-        session.entries(),
-    )?;
-    let available_models = application_model_options(session.provider_name(), session.model_name());
+    let extension_catalog =
+        crate::application_extension_catalog_view(&root_config, &workspace_root, &entries)?;
+    let available_models = application_model_options(&provider_name, &model_name);
     let model_options =
-        application_model_option_views(&root_config, session.provider_name(), &available_models);
-    let model_selection_binding = application_model_selection_binding(
-        session.provider_name(),
-        session.model_name(),
-        &available_models,
-    );
+        application_model_option_views(&root_config, &provider_name, &available_models);
+    let model_selection_binding =
+        application_model_selection_binding(&provider_name, &model_name, &available_models);
     Ok(ApplicationRunContextView {
-        provider_name: session.provider_name().to_owned(),
-        model_name: session.model_name().to_owned(),
+        provider_name,
+        model_name,
         available_models,
         model_options,
         model_selection_binding,
@@ -1351,6 +1341,85 @@ pub fn application_run_context_view(
         context_window_source: resolved.source,
         extension_catalog,
     })
+}
+
+fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, String)> {
+    let mut identity = None;
+    let mut identity_is_explicit = false;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name,
+                model_name,
+            }) if !identity_is_explicit => {
+                identity = Some((provider_name.clone(), model_name.clone()));
+                identity_is_explicit = true;
+            }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
+                if identity_is_explicit =>
+            {
+                if let Some((_, current_model)) = identity.as_mut() {
+                    *current_model = model_name.clone();
+                }
+            }
+            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot))
+                if identity.is_none() =>
+            {
+                identity = Some((snapshot.provider_name.clone(), snapshot.model_name.clone()));
+            }
+            _ => {}
+        }
+    }
+    identity
+}
+
+fn application_bound_session_entries(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<Vec<SessionLogEntry>> {
+    let records = JsonlSessionStore::read_event_records(session_path)?;
+    let actual_session_scope_id = records
+        .first()
+        .map(|record| record.session_id().to_owned())
+        .ok_or_else(|| anyhow!("durable application session has no session identity"))?;
+    if actual_session_scope_id != expected_session_scope_id
+        || records
+            .iter()
+            .any(|record| record.session_id() != expected_session_scope_id)
+    {
+        bail!("durable application session scope does not match the bound session");
+    }
+    records
+        .iter()
+        .filter_map(|record| {
+            record
+                .stored_event()
+                .payload
+                .get("session_log_entry")
+                .cloned()
+        })
+        .map(|value| {
+            serde_json::from_value::<SessionLogEntry>(value)
+                .context("failed to decode durable application session entry")
+        })
+        .collect()
+}
+
+/// Reads one renderer-safe, bounded child-agent activity projection for a bound session.
+///
+/// # Errors
+///
+/// Returns an error when the durable scope differs from the adapter binding or the append-only
+/// stream cannot be decoded safely.
+pub fn application_agent_activity_view(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<ApplicationAgentActivityView> {
+    if expected_session_scope_id.is_empty() {
+        bail!("expected agent-activity session scope must not be empty");
+    }
+    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    Ok(agent_activity_product_view_from_entries(&entries))
 }
 
 /// Reads the current shared verification product projection for one bound durable session.
@@ -1396,33 +1465,7 @@ pub fn application_session_transcript_page(
         bail!("transcript before ordinal must be positive");
     }
 
-    let records = JsonlSessionStore::read_event_records(session_path)?;
-    let actual_session_scope_id = records
-        .first()
-        .map(|record| record.session_id().to_owned())
-        .ok_or_else(|| anyhow!("durable transcript has no session identity"))?;
-    if actual_session_scope_id != expected_session_scope_id
-        || records
-            .iter()
-            .any(|record| record.session_id() != expected_session_scope_id)
-    {
-        bail!("durable transcript session scope does not match the bound session");
-    }
-
-    let entries = records
-        .iter()
-        .filter_map(|record| {
-            record
-                .stored_event()
-                .payload
-                .get("session_log_entry")
-                .cloned()
-        })
-        .map(|value| {
-            serde_json::from_value::<SessionLogEntry>(value)
-                .context("failed to decode durable transcript session entry")
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
     let mut tool_names = BTreeMap::new();
     let mut projected = Vec::new();
     for entry in entries {
@@ -1543,7 +1586,7 @@ pub fn application_session_transcript_page(
         .map(|message| message.ordinal);
 
     Ok(ApplicationTranscriptPage {
-        session_scope_id: actual_session_scope_id,
+        session_scope_id: expected_session_scope_id.to_owned(),
         total_messages,
         messages,
         next_before,

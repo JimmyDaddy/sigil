@@ -1,16 +1,23 @@
 use std::{
     collections::BTreeSet,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
     DesktopClientError, DesktopLaunchError, DesktopLaunchRequest, DesktopRunCancelRequest,
-    DesktopRunStartRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionDeleteRequest, DesktopSessionOpenRequest, DesktopSessionQuarantineRequest,
-    DesktopSessionRenameRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
+    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
+    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
+    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopTranscriptQuery,
+    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -21,15 +28,19 @@ use tokio::sync::oneshot;
 use crate::{
     appearance::{AppearanceSnapshot, AppearanceStoreError, ResolvedTheme, ThemePreference},
     ipc::{
-        DesktopAppearanceInput, DesktopApprovalActionInput, DesktopApprovalDecisionInput,
-        DesktopApprovalDecisionSummary, DesktopBootstrap, DesktopCatalogPage,
-        DesktopCatalogRequest, DesktopCatalogState, DesktopExternalUrlInput, DesktopRunAttachInput,
-        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
-        DesktopRunSummary, DesktopSessionCreateInput, DesktopSessionDeleteInput,
-        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
-        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
-        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
+        DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
+        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopExternalUrlInput,
+        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
+        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
+        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
+        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
+        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
+        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
+        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
+        DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
+        DesktopSupportSaveSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -37,6 +48,7 @@ use crate::{
 
 const DESKTOP_PROTOCOL_VERSION: u16 = 1;
 const MAX_EXTERNAL_URL_BYTES: usize = 2_048;
+const MAX_SUPPORT_BUNDLE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Error, Serialize)]
 #[error("{message}")]
@@ -67,6 +79,152 @@ pub(crate) fn desktop_open_external_url(
             "The link could not be opened. Copy it and open it in your browser.",
         )
     })
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_support_doctor(
+    workspace_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSupportDoctorSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .support_doctor()
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_export_support_bundle(
+    app: AppHandle,
+    workspace_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSupportSaveSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let bundle = client
+        .support_bundle()
+        .await
+        .map_err(project_client_error)?;
+    validate_support_bundle(&bundle.suggested_file_name, &bundle.content)?;
+    let suggested_file_name = bundle.suggested_file_name.clone();
+    let (sender, receiver) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&suggested_file_name)
+        .add_filter("JSON", &["json"])
+        .save_file(move |selection| {
+            let _ = sender.send(selection);
+        });
+    let Some(selection) = receiver.await.map_err(|_| {
+        DesktopCommandError::new(
+            "support_save_unavailable",
+            "The native save dialog is unavailable.",
+        )
+    })?
+    else {
+        return Ok(DesktopSupportSaveSummary {
+            cancelled: true,
+            file_name: None,
+        });
+    };
+    let destination = selection.into_path().map_err(|_| {
+        DesktopCommandError::new(
+            "support_save_invalid",
+            "The selected support report destination is invalid.",
+        )
+    })?;
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            DesktopCommandError::new(
+                "support_save_invalid",
+                "The selected support report destination is invalid.",
+            )
+        })?;
+    tokio::task::spawn_blocking(move || {
+        write_private_support_bundle(&destination, &bundle.content)
+    })
+    .await
+    .map_err(|_| {
+        DesktopCommandError::new(
+            "support_save_failed",
+            "The private support report could not be saved.",
+        )
+    })??;
+    Ok(DesktopSupportSaveSummary {
+        cancelled: false,
+        file_name: Some(file_name),
+    })
+}
+
+fn validate_support_bundle(file_name: &str, content: &str) -> Result<(), DesktopCommandError> {
+    if file_name.is_empty()
+        || file_name.len() > 160
+        || !file_name.starts_with("sigil-support-")
+        || !file_name.ends_with(".json")
+        || file_name.contains(['/', '\\'])
+        || content.is_empty()
+        || content.len() > MAX_SUPPORT_BUNDLE_BYTES
+    {
+        return Err(DesktopCommandError::new(
+            "support_bundle_invalid",
+            "The workspace server returned an invalid support report.",
+        ));
+    }
+    serde_json::from_str::<serde_json::Value>(content).map_err(|_| {
+        DesktopCommandError::new(
+            "support_bundle_invalid",
+            "The workspace server returned an invalid support report.",
+        )
+    })?;
+    Ok(())
+}
+
+fn write_private_support_bundle(
+    destination: &Path,
+    content: &str,
+) -> Result<(), DesktopCommandError> {
+    if destination
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(DesktopCommandError::new(
+            "support_save_invalid",
+            "A private support report cannot replace a symbolic link.",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(destination).map_err(|_| {
+        DesktopCommandError::new(
+            "support_save_failed",
+            "The private support report could not be saved.",
+        )
+    })?;
+    file.write_all(content.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| {
+            DesktopCommandError::new(
+                "support_save_failed",
+                "The private support report could not be saved.",
+            )
+        })
 }
 
 fn admit_external_https_url(candidate: &str) -> Result<String, DesktopCommandError> {
@@ -460,6 +618,27 @@ pub(crate) async fn desktop_run_context(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_agent_activity(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopAgentActivitySummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .agent_activity(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_cancel_run(
     workspace_id: String,
     input: DesktopRunCancelInput,
@@ -631,6 +810,61 @@ pub(crate) async fn desktop_catalog(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_plan_session_catalog_batch(
+    workspace_id: String,
+    input: DesktopSessionCatalogBatchPlanInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionCatalogBatchPlanSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let items = validate_batch_items(input.action, input.items)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .plan_session_catalog_batch(DesktopSessionCatalogBatchPlanRequest {
+            action: input.action,
+            items,
+        })
+        .await
+        .map(Into::into)
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_execute_session_catalog_batch(
+    workspace_id: String,
+    input: DesktopSessionCatalogBatchExecuteInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionCatalogBatchReceiptSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    if input.plan_id.is_empty() || input.plan_id.len() > 128 {
+        return Err(DesktopCommandError::new(
+            "session_batch_plan_invalid",
+            "The conversation batch preview is invalid or stale.",
+        ));
+    }
+    let items = validate_batch_items(input.action, input.items)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .execute_session_catalog_batch(DesktopSessionCatalogBatchExecuteRequest {
+            plan_id: input.plan_id,
+            action: input.action,
+            items,
+        })
+        .await
+        .map(Into::into)
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_create_session(
     workspace_id: String,
     input: DesktopSessionCreateInput,
@@ -769,6 +1003,34 @@ pub(crate) async fn desktop_quarantine_session(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_delete_invalid_session_source(
+    workspace_id: String,
+    input: DesktopSessionInvalidSourceDeleteInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopSessionInvalidSourceDeleteSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_ref(&input.session_ref)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .delete_invalid_source(DesktopSessionInvalidSourceDeleteRequest {
+            session_ref: input.session_ref,
+            source_bytes: input.source_bytes,
+            source_modified_at_unix_ms: input.source_modified_at_unix_ms,
+        })
+        .await
+        .map(|receipt| DesktopSessionInvalidSourceDeleteSummary {
+            session_ref: receipt.session_ref,
+            projection_generation: receipt.projection_generation,
+        })
+        .map_err(project_session_mutation_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_transcript(
     workspace_id: String,
     session_id: String,
@@ -838,6 +1100,51 @@ fn validate_catalog_request(
         pinned: request.pinned,
         state: request.state.map(Into::into),
     })
+}
+
+fn validate_batch_items(
+    action: sigil_desktop::DesktopSessionCatalogBatchAction,
+    items: Vec<crate::ipc::DesktopSessionCatalogBatchItemInput>,
+) -> Result<Vec<DesktopSessionCatalogBatchItem>, DesktopCommandError> {
+    if items.is_empty() || items.len() > 100 {
+        return Err(DesktopCommandError::new(
+            "session_batch_invalid",
+            "Select between 1 and 100 conversations.",
+        ));
+    }
+    items
+        .into_iter()
+        .map(|item| {
+            validate_session_ref(&item.session_ref)?;
+            let valid_shape = match action {
+                sigil_desktop::DesktopSessionCatalogBatchAction::DeleteSessions => {
+                    item.session_id
+                        .as_deref()
+                        .is_some_and(|session_id| validate_session_id(session_id).is_ok())
+                        && item.source_bytes.is_none()
+                        && item.source_modified_at_unix_ms.is_none()
+                }
+                sigil_desktop::DesktopSessionCatalogBatchAction::QuarantineInvalidSources
+                | sigil_desktop::DesktopSessionCatalogBatchAction::DeleteInvalidSources => {
+                    item.session_id.is_none()
+                        && item.source_bytes.is_some()
+                        && item.source_modified_at_unix_ms.is_some()
+                }
+            };
+            if !valid_shape {
+                return Err(DesktopCommandError::new(
+                    "session_batch_invalid",
+                    "The selected conversations no longer match this batch action.",
+                ));
+            }
+            Ok(DesktopSessionCatalogBatchItem {
+                session_ref: item.session_ref,
+                session_id: item.session_id,
+                source_bytes: item.source_bytes,
+                source_modified_at_unix_ms: item.source_modified_at_unix_ms,
+            })
+        })
+        .collect()
 }
 
 fn validate_workspace_id(value: &str) -> Result<(), DesktopCommandError> {

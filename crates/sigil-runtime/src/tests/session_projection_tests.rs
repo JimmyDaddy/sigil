@@ -574,6 +574,37 @@ fn invalid_catalog_source_can_only_be_quarantined_with_exact_metadata() -> Resul
 }
 
 #[test]
+fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("broken.jsonl");
+    fs::write(&source, b"not a session stream\n")?;
+    projection.rebuild()?;
+    let entry = projection.list_workspace_entries()?.remove(0);
+
+    assert!(matches!(
+        projection.delete_invalid_source(
+            "broken.jsonl",
+            entry.source_bytes,
+            entry.source_modified_at_unix_ms + 1,
+        ),
+        Err(LocalSessionMutationError::IdentityChanged)
+    ));
+    let receipt = projection.delete_invalid_source(
+        "broken.jsonl",
+        entry.source_bytes,
+        entry.source_modified_at_unix_ms,
+    )?;
+
+    assert!(receipt.operation_id.starts_with("invalid-source-delete:"));
+    assert!(receipt.projection_generation.is_some());
+    assert!(!source.exists());
+    assert!(projection.list_workspace_entries()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn projection_counts_duplicate_session_identity_without_overwriting_rows() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

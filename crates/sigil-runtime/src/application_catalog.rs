@@ -34,6 +34,8 @@ pub enum ApplicationClientAction {
     FocusModel,
     OpenSessionPicker,
     OpenAgentWorkbench,
+    OpenSettings,
+    OpenSupport,
 }
 
 /// Exact shared slash-command catalog.
@@ -54,7 +56,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "edit config",
         argument_hint: None,
         completes_with_space: false,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenSettings),
     },
     ApplicationCommandSpec {
         canonical: "/doctor",
@@ -63,7 +65,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "run local diagnostics",
         argument_hint: None,
         completes_with_space: false,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenSupport),
     },
     ApplicationCommandSpec {
         canonical: "/feedback",
@@ -72,7 +74,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "review and export a private support report",
         argument_hint: None,
         completes_with_space: false,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenSupport),
     },
     ApplicationCommandSpec {
         canonical: "/effort",

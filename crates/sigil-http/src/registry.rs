@@ -25,12 +25,13 @@ use crate::{
         HttpSessionOpenBindingError,
     },
     dto::{
-        HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
-        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
-        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
-        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+        HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
+        HttpApprovalDecisionRequest, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
+        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
+        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+        HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
+        HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -390,6 +391,18 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    pub(crate) fn durable_session_mutation_is_blocked(&self, durable_session_id: &str) -> bool {
+        let state = self.lock_state();
+        if !state.accepting_commands || state.durable_session_mutations.contains(durable_session_id)
+        {
+            return true;
+        }
+        state.sessions.values().any(|session| {
+            session.binding.session_scope_id == durable_session_id
+                && (session.foreground_run_id.is_some() || session.verification_in_progress)
+        })
+    }
+
     /// Returns one HTTP adapter session snapshot.
     ///
     /// # Errors
@@ -454,6 +467,31 @@ impl HttpSessionRunRegistry {
                 run_id: session_id.to_owned(),
                 message: error.message,
             })
+    }
+
+    /// Projects safe, bounded child-agent lifecycle and result-handoff state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown, its durable scope drifted, or projection
+    /// cannot complete.
+    pub fn agent_activity_view(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpAgentActivityView, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.agent_activity_view(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "agent activity view",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "agent activity view",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        })
     }
 
     /// Starts one run inside an existing HTTP adapter session.

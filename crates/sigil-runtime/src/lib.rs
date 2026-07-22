@@ -182,7 +182,9 @@ pub use portable_compaction::{
     portable_compaction_target_output_tokens, require_default_deepseek_v4_flash_portable_transport,
 };
 pub use product_view::{
-    AgentGraphProductSummary, agent_graph_product_summary_from_entries,
+    AgentGraphProductSummary, ApplicationAgentActivityItem, ApplicationAgentActivityStatus,
+    ApplicationAgentActivityView, ApplicationAgentHandoffStatus, ApplicationAgentUsageSummary,
+    agent_activity_product_view_from_entries, agent_graph_product_summary_from_entries,
     agent_graph_product_summary_from_session_log,
 };
 pub use provider_config::{
@@ -227,13 +229,13 @@ pub use session_lifecycle::{
     LocalSessionPinJournalBinding, LocalSessionReopenBinding, LocalSessionReopenError,
     LocalSessionRetentionJournalBinding, MAX_SESSION_CATALOG_PAGE_SIZE,
     SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SESSION_EXPORT_SCHEMA_VERSION,
-    SessionCatalogMutationReceipt, SessionCatalogProjectionEntry, SessionCatalogProjectionError,
-    SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
-    SessionCatalogProjectionRebuildReport, SessionCatalogProjectionReconcileReport,
-    SessionCatalogProjectionRecoveryReport, SessionCatalogProjectionService,
-    SessionCatalogQuarantineReceipt, SessionDeleteOutput, SessionDeletePreview,
-    SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1, SessionExportV1,
-    SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
+    SessionCatalogInvalidSourceDeleteReceipt, SessionCatalogMutationReceipt,
+    SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
+    SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
+    SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,
+    SessionCatalogProjectionService, SessionCatalogQuarantineReceipt, SessionDeleteOutput,
+    SessionDeletePreview, SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1,
+    SessionExportV1, SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
     SessionRetentionPreview, SessionRetentionReason,
 };
 pub use skills::{

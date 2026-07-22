@@ -128,3 +128,21 @@ bundled runtime 版本/架构与当前 commit 一致，`codesign --verify --deep
 conversation row 增加渐进披露的 rename/delete 菜单。rename 进入 append-only lifecycle truth，delete 使用 exact durable identity、
 显式确认与活动 run/verification reservation，SQLite 仅在 committed mutation 后刷新。debug recent reopen 同时改为优先当前
 `target/debug/sigil`，避免旧 package sidecar 造成 schema mismatch。
+
+2026-07-21 follow-up：invalid catalog row 现在提供两条显式恢复路径。quarantine 只接受 exact direct-child
+`session_ref` 与 catalog 记录的 bytes/mtime fingerprint，在 maintenance lease 内重新验证 regular-file metadata 后原子移动到
+workspace-local `.quarantine`；永久删除使用相同的 fail-closed identity check，但因为 malformed source 没有可信 durable
+session identity，不伪造 lifecycle delete journal。两条路径都只在 committed filesystem mutation 后 best-effort reconcile SQLite，
+renderer 永远不接触绝对路径。Tauri session capability 同步允许这两个收窄 command，desktop UI gate 会比较 renderer bridge
+中的全部 `desktop_*` invoke 与 permission manifest，防止再次出现“command 已注册但 renderer 不可调用”的漂移。
+
+2026-07-21 notification follow-up：notification viewport 是注意力通道，不是事件日志。正常进度与界面已经明确表达的状态变化
+（例如启动/连接 run、请求取消、提交审批、切换 workspace、新建/重命名会话和自动刷新历史）必须静默，不得弹 toast。
+Sigil toast 只承载需要用户关注的错误，以及删除、隔离这类结果不容易从当前界面确认的高影响操作反馈；使用产品 mark、
+语义 tone、最多四条的有界堆叠、自动过期、显式关闭与 polite/assertive 无障碍播报。持续的 workspace health failure 和带
+retry 的可恢复错误仍保留在原位，避免把必须处理的问题降级成一闪而过的 toast。
+
+2026-07-22 bounded-content follow-up：普通页面、conversation timeline、message、reasoning、tool card 和 drawer 默认遵循
+`min-width: 0` + container-bounded wrapping，长 URL、连续标识符和未分词文本不得撑宽应用或创建页面级横向滚动。
+只有 code/pre、diff、table 和 bounded tool-output viewer 等保真格式 surface 可以在自己的局部容器中横向滚动；
+UI gate 必须同时验证共享 bounded-content utility 与 timeline 的横向溢出禁止规则。

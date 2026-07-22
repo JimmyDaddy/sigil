@@ -1,6 +1,6 @@
 # RFC-0049 Desktop Skills and Agents Workbench V1
 
-状态：active / R49.0-R49.1 complete; R49.2-R49.3 partial
+状态：active / R49.0-R49.1 complete; R49.2-R49.3 and R49.5 partial
 
 创建日期：2026-07-20
 
@@ -47,6 +47,8 @@ Sigil runtime/TUI 已具备 skill discovery、agent profile、trust/policy、bac
 - Desktop/HTTP 不能直接借用一次 run preparation 内部的 process-local `AgentSupervisor`。R49.4 必须先建立 session-scoped live owner：owner 绑定 durable session scope 与 foreground lease，跨请求只暴露 bounded thread command；restart 后缺失 live owner 必须 fail closed 并只展示 durable terminal/interrupt projection。
 - 不声称 background child 是实时 remote worker，不把 safe-point follow-up 描述为实时 steering。
 - 不直接展示 provider continuation payload、workspace path、raw tool arguments 或 secret-bearing error。
+
+2026-07-22 follow-up 已完成 durable activity 的只读投影：conversation 头部会显示 active child 数量与紧凑任务摘要，activity drawer 可检查每个 child 的状态、handoff 状态、bounded result 和 token usage。该投影直接重放 parent session 的 append-only truth，不读取 child session path，也不用 renderer local state 猜测“已回传”。跨请求 follow-up、cancel 和 close 仍受 R49.4 live owner 约束，本批次不声称这些控制已完成。
 
 ## 3. Architecture and ownership
 

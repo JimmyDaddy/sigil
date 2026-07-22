@@ -17,6 +17,7 @@ import {
   type CatalogViewport,
 } from "./fixtures";
 import { UiCatalog } from "./UiCatalog";
+import { Select } from "../primitives";
 
 export function CatalogApp() {
   const [fixtureId, setFixtureId] = useState(catalogFixtures[0]?.id ?? "no-workspace");
@@ -90,12 +91,14 @@ function CatalogSelect({
   readonly onChange: (value: string) => void;
 }) {
   return (
-    <label className="catalog-control">
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+    <Select
+      label={label}
+      containerClassName="catalog-control"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    >
         {options.map((option) => <option key={option}>{option}</option>)}
-      </select>
-    </label>
+    </Select>
   );
 }
 
@@ -142,12 +145,13 @@ function FixtureSurface({
             onOpen={() => undefined}
             onRename={() => undefined}
             onDelete={() => undefined}
+            onDeleteInvalidSource={() => undefined}
             onQuarantine={() => undefined}
           />
         </section>
       ) : null}
       {fixture.streamState !== undefined ? (
-        <div className={`stream-chip stream-${fixture.streamState}`}>{fixture.streamState}</div>
+        <div className={`conversation-activity stream-${fixture.streamState}`}><span className="conversation-activity-dot" />{fixture.streamState}</div>
       ) : null}
       {fixture.attachmentGap ? <div className="timeline-gap">Some live details were not retained while reconnecting.</div> : null}
       {fixture.composer === undefined ? null : (
@@ -167,6 +171,8 @@ function FixtureSurface({
             onModelChange={() => undefined}
             onNewSession={() => Promise.resolve(true)}
             onOpenSessionPicker={() => undefined}
+            onOpenSettings={() => undefined}
+            onOpenSupport={() => undefined}
             onOpenAgentWorkbench={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}

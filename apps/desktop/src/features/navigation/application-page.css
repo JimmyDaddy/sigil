@@ -1,0 +1,100 @@
+.application-page {
+  box-sizing: border-box;
+  display: flex;
+  width: min(1180px, 100%);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.application-page-content {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sg-sys-space-6);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.application-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sg-sys-space-5);
+  margin-bottom: var(--sg-sys-space-5);
+}
+
+.application-page-heading { min-width: 0; }
+
+.application-page-header h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+}
+
+.application-page-header p:not(.eyebrow),
+.application-page-intro > p:not(.eyebrow) {
+  max-width: 700px;
+  margin: 8px 0 0;
+  color: var(--sg-sys-color-on-surface-variant);
+  line-height: 1.5;
+}
+
+.application-page-toolbar {
+  display: flex;
+  min-height: 56px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sg-sys-space-4);
+  padding: var(--sg-sys-space-2) var(--sg-sys-space-6);
+  border-bottom: 1px solid var(--sg-sys-color-outline);
+  background: color-mix(in srgb, var(--sg-sys-color-canvas) 88%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.application-page-toolbar-leading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--sg-sys-space-2);
+}
+
+.application-page-toolbar h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 18px;
+  line-height: 1.3;
+  letter-spacing: -.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.application-page-back {
+  border-color: transparent;
+  color: var(--sg-sys-color-on-surface-variant);
+  background: transparent;
+}
+
+.application-page-toolbar-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.application-page-intro { margin-bottom: var(--sg-sys-space-5); }
+
+.application-page-meta {
+  flex: 0 0 auto;
+  color: var(--sg-sys-color-on-surface-variant);
+  font-size: 13px;
+}
+
+.application-page-loading { min-height: 360px; }

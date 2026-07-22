@@ -373,7 +373,10 @@ fn desktop_owner_channel_json_bootstrap_and_pipe_close_are_secret_free() {
 
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
-    assert_eq!(server.server_info["schema_version"], 4);
+    assert_eq!(
+        server.server_info["schema_version"],
+        sigil_http::HTTP_SERVER_INFO_SCHEMA_VERSION
+    );
     assert_eq!(server.server_info["protocol_version"], 2);
     assert_eq!(server.server_info["authentication"], "bearer");
     assert_eq!(server.server_info["shutdown_on_stdin_close"], true);
@@ -420,7 +423,10 @@ async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
         .await
         .expect("desktop launcher should authenticate the real server");
 
-    assert_eq!(process.server_info().schema_version, 4);
+    assert_eq!(
+        process.server_info().schema_version,
+        sigil_http::HTTP_SERVER_INFO_SCHEMA_VERSION
+    );
     assert_eq!(process.server_info().protocol_version, 2);
     assert!(process.server_info().capabilities.durable_session_reopen);
     assert!(process.server_info().capabilities.bounded_transcript_replay);

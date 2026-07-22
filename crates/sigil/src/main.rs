@@ -22,6 +22,7 @@ use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpS
 use sigil_http::{
     HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
     HttpLiveEventBus, HttpLocalServer, HttpProductionRunDriver, HttpProductionRunDriverOptions,
+    HttpSupportContext,
 };
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
@@ -706,7 +707,12 @@ async fn serve_command(
         paths.workspace_id.clone(),
         options.shutdown_on_stdin_close,
     )
-    .await?;
+    .await?
+    .with_support_context(HttpSupportContext::new(
+        config_path,
+        launch_cwd,
+        BuildInfo::current().into(),
+    ));
     plan.bind_addr = server.local_addr()?;
     let mut owner_channel = options
         .shutdown_on_stdin_close

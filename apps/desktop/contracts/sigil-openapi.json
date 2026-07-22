@@ -89,6 +89,157 @@
       }
     },
     "schemas": {
+      "AgentActivityItem": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "maxLength": 32768,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handoff_status": {
+            "$ref": "#/components/schemas/AgentHandoffStatus"
+          },
+          "objective": {
+            "maxLength": 32768,
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "maxLength": 32768,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_summary": {
+            "maxLength": 32768,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_summary_truncated": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentActivityStatus"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentUsageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "thread_id",
+          "objective",
+          "status",
+          "handoff_status",
+          "result_summary_truncated"
+        ],
+        "type": "object"
+      },
+      "AgentActivityStatus": {
+        "enum": [
+          "started",
+          "running",
+          "blocked",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted",
+          "unavailable",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "AgentActivityView": {
+        "additionalProperties": false,
+        "properties": {
+          "active_agents": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentActivityItem"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "terminal_agents": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "total_agents": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_agents",
+          "active_agents",
+          "terminal_agents",
+          "items"
+        ],
+        "type": "object"
+      },
+      "AgentHandoffStatus": {
+        "enum": [
+          "pending",
+          "result_ready",
+          "result_read",
+          "returned",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "AgentUsageSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "cached_tokens": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "total_tokens"
+        ],
+        "type": "object"
+      },
       "ApplicationAgentBinding": {
         "additionalProperties": false,
         "properties": {
@@ -177,7 +328,9 @@
           "focus_effort",
           "focus_model",
           "open_session_picker",
-          "open_agent_workbench"
+          "open_agent_workbench",
+          "open_settings",
+          "open_support"
         ],
         "type": "string"
       },
@@ -1008,6 +1161,9 @@
       "ServerCapabilities": {
         "additionalProperties": false,
         "properties": {
+          "agent_activity": {
+            "type": "boolean"
+          },
           "approval": {
             "type": "boolean"
           },
@@ -1032,6 +1188,9 @@
           "session_catalog": {
             "type": "boolean"
           },
+          "support_diagnostics": {
+            "type": "boolean"
+          },
           "verification": {
             "type": "boolean"
           }
@@ -1045,7 +1204,9 @@
           "approval",
           "cancellation",
           "verification",
-          "run_context"
+          "run_context",
+          "agent_activity",
+          "support_diagnostics"
         ],
         "type": "object"
       },
@@ -1069,7 +1230,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 4,
+            "const": 5,
             "type": "integer"
           },
           "server_version": {
@@ -1091,6 +1252,253 @@
           "authentication",
           "shutdown_on_stdin_close",
           "capabilities"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchAction": {
+        "enum": [
+          "delete_sessions",
+          "quarantine_invalid_sources",
+          "delete_invalid_sources"
+        ],
+        "type": "string"
+      },
+      "SessionCatalogBatchExecuteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/SessionCatalogBatchAction"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCatalogBatchItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "plan_id": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "action",
+          "items"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchItem": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_ref": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "source_bytes": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source_modified_at_unix_ms": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_ref"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/SessionCatalogBatchAction"
+          },
+          "blocked": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "executable": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "generation": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCatalogBatchPlanItem"
+            },
+            "type": "array"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "total": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id",
+          "action",
+          "generation",
+          "total",
+          "executable",
+          "blocked",
+          "items"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchPlanItem": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_ref": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "executable",
+              "blocked"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "status"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchPlanRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/SessionCatalogBatchAction"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCatalogBatchItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "items"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/SessionCatalogBatchAction"
+          },
+          "completed": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "failed": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCatalogBatchReceiptItem"
+            },
+            "type": "array"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "skipped": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id",
+          "action",
+          "total",
+          "completed",
+          "failed",
+          "skipped",
+          "items"
+        ],
+        "type": "object"
+      },
+      "SessionCatalogBatchReceiptItem": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed",
+              "skipped"
+            ],
+            "type": "string"
+          },
+          "projection_generation": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quarantine_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "outcome"
         ],
         "type": "object"
       },
@@ -1262,6 +1670,53 @@
         "required": [
           "session_ref",
           "session_id"
+        ],
+        "type": "object"
+      },
+      "SessionInvalidSourceDeleteReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "projection_generation": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_ref",
+          "operation_id"
+        ],
+        "type": "object"
+      },
+      "SessionInvalidSourceDeleteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "session_ref": {
+            "maxLength": 128,
+            "pattern": "^[^/\\\\]+\\.jsonl$",
+            "type": "string"
+          },
+          "source_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "source_modified_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_ref",
+          "source_bytes",
+          "source_modified_at_unix_ms"
         ],
         "type": "object"
       },
@@ -1544,6 +1999,191 @@
           "session_scope_id",
           "total_messages",
           "messages"
+        ],
+        "type": "object"
+      },
+      "SupportBundleExport": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 262144,
+            "type": "string"
+          },
+          "generated_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "suggested_file_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggested_file_name",
+          "generated_at_unix_ms",
+          "content"
+        ],
+        "type": "object"
+      },
+      "SupportCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "remediation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SupportStatus"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "name",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "SupportDoctorReport": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/SupportCheck"
+            },
+            "type": "array"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/SupportEnvironment"
+          },
+          "generated_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "privacy": {
+            "$ref": "#/components/schemas/SupportPrivacy"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/SupportSummary"
+          },
+          "target": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "generated_at_unix_ms",
+          "version",
+          "commit",
+          "target",
+          "profile",
+          "environment",
+          "summary",
+          "checks",
+          "privacy"
+        ],
+        "type": "object"
+      },
+      "SupportEnvironment": {
+        "additionalProperties": false,
+        "properties": {
+          "architecture": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "terminal_family": {
+            "enum": [
+              "iterm2",
+              "apple_terminal",
+              "wezterm",
+              "vscode",
+              "other",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "os",
+          "architecture",
+          "terminal_family"
+        ],
+        "type": "object"
+      },
+      "SupportPrivacy": {
+        "additionalProperties": false,
+        "properties": {
+          "excluded": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "included": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "review_before_sharing": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "included",
+          "excluded",
+          "review_before_sharing"
+        ],
+        "type": "object"
+      },
+      "SupportStatus": {
+        "enum": [
+          "ok",
+          "warn",
+          "error"
+        ],
+        "type": "string"
+      },
+      "SupportSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "ok": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "overall_status": {
+            "$ref": "#/components/schemas/SupportStatus"
+          },
+          "warn": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "overall_status",
+          "ok",
+          "warn",
+          "error"
         ],
         "type": "object"
       },
@@ -2218,6 +2858,83 @@
         "summary": "List durable historical sessions for the current workspace"
       }
     },
+    "/session-catalog/batch/execute": {
+      "post": {
+        "description": "Replans and compares the opaque plan digest before the first mutation, then returns a per-item best-effort receipt. The operation is not an atomic transaction across session files.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCatalogBatchExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCatalogBatchReceipt"
+                }
+              }
+            },
+            "description": "Per-item best-effort batch receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Execute one confirmed session catalog batch"
+      }
+    },
+    "/session-catalog/batch/plan": {
+      "post": {
+        "description": "Reconciles current durable catalog truth, classifies each selected identity, and returns a content-bound plan without mutating any session source.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCatalogBatchPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCatalogBatchPlan"
+                }
+              }
+            },
+            "description": "Content-bound batch preview"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Preview one exact bounded session catalog batch"
+      }
+    },
     "/session-catalog/delete": {
       "post": {
         "description": "Rejects pinned or active sessions, then applies the existing content-bound preview/delete lifecycle and evicts idle adapter handles.",
@@ -2259,6 +2976,49 @@
           }
         },
         "summary": "Delete one exact durable conversation"
+      }
+    },
+    "/session-catalog/delete-invalid-source": {
+      "post": {
+        "description": "Revalidates the invalid source fingerprint under a maintenance lease, then permanently removes the regular file after native-shell confirmation.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionInvalidSourceDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInvalidSourceDeleteReceipt"
+                }
+              }
+            },
+            "description": "Committed invalid-source delete receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Permanently delete one exact invalid local session source"
       }
     },
     "/session-catalog/quarantine": {
@@ -2467,6 +3227,38 @@
           }
         },
         "summary": "Get a local session handle"
+      }
+    },
+    "/sessions/{session_id}/agent-activity": {
+      "get": {
+        "description": "Projects safe child-agent status, objective, bounded result summary and usage. Child session references, paths, hashes and raw tool arguments are excluded.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentActivityView"
+                }
+              }
+            },
+            "description": "Newest child-agent activity first"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Read bounded child-agent lifecycle and result handoff state"
       }
     },
     "/sessions/{session_id}/run-context": {
@@ -2687,6 +3479,54 @@
           }
         },
         "summary": "Rerun one exact stale-safe recommended verification check"
+      }
+    },
+    "/support/bundle": {
+      "post": {
+        "description": "Returns bounded JSON only to the native desktop client. The renderer does not receive the bundle content or a filesystem path.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportBundleExport"
+                }
+              }
+            },
+            "description": "Private bounded support bundle"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Build a private redacted support bundle"
+      }
+    },
+    "/support/doctor": {
+      "get": {
+        "description": "Returns only the frozen path-free support projection. Credentials, local paths, conversation content, tool payloads, and file content are excluded.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportDoctorReport"
+                }
+              }
+            },
+            "description": "Redacted diagnostic report"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read redacted local diagnostics"
       }
     }
   },

@@ -34,9 +34,14 @@ description = "Allows the main local window to query the bounded server-owned se
 commands.allow = ["desktop_catalog"]
 
 [[permission]]
+identifier = "allow-desktop-session-batch"
+description = "Allows the main local window to preview and execute one server-revalidated bounded batch of conversation mutations."
+commands.allow = ["desktop_plan_session_catalog_batch", "desktop_execute_session_catalog_batch"]
+
+[[permission]]
 identifier = "allow-desktop-session"
-description = "Allows the main local window to create, reopen, read, rename, or confirm deletion of one bounded server-owned conversation."
-commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_rename_session", "desktop_delete_session", "desktop_transcript", "desktop_run_context"]
+description = "Allows the main local window to create, reopen, read, rename, quarantine, or confirm deletion of one bounded server-owned conversation source."
+commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_rename_session", "desktop_delete_session", "desktop_quarantine_session", "desktop_delete_invalid_session_source", "desktop_transcript", "desktop_run_context", "desktop_agent_activity"]
 
 [[permission]]
 identifier = "allow-desktop-run"
@@ -52,3 +57,8 @@ commands.allow = ["desktop_resolve_approval"]
 identifier = "allow-desktop-verification"
 description = "Allows the main local window to inspect and rerun one exact server-projected verification check."
 commands.allow = ["desktop_verification", "desktop_rerun_verification"]
+
+[[permission]]
+identifier = "allow-desktop-support"
+description = "Allows the main local window to read redacted diagnostics and ask the native shell to save a private support report."
+commands.allow = ["desktop_support_doctor", "desktop_export_support_bundle"]

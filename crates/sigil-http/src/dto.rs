@@ -7,9 +7,13 @@ pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
     TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
 };
+use sigil_runtime::support::{
+    DoctorSupportReportV1, SupportDoctorCheckV1, SupportDoctorStatus, SupportEnvironmentV1,
+    SupportPrivacyV1, SupportTerminalFamily,
+};
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 4;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 5;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +45,10 @@ pub struct HttpServerCapabilities {
     pub verification: bool,
     /// Bound sessions expose typed model, permission-mode, and context-usage facts.
     pub run_context: bool,
+    /// Bound sessions expose a safe, bounded child-agent lifecycle and handoff projection.
+    pub agent_activity: bool,
+    /// Redacted local diagnostics and an explicit private support-bundle export are available.
+    pub support_diagnostics: bool,
 }
 
 impl HttpServerCapabilities {
@@ -57,8 +65,148 @@ impl HttpServerCapabilities {
             cancellation: true,
             verification: true,
             run_context: true,
+            agent_activity: true,
+            support_diagnostics: true,
         }
     }
+}
+
+/// Stable status token for the desktop support surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSupportStatus {
+    Ok,
+    Warn,
+    Error,
+}
+
+impl From<SupportDoctorStatus> for HttpSupportStatus {
+    fn from(value: SupportDoctorStatus) -> Self {
+        match value {
+            SupportDoctorStatus::Ok => Self::Ok,
+            SupportDoctorStatus::Warn => Self::Warn,
+            SupportDoctorStatus::Error => Self::Error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportSummary {
+    pub overall_status: HttpSupportStatus,
+    pub ok: usize,
+    pub warn: usize,
+    pub error: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportCheck {
+    pub status: HttpSupportStatus,
+    pub name: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+impl From<SupportDoctorCheckV1> for HttpSupportCheck {
+    fn from(value: SupportDoctorCheckV1) -> Self {
+        Self {
+            status: value.status.into(),
+            name: value.name,
+            summary: value.summary,
+            remediation: value.remediation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportEnvironment {
+    pub os: String,
+    pub architecture: String,
+    pub terminal_family: String,
+}
+
+impl From<SupportEnvironmentV1> for HttpSupportEnvironment {
+    fn from(value: SupportEnvironmentV1) -> Self {
+        let terminal_family = match value.terminal_family {
+            SupportTerminalFamily::Iterm2 => "iterm2",
+            SupportTerminalFamily::AppleTerminal => "apple_terminal",
+            SupportTerminalFamily::Wezterm => "wezterm",
+            SupportTerminalFamily::Vscode => "vscode",
+            SupportTerminalFamily::Other => "other",
+            SupportTerminalFamily::Unknown => "unknown",
+        };
+        Self {
+            os: value.os,
+            architecture: value.architecture,
+            terminal_family: terminal_family.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportPrivacy {
+    pub included: Vec<String>,
+    pub excluded: Vec<String>,
+    pub review_before_sharing: bool,
+}
+
+impl From<SupportPrivacyV1> for HttpSupportPrivacy {
+    fn from(value: SupportPrivacyV1) -> Self {
+        Self {
+            included: value.included,
+            excluded: value.excluded,
+            review_before_sharing: value.review_before_sharing,
+        }
+    }
+}
+
+/// Path-free diagnostic projection returned to an authenticated desktop client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportDoctorReport {
+    pub generated_at_unix_ms: u64,
+    pub version: String,
+    pub commit: String,
+    pub target: String,
+    pub profile: String,
+    pub environment: HttpSupportEnvironment,
+    pub summary: HttpSupportSummary,
+    pub checks: Vec<HttpSupportCheck>,
+    pub privacy: HttpSupportPrivacy,
+}
+
+impl From<DoctorSupportReportV1> for HttpSupportDoctorReport {
+    fn from(value: DoctorSupportReportV1) -> Self {
+        Self {
+            generated_at_unix_ms: value.generated_at_unix_ms,
+            version: value.build.version,
+            commit: value.build.commit,
+            target: value.build.target,
+            profile: value.build.profile,
+            environment: value.environment.into(),
+            summary: HttpSupportSummary {
+                overall_status: value.summary.overall_status.into(),
+                ok: value.summary.ok,
+                warn: value.summary.warn,
+                error: value.summary.error,
+            },
+            checks: value.checks.into_iter().map(Into::into).collect(),
+            privacy: value.privacy.into(),
+        }
+    }
+}
+
+/// Bounded private support JSON handed only to the native desktop save boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSupportBundleExport {
+    pub suggested_file_name: String,
+    pub generated_at_unix_ms: u64,
+    pub content: String,
 }
 
 /// Immutable, secret-free metadata published after the local listener is ready.
@@ -155,6 +303,123 @@ pub struct HttpSessionQuarantineRequest {
     pub source_modified_at_unix_ms: u64,
 }
 
+/// Exact invalid catalog source fingerprint selected for permanent deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionInvalidSourceDeleteRequest {
+    pub session_ref: String,
+    pub source_bytes: u64,
+    pub source_modified_at_unix_ms: u64,
+}
+
+/// Server-owned operation admitted by the session catalog batch planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionCatalogBatchAction {
+    DeleteSessions,
+    QuarantineInvalidSources,
+    DeleteInvalidSources,
+}
+
+/// One exact catalog identity selected by an interactive client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionCatalogBatchItem {
+    pub session_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified_at_unix_ms: Option<u64>,
+}
+
+/// Exact selected set submitted for a read-only batch preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionCatalogBatchPlanRequest {
+    pub action: HttpSessionCatalogBatchAction,
+    pub items: Vec<HttpSessionCatalogBatchItem>,
+}
+
+/// The same selected set plus the opaque plan digest confirmed by the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionCatalogBatchExecuteRequest {
+    pub plan_id: String,
+    pub action: HttpSessionCatalogBatchAction,
+    pub items: Vec<HttpSessionCatalogBatchItem>,
+}
+
+/// Server classification for one preflight row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionCatalogBatchPlanStatus {
+    Executable,
+    Blocked,
+}
+
+/// One bounded preflight result. `reason` is a stable machine code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionCatalogBatchPlanItem {
+    pub session_ref: String,
+    pub status: HttpSessionCatalogBatchPlanStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Content-bound preview returned before any batch mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionCatalogBatchPlan {
+    pub plan_id: String,
+    pub action: HttpSessionCatalogBatchAction,
+    pub generation: u64,
+    pub total: usize,
+    pub executable: usize,
+    pub blocked: usize,
+    pub items: Vec<HttpSessionCatalogBatchPlanItem>,
+}
+
+/// Outcome of one item in a best-effort batch execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionCatalogBatchOutcome {
+    Completed,
+    Failed,
+    Skipped,
+}
+
+/// Bounded per-item batch receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionCatalogBatchReceiptItem {
+    pub session_ref: String,
+    pub outcome: HttpSessionCatalogBatchOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
+/// Result of one server-owned best-effort batch execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionCatalogBatchReceipt {
+    pub plan_id: String,
+    pub action: HttpSessionCatalogBatchAction,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub items: Vec<HttpSessionCatalogBatchReceiptItem>,
+}
+
 /// Bounded receipt for a committed durable catalog mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +459,28 @@ impl From<sigil_runtime::SessionCatalogQuarantineReceipt> for HttpSessionQuarant
             session_ref: receipt.session_ref,
             operation_id: receipt.operation_id,
             quarantine_name: receipt.quarantine_name,
+            projection_generation: receipt.projection_generation,
+        }
+    }
+}
+
+/// Bounded receipt for one invalid source permanently removed from the active catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionInvalidSourceDeleteReceipt {
+    pub session_ref: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_generation: Option<u64>,
+}
+
+impl From<sigil_runtime::SessionCatalogInvalidSourceDeleteReceipt>
+    for HttpSessionInvalidSourceDeleteReceipt
+{
+    fn from(receipt: sigil_runtime::SessionCatalogInvalidSourceDeleteReceipt) -> Self {
+        Self {
+            session_ref: receipt.session_ref,
+            operation_id: receipt.operation_id,
             projection_generation: receipt.projection_generation,
         }
     }
@@ -286,6 +573,74 @@ pub struct HttpSessionTranscriptPage {
     /// Exclusive ordinal for the next older page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_before: Option<u64>,
+}
+
+/// Provider-neutral child-agent lifecycle visible to authenticated application clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpAgentActivityStatus {
+    Started,
+    Running,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+    Unavailable,
+    Unknown,
+}
+
+/// Whether a terminal child result is still pending or has reached the parent conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpAgentHandoffStatus {
+    Pending,
+    ResultReady,
+    ResultRead,
+    Returned,
+    Unavailable,
+}
+
+/// Bounded token usage for one child-agent result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpAgentUsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+}
+
+/// One safe activity row. Session references, paths, hashes, and raw tool arguments are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpAgentActivityItem {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub objective: String,
+    pub status: HttpAgentActivityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub handoff_status: HttpAgentHandoffStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+    pub result_summary_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<HttpAgentUsageSummary>,
+}
+
+/// Bounded child-agent activity for one parent session, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpAgentActivityView {
+    pub total_agents: usize,
+    pub active_agents: usize,
+    pub terminal_agents: usize,
+    pub items: Vec<HttpAgentActivityItem>,
 }
 
 /// Runtime-owned durable binding for one process-local HTTP adapter session.
@@ -384,6 +739,8 @@ pub enum HttpApplicationClientAction {
     FocusModel,
     OpenSessionPicker,
     OpenAgentWorkbench,
+    OpenSettings,
+    OpenSupport,
 }
 
 /// One bounded slash-command catalog entry.

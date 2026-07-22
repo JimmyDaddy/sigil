@@ -16,16 +16,19 @@ use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
-    application_run_context_view, application_session_transcript_page,
-    application_verification_view, bind_application_session_with_model,
-    bind_existing_application_session, prepare_application_run,
-    record_application_preparation_cancellation, rerun_application_verification,
+    application_agent_activity_view, application_run_context_view,
+    application_session_transcript_page, application_verification_view,
+    bind_application_session_with_model, bind_existing_application_session,
+    prepare_application_run, record_application_preparation_cancellation,
+    rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
+    HTTP_APPROVAL_POLICY_VERSION, HttpAgentActivityItem, HttpAgentActivityStatus,
+    HttpAgentActivityView, HttpAgentHandoffStatus, HttpAgentUsageSummary,
+    HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
     HttpApprovalDecisionRecord, HttpContextWindowSource, HttpDurableCommandStore,
@@ -526,6 +529,12 @@ impl HttpRunDriver for HttpProductionRunDriver {
                             sigil_runtime::ApplicationClientAction::OpenAgentWorkbench => {
                                 HttpApplicationClientAction::OpenAgentWorkbench
                             }
+                            sigil_runtime::ApplicationClientAction::OpenSettings => {
+                                HttpApplicationClientAction::OpenSettings
+                            }
+                            sigil_runtime::ApplicationClientAction::OpenSupport => {
+                                HttpApplicationClientAction::OpenSupport
+                            }
                         }),
                         available: entry.available,
                         unavailable_reason: entry.unavailable_reason,
@@ -577,6 +586,87 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     })
                     .collect(),
             },
+        })
+    }
+
+    fn agent_activity_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<HttpAgentActivityView, HttpRunDriverError> {
+        let view = application_agent_activity_view(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpRunDriverError::new("durable agent activity projection failed"))?;
+        Ok(HttpAgentActivityView {
+            total_agents: view.total_agents,
+            active_agents: view.active_agents,
+            terminal_agents: view.terminal_agents,
+            items: view
+                .items
+                .into_iter()
+                .map(|item| HttpAgentActivityItem {
+                    thread_id: item.thread_id,
+                    profile_id: item.profile_id,
+                    display_name: item.display_name,
+                    objective: item.objective,
+                    status: match item.status {
+                        sigil_runtime::ApplicationAgentActivityStatus::Started => {
+                            HttpAgentActivityStatus::Started
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Running => {
+                            HttpAgentActivityStatus::Running
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Blocked => {
+                            HttpAgentActivityStatus::Blocked
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Completed => {
+                            HttpAgentActivityStatus::Completed
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Failed => {
+                            HttpAgentActivityStatus::Failed
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Cancelled => {
+                            HttpAgentActivityStatus::Cancelled
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Interrupted => {
+                            HttpAgentActivityStatus::Interrupted
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Unavailable => {
+                            HttpAgentActivityStatus::Unavailable
+                        }
+                        sigil_runtime::ApplicationAgentActivityStatus::Unknown => {
+                            HttpAgentActivityStatus::Unknown
+                        }
+                    },
+                    reason: item.reason,
+                    handoff_status: match item.handoff_status {
+                        sigil_runtime::ApplicationAgentHandoffStatus::Pending => {
+                            HttpAgentHandoffStatus::Pending
+                        }
+                        sigil_runtime::ApplicationAgentHandoffStatus::ResultReady => {
+                            HttpAgentHandoffStatus::ResultReady
+                        }
+                        sigil_runtime::ApplicationAgentHandoffStatus::ResultRead => {
+                            HttpAgentHandoffStatus::ResultRead
+                        }
+                        sigil_runtime::ApplicationAgentHandoffStatus::Returned => {
+                            HttpAgentHandoffStatus::Returned
+                        }
+                        sigil_runtime::ApplicationAgentHandoffStatus::Unavailable => {
+                            HttpAgentHandoffStatus::Unavailable
+                        }
+                    },
+                    result_summary: item.result_summary,
+                    result_summary_truncated: item.result_summary_truncated,
+                    usage: item.usage.map(|usage| HttpAgentUsageSummary {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        total_tokens: usage.total_tokens,
+                        cached_tokens: usage.cached_tokens,
+                    }),
+                })
+                .collect(),
         })
     }
 

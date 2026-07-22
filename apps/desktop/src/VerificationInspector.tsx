@@ -3,7 +3,8 @@ import { useState } from "react";
 import { writeClipboard } from "./clipboard";
 import { useLocale } from "./i18n";
 import type { VerificationSummary } from "./types";
-import { Button, Collapsible } from "./ui/primitives";
+import { Icon } from "./ui/icons";
+import { Button, Collapsible, IconButton, Tooltip } from "./ui/primitives";
 
 export function VerificationInspector({
   verification,
@@ -68,9 +69,15 @@ function EvidenceRow({ label, value }: { label: string; value?: string }) {
     <div className="evidence-row">
       <span>{label}</span><code>{value ?? t("notLinked")}</code>
       {value !== undefined ? (
-        <Button className="evidence-copy" variant="quiet" type="button" onClick={() => void writeClipboard(value).then(setCopied)} aria-label={t("copyItem", { item: label.toLowerCase() })}>
-          {copied ? t("copied") : t("copy")}
-        </Button>
+        <Tooltip label={copied ? t("copied") : t("copyItem", { item: label.toLowerCase() })}>
+          <IconButton
+            className="evidence-copy"
+            type="button"
+            onClick={() => void writeClipboard(value).then(setCopied)}
+            aria-label={t("copyItem", { item: label.toLowerCase() })}
+            icon={<Icon name={copied ? "check" : "copy"} />}
+          />
+        </Tooltip>
       ) : null}
     </div>
   );

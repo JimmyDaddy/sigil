@@ -6,6 +6,7 @@ import { App } from "./App";
 import type { AppearanceSnapshot } from "./appearance/contract";
 import { mergeTimelineEvent, reduceConversationTimeline, reduceTimeline } from "./ConversationPanel";
 import { DiffViewer } from "./DiffViewer";
+import { ErrorCard } from "./ErrorCard";
 import { Message } from "./Message";
 import { MessageContent } from "./MessageContent";
 import { presentTool, ToolCard } from "./ToolCard";
@@ -13,12 +14,14 @@ import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
   DesktopBootstrap,
+  RunContext,
   RunStreamStatus,
   SessionSummary,
   TimelineEvent,
   TranscriptMessage,
   WorkspaceSummary,
 } from "./types";
+import { Icon } from "./ui/icons";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
@@ -51,6 +54,37 @@ const defaultAppearance: AppearanceSnapshot = {
   resolvedTheme: "dark",
 };
 
+const defaultRunContext: RunContext = {
+  providerName: "deepseek",
+  modelName: "deepseek-v4-flash",
+  availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+  modelOptions: [
+    {
+      modelName: "deepseek-v4-flash",
+      availableReasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
+    },
+    {
+      modelName: "deepseek-v4-pro",
+      availableReasoningEfforts: ["low", "medium", "high", "max"],
+      defaultReasoningEffort: "max",
+      reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
+    },
+  ],
+  modelSelection: "per_run",
+  modelSelectionBinding: "model-binding-deepseek-v4-flash",
+  defaultPermissionMode: "manual",
+  availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
+  availableReasoningEfforts: ["low", "medium", "high", "max"],
+  defaultReasoningEffort: "max",
+  reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
+  contextWindowTokens: 128_000,
+  lastPromptTokens: 4_096,
+  contextWindowSource: "provider",
+  extensionCatalog: { commands: [], skills: [], agents: [] },
+};
+
 type BridgeOverrides = Omit<Partial<DesktopBridge>, "bootstrap"> & {
   bootstrap?: () => Promise<Omit<DesktopBootstrap, "appearance"> & {
     appearance?: AppearanceSnapshot;
@@ -71,6 +105,18 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       resolvedTheme: preference === "light" ? "light" : "dark",
     }),
     openExternalUrl: async () => undefined,
+    supportDoctor: async () => ({
+      generatedAtUnixMs: 1_784_419_200_000,
+      version: "0.0.1-alpha.5",
+      commit: "test",
+      target: "aarch64-apple-darwin",
+      profile: "debug",
+      environment: { os: "macos", architecture: "aarch64", terminalFamily: "other" },
+      summary: { overallStatus: "warn", ok: 4, warn: 1, error: 0 },
+      checks: [{ status: "warn", name: "configuration", summary: "Review one setting.", remediation: "Open sigil.toml." }],
+      privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },
+    }),
+    exportSupportBundle: async () => ({ cancelled: false, fileName: "sigil-support-test.json" }),
     pickWorkspace: async () => ({ cancelled: false, workspace }),
     openRecentWorkspace: async () => workspace,
     closeWorkspace: async () => [],
@@ -100,39 +146,38 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       quarantineName: `quarantined--${input.sessionRef}`,
       projectionGeneration: 2,
     }),
+    deleteInvalidSessionSource: async (_workspaceId, input) => ({
+      sessionRef: input.sessionRef,
+      projectionGeneration: 2,
+    }),
+    planSessionCatalogBatch: async (_workspaceId, input) => ({
+      planId: "sha256:test-plan",
+      action: input.action,
+      generation: 1,
+      total: input.items.length,
+      executable: input.items.length,
+      blocked: 0,
+      items: input.items.map((item) => ({ sessionRef: item.sessionRef, status: "executable" })),
+    }),
+    executeSessionCatalogBatch: async (_workspaceId, input) => ({
+      planId: input.planId,
+      action: input.action,
+      total: input.items.length,
+      completed: input.items.length,
+      failed: 0,
+      skipped: 0,
+      items: input.items.map((item) => ({ sessionRef: item.sessionRef, outcome: "completed" })),
+    }),
     transcript: async () => ({
       totalMessages: 0,
       messages: [],
     }),
-    runContext: async () => ({
-      providerName: "deepseek",
-      modelName: "deepseek-v4-flash",
-      availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
-      modelOptions: [
-        {
-          modelName: "deepseek-v4-flash",
-          availableReasoningEfforts: ["low", "medium", "high", "max"],
-          defaultReasoningEffort: "max",
-          reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
-        },
-        {
-          modelName: "deepseek-v4-pro",
-          availableReasoningEfforts: ["low", "medium", "high", "max"],
-          defaultReasoningEffort: "max",
-          reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
-        },
-      ],
-      modelSelection: "per_run",
-      modelSelectionBinding: "model-binding-deepseek-v4-flash",
-      defaultPermissionMode: "manual",
-      availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
-      availableReasoningEfforts: ["low", "medium", "high", "max"],
-      defaultReasoningEffort: "max",
-      reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
-      contextWindowTokens: 128_000,
-      lastPromptTokens: 4_096,
-      contextWindowSource: "provider",
-      extensionCatalog: { commands: [], skills: [], agents: [] },
+    runContext: async () => defaultRunContext,
+    agentActivity: async () => ({
+      totalAgents: 0,
+      activeAgents: 0,
+      terminalAgents: 0,
+      items: [],
     }),
     startRun: async (_workspaceId, sessionId) => ({
       id: "run-1",
@@ -276,6 +321,9 @@ describe("desktop coding-agent components", () => {
     const diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
     const diffRender = render(<DiffViewer diff={diff} />);
     expect(screen.getByLabelText("Unified diff")).toBeTruthy();
+    const copyDiff = screen.getByRole("button", { name: "Copy diff" });
+    expect(copyDiff.querySelector("svg")).toBeTruthy();
+    expect(screen.queryByText("Copy diff")).toBeNull();
     expect(screen.queryByRole("button", { name: /apply|revert/i })).toBeNull();
     diffRender.unmount();
 
@@ -336,7 +384,7 @@ describe("desktop coding-agent components", () => {
 });
 
 describe("desktop workspace and history shell", () => {
-  it("persists a theme switch without remounting the active conversation draft", async () => {
+  it("persists a theme switch and preserves the active conversation draft", async () => {
     const user = userEvent.setup();
     const setAppearance = vi.fn(async () => ({
       preference: "light" as const,
@@ -356,12 +404,13 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await screen.findByLabelText("Message Sigil") as HTMLTextAreaElement;
     await user.type(composer, "Keep this draft");
-    await user.click(screen.getByRole("button", { name: "System theme. Switch to light theme" }));
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Light theme" }));
 
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
     expect(setAppearance).toHaveBeenCalledWith("light");
-    expect(screen.getByLabelText("Message Sigil")).toBe(composer);
-    expect(composer.value).toBe("Keep this draft");
+    await user.click(screen.getByLabelText("Sigil desktop home"));
+    expect((screen.getByLabelText("Message Sigil") as HTMLTextAreaElement).value).toBe("Keep this draft");
   });
 
   it("keeps the proven theme on save failure and exposes a scoped retry", async () => {
@@ -377,11 +426,12 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
-    await user.click(screen.getByRole("button", { name: "System theme. Switch to light theme" }));
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Light theme" }));
     expect((await screen.findByRole("alert")).textContent).toContain("previous appearance is still active");
     expect(document.documentElement.dataset.theme).toBe("dark");
 
-    await user.click(screen.getByRole("button", { name: "Theme change failed. Retry" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
     expect(attempts).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
@@ -398,13 +448,84 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridge} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
-    const systemTheme = screen.getByRole("button", { name: "System theme. Switch to light theme" });
-    expect(systemTheme).toBeTruthy();
-    expect(systemTheme.querySelector("circle")).not.toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open settings" }));
+    const systemTheme = screen.getByRole("button", { name: "System theme" });
+    expect(systemTheme.getAttribute("aria-pressed")).toBe("true");
     act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
     expect(document.documentElement.dataset.themePreference).toBe("system");
     expect(document.documentElement.dataset.theme).toBe("light");
-    expect(screen.getByRole("button", { name: "System theme. Switch to light theme" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "System theme" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("opens redacted support diagnostics from settings and saves through the native bridge", async () => {
+    const user = userEvent.setup();
+    const supportDoctor = vi.fn(async () => ({
+      generatedAtUnixMs: 1_784_419_200_000,
+      version: "0.0.1-alpha.5",
+      commit: "test",
+      target: "aarch64-apple-darwin",
+      profile: "debug",
+      environment: { os: "macos", architecture: "aarch64", terminalFamily: "other" },
+      summary: { overallStatus: "warn" as const, ok: 4, warn: 1, error: 0 },
+      checks: [{ status: "warn" as const, name: "configuration", summary: "Review one setting.", remediation: "Open sigil.toml." }],
+      privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },
+    }));
+    const exportSupportBundle = vi.fn(async () => ({
+      cancelled: false,
+      fileName: "sigil-support-test.json",
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      supportDoctor,
+      exportSupportBundle,
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Open support and diagnostics" }));
+
+    expect(await screen.findByRole("heading", { name: "Support & diagnostics" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to settings" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open settings" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeTruthy();
+    expect(screen.getByText("Review one setting.")).toBeTruthy();
+    expect(screen.getByText("credentials")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save private report" }));
+    await waitFor(() => expect(exportSupportBundle).toHaveBeenCalledWith(workspace.id));
+    expect(await screen.findByText("Support report saved")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Back to settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+  });
+
+  it("persists a provider-validated default model for newly created desktop conversations", async () => {
+    const user = userEvent.setup();
+    let sequence = 0;
+    const createSession = vi.fn(async () => ({
+      id: `http-session-${++sequence}`,
+      label: "New conversation",
+      runCount: 0,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      createSession,
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByRole("combobox", { name: "Model" });
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "Default model for new conversations" }),
+      "deepseek-v4-pro",
+    );
+    expect(window.localStorage.getItem("sigil.desktop.default-models.v1")).toContain("deepseek-v4-pro");
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    expect(createSession.mock.calls[1]).toEqual([workspace.id, "New conversation", "deepseek-v4-pro"]);
   });
 
   it("keeps cross-run timeline order by arrival instead of opaque run id", () => {
@@ -702,8 +823,10 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("No matching conversation.")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByText("New conversation ready.")).toBeTruthy();
-    expect(screen.getByText("0 recorded runs")).toBeTruthy();
+    expect(await screen.findByText("0 recorded runs")).toBeTruthy();
+    expect(screen.queryByText("New conversation ready.")).toBeNull();
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
+    expect(document.querySelector(".session-notice")).toBeNull();
     expect(screen.getAllByRole("heading", { name: "New conversation" })).toHaveLength(1);
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Conversation workspace" })).toBeTruthy();
@@ -713,9 +836,12 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText(/private bearer|TUI-first|stay in Rust/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    const workspaceDialog = screen.getByRole("dialog", { name: "Switch workspace: sigil" });
+    expect(workspaceDialog.querySelector(".workspace-switcher-content")).toBeTruthy();
+    expect(workspaceDialog.querySelector(".workspace-switcher-panel")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Close sigil" }));
-    expect(await screen.findByText("Workspace closed.")).toBeTruthy();
-    expect(closeRequest).toBe(workspace.id);
+    await waitFor(() => expect(closeRequest).toBe(workspace.id));
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
   });
 
   it("pages generation-consistent history and opens only a ready durable entry", async () => {
@@ -782,12 +908,143 @@ describe("desktop workspace and history shell", () => {
     await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
   });
 
+  it("keeps the active conversation selected and ignores repeated opens of the same session", async () => {
+    const user = userEvent.setup();
+    const openSession = vi.fn(async () => ({ id: "adapter-session", label: "Active session", runCount: 0 }));
+    const entry = {
+      sessionRef: "active.jsonl",
+      sessionId: "durable-active",
+      sourceState: "ready" as const,
+      sourceBytes: 512,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+      title: "Active session",
+      userMessageCount: 0,
+      assistantMessageCount: 0,
+      toolResultCount: 0,
+      pinned: false,
+    };
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }),
+      openSession,
+    })} />);
+
+    const row = await screen.findByRole("button", { name: /^Active session/ });
+    await user.click(row);
+    await screen.findByRole("heading", { name: "Active session" });
+    await waitFor(() => expect(row.getAttribute("aria-current")).toBe("page"));
+    await user.click(row);
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+
+    expect(openSession).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("status", { name: "Opening conversation…" })).toBeNull();
+  });
+
+  it("previews and executes selected conversation mutations through the batch contract", async () => {
+    const user = userEvent.setup();
+    const entry = {
+      sessionRef: "batch-ready.jsonl",
+      sessionId: "durable-batch-ready",
+      sourceState: "ready" as const,
+      sourceBytes: 1024,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+      providerName: "deepseek",
+      modelName: "deepseek-chat",
+      title: "Batch ready session",
+      userMessageCount: 2,
+      assistantMessageCount: 2,
+      toolResultCount: 1,
+      pinned: false,
+    };
+    const planSessionCatalogBatch = vi.fn(async () => ({
+      planId: "sha256:batch-ready",
+      action: "delete_sessions" as const,
+      generation: 7,
+      total: 1,
+      executable: 1,
+      blocked: 0,
+      items: [{ sessionRef: entry.sessionRef, status: "executable" as const }],
+    }));
+    const executeSessionCatalogBatch = vi.fn(async () => ({
+      planId: "sha256:batch-ready",
+      action: "delete_sessions" as const,
+      total: 1,
+      completed: 1,
+      failed: 0,
+      skipped: 0,
+      items: [{ sessionRef: entry.sessionRef, outcome: "completed" as const }],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({ ...emptyCatalog, generation: 7, entries: [entry], nextCursor: "cursor-2" }),
+      planSessionCatalogBatch,
+      executeSessionCatalogBatch,
+    })} />);
+
+    await screen.findByText("Batch ready session");
+    fireEvent.click(screen.getByRole("button", { name: "Manage conversations" }));
+    const heading = await screen.findByRole("heading", { name: "Conversation Library" });
+    const backButton = screen.getByRole("button", { name: "Back to conversations" });
+    expect(heading.closest(".application-page-toolbar")?.contains(backButton)).toBe(true);
+    expect(screen.getByRole("button", { name: "Manage conversations" }).getAttribute("aria-current")).toBe("page");
+    const loadMore = screen.getByRole("button", { name: "Load more" });
+    expect(loadMore.closest(".library-table-frame")).toBeTruthy();
+    expect(loadMore.closest(".library-pagination")).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "Select conversation: Batch ready session" }));
+    await user.click(screen.getByRole("button", { name: "Delete ready (1)" }));
+
+    expect(await screen.findByRole("dialog", { name: "Review batch action" })).toBeTruthy();
+    expect(planSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
+      action: "delete_sessions",
+      items: [{ sessionRef: entry.sessionRef, sessionId: entry.sessionId }],
+    });
+    await user.click(screen.getByRole("button", { name: "Apply action" }));
+    await waitFor(() => expect(executeSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
+      planId: "sha256:batch-ready",
+      action: "delete_sessions",
+      items: [{ sessionRef: entry.sessionRef, sessionId: entry.sessionId }],
+    }));
+    expect(await screen.findByRole("heading", { name: "Latest batch result" })).toBeTruthy();
+  });
+
+  it("stores the startup restore preference and honors it on the next bootstrap", async () => {
+    const user = userEvent.setup();
+    const openRecentWorkspace = vi.fn(async () => workspace);
+    const recent = [{ id: workspace.id, displayName: workspace.displayName, isOpen: false }];
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [], recentWorkspaces: recent }),
+      openRecentWorkspace,
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("checkbox", { name: "Reopen the most recent workspace" }));
+    expect(window.localStorage.getItem("sigil.desktop.reopen-last-workspace.v1")).toBe("false");
+
+    cleanup();
+    openRecentWorkspace.mockClear();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [], recentWorkspaces: recent }),
+      openRecentWorkspace,
+    })} />);
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    expect(openRecentWorkspace).not.toHaveBeenCalled();
+  });
+
   it("shows branded conversation loading in the workspace instead of the session rail", async () => {
     const user = userEvent.setup();
     let resolveOpen: ((session: SessionSummary) => void) | undefined;
     let resolveTranscript: ((page: { totalMessages: number; messages: []; }) => void) | undefined;
+    let resolveRunContext: ((context: RunContext) => void) | undefined;
     const transcript = vi.fn(() => new Promise<{ totalMessages: number; messages: []; }>((resolve) => {
       resolveTranscript = resolve;
+    }));
+    const runContext = vi.fn(() => new Promise<RunContext>((resolve) => {
+      resolveRunContext = resolve;
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
@@ -814,6 +1071,7 @@ describe("desktop workspace and history shell", () => {
         resolveOpen = resolve;
       }),
       transcript,
+      runContext,
     });
     render(<App bridge={bridge} />);
 
@@ -830,13 +1088,47 @@ describe("desktop workspace and history shell", () => {
       resolveOpen?.({ id: "http-session-loading", label: "Loading state session", runCount: 2 });
     });
     await waitFor(() => expect(transcript).toHaveBeenCalledOnce());
+    await waitFor(() => expect(runContext).toHaveBeenCalledOnce());
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
 
     await act(async () => {
       resolveTranscript?.({ totalMessages: 0, messages: [] });
     });
+    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+
+    await act(async () => {
+      resolveRunContext?.(defaultRunContext);
+    });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
     expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
+    expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
+    expect(within(workspaceRegion).getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+  });
+
+  it("keeps the conversation rail stable with row skeletons while history loads", async () => {
+    let resolveCatalog: ((page: CatalogPage) => void) | undefined;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: () => new Promise((resolve) => {
+        resolveCatalog = resolve;
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    const navigation = await screen.findByRole("complementary", { name: "Conversation navigation" });
+    expect(await within(navigation).findByRole("status", { name: "Loading conversations…" })).toBeTruthy();
+    expect(navigation.querySelectorAll(".history-skeleton-row")).toHaveLength(6);
+
+    await act(async () => {
+      resolveCatalog?.(emptyCatalog);
+    });
+    expect(await within(navigation).findByText("No matching conversation.")).toBeTruthy();
+    expect(navigation.querySelector(".history-skeleton")).toBeNull();
   });
 
   it("opens bounded transcript text and pages older messages in chronological order", async () => {
@@ -1067,6 +1359,11 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Filters" }));
     await user.type(screen.getByRole("textbox", { name: "Provider" }), "deepseek");
     expect(screen.getByText("1 active filter")).toBeTruthy();
+    const clearActiveFilters = screen.getByRole("button", { name: "Clear" });
+    expect(clearActiveFilters.querySelector("svg")).toBeTruthy();
+    expect(screen.queryByText("Clear")).toBeNull();
+    await user.click(clearActiveFilters);
+    expect(screen.queryByText("1 active filter")).toBeNull();
     expect(screen.getByRole("heading", { name: "Durable session" })).toBeTruthy();
   });
 
@@ -1136,6 +1433,9 @@ describe("desktop workspace and history shell", () => {
       sessionRef: "managed.jsonl",
       sessionId: "durable-managed",
     }));
+    const deleted = await screen.findByText("Conversation deleted.");
+    expect(deleted.closest(".sg-toast-success")).toBeTruthy();
+    expect(document.querySelector(".session-notice")).toBeNull();
   });
 
   it("quarantines an invalid source from its context menu after confirmation", async () => {
@@ -1176,6 +1476,51 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByRole("alertdialog", { name: "Quarantine invalid conversation source?" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Move to quarantine" }));
     await waitFor(() => expect(quarantineSession).toHaveBeenCalledWith(workspace.id, {
+      sessionRef: "broken.jsonl",
+      sourceBytes: 17,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+    }));
+    expect((await screen.findByText("Invalid conversation source moved to quarantine.")).closest(".sg-toast-success")).toBeTruthy();
+  });
+
+  it("permanently deletes an invalid source only after explicit confirmation", async () => {
+    const deleteInvalidSessionSource = vi.fn(async (_workspaceId, input: { sessionRef: string }) => ({
+      sessionRef: input.sessionRef,
+      projectionGeneration: 3,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        degradedSourceCount: 1,
+        entries: [{
+          sessionRef: "broken.jsonl",
+          sourceState: "invalid",
+          sourceBytes: 17,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Broken source",
+          userMessageCount: 0,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      deleteInvalidSessionSource,
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const unavailableRow = await screen.findByText("Broken source");
+    fireEvent.contextMenu(unavailableRow);
+    await user.click(screen.getByRole("menuitem", { name: "Delete invalid source" }));
+    expect(deleteInvalidSessionSource).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "Delete invalid conversation source?" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    await waitFor(() => expect(deleteInvalidSessionSource).toHaveBeenCalledWith(workspace.id, {
       sessionRef: "broken.jsonl",
       sourceBytes: 17,
       sourceModifiedAtUnixMs: 1_784_419_200_000,
@@ -1249,8 +1594,8 @@ describe("desktop workspace and history shell", () => {
     await user.click(workspaceTrigger);
     await user.click(screen.getByRole("button", { name: "Close sigil" }));
     await user.click(screen.getByRole("button", { name: "Close workspace and interrupt runs" }));
-    expect(await screen.findByText("Workspace closed.")).toBeTruthy();
-    expect(confirmations).toEqual([false, false, true]);
+    await waitFor(() => expect(confirmations).toEqual([false, false, true]));
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
   });
 
   it("uses primitive navigation and contextual review drawers without remounting the conversation", async () => {
@@ -1287,6 +1632,7 @@ describe("desktop workspace and history shell", () => {
     expect(document.activeElement).toBe(navigationTrigger);
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(screen.queryByLabelText("Creating a new conversation…")).toBeNull());
     expect(document.querySelector("#verification-inspector")).toBeNull();
     const timeline = screen.getByRole("log", { name: "Conversation timeline" });
     const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
@@ -1310,6 +1656,50 @@ describe("desktop workspace and history shell", () => {
     restoreMedia();
   });
 
+  it("shows durable child Agent activity and confirms its result returned to the conversation", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      agentActivity: async () => ({
+        totalAgents: 1,
+        activeAgents: 0,
+        terminalAgents: 1,
+        items: [{
+          threadId: "agent_review",
+          profileId: "explore",
+          displayName: "Repository review",
+          objective: "Inspect the repository architecture",
+          status: "completed",
+          handoffStatus: "returned",
+          resultSummary: "The child Agent returned a bounded architecture report.",
+          resultSummaryTruncated: false,
+          usage: {
+            inputTokens: 240,
+            outputTokens: 80,
+            totalTokens: 320,
+          },
+        }],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const activityTrigger = await screen.findByRole("button", { name: "Open Agent activity" });
+    await user.click(activityTrigger);
+
+    expect(screen.getByRole("dialog", { name: "Agent activity" })).toBeTruthy();
+    expect(screen.getByText("Repository review")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
+    expect(screen.getByText("Returned to conversation")).toBeTruthy();
+    expect(screen.getByText("The child Agent returned a bounded architecture report.")).toBeTruthy();
+    expect(screen.getByText("320 tokens")).toBeTruthy();
+  });
+
   it("automatically restarts stale pagination instead of mixing generations", async () => {
     const user = userEvent.setup();
     let firstPageRequests = 0;
@@ -1329,9 +1719,10 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("Conversation history refreshed because the list changed.")).toBeTruthy();
-    expect(firstPageRequests).toBe(2);
+    await waitFor(() => expect(firstPageRequests).toBe(2));
+    expect(screen.queryByText("Conversation history refreshed because the list changed.")).toBeNull();
     expect(screen.queryByText("History changed while paging.")).toBeNull();
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
   });
 
   it("runs a prompt and merges streamed and durable completion into one assistant reply", async () => {
@@ -1357,10 +1748,14 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByText("Available")).toBeTruthy();
     await user.type(screen.getByLabelText("Message Sigil"), "Say hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(screen.getByText("Say hello")).toBeTruthy();
-    expect(await screen.findByText("Run started. Live updates are connected.")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+    expect(screen.queryByText("Starting the run…")).toBeNull();
+    expect(screen.queryByText("Run started. Live updates are connected.")).toBeNull();
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
     expect(document.querySelector(".statusbar")).toBeNull();
     expect(document.querySelector(".app-shell > .sr-only")?.textContent).toContain("Sigil is ready.");
     await waitFor(() => expect(eventListener).toBeDefined());
@@ -1381,7 +1776,7 @@ describe("desktop workspace and history shell", () => {
 
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     expect(screen.queryByText("complete")).toBeNull();
-    expect(screen.getByText("terminal")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
   });
 
@@ -1548,13 +1943,14 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridgeWith()} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
-    await user.click(screen.getByRole("button", { name: "Language: English. Switch to Chinese" }));
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "简体中文" }));
 
-    expect(screen.getByRole("heading", { name: "打开工作区" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "设置" })).toBeTruthy();
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(window.localStorage.getItem("sigil.desktop.locale.v1")).toBe("zh-CN");
 
-    await user.click(screen.getByRole("button", { name: "语言：中文。切换为英文" }));
+    await user.click(screen.getByRole("button", { name: "English" }));
     expect(document.documentElement.lang).toBe("en");
   });
 
@@ -1747,8 +2143,10 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Edit one file")).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Stop run" }));
-    expect(cancelledRun).toBe("run-1");
-    expect(await screen.findByText("Cancellation requested. Waiting for the run to stop safely.")).toBeTruthy();
+    await waitFor(() => expect(cancelledRun).toBe("run-1"));
+    expect(screen.queryByText("Requesting cancellation…")).toBeNull();
+    expect(screen.queryByText("Cancellation requested. Waiting for the run to stop safely.")).toBeNull();
+    expect(document.querySelector(".sg-notification-viewport")).toBeNull();
   });
 
   it("shows exact verification evidence and reruns only the rendered binding", async () => {
@@ -1807,8 +2205,31 @@ describe("desktop workspace and history shell", () => {
     expect((screen.getByText("Evidence details").closest("details") as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByText("receipt-1")).toBeTruthy();
     expect(screen.getByText("changeset-1")).toBeTruthy();
+    const copyReceipt = screen.getByRole("button", { name: "Copy receipt" });
+    expect(copyReceipt.querySelector("svg")).toBeTruthy();
+    expect(screen.queryByText(/^Copy$/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Run recommended check" }));
     expect(await screen.findByText("passed")).toBeTruthy();
     expect(rerunSnapshot).toBe("snapshot-1");
+  });
+
+  it("renders dismiss-only errors as compact accessible icon actions", async () => {
+    const user = userEvent.setup();
+    const onDismiss = vi.fn();
+    render(
+      <ErrorCard
+        title="Run action needs attention"
+        message="The action could not be completed."
+        actionLabel="Dismiss"
+        actionIcon={<Icon name="close" />}
+        onAction={onDismiss}
+      />,
+    );
+
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+    expect(dismiss.querySelector("svg")).toBeTruthy();
+    expect(screen.queryByText("Dismiss")).toBeNull();
+    await user.click(dismiss);
+    expect(onDismiss).toHaveBeenCalledOnce();
   });
 });

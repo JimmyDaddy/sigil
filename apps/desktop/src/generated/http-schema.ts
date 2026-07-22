@@ -385,6 +385,99 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session-catalog/batch/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute one confirmed session catalog batch
+         * @description Replans and compares the opaque plan digest before the first mutation, then returns a per-item best-effort receipt. The operation is not an atomic transaction across session files.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionCatalogBatchExecuteRequest"];
+                };
+            };
+            responses: {
+                /** @description Per-item best-effort batch receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionCatalogBatchReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session-catalog/batch/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview one exact bounded session catalog batch
+         * @description Reconciles current durable catalog truth, classifies each selected identity, and returns a content-bound plan without mutating any session source.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionCatalogBatchPlanRequest"];
+                };
+            };
+            responses: {
+                /** @description Content-bound batch preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionCatalogBatchPlan"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/session-catalog/delete": {
         parameters: {
             query?: never;
@@ -418,6 +511,54 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["SessionMutationReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session-catalog/delete-invalid-source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Permanently delete one exact invalid local session source
+         * @description Revalidates the invalid source fingerprint under a maintenance lease, then permanently removes the regular file after native-shell confirmation.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SessionInvalidSourceDeleteRequest"];
+                };
+            };
+            responses: {
+                /** @description Committed invalid-source delete receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionInvalidSourceDeleteReceipt"];
                     };
                 };
                 400: components["responses"]["BadRequest"];
@@ -680,6 +821,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/agent-activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read bounded child-agent lifecycle and result handoff state
+         * @description Projects safe child-agent status, objective, bounded result summary and usage. Child session references, paths, hashes and raw tool arguments are excluded.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Newest child-agent activity first */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AgentActivityView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/run-context": {
         parameters: {
             query?: never;
@@ -910,10 +1095,127 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/support/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Build a private redacted support bundle
+         * @description Returns bounded JSON only to the native desktop client. The renderer does not receive the bundle content or a filesystem path.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Private bounded support bundle */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SupportBundleExport"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/support/doctor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read redacted local diagnostics
+         * @description Returns only the frozen path-free support projection. Credentials, local paths, conversation content, tool payloads, and file content are excluded.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Redacted diagnostic report */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SupportDoctorReport"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AgentActivityItem: {
+            display_name?: string | null;
+            handoff_status: components["schemas"]["AgentHandoffStatus"];
+            objective: string;
+            profile_id?: string | null;
+            reason?: string | null;
+            result_summary?: string | null;
+            result_summary_truncated: boolean;
+            status: components["schemas"]["AgentActivityStatus"];
+            thread_id: string;
+            usage?: components["schemas"]["AgentUsageSummary"] | null;
+        };
+        /** @enum {string} */
+        AgentActivityStatus: "started" | "running" | "blocked" | "completed" | "failed" | "cancelled" | "interrupted" | "unavailable" | "unknown";
+        AgentActivityView: {
+            /** Format: uint64 */
+            active_agents: number;
+            items: components["schemas"]["AgentActivityItem"][];
+            /** Format: uint64 */
+            terminal_agents: number;
+            /** Format: uint64 */
+            total_agents: number;
+        };
+        /** @enum {string} */
+        AgentHandoffStatus: "pending" | "result_ready" | "result_read" | "returned" | "unavailable";
+        AgentUsageSummary: {
+            /** Format: uint64 */
+            cached_tokens?: number | null;
+            /** Format: uint64 */
+            input_tokens: number;
+            /** Format: uint64 */
+            output_tokens: number;
+            /** Format: uint64 */
+            total_tokens: number;
+        };
         ApplicationAgentBinding: {
             profile_id: string;
             snapshot_id: string;
@@ -933,7 +1235,7 @@ export interface components {
             user_invocable: boolean;
         };
         /** @enum {string} */
-        ApplicationClientAction: "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench";
+        ApplicationClientAction: "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
         ApplicationCommandCatalogEntry: {
             aliases: string[];
             argument_hint?: string | null;
@@ -1112,6 +1414,7 @@ export interface components {
         /** @enum {string} */
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";
         ServerCapabilities: {
+            agent_activity: boolean;
             approval: boolean;
             bounded_transcript_replay: boolean;
             cancellation: boolean;
@@ -1120,6 +1423,7 @@ export interface components {
             live_events: boolean;
             run_context: boolean;
             session_catalog: boolean;
+            support_diagnostics: boolean;
             verification: boolean;
         };
         ServerInfo: {
@@ -1130,10 +1434,71 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 4;
+            schema_version: 5;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
+        };
+        /** @enum {string} */
+        SessionCatalogBatchAction: "delete_sessions" | "quarantine_invalid_sources" | "delete_invalid_sources";
+        SessionCatalogBatchExecuteRequest: {
+            action: components["schemas"]["SessionCatalogBatchAction"];
+            items: components["schemas"]["SessionCatalogBatchItem"][];
+            plan_id: string;
+        };
+        SessionCatalogBatchItem: {
+            session_id?: string | null;
+            session_ref: string;
+            /** Format: uint64 */
+            source_bytes?: number | null;
+            /** Format: uint64 */
+            source_modified_at_unix_ms?: number | null;
+        };
+        SessionCatalogBatchPlan: {
+            action: components["schemas"]["SessionCatalogBatchAction"];
+            /** Format: uint64 */
+            blocked: number;
+            /** Format: uint64 */
+            executable: number;
+            /** Format: uint64 */
+            generation: number;
+            items: components["schemas"]["SessionCatalogBatchPlanItem"][];
+            plan_id: string;
+            /** Format: uint64 */
+            total: number;
+        };
+        SessionCatalogBatchPlanItem: {
+            reason?: string | null;
+            session_ref: string;
+            /** @enum {string} */
+            status: "executable" | "blocked";
+        };
+        SessionCatalogBatchPlanRequest: {
+            action: components["schemas"]["SessionCatalogBatchAction"];
+            items: components["schemas"]["SessionCatalogBatchItem"][];
+        };
+        SessionCatalogBatchReceipt: {
+            action: components["schemas"]["SessionCatalogBatchAction"];
+            /** Format: uint64 */
+            completed: number;
+            /** Format: uint64 */
+            failed: number;
+            items: components["schemas"]["SessionCatalogBatchReceiptItem"][];
+            plan_id: string;
+            /** Format: uint64 */
+            skipped: number;
+            /** Format: uint64 */
+            total: number;
+        };
+        SessionCatalogBatchReceiptItem: {
+            operation_id?: string | null;
+            /** @enum {string} */
+            outcome: "completed" | "failed" | "skipped";
+            /** Format: uint64 */
+            projection_generation?: number | null;
+            quarantine_name?: string | null;
+            reason?: string | null;
+            session_ref: string;
         };
         /** @description Compact historical metadata only; message and tool bodies are absent. */
         SessionCatalogEntry: {
@@ -1183,6 +1548,19 @@ export interface components {
         SessionDeleteRequest: {
             session_id: string;
             session_ref: string;
+        };
+        SessionInvalidSourceDeleteReceipt: {
+            operation_id: string;
+            /** Format: uint64 */
+            projection_generation?: number | null;
+            session_ref: string;
+        };
+        SessionInvalidSourceDeleteRequest: {
+            session_ref: string;
+            /** Format: uint64 */
+            source_bytes: number;
+            /** Format: uint64 */
+            source_modified_at_unix_ms: number;
         };
         SessionListResponse: {
             sessions: components["schemas"]["SessionSnapshot"][];
@@ -1249,6 +1627,52 @@ export interface components {
             session_scope_id: string;
             /** Format: uint64 */
             total_messages: number;
+        };
+        SupportBundleExport: {
+            content: string;
+            /** Format: uint64 */
+            generated_at_unix_ms: number;
+            suggested_file_name: string;
+        };
+        SupportCheck: {
+            name: string;
+            remediation?: string | null;
+            status: components["schemas"]["SupportStatus"];
+            summary: string;
+        };
+        SupportDoctorReport: {
+            checks: components["schemas"]["SupportCheck"][];
+            commit: string;
+            environment: components["schemas"]["SupportEnvironment"];
+            /** Format: uint64 */
+            generated_at_unix_ms: number;
+            privacy: components["schemas"]["SupportPrivacy"];
+            profile: string;
+            summary: components["schemas"]["SupportSummary"];
+            target: string;
+            version: string;
+        };
+        SupportEnvironment: {
+            architecture: string;
+            os: string;
+            /** @enum {string} */
+            terminal_family: "iterm2" | "apple_terminal" | "wezterm" | "vscode" | "other" | "unknown";
+        };
+        SupportPrivacy: {
+            excluded: string[];
+            included: string[];
+            review_before_sharing: boolean;
+        };
+        /** @enum {string} */
+        SupportStatus: "ok" | "warn" | "error";
+        SupportSummary: {
+            /** Format: uint64 */
+            error: number;
+            /** Format: uint64 */
+            ok: number;
+            overall_status: components["schemas"]["SupportStatus"];
+            /** Format: uint64 */
+            warn: number;
         };
         VerificationEvidence: {
             changeset_apply_event_id: string | null;

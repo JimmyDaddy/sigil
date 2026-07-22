@@ -17,7 +17,9 @@ use sigil_kernel::{
     VerificationProductEvidence, VerificationProductView, VerificationRecommendationKind,
     VerificationVerdict,
 };
-use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService};
+use sigil_runtime::{
+    LocalSessionLifecycleService, SessionCatalogProjectionService, support::SupportBuildInfo,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -40,9 +42,80 @@ use super::{
     HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
     HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpSupportContext, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
+
+#[tokio::test]
+async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("missing-sigil.toml");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, body) = http_raw_request(address, http_get("/support/doctor", None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, doctor) = http_raw_request(
+        address,
+        http_get("/support/doctor", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(doctor["version"], "0.0.1-test");
+    assert!(doctor["checks"].is_array());
+    assert!(
+        !doctor
+            .to_string()
+            .contains(&temp.path().display().to_string())
+    );
+
+    let (status, bundle) = http_raw_request(
+        address,
+        http_post("/support/bundle", Some("secret-token"), "{}"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        bundle["suggested_file_name"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sigil-support-") && value.ends_with(".json"))
+    );
+    let content = bundle["content"]
+        .as_str()
+        .expect("support bundle content should be encoded only for native client");
+    serde_json::from_str::<Value>(content).expect("support bundle should be valid json");
+    assert!(!content.contains(&temp.path().display().to_string()));
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+}
 
 #[test]
 fn module_split_facade_exports_protocol_auth_sse_and_dto_contracts() {
@@ -446,6 +519,8 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.bounded_transcript_replay);
     assert!(server_info.capabilities.verification);
     assert!(server_info.capabilities.run_context);
+    assert!(server_info.capabilities.agent_activity);
+    assert!(server_info.capabilities.support_diagnostics);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -564,23 +639,85 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(status, 200);
     assert_eq!(renamed_page["entries"][0]["title"], "Renamed from desktop");
 
-    let delete_body = json!({
+    let batch_items = json!([{
         "session_ref": managed_session_ref,
         "session_id": managed_session_id
+    }]);
+    let plan_body = json!({
+        "action": "delete_sessions",
+        "items": batch_items
+    })
+    .to_string();
+    let (status, plan) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/plan",
+            Some("secret-token"),
+            &plan_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(plan["executable"], 1);
+    assert_eq!(plan["blocked"], 0);
+    assert!(
+        plan["plan_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:"))
+    );
+    write_catalog_session(
+        &sessions.join("batch-drift.jsonl"),
+        "Batch drift guard",
+        "deepseek",
+        "chat",
+    );
+    let stale_execute_body = json!({
+        "plan_id": plan["plan_id"],
+        "action": "delete_sessions",
+        "items": batch_items
+    })
+    .to_string();
+    let (status, stale_batch) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/execute",
+            Some("secret-token"),
+            &stale_execute_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(stale_batch["error"]["code"], "session_batch_plan_stale");
+    let (status, current_plan) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/plan",
+            Some("secret-token"),
+            &plan_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let execute_body = json!({
+        "plan_id": current_plan["plan_id"],
+        "action": "delete_sessions",
+        "items": batch_items
     })
     .to_string();
     let (status, deleted) = http_raw_request(
         address,
         http_post(
-            "/session-catalog/delete",
+            "/session-catalog/batch/execute",
             Some("secret-token"),
-            &delete_body,
+            &execute_body,
         ),
     )
     .await;
     assert_eq!(status, 200);
+    assert_eq!(deleted["completed"], 1);
+    assert_eq!(deleted["failed"], 0);
     assert!(
-        deleted["operation_id"]
+        deleted["items"][0]["operation_id"]
             .as_str()
             .is_some_and(|value| value.starts_with("session-delete:"))
     );
@@ -638,6 +775,40 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             )
             .exists()
     );
+
+    let disposable_source = sessions.join("disposable.jsonl");
+    fs::write(&disposable_source, b"still not a session stream\n")
+        .expect("disposable invalid source should write");
+    let (status, disposable_page) = http_raw_request(
+        address,
+        http_get("/session-catalog?state=invalid", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let disposable_entry = &disposable_page["entries"][0];
+    let delete_invalid_body = json!({
+        "session_ref": disposable_entry["session_ref"],
+        "source_bytes": disposable_entry["source_bytes"],
+        "source_modified_at_unix_ms": disposable_entry["source_modified_at_unix_ms"]
+    })
+    .to_string();
+    let (status, deleted_invalid) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/delete-invalid-source",
+            Some("secret-token"),
+            &delete_invalid_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(deleted_invalid["session_ref"], "disposable.jsonl");
+    assert!(
+        deleted_invalid["operation_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("invalid-source-delete:"))
+    );
+    assert!(!disposable_source.exists());
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
@@ -1580,12 +1751,26 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/session-catalog"]["get"]["responses"]["409"].is_object());
     assert!(document["paths"]["/session-catalog/rename"]["post"]["responses"]["200"].is_object());
     assert!(document["paths"]["/session-catalog/delete"]["post"]["responses"]["409"].is_object());
+    assert!(
+        document["paths"]["/session-catalog/batch/plan"]["post"]["responses"]["200"].is_object()
+    );
+    assert!(
+        document["paths"]["/session-catalog/batch/execute"]["post"]["responses"]["409"].is_object()
+    );
     assert_eq!(
         document["components"]["schemas"]["SessionRenameRequest"]["additionalProperties"],
         false
     );
     assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
+    assert!(document["components"]["schemas"]["SessionCatalogBatchPlan"].is_object());
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
+    assert!(document["paths"]["/support/doctor"]["get"]["responses"]["200"].is_object());
+    assert!(document["paths"]["/support/bundle"]["post"]["responses"]["200"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["support_diagnostics"]
+            ["type"],
+        "boolean"
+    );
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
     assert!(
@@ -1594,6 +1779,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(
         document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/agent-activity"]["get"]["responses"]["200"]
             .is_object()
     );
     assert_eq!(
@@ -1608,6 +1797,14 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["run_context"]["type"],
         "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["agent_activity"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["AgentActivityView"]["properties"]["items"]["maxItems"],
+        100
     );
     assert!(
         document["paths"]["/sessions/{session_id}/runs"]["post"]["responses"]["409"].is_object()

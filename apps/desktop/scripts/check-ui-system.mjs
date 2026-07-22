@@ -6,6 +6,7 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const srcRoot = join(desktopRoot, "src");
 const foundations = join(srcRoot, "ui", "foundations");
 const stylesPath = join(srcRoot, "styles.css");
+const conversationStylesPath = join(srcRoot, "features", "conversation", "conversation.css");
 const referencePath = join(foundations, "reference.css");
 const themesPath = join(foundations, "themes.css");
 const densityPath = join(foundations, "density.css");
@@ -17,6 +18,8 @@ const indexPath = join(desktopRoot, "index.html");
 const catalogHtmlPath = join(desktopRoot, "catalog.html");
 const appearanceBootstrapPath = join(desktopRoot, "public", "appearance-bootstrap.js");
 const rawInteractiveAllowlistPath = join(srcRoot, "ui", "raw-interactive-allowlist.json");
+const desktopBridgePath = join(srcRoot, "bridge.ts");
+const desktopPermissionsPath = join(desktopRoot, "src-tauri", "permissions", "desktop.toml");
 
 function fail(message) {
   throw new Error(`desktop UI system check failed: ${message}`);
@@ -188,6 +191,24 @@ if (!themeSource.includes(':root[data-theme="light"]')) {
   fail("light theme must be selected by the pre-paint data-theme contract");
 }
 
+const bridgeSource = readFileSync(desktopBridgePath, "utf8");
+const permissionSource = readFileSync(desktopPermissionsPath, "utf8");
+const invokedDesktopCommands = new Set(
+  [...bridgeSource.matchAll(/invoke(?:<[^>]+>)?\(\s*["'](desktop_[^"']+)["']/g)]
+    .map((match) => match[1]),
+);
+const allowedDesktopCommands = new Set(
+  [...permissionSource.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/["'](desktop_[^"']+)["']/g)])
+    .map((match) => match[1]),
+);
+const missingDesktopPermissions = [...invokedDesktopCommands]
+  .filter((command) => !allowedDesktopCommands.has(command))
+  .sort();
+if (missingDesktopPermissions.length > 0) {
+  fail(`renderer bridge command is missing from the Tauri allowlist: ${missingDesktopPermissions.join(", ")}`);
+}
+
 const densitySource = readFileSync(densityPath, "utf8");
 if (!densitySource.includes("--sg-sys-session-row-height: 48px")) {
   fail("session row density must remain bounded to 48px for the 1280x720 catalog contract");
@@ -215,6 +236,17 @@ if (!/body\s*\{[^}]*min-width:\s*320px[^}]*overflow:\s*hidden/.test(resetSource)
 }
 if (!styles.includes("grid-template-columns: var(--sg-sys-navigation-width) minmax(0, 1fr)") || !styles.includes("@media (max-width: 899px)")) {
   fail("resizable desktop navigation and compact fallback contract is missing");
+}
+const conversationStyles = readFileSync(conversationStylesPath, "utf8");
+if (!styles.includes(".sg-bounded-content")
+  || !/\.timeline\s*\{[^}]*overflow-x:\s*hidden/.test(conversationStyles)) {
+  fail("bounded prose and no-container-horizontal-scroll contract is missing");
+}
+for (const localScrollSurface of [".markdown-table-scroll", ".code-block pre", ".tool-output", ".diff-viewer pre"]) {
+  const selector = localScrollSurface.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`${selector}\\s*\\{[^}]*(?:overflow|overflow-x):\\s*(?:auto|scroll)`).test(conversationStyles)) {
+    fail(`local horizontal-scroll surface is missing: ${localScrollSurface}`);
+  }
 }
 for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".css")) {
   if (/url\(\s*["']?https?:/i.test(readFileSync(path, "utf8"))) {

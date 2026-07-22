@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 
 import { writeClipboard } from "./clipboard";
 import { useLocale } from "./i18n";
-import { Button } from "./ui/primitives";
+import { Icon } from "./ui/icons";
+import { IconButton, Tooltip } from "./ui/primitives";
 
 export function DiffViewer({ diff }: { diff: string }) {
   const { t } = useLocale();
@@ -12,9 +13,15 @@ export function DiffViewer({ diff }: { diff: string }) {
     <figure className="diff-viewer">
       <figcaption>
         <span>{t("proposedFileChanges")}</span>
-        <Button className="diff-copy" variant="quiet" type="button" onClick={() => void writeClipboard(diff).then(setCopied)}>
-          {copied ? t("copied") : t("copyDiff")}
-        </Button>
+        <Tooltip label={copied ? t("copied") : t("copyDiff")}>
+          <IconButton
+            className="diff-copy"
+            type="button"
+            onClick={() => void writeClipboard(diff).then(setCopied)}
+            aria-label={t("copyDiff")}
+            icon={<Icon name={copied ? "check" : "copy"} />}
+          />
+        </Tooltip>
       </figcaption>
       <pre aria-label={t("unifiedDiff")}>
         {lines.map((line, index) => <span className={`diff-${diffLineKind(line)}`} key={`${index}:${line}`}>{line || " "}</span>)}

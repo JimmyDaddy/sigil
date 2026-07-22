@@ -206,3 +206,45 @@ fn verification_rerun_requires_one_bounded_exact_binding() {
     invalid.request.policy_hash.clear();
     assert!(validate_verification_rerun(&invalid).is_err());
 }
+
+#[test]
+fn support_bundle_validation_and_private_write_are_bounded() {
+    assert!(validate_support_bundle("sigil-support-123.json", "{\"schema_version\":1}").is_ok());
+    assert!(validate_support_bundle("../support.json", "{}").is_err());
+    assert!(validate_support_bundle("sigil-support-123.json", "not-json").is_err());
+    assert!(
+        validate_support_bundle(
+            "sigil-support-123.json",
+            &format!("\"{}\"", "x".repeat(MAX_SUPPORT_BUNDLE_BYTES)),
+        )
+        .is_err()
+    );
+
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let destination = temp.path().join("sigil-support-123.json");
+    write_private_support_bundle(&destination, "{\"schema_version\":1}")
+        .expect("private support bundle should write");
+    assert_eq!(
+        std::fs::read_to_string(destination).expect("support bundle should read"),
+        "{\"schema_version\":1}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_support_write_rejects_symbolic_link_targets() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let target = temp.path().join("target.json");
+    std::fs::write(&target, "private").expect("target should write");
+    let link = temp.path().join("sigil-support-123.json");
+    symlink(&target, &link).expect("symlink should create");
+
+    let error = write_private_support_bundle(&link, "{}").expect_err("symlink should fail");
+    assert_eq!(error.code, "support_save_invalid");
+    assert_eq!(
+        std::fs::read_to_string(target).expect("target should remain readable"),
+        "private"
+    );
+}

@@ -35,6 +35,8 @@ export function Composer({
   onReasoningEffortChange,
   onNewSession,
   onOpenSessionPicker,
+  onOpenSettings,
+  onOpenSupport,
   onOpenAgentWorkbench,
   onNotice,
   onSubmit,
@@ -57,6 +59,8 @@ export function Composer({
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
   onNewSession: () => Promise<boolean>;
   onOpenSessionPicker: (query: string) => void;
+  onOpenSettings: () => void;
+  onOpenSupport: () => void;
   onOpenAgentWorkbench: (query: string) => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
@@ -226,6 +230,12 @@ export function Composer({
         return true;
       case "open_session_picker":
         onOpenSessionPicker(argument);
+        return true;
+      case "open_settings":
+        onOpenSettings();
+        return true;
+      case "open_support":
+        onOpenSupport();
         return true;
       default:
         onNotice(suggestion.unavailableReason ?? t("commandUnavailable"), true);

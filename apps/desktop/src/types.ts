@@ -21,6 +21,43 @@ export interface WorkspaceSelection {
   workspace?: WorkspaceSummary;
 }
 
+export type SupportStatus = "ok" | "warn" | "error";
+
+export interface SupportDoctorReport {
+  generatedAtUnixMs: number;
+  version: string;
+  commit: string;
+  target: string;
+  profile: string;
+  environment: {
+    os: string;
+    architecture: string;
+    terminalFamily: string;
+  };
+  summary: {
+    overallStatus: SupportStatus;
+    ok: number;
+    warn: number;
+    error: number;
+  };
+  checks: Array<{
+    status: SupportStatus;
+    name: string;
+    summary: string;
+    remediation?: string;
+  }>;
+  privacy: {
+    included: string[];
+    excluded: string[];
+    reviewBeforeSharing: boolean;
+  };
+}
+
+export interface SupportSaveSummary {
+  cancelled: boolean;
+  fileName?: string;
+}
+
 export interface RecentWorkspaceSummary {
   id: string;
   displayName: string;
@@ -99,6 +136,12 @@ export interface SessionQuarantineInput {
   sourceModifiedAtUnixMs: number;
 }
 
+export interface SessionInvalidSourceDeleteInput {
+  sessionRef: string;
+  sourceBytes: number;
+  sourceModifiedAtUnixMs: number;
+}
+
 export interface SessionMutationSummary {
   sessionRef: string;
   sessionId: string;
@@ -109,6 +152,67 @@ export interface SessionQuarantineSummary {
   sessionRef: string;
   quarantineName: string;
   projectionGeneration?: number;
+}
+
+export interface SessionInvalidSourceDeleteSummary {
+  sessionRef: string;
+  projectionGeneration?: number;
+}
+
+export type SessionCatalogBatchAction =
+  | "delete_sessions"
+  | "quarantine_invalid_sources"
+  | "delete_invalid_sources";
+
+export interface SessionCatalogBatchItem {
+  sessionRef: string;
+  sessionId?: string;
+  sourceBytes?: number;
+  sourceModifiedAtUnixMs?: number;
+}
+
+export interface SessionCatalogBatchPlanInput {
+  action: SessionCatalogBatchAction;
+  items: SessionCatalogBatchItem[];
+}
+
+export interface SessionCatalogBatchExecuteInput extends SessionCatalogBatchPlanInput {
+  planId: string;
+}
+
+export interface SessionCatalogBatchPlanItem {
+  sessionRef: string;
+  status: "executable" | "blocked";
+  reason?: string;
+}
+
+export interface SessionCatalogBatchPlan {
+  planId: string;
+  action: SessionCatalogBatchAction;
+  generation: number;
+  total: number;
+  executable: number;
+  blocked: number;
+  items: SessionCatalogBatchPlanItem[];
+}
+
+export interface SessionCatalogBatchReceiptItem {
+  sessionRef: string;
+  outcome: "completed" | "failed" | "skipped";
+  reason?: string;
+  operationId?: string;
+  quarantineName?: string;
+  projectionGeneration?: number;
+}
+
+export interface SessionCatalogBatchReceipt {
+  planId: string;
+  action: SessionCatalogBatchAction;
+  total: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  items: SessionCatalogBatchReceiptItem[];
 }
 
 export type TranscriptRole = "user" | "assistant" | "tool";
@@ -160,7 +264,9 @@ export type ApplicationClientAction =
   | "focus_effort"
   | "focus_model"
   | "open_session_picker"
-  | "open_agent_workbench";
+  | "open_agent_workbench"
+  | "open_settings"
+  | "open_support";
 
 export interface CommandCatalogEntry {
   canonical: string;
@@ -211,6 +317,49 @@ export interface AgentCatalogEntry {
 export interface AgentBinding {
   profileId: string;
   snapshotId: string;
+}
+
+export type AgentActivityStatus =
+  | "started"
+  | "running"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "unavailable"
+  | "unknown";
+
+export type AgentHandoffStatus =
+  | "pending"
+  | "result_ready"
+  | "result_read"
+  | "returned"
+  | "unavailable";
+
+export interface AgentActivityItem {
+  threadId: string;
+  profileId?: string;
+  displayName?: string;
+  objective: string;
+  status: AgentActivityStatus;
+  reason?: string;
+  handoffStatus: AgentHandoffStatus;
+  resultSummary?: string;
+  resultSummaryTruncated: boolean;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cachedTokens?: number;
+  };
+}
+
+export interface AgentActivitySummary {
+  totalAgents: number;
+  activeAgents: number;
+  terminalAgents: number;
+  items: AgentActivityItem[];
 }
 
 export interface ExtensionCatalog {

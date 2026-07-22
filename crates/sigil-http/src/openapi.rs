@@ -52,6 +52,28 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/support/doctor": {
+                "get": {
+                    "summary": "Read redacted local diagnostics",
+                    "description": "Returns only the frozen path-free support projection. Credentials, local paths, conversation content, tool payloads, and file content are excluded.",
+                    "responses": {
+                        "200": { "description": "Redacted diagnostic report", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SupportDoctorReport" } } } },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/support/bundle": {
+                "post": {
+                    "summary": "Build a private redacted support bundle",
+                    "description": "Returns bounded JSON only to the native desktop client. The renderer does not receive the bundle content or a filesystem path.",
+                    "responses": {
+                        "200": { "description": "Private bounded support bundle", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SupportBundleExport" } } } },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "Read this authenticated local API description",
@@ -215,6 +237,39 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/session-catalog/batch/plan": {
+                "post": {
+                    "summary": "Preview one exact bounded session catalog batch",
+                    "description": "Reconciles current durable catalog truth, classifies each selected identity, and returns a content-bound plan without mutating any session source.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCatalogBatchPlanRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Content-bound batch preview", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCatalogBatchPlan" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/session-catalog/batch/execute": {
+                "post": {
+                    "summary": "Execute one confirmed session catalog batch",
+                    "description": "Replans and compares the opaque plan digest before the first mutation, then returns a per-item best-effort receipt. The operation is not an atomic transaction across session files.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCatalogBatchExecuteRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Per-item best-effort batch receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCatalogBatchReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/session-catalog/rename": {
                 "post": {
                     "summary": "Rename one exact durable conversation",
@@ -261,6 +316,24 @@ pub fn http_openapi_document() -> Value {
                     },
                     "responses": {
                         "200": { "description": "Committed quarantine receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionQuarantineReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/session-catalog/delete-invalid-source": {
+                "post": {
+                    "summary": "Permanently delete one exact invalid local session source",
+                    "description": "Revalidates the invalid source fingerprint under a maintenance lease, then permanently removes the regular file after native-shell confirmation.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInvalidSourceDeleteRequest" } } }
+                    },
+                    "responses": {
+                        "200": { "description": "Committed invalid-source delete receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInvalidSourceDeleteReceipt" } } } },
                         "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
@@ -358,6 +431,22 @@ pub fn http_openapi_document() -> Value {
                         "200": {
                             "description": "Typed run context for the next run",
                             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunContextView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/agent-activity": {
+                "get": {
+                    "summary": "Read bounded child-agent lifecycle and result handoff state",
+                    "description": "Projects safe child-agent status, objective, bounded result summary and usage. Child session references, paths, hashes and raw tool arguments are excluded.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Newest child-agent activity first",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentActivityView" } } }
                         },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
@@ -570,7 +659,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -580,7 +669,81 @@ pub fn http_openapi_document() -> Value {
                         "approval": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
                         "verification": { "type": "boolean" },
-                        "run_context": { "type": "boolean" }
+                        "run_context": { "type": "boolean" },
+                        "agent_activity": { "type": "boolean" },
+                        "support_diagnostics": { "type": "boolean" }
+                    }
+                },
+                "SupportStatus": {
+                    "type": "string",
+                    "enum": ["ok", "warn", "error"]
+                },
+                "SupportSummary": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["overall_status", "ok", "warn", "error"],
+                    "properties": {
+                        "overall_status": { "$ref": "#/components/schemas/SupportStatus" },
+                        "ok": { "type": "integer", "format": "uint64" },
+                        "warn": { "type": "integer", "format": "uint64" },
+                        "error": { "type": "integer", "format": "uint64" }
+                    }
+                },
+                "SupportCheck": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status", "name", "summary"],
+                    "properties": {
+                        "status": { "$ref": "#/components/schemas/SupportStatus" },
+                        "name": { "type": "string" },
+                        "summary": { "type": "string" },
+                        "remediation": { "type": ["string", "null"] }
+                    }
+                },
+                "SupportEnvironment": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["os", "architecture", "terminal_family"],
+                    "properties": {
+                        "os": { "type": "string" },
+                        "architecture": { "type": "string" },
+                        "terminal_family": { "type": "string", "enum": ["iterm2", "apple_terminal", "wezterm", "vscode", "other", "unknown"] }
+                    }
+                },
+                "SupportPrivacy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["included", "excluded", "review_before_sharing"],
+                    "properties": {
+                        "included": { "type": "array", "items": { "type": "string" } },
+                        "excluded": { "type": "array", "items": { "type": "string" } },
+                        "review_before_sharing": { "type": "boolean" }
+                    }
+                },
+                "SupportDoctorReport": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["generated_at_unix_ms", "version", "commit", "target", "profile", "environment", "summary", "checks", "privacy"],
+                    "properties": {
+                        "generated_at_unix_ms": { "type": "integer", "format": "uint64" },
+                        "version": { "type": "string" },
+                        "commit": { "type": "string" },
+                        "target": { "type": "string" },
+                        "profile": { "type": "string" },
+                        "environment": { "$ref": "#/components/schemas/SupportEnvironment" },
+                        "summary": { "$ref": "#/components/schemas/SupportSummary" },
+                        "checks": { "type": "array", "items": { "$ref": "#/components/schemas/SupportCheck" } },
+                        "privacy": { "$ref": "#/components/schemas/SupportPrivacy" }
+                    }
+                },
+                "SupportBundleExport": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["suggested_file_name", "generated_at_unix_ms", "content"],
+                    "properties": {
+                        "suggested_file_name": { "type": "string" },
+                        "generated_at_unix_ms": { "type": "integer", "format": "uint64" },
+                        "content": { "type": "string", "maxLength": 262144 }
                     }
                 },
                 "SessionCreateRequest": {
@@ -629,6 +792,16 @@ pub fn http_openapi_document() -> Value {
                         "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" }
                     }
                 },
+                "SessionInvalidSourceDeleteRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "source_bytes", "source_modified_at_unix_ms"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
+                        "source_bytes": { "type": "integer", "format": "uint64" },
+                        "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" }
+                    }
+                },
                 "SessionMutationReceipt": {
                     "type": "object",
                     "additionalProperties": false,
@@ -648,6 +821,16 @@ pub fn http_openapi_document() -> Value {
                         "session_ref": { "type": "string" },
                         "operation_id": { "type": "string" },
                         "quarantine_name": { "type": "string" },
+                        "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "SessionInvalidSourceDeleteReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "operation_id"],
+                    "properties": {
+                        "session_ref": { "type": "string" },
+                        "operation_id": { "type": "string" },
                         "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
                     }
                 },
@@ -707,6 +890,53 @@ pub fn http_openapi_document() -> Value {
                         "original_content_bytes": { "type": "integer", "format": "uint64" }
                     }
                 },
+                "AgentActivityStatus": {
+                    "type": "string",
+                    "enum": ["started", "running", "blocked", "completed", "failed", "cancelled", "interrupted", "unavailable", "unknown"]
+                },
+                "AgentHandoffStatus": {
+                    "type": "string",
+                    "enum": ["pending", "result_ready", "result_read", "returned", "unavailable"]
+                },
+                "AgentUsageSummary": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["input_tokens", "output_tokens", "total_tokens"],
+                    "properties": {
+                        "input_tokens": { "type": "integer", "format": "uint64" },
+                        "output_tokens": { "type": "integer", "format": "uint64" },
+                        "total_tokens": { "type": "integer", "format": "uint64" },
+                        "cached_tokens": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "AgentActivityItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["thread_id", "objective", "status", "handoff_status", "result_summary_truncated"],
+                    "properties": {
+                        "thread_id": { "type": "string" },
+                        "profile_id": { "type": ["string", "null"] },
+                        "display_name": { "type": ["string", "null"], "maxLength": 32768 },
+                        "objective": { "type": "string", "maxLength": 32768 },
+                        "status": { "$ref": "#/components/schemas/AgentActivityStatus" },
+                        "reason": { "type": ["string", "null"], "maxLength": 32768 },
+                        "handoff_status": { "$ref": "#/components/schemas/AgentHandoffStatus" },
+                        "result_summary": { "type": ["string", "null"], "maxLength": 32768 },
+                        "result_summary_truncated": { "type": "boolean" },
+                        "usage": { "oneOf": [{ "$ref": "#/components/schemas/AgentUsageSummary" }, { "type": "null" }] }
+                    }
+                },
+                "AgentActivityView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["total_agents", "active_agents", "terminal_agents", "items"],
+                    "properties": {
+                        "total_agents": { "type": "integer", "format": "uint64" },
+                        "active_agents": { "type": "integer", "format": "uint64" },
+                        "terminal_agents": { "type": "integer", "format": "uint64" },
+                        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/AgentActivityItem" } }
+                    }
+                },
                 "SessionCatalogPage": {
                     "type": "object",
                     "additionalProperties": false,
@@ -749,6 +979,91 @@ pub fn http_openapi_document() -> Value {
                         "control_entry_count": { "type": "integer", "format": "uint64" },
                         "pinned": { "type": "boolean" },
                         "indexed_at_unix_ms": { "type": "integer", "format": "uint64" }
+                    }
+                },
+                "SessionCatalogBatchAction": {
+                    "type": "string",
+                    "enum": ["delete_sessions", "quarantine_invalid_sources", "delete_invalid_sources"]
+                },
+                "SessionCatalogBatchItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref"],
+                    "properties": {
+                        "session_ref": { "type": "string", "maxLength": 512 },
+                        "session_id": { "type": ["string", "null"], "maxLength": 512 },
+                        "source_bytes": { "type": ["integer", "null"], "format": "uint64" },
+                        "source_modified_at_unix_ms": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "SessionCatalogBatchPlanRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["action", "items"],
+                    "properties": {
+                        "action": { "$ref": "#/components/schemas/SessionCatalogBatchAction" },
+                        "items": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/components/schemas/SessionCatalogBatchItem" } }
+                    }
+                },
+                "SessionCatalogBatchExecuteRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "action", "items"],
+                    "properties": {
+                        "plan_id": { "type": "string", "maxLength": 128 },
+                        "action": { "$ref": "#/components/schemas/SessionCatalogBatchAction" },
+                        "items": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/components/schemas/SessionCatalogBatchItem" } }
+                    }
+                },
+                "SessionCatalogBatchPlanItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "status"],
+                    "properties": {
+                        "session_ref": { "type": "string" },
+                        "status": { "type": "string", "enum": ["executable", "blocked"] },
+                        "reason": { "type": ["string", "null"] }
+                    }
+                },
+                "SessionCatalogBatchPlan": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "action", "generation", "total", "executable", "blocked", "items"],
+                    "properties": {
+                        "plan_id": { "type": "string" },
+                        "action": { "$ref": "#/components/schemas/SessionCatalogBatchAction" },
+                        "generation": { "type": "integer", "format": "uint64" },
+                        "total": { "type": "integer", "format": "uint64" },
+                        "executable": { "type": "integer", "format": "uint64" },
+                        "blocked": { "type": "integer", "format": "uint64" },
+                        "items": { "type": "array", "items": { "$ref": "#/components/schemas/SessionCatalogBatchPlanItem" } }
+                    }
+                },
+                "SessionCatalogBatchReceiptItem": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_ref", "outcome"],
+                    "properties": {
+                        "session_ref": { "type": "string" },
+                        "outcome": { "type": "string", "enum": ["completed", "failed", "skipped"] },
+                        "reason": { "type": ["string", "null"] },
+                        "operation_id": { "type": ["string", "null"] },
+                        "quarantine_name": { "type": ["string", "null"] },
+                        "projection_generation": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "SessionCatalogBatchReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "action", "total", "completed", "failed", "skipped", "items"],
+                    "properties": {
+                        "plan_id": { "type": "string" },
+                        "action": { "$ref": "#/components/schemas/SessionCatalogBatchAction" },
+                        "total": { "type": "integer", "format": "uint64" },
+                        "completed": { "type": "integer", "format": "uint64" },
+                        "failed": { "type": "integer", "format": "uint64" },
+                        "skipped": { "type": "integer", "format": "uint64" },
+                        "items": { "type": "array", "items": { "$ref": "#/components/schemas/SessionCatalogBatchReceiptItem" } }
                     }
                 },
                 "DisclosureListResponse": {
@@ -874,7 +1189,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationClientAction": {
                     "type": "string",
-                    "enum": ["new_session", "focus_effort", "focus_model", "open_session_picker", "open_agent_workbench"]
+                    "enum": ["new_session", "focus_effort", "focus_model", "open_session_picker", "open_agent_workbench", "open_settings", "open_support"]
                 },
                 "ApplicationCommandCatalogEntry": {
                     "type": "object",

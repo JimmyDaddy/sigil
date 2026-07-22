@@ -5,7 +5,7 @@ import { HistoryContent, type HistoryState } from "../../HistoryPanel";
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "../../types";
 import { useLocale } from "../../i18n";
 import { Icon } from "../../ui/icons";
-import { Button, Checkbox, IconButton, Popover, Select, TextField } from "../../ui/primitives";
+import { Button, Checkbox, IconButton, Popover, Select, TextField, Tooltip } from "../../ui/primitives";
 
 interface SessionRailProps {
   readonly historyState: HistoryState;
@@ -13,8 +13,7 @@ interface SessionRailProps {
   readonly selectedSessionId?: string;
   readonly navigationBusy: boolean;
   readonly openingSessionRef?: string;
-  readonly sessionMessage?: string;
-  readonly sessionError: boolean;
+  readonly sessionErrorMessage?: string;
   readonly searchDraft: string;
   readonly searchInputRef?: RefObject<HTMLInputElement | null>;
   readonly providerFilter: string;
@@ -31,6 +30,7 @@ interface SessionRailProps {
   readonly onOpen: (entry: CatalogEntry) => void;
   readonly onRename: (entry: CatalogEntry) => void;
   readonly onDelete: (entry: CatalogEntry) => void;
+  readonly onDeleteInvalidSource: (entry: CatalogEntry) => void;
   readonly onQuarantine: (entry: CatalogEntry) => void;
 }
 
@@ -40,8 +40,7 @@ export function SessionRail({
   selectedSessionId,
   navigationBusy,
   openingSessionRef,
-  sessionMessage,
-  sessionError,
+  sessionErrorMessage,
   searchDraft,
   searchInputRef,
   providerFilter,
@@ -58,6 +57,7 @@ export function SessionRail({
   onOpen,
   onRename,
   onDelete,
+  onDeleteInvalidSource,
   onQuarantine,
 }: SessionRailProps) {
   const { t } = useLocale();
@@ -104,13 +104,19 @@ export function SessionRail({
       {activeFilterCount > 0 ? (
         <div className="active-filter-summary">
           <span>{activeFilterCount === 1 ? t("activeFilter") : t("activeFilters", { count: activeFilterCount })}</span>
-          <Button type="button" variant="quiet" onClick={onClearFilters}>{t("clear")}</Button>
+          <Tooltip label={t("clearFilters")}>
+            <IconButton
+              className="active-filter-clear"
+              type="button"
+              onClick={onClearFilters}
+              aria-label={t("clear")}
+              icon={<Icon name="close" />}
+            />
+          </Tooltip>
         </div>
       ) : null}
-      {sessionMessage === undefined ? null : sessionError ? (
-        <ErrorCard title={t("conversationUnavailable")} message={sessionMessage} actionLabel={t("refreshConversations")} onAction={onRetry} />
-      ) : (
-        <div className="session-notice" role="status">{sessionMessage}</div>
+      {sessionErrorMessage === undefined ? null : (
+        <ErrorCard title={t("conversationUnavailable")} message={sessionErrorMessage} actionLabel={t("refreshConversations")} onAction={onRetry} />
       )}
       <div className="session-rail-scroll">
         <HistoryContent
@@ -124,6 +130,7 @@ export function SessionRail({
           onOpen={onOpen}
           onRename={onRename}
           onDelete={onDelete}
+          onDeleteInvalidSource={onDeleteInvalidSource}
           onQuarantine={onQuarantine}
         />
       </div>

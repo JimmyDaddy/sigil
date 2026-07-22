@@ -46,6 +46,7 @@ export function WorkspaceSwitcher({
   return (
     <Popover
       className="workspace-switcher"
+      align="start"
       label={
         <span className="workspace-switcher-label">
           {active === undefined ? (
@@ -64,7 +65,7 @@ export function WorkspaceSwitcher({
       onOpenChange={setOpen}
       triggerRef={resolvedTriggerRef}
     >
-      <div className="workspace-switcher-panel">
+      <div className="workspace-switcher-content">
         <div className="workspace-switcher-heading">
           <strong>{t("workspaces")}</strong>
           <small>{t("openCount", { count: workspaces.length })}</small>

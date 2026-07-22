@@ -504,6 +504,17 @@ model = "deepseek-v4-flash"
 
     assert_eq!(session.session_scope_id(), binding.session_scope_id);
     assert_eq!(session.model_name(), "deepseek-v4-pro");
+    let selected_context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(selected_context.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        selected_context.default_reasoning_effort,
+        Some(ReasoningEffort::Max)
+    );
     let mut stale = request;
     stale.model_name = Some("deepseek-v4-flash".to_owned());
     assert!(matches!(

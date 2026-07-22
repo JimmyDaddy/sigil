@@ -26,7 +26,15 @@
 
   .sg-field { display: grid; gap: var(--sg-sys-space-1); min-width: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
   .sg-field-label { font-weight: 700; }
-  .sg-field-control { width: 100%; min-height: var(--sg-sys-control-height); padding: 7px 9px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); font: inherit; }
+  .sg-field-control { width: 100%; min-height: var(--sg-sys-control-height); padding: 7px 10px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); outline: 0; color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); font: inherit; transition: border-color var(--sg-sys-motion-fast), box-shadow var(--sg-sys-motion-fast), background var(--sg-sys-motion-fast); }
+  .sg-field-control::placeholder { color: var(--sg-sys-color-on-surface-subtle); opacity: 1; }
+  .sg-field-control:hover:not(:disabled) { border-color: var(--sg-sys-color-outline); background: var(--sg-sys-color-surface-container-low); }
+  .sg-field-control:focus-visible { border-color: var(--sg-sys-color-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--sg-sys-color-primary) 24%, transparent); }
+  .sg-field-control:disabled { cursor: not-allowed; opacity: .55; }
+  .sg-select-control { position: relative; display: block; min-width: 0; }
+  .sg-select-control select { appearance: none; padding-right: 34px; cursor: pointer; }
+  .sg-select-control select:disabled { cursor: not-allowed; }
+  .sg-select-indicator { position: absolute; top: 50%; right: 13px; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; color: var(--sg-sys-color-on-surface-variant); pointer-events: none; transform: translateY(-70%) rotate(45deg); }
   textarea.sg-field-control { min-height: 84px; resize: vertical; line-height: 1.5; }
   .sg-field > small { color: var(--sg-sys-color-on-surface-subtle); line-height: 1.4; }
   .sg-field-error .sg-field-control { border-color: var(--sg-sys-color-error); }
@@ -46,7 +54,8 @@
   .sg-popover { position: relative; display: inline-block; }
   .sg-popover-trigger { padding: 7px 10px; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; font-weight: 700; }
   .sg-popover-trigger[aria-expanded="true"] { border-color: var(--sg-sys-color-primary); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-hover); }
-  .sg-popover-panel { position: absolute; z-index: var(--sg-sys-z-popover); top: calc(100% + var(--sg-sys-space-2)); right: 0; width: min(280px, calc(100vw - var(--sg-sys-space-6))); padding: var(--sg-sys-space-3); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-lg); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-modal); }
+  .sg-popover-panel { z-index: var(--sg-sys-z-popover); width: min(280px, calc(100vw - var(--sg-sys-space-6))); padding: var(--sg-sys-space-3); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-lg); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-modal); }
+  .sg-menu-panel { width: 136px; }
   .sg-menu-items { display: grid; gap: 2px; }
   .sg-menu-item { width: 100%; justify-content: flex-start; padding: 7px 9px; border-color: transparent; background: transparent; text-align: left; }
 
@@ -65,10 +74,9 @@
 
   .sg-tooltip-anchor { display: inline-flex; min-width: 0; }
   .sg-tooltip { position: fixed; z-index: var(--sg-sys-z-tooltip); width: max-content; max-width: min(240px, calc(100vw - 24px)); padding: 5px 8px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-dock); pointer-events: none; font-size: 11px; }
-  .sg-toast { padding: 9px var(--sg-sys-space-3); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-dock); font-size: 12px; }
 }
 
 @media (max-width: 480px) {
   .sg-modal-backdrop { padding: var(--sg-sys-space-3); }
-  .sg-popover-panel { position: fixed; top: auto; right: var(--sg-sys-space-3); bottom: var(--sg-sys-space-3); left: var(--sg-sys-space-3); width: auto; }
+  .sg-popover-panel { width: auto; }
 }

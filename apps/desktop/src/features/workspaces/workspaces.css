@@ -1,12 +1,12 @@
 @layer features {
   .workspace-switcher { min-width: 0; }
   .workspace-switcher > .sg-popover-trigger { min-width: 160px; max-width: 280px; }
-  .workspace-switcher > .sg-popover-panel { right: auto; left: 0; width: min(320px, calc(100vw - 24px)); }
+  .workspace-switcher-panel { width: min(380px, calc(100vw - 24px)); overflow-x: clip; }
   .workspace-switcher-label { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); }
   .workspace-switcher-label .sg-status-indicator { min-width: 0; }
   .workspace-switcher-label .sg-status-indicator > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .workspace-switcher-placeholder { overflow: hidden; color: var(--sg-sys-color-on-surface-variant); text-overflow: ellipsis; white-space: nowrap; }
-  .workspace-switcher-panel { display: grid; max-height: min(520px, calc(100vh - 96px)); gap: var(--sg-sys-space-3); overflow-y: auto; overscroll-behavior: contain; }
+  .workspace-switcher-content { display: grid; width: 100%; min-width: 0; gap: var(--sg-sys-space-3); }
   .workspace-switcher-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sg-sys-space-3); }
   .workspace-switcher-heading small, .workspace-recent-group > strong { color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
   .workspace-switcher-empty { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
@@ -19,6 +19,6 @@
   .workspace-recent-group { display: grid; gap: var(--sg-sys-space-1); padding-top: var(--sg-sys-space-2); border-top: 1px solid var(--sg-sys-color-outline); }
 
   @media (max-width: 480px) {
-    .workspace-switcher > .sg-popover-panel { position: fixed; top: auto; right: var(--sg-sys-space-3); bottom: var(--sg-sys-space-3); left: var(--sg-sys-space-3); width: auto; }
+    .workspace-switcher-panel { width: auto; }
   }
 }

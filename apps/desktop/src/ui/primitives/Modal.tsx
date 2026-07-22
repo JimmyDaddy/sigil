@@ -133,7 +133,7 @@ export function Modal({
       />
       <section
         id={id}
-        className={`sg-modal-surface sg-modal-surface-${kind} sg-modal-side-${side}`}
+        className={`sg-modal-surface sg-modal-surface-${kind}${kind === "drawer" ? ` sg-modal-side-${side}` : ""}`}
         ref={surfaceRef}
         tabIndex={-1}
         role={destructive ? "alertdialog" : "dialog"}

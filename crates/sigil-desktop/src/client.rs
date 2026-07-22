@@ -11,12 +11,16 @@ use crate::{
         DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCommandEnvelope,
         DesktopErrorResponse, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
+        DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
         DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+        DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
         DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
         DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
         DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
-        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
-        DesktopVerificationRerunRequest, DesktopVerificationView,
+        DesktopSupportBundleExport, DesktopSupportDoctorReport, DesktopTranscriptQuery,
+        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
+        DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -55,6 +59,18 @@ impl DesktopHttpClient {
     /// Lists process-local session handles.
     pub async fn list_sessions(&self) -> Result<DesktopSessionListResponse, DesktopClientError> {
         self.get_json(self.route(["sessions"])?, StatusCode::OK)
+            .await
+    }
+
+    /// Reads path-free diagnostics from the supervised workspace server.
+    pub async fn support_doctor(&self) -> Result<DesktopSupportDoctorReport, DesktopClientError> {
+        self.get_json(self.route(["support", "doctor"])?, StatusCode::OK)
+            .await
+    }
+
+    /// Builds a bounded private support bundle for the native save boundary.
+    pub async fn support_bundle(&self) -> Result<DesktopSupportBundleExport, DesktopClientError> {
+        self.post_json(self.route(["support", "bundle"])?, &(), StatusCode::OK)
             .await
     }
 
@@ -152,6 +168,45 @@ impl DesktopHttpClient {
     ) -> Result<DesktopSessionQuarantineReceipt, DesktopClientError> {
         self.post_json(
             self.route(["session-catalog", "quarantine"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Permanently removes one exact invalid source after native-shell confirmation.
+    pub async fn delete_invalid_source(
+        &self,
+        request: DesktopSessionInvalidSourceDeleteRequest,
+    ) -> Result<DesktopSessionInvalidSourceDeleteReceipt, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "delete-invalid-source"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Builds a content-bound preview for one exact, bounded batch selection.
+    pub async fn plan_session_catalog_batch(
+        &self,
+        request: DesktopSessionCatalogBatchPlanRequest,
+    ) -> Result<DesktopSessionCatalogBatchPlan, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "batch", "plan"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Executes a previously confirmed batch after server-side re-planning.
+    pub async fn execute_session_catalog_batch(
+        &self,
+        request: DesktopSessionCatalogBatchExecuteRequest,
+    ) -> Result<DesktopSessionCatalogBatchReceipt, DesktopClientError> {
+        self.post_json(
+            self.route(["session-catalog", "batch", "execute"])?,
             &request,
             StatusCode::OK,
         )
@@ -314,6 +369,18 @@ impl DesktopHttpClient {
     ) -> Result<crate::DesktopRunContextView, DesktopClientError> {
         self.get_json(
             self.route(["sessions", session_id, "run-context"])?,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Projects safe bounded child-agent lifecycle and result-handoff state.
+    pub async fn agent_activity(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::DesktopAgentActivityView, DesktopClientError> {
+        self.get_json(
+            self.route(["sessions", session_id, "agent-activity"])?,
             StatusCode::OK,
         )
         .await

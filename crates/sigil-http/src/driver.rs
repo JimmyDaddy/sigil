@@ -4,9 +4,10 @@ use sigil_kernel::SessionRef;
 use thiserror::Error as ThisError;
 
 use crate::dto::{
-    HttpApplicationAgentBinding, HttpApplicationSkillBinding, HttpApprovalDecisionRecord,
-    HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpAgentActivityView, HttpApplicationAgentBinding, HttpApplicationSkillBinding,
+    HttpApprovalDecisionRecord, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
+    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -147,6 +148,20 @@ pub trait HttpRunDriver: Send + Sync {
     ) -> Result<HttpRunContextView, HttpRunDriverError> {
         Err(HttpRunDriverError::new(
             "run-context projection is unavailable",
+        ))
+    }
+
+    /// Projects safe, bounded child-agent lifecycle and result-handoff state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable scope validation or projection fails.
+    fn agent_activity_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpAgentActivityView, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "agent activity projection is unavailable",
         ))
     }
 

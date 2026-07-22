@@ -4,12 +4,19 @@ import { listen } from "@tauri-apps/api/event";
 import type { AppearanceSnapshot, ThemePreference } from "./appearance/contract";
 
 import type {
+  AgentActivitySummary,
   AgentBinding,
   CatalogPage,
   CatalogRequest,
   DesktopBootstrap,
   SessionOpenInput,
+  SessionCatalogBatchExecuteInput,
+  SessionCatalogBatchPlan,
+  SessionCatalogBatchPlanInput,
+  SessionCatalogBatchReceipt,
   SessionDeleteInput,
+  SessionInvalidSourceDeleteInput,
+  SessionInvalidSourceDeleteSummary,
   SessionMutationSummary,
   SessionQuarantineInput,
   SessionQuarantineSummary,
@@ -32,12 +39,16 @@ import type {
   TranscriptRequest,
   VerificationRerunBinding,
   VerificationSummary,
+  SupportDoctorReport,
+  SupportSaveSummary,
 } from "./types";
 
 export interface DesktopBridge {
   bootstrap(): Promise<DesktopBootstrap>;
   setAppearance(preference: ThemePreference): Promise<AppearanceSnapshot>;
   openExternalUrl(url: string): Promise<void>;
+  supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
+  exportSupportBundle(workspaceId: string): Promise<SupportSaveSummary>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
@@ -53,12 +64,25 @@ export interface DesktopBridge {
     workspaceId: string,
     input: SessionQuarantineInput,
   ): Promise<SessionQuarantineSummary>;
+  deleteInvalidSessionSource(
+    workspaceId: string,
+    input: SessionInvalidSourceDeleteInput,
+  ): Promise<SessionInvalidSourceDeleteSummary>;
+  planSessionCatalogBatch(
+    workspaceId: string,
+    input: SessionCatalogBatchPlanInput,
+  ): Promise<SessionCatalogBatchPlan>;
+  executeSessionCatalogBatch(
+    workspaceId: string,
+    input: SessionCatalogBatchExecuteInput,
+  ): Promise<SessionCatalogBatchReceipt>;
   transcript(
     workspaceId: string,
     sessionId: string,
     request: TranscriptRequest,
   ): Promise<TranscriptPage>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
+  agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
   startRun(
     workspaceId: string,
     sessionId: string,
@@ -97,6 +121,10 @@ export const desktopBridge: DesktopBridge = {
     invoke<AppearanceSnapshot>("desktop_set_appearance", { input: { preference } }),
   openExternalUrl: (url) =>
     invoke<void>("desktop_open_external_url", { input: { url } }),
+  supportDoctor: (workspaceId) =>
+    invoke<SupportDoctorReport>("desktop_support_doctor", { workspaceId }),
+  exportSupportBundle: (workspaceId) =>
+    invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>
@@ -121,6 +149,21 @@ export const desktopBridge: DesktopBridge = {
     invoke<SessionMutationSummary>("desktop_delete_session", { workspaceId, input }),
   quarantineSession: (workspaceId, input) =>
     invoke<SessionQuarantineSummary>("desktop_quarantine_session", { workspaceId, input }),
+  deleteInvalidSessionSource: (workspaceId, input) =>
+    invoke<SessionInvalidSourceDeleteSummary>("desktop_delete_invalid_session_source", {
+      workspaceId,
+      input,
+    }),
+  planSessionCatalogBatch: (workspaceId, input) =>
+    invoke<SessionCatalogBatchPlan>("desktop_plan_session_catalog_batch", {
+      workspaceId,
+      input,
+    }),
+  executeSessionCatalogBatch: (workspaceId, input) =>
+    invoke<SessionCatalogBatchReceipt>("desktop_execute_session_catalog_batch", {
+      workspaceId,
+      input,
+    }),
   transcript: (workspaceId, sessionId, request) =>
     invoke<TranscriptPage>("desktop_transcript", {
       workspaceId,
@@ -129,6 +172,8 @@ export const desktopBridge: DesktopBridge = {
     }),
   runContext: (workspaceId, sessionId) =>
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
+  agentActivity: (workspaceId, sessionId) =>
+    invoke<AgentActivitySummary>("desktop_agent_activity", { workspaceId, sessionId }),
   startRun: (
     workspaceId,
     sessionId,

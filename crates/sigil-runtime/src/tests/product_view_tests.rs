@@ -2,13 +2,17 @@ use anyhow::Result;
 use sigil_kernel::{
     AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentProfileId,
     AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry,
-    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, ControlEntry,
-    JsonlSessionStore, ModelMessage, SessionLogEntry, SessionRef, WorkspaceRootSnapshot,
+    AgentResultContinuationStatus, AgentRunContextSnapshot, AgentThreadId, AgentThreadResult,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
+    ControlEntry, JsonlSessionStore, ModelMessage, SessionLogEntry, SessionRef,
+    WorkspaceRootSnapshot,
 };
 
 use super::{
-    agent_graph_product_summary_from_entries, agent_graph_product_summary_from_session_log,
+    ApplicationAgentActivityStatus, ApplicationAgentHandoffStatus,
+    agent_activity_product_view_from_entries, agent_graph_product_summary_from_entries,
+    agent_graph_product_summary_from_session_log,
 };
 
 #[test]
@@ -49,6 +53,65 @@ fn agent_graph_product_view_treats_unresolved_continuation_as_active() -> Result
 
     assert_eq!(summary.active_agents, 1);
     assert_eq!(summary.terminal_agents, 0);
+    Ok(())
+}
+
+#[test]
+fn agent_activity_view_exposes_safe_result_and_handoff_without_session_references() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut entries = agent_entries(temp.path(), AgentThreadStatus::Completed)?;
+    entries.insert(
+        entries.len() - 1,
+        SessionLogEntry::Control(ControlEntry::AgentThreadResultRecorded(
+            AgentThreadResultRecordedEntry {
+                result: AgentThreadResult {
+                    thread_id: AgentThreadId::new("thread_1")?,
+                    session_ref: SessionRef::new_relative("children/private.jsonl")?,
+                    status: AgentThreadTerminalStatus::Completed,
+                    summary: "mapped the runtime".to_owned(),
+                    summary_truncated: false,
+                    original_summary_chars: None,
+                    artifacts: Vec::new(),
+                    changed_paths: vec!["private/path.rs".to_owned()],
+                    risks: Vec::new(),
+                    followups: Vec::new(),
+                    usage: Some(AgentUsageSummary {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        total_tokens: 15,
+                        cached_tokens: Some(3),
+                    }),
+                    output_hash: "sha256:private".to_owned(),
+                    final_answer_ref: None,
+                },
+            },
+        )),
+    );
+
+    let view = agent_activity_product_view_from_entries(&entries);
+
+    assert_eq!(view.total_agents, 1);
+    assert_eq!(view.active_agents, 0);
+    assert_eq!(view.terminal_agents, 1);
+    let item = view
+        .items
+        .first()
+        .expect("agent activity should be visible");
+    assert_eq!(item.thread_id, "thread_1");
+    assert_eq!(item.status, ApplicationAgentActivityStatus::Completed);
+    assert_eq!(
+        item.handoff_status,
+        ApplicationAgentHandoffStatus::ResultReady
+    );
+    assert_eq!(item.result_summary.as_deref(), Some("mapped the runtime"));
+    assert_eq!(
+        item.usage.as_ref().map(|usage| usage.total_tokens),
+        Some(15)
+    );
+    let debug = format!("{item:?}");
+    assert!(!debug.contains("private.jsonl"));
+    assert!(!debug.contains("private/path.rs"));
+    assert!(!debug.contains("sha256:private"));
     Ok(())
 }
 

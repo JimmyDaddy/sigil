@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
+    DesktopAgentActivityStatus, DesktopAgentActivityView, DesktopAgentHandoffStatus,
     DesktopApplicationClientAction, DesktopApprovalDecisionRecord, DesktopContextWindowSource,
     DesktopModelSelectionPolicy, DesktopPermissionMode, DesktopReasoningEffort,
-    DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogEntry,
-    DesktopSessionCatalogPage, DesktopSessionCatalogState, DesktopSessionSnapshot,
-    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage, DesktopTimelineEvent,
+    DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogBatchAction,
+    DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
+    DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
+    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopSupportCheck, DesktopSupportDoctorReport, DesktopSupportEnvironment,
+    DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary, DesktopTimelineEvent,
     DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
     DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
     DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
@@ -23,6 +28,129 @@ pub(crate) struct DesktopBootstrap {
     pub(crate) workspaces: Vec<DesktopWorkspaceSummary>,
     pub(crate) recent_workspaces: Vec<RecentWorkspaceSummary>,
     pub(crate) appearance: AppearanceSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSupportDoctorSummary {
+    generated_at_unix_ms: u64,
+    version: String,
+    commit: String,
+    target: String,
+    profile: String,
+    environment: DesktopSupportEnvironmentSummary,
+    summary: DesktopSupportStatusSummary,
+    checks: Vec<DesktopSupportCheckSummary>,
+    privacy: DesktopSupportPrivacySummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSupportEnvironmentSummary {
+    os: String,
+    architecture: String,
+    terminal_family: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSupportStatusSummary {
+    overall_status: &'static str,
+    ok: usize,
+    warn: usize,
+    error: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSupportCheckSummary {
+    status: &'static str,
+    name: String,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSupportPrivacySummary {
+    included: Vec<String>,
+    excluded: Vec<String>,
+    review_before_sharing: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSupportSaveSummary {
+    pub(crate) cancelled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_name: Option<String>,
+}
+
+impl From<DesktopSupportDoctorReport> for DesktopSupportDoctorSummary {
+    fn from(value: DesktopSupportDoctorReport) -> Self {
+        Self {
+            generated_at_unix_ms: value.generated_at_unix_ms,
+            version: value.version,
+            commit: value.commit,
+            target: value.target,
+            profile: value.profile,
+            environment: value.environment.into(),
+            summary: value.summary.into(),
+            checks: value.checks.into_iter().map(Into::into).collect(),
+            privacy: value.privacy.into(),
+        }
+    }
+}
+
+impl From<DesktopSupportEnvironment> for DesktopSupportEnvironmentSummary {
+    fn from(value: DesktopSupportEnvironment) -> Self {
+        Self {
+            os: value.os,
+            architecture: value.architecture,
+            terminal_family: value.terminal_family,
+        }
+    }
+}
+
+impl From<DesktopSupportSummary> for DesktopSupportStatusSummary {
+    fn from(value: DesktopSupportSummary) -> Self {
+        Self {
+            overall_status: support_status_label(value.overall_status),
+            ok: value.ok,
+            warn: value.warn,
+            error: value.error,
+        }
+    }
+}
+
+impl From<DesktopSupportCheck> for DesktopSupportCheckSummary {
+    fn from(value: DesktopSupportCheck) -> Self {
+        Self {
+            status: support_status_label(value.status),
+            name: value.name,
+            summary: value.summary,
+            remediation: value.remediation,
+        }
+    }
+}
+
+impl From<DesktopSupportPrivacy> for DesktopSupportPrivacySummary {
+    fn from(value: DesktopSupportPrivacy) -> Self {
+        Self {
+            included: value.included,
+            excluded: value.excluded,
+            review_before_sharing: value.review_before_sharing,
+        }
+    }
+}
+
+fn support_status_label(value: DesktopSupportStatus) -> &'static str {
+    match value {
+        DesktopSupportStatus::Ok => "ok",
+        DesktopSupportStatus::Warn => "warn",
+        DesktopSupportStatus::Error => "error",
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +268,89 @@ pub(crate) struct DesktopSessionQuarantineInput {
     pub(crate) source_modified_at_unix_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionInvalidSourceDeleteInput {
+    pub(crate) session_ref: String,
+    pub(crate) source_bytes: u64,
+    pub(crate) source_modified_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionCatalogBatchItemInput {
+    pub(crate) session_ref: String,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) source_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) source_modified_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionCatalogBatchPlanInput {
+    pub(crate) action: DesktopSessionCatalogBatchAction,
+    pub(crate) items: Vec<DesktopSessionCatalogBatchItemInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionCatalogBatchExecuteInput {
+    pub(crate) plan_id: String,
+    pub(crate) action: DesktopSessionCatalogBatchAction,
+    pub(crate) items: Vec<DesktopSessionCatalogBatchItemInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionCatalogBatchPlanSummary {
+    pub(crate) plan_id: String,
+    pub(crate) action: DesktopSessionCatalogBatchAction,
+    pub(crate) generation: u64,
+    pub(crate) total: usize,
+    pub(crate) executable: usize,
+    pub(crate) blocked: usize,
+    pub(crate) items: Vec<DesktopSessionCatalogBatchPlanItemSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionCatalogBatchPlanItemSummary {
+    pub(crate) session_ref: String,
+    pub(crate) status: DesktopSessionCatalogBatchPlanStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionCatalogBatchReceiptSummary {
+    pub(crate) plan_id: String,
+    pub(crate) action: DesktopSessionCatalogBatchAction,
+    pub(crate) total: usize,
+    pub(crate) completed: usize,
+    pub(crate) failed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) items: Vec<DesktopSessionCatalogBatchReceiptItemSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionCatalogBatchReceiptItemSummary {
+    pub(crate) session_ref: String,
+    pub(crate) outcome: DesktopSessionCatalogBatchOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quarantine_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_generation: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionMutationSummary {
@@ -154,6 +365,14 @@ pub(crate) struct DesktopSessionMutationSummary {
 pub(crate) struct DesktopSessionQuarantineSummary {
     pub(crate) session_ref: String,
     pub(crate) quarantine_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_generation: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionInvalidSourceDeleteSummary {
+    pub(crate) session_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) projection_generation: Option<u64>,
 }
@@ -272,6 +491,45 @@ pub(crate) struct DesktopRunContext {
     pub(crate) last_prompt_tokens: Option<u64>,
     pub(crate) context_window_source: &'static str,
     pub(crate) extension_catalog: DesktopExtensionCatalog,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentActivitySummary {
+    pub(crate) total_agents: usize,
+    pub(crate) active_agents: usize,
+    pub(crate) terminal_agents: usize,
+    pub(crate) items: Vec<DesktopAgentActivityItemSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentActivityItemSummary {
+    pub(crate) thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
+    pub(crate) objective: String,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    pub(crate) handoff_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_summary: Option<String>,
+    pub(crate) result_summary_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<DesktopAgentUsageSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentUsageSummary {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,6 +772,53 @@ impl From<DesktopSessionCatalogPage> for DesktopCatalogPage {
     }
 }
 
+impl From<DesktopSessionCatalogBatchPlan> for DesktopSessionCatalogBatchPlanSummary {
+    fn from(value: DesktopSessionCatalogBatchPlan) -> Self {
+        Self {
+            plan_id: value.plan_id,
+            action: value.action,
+            generation: value.generation,
+            total: value.total,
+            executable: value.executable,
+            blocked: value.blocked,
+            items: value
+                .items
+                .into_iter()
+                .map(|item| DesktopSessionCatalogBatchPlanItemSummary {
+                    session_ref: item.session_ref,
+                    status: item.status,
+                    reason: item.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<DesktopSessionCatalogBatchReceipt> for DesktopSessionCatalogBatchReceiptSummary {
+    fn from(value: DesktopSessionCatalogBatchReceipt) -> Self {
+        Self {
+            plan_id: value.plan_id,
+            action: value.action,
+            total: value.total,
+            completed: value.completed,
+            failed: value.failed,
+            skipped: value.skipped,
+            items: value
+                .items
+                .into_iter()
+                .map(|item| DesktopSessionCatalogBatchReceiptItemSummary {
+                    session_ref: item.session_ref,
+                    outcome: item.outcome,
+                    reason: item.reason,
+                    operation_id: item.operation_id,
+                    quarantine_name: item.quarantine_name,
+                    projection_generation: item.projection_generation,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl From<DesktopSessionCatalogEntry> for DesktopCatalogEntry {
     fn from(value: DesktopSessionCatalogEntry) -> Self {
         Self {
@@ -714,6 +1019,61 @@ impl From<DesktopRunContextView> for DesktopRunContext {
     }
 }
 
+impl From<DesktopAgentActivityView> for DesktopAgentActivitySummary {
+    fn from(value: DesktopAgentActivityView) -> Self {
+        Self {
+            total_agents: value.total_agents,
+            active_agents: value.active_agents,
+            terminal_agents: value.terminal_agents,
+            items: value
+                .items
+                .into_iter()
+                .map(|item| DesktopAgentActivityItemSummary {
+                    thread_id: item.thread_id,
+                    profile_id: item.profile_id,
+                    display_name: item.display_name,
+                    objective: item.objective,
+                    status: agent_activity_status_label(item.status),
+                    reason: item.reason,
+                    handoff_status: agent_handoff_status_label(item.handoff_status),
+                    result_summary: item.result_summary,
+                    result_summary_truncated: item.result_summary_truncated,
+                    usage: item.usage.map(|usage| DesktopAgentUsageSummary {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        total_tokens: usage.total_tokens,
+                        cached_tokens: usage.cached_tokens,
+                    }),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn agent_activity_status_label(status: DesktopAgentActivityStatus) -> &'static str {
+    match status {
+        DesktopAgentActivityStatus::Started => "started",
+        DesktopAgentActivityStatus::Running => "running",
+        DesktopAgentActivityStatus::Blocked => "blocked",
+        DesktopAgentActivityStatus::Completed => "completed",
+        DesktopAgentActivityStatus::Failed => "failed",
+        DesktopAgentActivityStatus::Cancelled => "cancelled",
+        DesktopAgentActivityStatus::Interrupted => "interrupted",
+        DesktopAgentActivityStatus::Unavailable => "unavailable",
+        DesktopAgentActivityStatus::Unknown => "unknown",
+    }
+}
+
+fn agent_handoff_status_label(status: DesktopAgentHandoffStatus) -> &'static str {
+    match status {
+        DesktopAgentHandoffStatus::Pending => "pending",
+        DesktopAgentHandoffStatus::ResultReady => "result_ready",
+        DesktopAgentHandoffStatus::ResultRead => "result_read",
+        DesktopAgentHandoffStatus::Returned => "returned",
+        DesktopAgentHandoffStatus::Unavailable => "unavailable",
+    }
+}
+
 fn application_client_action_label(value: DesktopApplicationClientAction) -> &'static str {
     match value {
         DesktopApplicationClientAction::NewSession => "new_session",
@@ -721,6 +1081,8 @@ fn application_client_action_label(value: DesktopApplicationClientAction) -> &'s
         DesktopApplicationClientAction::FocusModel => "focus_model",
         DesktopApplicationClientAction::OpenSessionPicker => "open_session_picker",
         DesktopApplicationClientAction::OpenAgentWorkbench => "open_agent_workbench",
+        DesktopApplicationClientAction::OpenSettings => "open_settings",
+        DesktopApplicationClientAction::OpenSupport => "open_support",
     }
 }
 

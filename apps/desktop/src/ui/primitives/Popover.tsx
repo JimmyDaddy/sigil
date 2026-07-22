@@ -11,6 +11,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 
 import { focusInitial } from "./focus";
 
@@ -24,6 +25,7 @@ export interface PopoverProps {
   readonly triggerPopup?: "dialog" | "menu";
   readonly panelRole?: "dialog" | "presentation";
   readonly triggerRef?: RefObject<HTMLButtonElement | null>;
+  readonly align?: "start" | "end";
 }
 
 export function Popover({
@@ -36,6 +38,7 @@ export function Popover({
   triggerPopup = "dialog",
   panelRole = "dialog",
   triggerRef: externalTriggerRef,
+  align = "end",
 }: PopoverProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -54,7 +57,13 @@ export function Popover({
   useEffect(() => {
     if (!open) return;
     const handlePointer = (event: PointerEvent) => {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) updateOpen(false);
+      if (
+        event.target instanceof Node
+        && !rootRef.current?.contains(event.target)
+        && !panelRef.current?.contains(event.target)
+      ) {
+        updateOpen(false);
+      }
     };
     const handleKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -77,21 +86,51 @@ export function Popover({
       return;
     }
     const panel = panelRef.current;
-    if (panel === null) return;
+    const trigger = triggerRef.current;
+    if (panel === null || trigger === null) return;
     const keepInsideViewport = () => {
       const margin = 12;
-      const bounds = panel.getBoundingClientRect();
-      let offsetX = 0;
-      if (bounds.left < margin) offsetX += margin - bounds.left;
-      if (bounds.right + offsetX > window.innerWidth - margin) {
-        offsetX -= bounds.right + offsetX - (window.innerWidth - margin);
-      }
-      setPanelStyle(offsetX === 0 ? undefined : { transform: `translateX(${offsetX}px)` });
+      const gap = 8;
+      const triggerBounds = trigger.getBoundingClientRect();
+      const panelBounds = panel.getBoundingClientRect();
+      const availableBelow = Math.max(0, window.innerHeight - margin - triggerBounds.bottom - gap);
+      const availableAbove = Math.max(0, triggerBounds.top - margin - gap);
+      const placeAbove = panelBounds.height > availableBelow && availableAbove > availableBelow;
+      const availableHeight = placeAbove ? availableAbove : availableBelow;
+      const renderedHeight = Math.min(panelBounds.height, availableHeight);
+      const preferredLeft = align === "start"
+        ? triggerBounds.left
+        : triggerBounds.right - panelBounds.width;
+      const left = Math.min(
+        Math.max(margin, preferredLeft),
+        Math.max(margin, window.innerWidth - margin - panelBounds.width),
+      );
+      const top = placeAbove
+        ? Math.max(margin, triggerBounds.top - gap - renderedHeight)
+        : Math.min(triggerBounds.bottom + gap, window.innerHeight - margin - renderedHeight);
+      setPanelStyle({
+        position: "fixed",
+        top,
+        right: "auto",
+        bottom: "auto",
+        left,
+        maxHeight: availableHeight,
+        overflowY: "auto",
+      });
     };
     keepInsideViewport();
     window.addEventListener("resize", keepInsideViewport);
-    return () => window.removeEventListener("resize", keepInsideViewport);
-  }, [open]);
+    window.addEventListener("scroll", keepInsideViewport, true);
+    return () => {
+      window.removeEventListener("resize", keepInsideViewport);
+      window.removeEventListener("scroll", keepInsideViewport, true);
+    };
+  }, [align, open, triggerRef]);
+
+  const panelClassName = [
+    "sg-popover-panel",
+    ...className.split(/\s+/).filter(Boolean).map((name) => `${name}-panel`),
+  ].join(" ");
 
   return (
     <div className={`sg-popover ${className}`.trim()} ref={rootRef}>
@@ -113,9 +152,9 @@ export function Popover({
       >
         {label}
       </button>
-      {open ? (
+      {open ? createPortal(
         <div
-          className="sg-popover-panel"
+          className={panelClassName}
           id={panelId}
           ref={panelRef}
           role={panelRole}
@@ -124,7 +163,8 @@ export function Popover({
           style={panelStyle}
         >
           {children}
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </div>
   );

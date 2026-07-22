@@ -12,10 +12,12 @@
     "allow-desktop-close-workspace",
     "allow-desktop-open-recent-workspace",
     "allow-desktop-catalog",
+    "allow-desktop-session-batch",
     "allow-desktop-session",
     "allow-desktop-run",
     "allow-desktop-approval",
     "allow-desktop-verification",
+    "allow-desktop-support",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

@@ -43,6 +43,33 @@ const context: RunContext = {
   extensionCatalog: {
     commands: [
       {
+        canonical: "/config",
+        aliases: [],
+        label: "Open settings",
+        description: "edit config",
+        completesWithSpace: false,
+        clientAction: "open_settings",
+        available: true,
+      },
+      {
+        canonical: "/doctor",
+        aliases: [],
+        label: "Run diagnostics",
+        description: "run local diagnostics",
+        completesWithSpace: false,
+        clientAction: "open_support",
+        available: true,
+      },
+      {
+        canonical: "/feedback",
+        aliases: [],
+        label: "Send feedback",
+        description: "review and export a private support report",
+        completesWithSpace: false,
+        clientAction: "open_support",
+        available: true,
+      },
+      {
         canonical: "/effort",
         aliases: ["/e"],
         label: "Change effort",
@@ -170,6 +197,8 @@ function renderComposer(overrides: {
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
   onOpenSessionPicker?: (query: string) => void;
+  onOpenSettings?: () => void;
+  onOpenSupport?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
 } = {}) {
   const onSubmit = overrides.onSubmit ?? vi.fn(async (
@@ -180,6 +209,8 @@ function renderComposer(overrides: {
   const onReasoningEffortChange = overrides.onReasoningEffortChange ?? vi.fn((_effort: ReasoningEffort) => undefined);
   const onOpenAgentWorkbench = overrides.onOpenAgentWorkbench ?? vi.fn((_query: string) => undefined);
   const onOpenSessionPicker = overrides.onOpenSessionPicker ?? vi.fn((_query: string) => undefined);
+  const onOpenSettings = overrides.onOpenSettings ?? vi.fn(() => undefined);
+  const onOpenSupport = overrides.onOpenSupport ?? vi.fn(() => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   render(
     <LocaleProvider>
@@ -199,6 +230,8 @@ function renderComposer(overrides: {
         onReasoningEffortChange={onReasoningEffortChange}
         onNewSession={async () => true}
         onOpenSessionPicker={onOpenSessionPicker}
+        onOpenSettings={onOpenSettings}
+        onOpenSupport={onOpenSupport}
         onOpenAgentWorkbench={onOpenAgentWorkbench}
         onNotice={onNotice}
         onSubmit={onSubmit}
@@ -206,7 +239,7 @@ function renderComposer(overrides: {
       />
     </LocaleProvider>,
   );
-  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onOpenSessionPicker, onNotice };
+  return { onSubmit, onReasoningEffortChange, onOpenAgentWorkbench, onOpenSessionPicker, onOpenSettings, onOpenSupport, onNotice };
 }
 
 describe("structured composer", () => {
@@ -295,6 +328,30 @@ describe("structured composer", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenSessionPicker).toHaveBeenCalledWith("typo");
+  });
+
+  it("routes /config to the desktop settings page", async () => {
+    const user = userEvent.setup();
+    const { onOpenSettings, onSubmit } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "/config");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["/doctor", "/feedback"])("routes %s to support and diagnostics", async (command) => {
+    const user = userEvent.setup();
+    const { onOpenSupport, onSubmit } = renderComposer();
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, command);
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenSupport).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("shows unavailable agents without dispatching a run", async () => {

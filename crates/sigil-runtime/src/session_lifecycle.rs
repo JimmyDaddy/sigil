@@ -31,7 +31,8 @@ pub use journal::{
 };
 pub use projection::{
     DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE,
-    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION, SessionCatalogMutationReceipt,
+    SESSION_CATALOG_APPLICATION_ID, SESSION_CATALOG_SCHEMA_VERSION,
+    SessionCatalogInvalidSourceDeleteReceipt, SessionCatalogMutationReceipt,
     SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
     SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
     SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,

@@ -18,7 +18,7 @@ export function MessageContent({ text, onOpenExternalUrl }: MessageContentProps)
     return <p className="message-content-empty">{t("messageUnavailable")}</p>;
   }
   return (
-    <div className="message-content">
+    <div className="message-content sg-bounded-content">
       <Tooltip label={copied ? t("copied") : t("copyMessage")}>
         <IconButton
           className="content-copy"

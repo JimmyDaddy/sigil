@@ -5,6 +5,71 @@ use serde::{Deserialize, Serialize};
 /// Current command-envelope protocol accepted by `sigil serve`.
 pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSupportStatus {
+    Ok,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportSummary {
+    pub overall_status: DesktopSupportStatus,
+    pub ok: usize,
+    pub warn: usize,
+    pub error: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportCheck {
+    pub status: DesktopSupportStatus,
+    pub name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportEnvironment {
+    pub os: String,
+    pub architecture: String,
+    pub terminal_family: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportPrivacy {
+    pub included: Vec<String>,
+    pub excluded: Vec<String>,
+    pub review_before_sharing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportDoctorReport {
+    pub generated_at_unix_ms: u64,
+    pub version: String,
+    pub commit: String,
+    pub target: String,
+    pub profile: String,
+    pub environment: DesktopSupportEnvironment,
+    pub summary: DesktopSupportSummary,
+    pub checks: Vec<DesktopSupportCheck>,
+    pub privacy: DesktopSupportPrivacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSupportBundleExport {
+    pub suggested_file_name: String,
+    pub generated_at_unix_ms: u64,
+    pub content: String,
+}
+
 /// Request body for creating one process-local session handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
@@ -56,6 +121,113 @@ pub struct DesktopSessionQuarantineRequest {
     pub source_modified_at_unix_ms: u64,
 }
 
+/// Exact invalid source fingerprint selected for native-shell permanent deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionInvalidSourceDeleteRequest {
+    pub session_ref: String,
+    pub source_bytes: u64,
+    pub source_modified_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionCatalogBatchAction {
+    DeleteSessions,
+    QuarantineInvalidSources,
+    DeleteInvalidSources,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchItem {
+    pub session_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchPlanRequest {
+    pub action: DesktopSessionCatalogBatchAction,
+    pub items: Vec<DesktopSessionCatalogBatchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchExecuteRequest {
+    pub plan_id: String,
+    pub action: DesktopSessionCatalogBatchAction,
+    pub items: Vec<DesktopSessionCatalogBatchItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionCatalogBatchPlanStatus {
+    Executable,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchPlanItem {
+    pub session_ref: String,
+    pub status: DesktopSessionCatalogBatchPlanStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchPlan {
+    pub plan_id: String,
+    pub action: DesktopSessionCatalogBatchAction,
+    pub generation: u64,
+    pub total: usize,
+    pub executable: usize,
+    pub blocked: usize,
+    pub items: Vec<DesktopSessionCatalogBatchPlanItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionCatalogBatchOutcome {
+    Completed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchReceiptItem {
+    pub session_ref: String,
+    pub outcome: DesktopSessionCatalogBatchOutcome,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub quarantine_name: Option<String>,
+    #[serde(default)]
+    pub projection_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionCatalogBatchReceipt {
+    pub plan_id: String,
+    pub action: DesktopSessionCatalogBatchAction,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub items: Vec<DesktopSessionCatalogBatchReceiptItem>,
+}
+
 /// Bounded receipt for a committed durable catalog mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -74,6 +246,16 @@ pub struct DesktopSessionQuarantineReceipt {
     pub session_ref: String,
     pub operation_id: String,
     pub quarantine_name: String,
+    #[serde(default)]
+    pub projection_generation: Option<u64>,
+}
+
+/// Bounded receipt for one invalid source permanently removed from the active catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionInvalidSourceDeleteReceipt {
+    pub session_ref: String,
+    pub operation_id: String,
     #[serde(default)]
     pub projection_generation: Option<u64>,
 }
@@ -277,6 +459,8 @@ pub enum DesktopApplicationClientAction {
     FocusModel,
     OpenSessionPicker,
     OpenAgentWorkbench,
+    OpenSettings,
+    OpenSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -401,6 +585,69 @@ pub struct DesktopRunContextView {
     pub last_prompt_tokens: Option<u64>,
     pub context_window_source: DesktopContextWindowSource,
     pub extension_catalog: DesktopApplicationExtensionCatalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopAgentActivityStatus {
+    Started,
+    Running,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopAgentHandoffStatus {
+    Pending,
+    ResultReady,
+    ResultRead,
+    Returned,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopAgentUsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopAgentActivityItem {
+    pub thread_id: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub objective: String,
+    pub status: DesktopAgentActivityStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub handoff_status: DesktopAgentHandoffStatus,
+    #[serde(default)]
+    pub result_summary: Option<String>,
+    pub result_summary_truncated: bool,
+    #[serde(default)]
+    pub usage: Option<DesktopAgentUsageSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopAgentActivityView {
+    pub total_agents: usize,
+    pub active_agents: usize,
+    pub terminal_agents: usize,
+    pub items: Vec<DesktopAgentActivityItem>,
 }
 
 /// Request payload for starting one run.

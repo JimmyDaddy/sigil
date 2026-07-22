@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ApprovalDock } from "./ApprovalDock";
+import { AgentActivityPanel } from "./AgentActivityPanel";
 import type { DesktopBridge } from "./bridge";
 import { Composer, draftStorageKey } from "./Composer";
 import { ErrorCard } from "./ErrorCard";
@@ -9,12 +10,14 @@ import { translateEnglish, useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
+  AgentActivitySummary,
   AgentBinding,
   AgentCatalogEntry,
   ApprovalAction,
   PermissionMode,
   ReasoningEffort,
   RunContext,
+  RunStreamState,
   RunStreamStatus,
   RunSummary,
   SessionSummary,
@@ -26,6 +29,7 @@ import type {
 } from "./types";
 import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
+import { useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
 
 interface ConversationPanelProps {
@@ -33,8 +37,11 @@ interface ConversationPanelProps {
   workspaceId: string;
   session: SessionSummary;
   onInitialLoadComplete?: (sessionId: string) => void;
+  onRunContextChange?: (context: RunContext) => void;
   onNewSession: () => Promise<boolean>;
   onOpenSessionPicker: (query: string) => void;
+  onOpenSettings: () => void;
+  onOpenSupport: () => void;
 }
 
 interface TimelineRowBase {
@@ -53,13 +60,23 @@ export function ConversationPanel({
   workspaceId,
   session,
   onInitialLoadComplete,
+  onRunContextChange,
   onNewSession,
   onOpenSessionPicker,
+  onOpenSettings,
+  onOpenSupport,
 }: ConversationPanelProps) {
   const { t } = useLocale();
+  const { notify } = useNotifications();
   const [run, setRun] = useState<RunSummary>();
+  const [agentActivity, setAgentActivity] = useState<AgentActivitySummary>();
+  const [agentActivityBusy, setAgentActivityBusy] = useState(false);
+  const [agentActivityError, setAgentActivityError] = useState(false);
+  const [agentActivityReload, setAgentActivityReload] = useState(0);
+  const [agentActivityOpen, setAgentActivityOpen] = useState(false);
   const [runContext, setRunContext] = useState<RunContext>();
   const [runContextBusy, setRunContextBusy] = useState(false);
+  const [runContextError, setRunContextError] = useState(false);
   const [runContextReload, setRunContextReload] = useState(0);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
@@ -78,7 +95,6 @@ export function ConversationPanel({
   const [transcriptError, setTranscriptError] = useState(false);
   const [transcriptReload, setTranscriptReload] = useState(0);
   const [attachmentGap, setAttachmentGap] = useState(false);
-  const [runNotice, setRunNotice] = useState<{ message: string; error: boolean }>();
   const [runAnnouncement, setRunAnnouncement] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [extensionWorkbenchOpen, setExtensionWorkbenchOpen] = useState(false);
@@ -92,16 +108,35 @@ export function ConversationPanel({
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
+  const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
   const terminalTranscriptRefreshRunId = useRef<string | undefined>(undefined);
+  const initialRunContextSessionId = useRef<string | undefined>(undefined);
   const initialTranscriptSessionId = useRef<string | undefined>(undefined);
+  const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
+  const finishInitialLoadIfReady = useCallback((sessionId: string) => {
+    if (
+      initialLoadReportedSessionId.current !== sessionId
+      && initialRunContextSessionId.current === sessionId
+      && initialTranscriptSessionId.current === sessionId
+    ) {
+      initialLoadReportedSessionId.current = sessionId;
+      onInitialLoadComplete?.(sessionId);
+    }
+  }, [onInitialLoadComplete]);
   const onNotice = useCallback((message: string, error = false) => {
-    setRunNotice({ message, error });
-  }, []);
+    if (!error) return;
+    notify({ message, tone: "error" });
+  }, [notify]);
   useEffect(() => {
     setRun(undefined);
+    setAgentActivity(undefined);
+    setAgentActivityBusy(false);
+    setAgentActivityError(false);
+    setAgentActivityOpen(false);
     setRunContext(undefined);
     setRunContextBusy(false);
+    setRunContextError(false);
     setPermissionMode("manual");
     setReasoningEffort(undefined);
     setSelectedModelName(undefined);
@@ -114,7 +149,6 @@ export function ConversationPanel({
     setNextBefore(undefined);
     setTranscriptError(false);
     setAttachmentGap(false);
-    setRunNotice(undefined);
     setRunAnnouncement("");
     setInspectorOpen(false);
     setExtensionWorkbenchOpen(false);
@@ -124,6 +158,9 @@ export function ConversationPanel({
     setRequestedAgent(undefined);
     activeRunIdRef.current = undefined;
     terminalTranscriptRefreshRunId.current = undefined;
+    initialRunContextSessionId.current = undefined;
+    initialTranscriptSessionId.current = undefined;
+    initialLoadReportedSessionId.current = undefined;
   }, [session.id, workspaceId]);
 
   const refreshTerminalTranscript = useCallback((runId: string) => {
@@ -135,11 +172,14 @@ export function ConversationPanel({
   useEffect(() => {
     let disposed = false;
     setRunContextBusy(true);
+    setRunContextError(false);
     void bridge
       .runContext(workspaceId, session.id)
       .then((context) => {
         if (disposed) return;
         setRunContext(context);
+        onRunContextChange?.(context);
+        setRunContextError(false);
         setSelectedModelName(context.modelName);
         setPermissionMode((current) =>
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
@@ -151,15 +191,42 @@ export function ConversationPanel({
         );
       })
       .catch(() => {
-        if (!disposed) setRunContext(undefined);
+        if (!disposed) {
+          setRunContext(undefined);
+          setRunContextError(true);
+        }
       })
       .finally(() => {
-        if (!disposed) setRunContextBusy(false);
+        if (!disposed) {
+          setRunContextBusy(false);
+          initialRunContextSessionId.current = session.id;
+          finishInitialLoadIfReady(session.id);
+        }
       });
     return () => {
       disposed = true;
     };
-  }, [bridge, runContextReload, session.id, workspaceId]);
+  }, [bridge, finishInitialLoadIfReady, onRunContextChange, runContextReload, session.id, workspaceId]);
+
+  useEffect(() => {
+    let disposed = false;
+    setAgentActivityBusy(true);
+    void bridge.agentActivity(workspaceId, session.id)
+      .then((view) => {
+        if (disposed) return;
+        setAgentActivity(view);
+        setAgentActivityError(false);
+      })
+      .catch(() => {
+        if (!disposed) setAgentActivityError(true);
+      })
+      .finally(() => {
+        if (!disposed) setAgentActivityBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [agentActivityReload, bridge, session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -181,14 +248,14 @@ export function ConversationPanel({
           setTranscriptBusy(false);
           if (initialTranscriptSessionId.current !== session.id) {
             initialTranscriptSessionId.current = session.id;
-            onInitialLoadComplete?.(session.id);
+            finishInitialLoadIfReady(session.id);
           }
         }
       });
     return () => {
       disposed = true;
     };
-  }, [bridge, onInitialLoadComplete, session.id, transcriptReload, workspaceId]);
+  }, [bridge, finishInitialLoadIfReady, session.id, transcriptReload, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -218,6 +285,9 @@ export function ConversationPanel({
         if (activeRunIdRef.current !== event.runId) return;
         if (event.kind === "run_started") setOptimisticPrompt(undefined);
         setEvents((current) => mergeTimelineEvent(current, event));
+        if (event.kind === "control" && event.itemId?.startsWith("agent_")) {
+          setAgentActivityReload((value) => value + 1);
+        }
         const terminalStatus = terminalStatusForEvent(event);
         if (terminalStatus !== undefined) {
           setOptimisticPrompt(undefined);
@@ -244,10 +314,13 @@ export function ConversationPanel({
         if (activeRunIdRef.current === undefined) activeRunIdRef.current = status.runId;
         if (activeRunIdRef.current !== status.runId) return;
         setStreamStatus(status);
-        if (status.message !== undefined) onNotice(status.message, status.state === "error");
+        if (status.state === "error" && status.message !== undefined) {
+          onNotice(status.message, true);
+        }
         if (status.state === "terminal") {
           setRunAnnouncement(status.message ?? t("runFinishedAnnouncement"));
           setRunContextReload((value) => value + 1);
+          setAgentActivityReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
@@ -286,11 +359,8 @@ export function ConversationPanel({
         if (isTerminal(attachment.run.status) || attachment.streamState === "terminal") {
           refreshTerminalTranscript(attachment.run.id);
         }
-        if (attachment.streamMessage !== undefined) {
-          onNotice(
-            attachment.streamMessage,
-            attachment.streamState === "error",
-          );
+        if (attachment.streamState === "error" && attachment.streamMessage !== undefined) {
+          onNotice(attachment.streamMessage, true);
         }
       } catch {
         if (!disposed) {
@@ -378,7 +448,6 @@ export function ConversationPanel({
     timelinePinnedToEnd.current = true;
     setOptimisticPrompt(nextPrompt);
     setSubmitting(true);
-    onNotice(t("startingRunNotice"));
     try {
       const modelChanged =
         runContext !== undefined && selectedModelName !== runContext.modelName;
@@ -408,7 +477,6 @@ export function ConversationPanel({
       setPermissionMode(started.permissionMode);
       setReasoningEffort(started.reasoningEffort ?? selectedReasoningEffort);
       if (modelChanged) setRunContextReload((current) => current + 1);
-      onNotice(t("runStarted"));
       return true;
     } catch {
       setOptimisticPrompt(undefined);
@@ -422,10 +490,8 @@ export function ConversationPanel({
   const cancel = async () => {
     if (run === undefined || !active || controlBusy) return;
     setControlBusy(true);
-    onNotice(t("requestingCancellation"));
     try {
       setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
-      onNotice(t("cancellationRequested"));
     } catch {
       onNotice(t("cancellationFailed"), true);
     } finally {
@@ -436,16 +502,14 @@ export function ConversationPanel({
   const decideApproval = async (decision: ApprovalAction) => {
     if (pendingApproval?.approval === undefined || controlBusy) return;
     setControlBusy(true);
-    onNotice(decision === "deny" ? t("submittingDenial") : t("submittingApproval"));
     try {
-      const outcome = await bridge.resolveApproval(
+      await bridge.resolveApproval(
         workspaceId,
         session.id,
         pendingApproval.runId,
         pendingApproval.approval,
         decision,
       );
-      onNotice(t("toolRequestDecision", { decision: outcome.decision }));
     } catch {
       onNotice(t("approvalDecisionFailed"), true);
     } finally {
@@ -456,7 +520,6 @@ export function ConversationPanel({
   const rerunVerification = async () => {
     if (verification?.action?.kind !== "rerun" || verificationBusy || active) return;
     setVerificationBusy(true);
-    onNotice(t("runningRecommendedCheck", { check: verification.recommendedCheckSpecId ?? "" }));
     try {
       const next = await bridge.rerunVerification(
         workspaceId,
@@ -464,7 +527,6 @@ export function ConversationPanel({
         verification.action.request,
       );
       setVerification(next);
-      onNotice(t("verificationFinished", { status: next.status }));
     } catch {
       onNotice(t("verificationChanged"), true);
       try {
@@ -488,9 +550,28 @@ export function ConversationPanel({
           </span>
         </div>
         <div className="conversation-header-actions">
-          <span className={`stream-chip stream-${streamStatus?.state ?? "idle"}`}>
-            {streamStatus?.state ?? "ready"}
-          </span>
+          <ConversationActivity state={streamStatus?.state} t={t} />
+          {agentActivity !== undefined && agentActivity.totalAgents > 0 ? (
+            <Tooltip label={t("openAgentActivity")}>
+              <IconButton
+                className={`agent-activity-trigger${agentActivity.activeAgents > 0 ? " is-active" : ""}`}
+                ref={agentActivityTriggerRef}
+                type="button"
+                aria-label={t("openAgentActivity")}
+                aria-controls="agent-activity-inspector"
+                aria-expanded={agentActivityOpen}
+                icon={(
+                  <>
+                    <Icon name="agents" />
+                    <span className="agent-activity-trigger-count" aria-hidden="true">
+                      {agentActivity.activeAgents > 0 ? agentActivity.activeAgents : agentActivity.totalAgents}
+                    </span>
+                  </>
+                )}
+                onClick={() => setAgentActivityOpen(true)}
+              />
+            </Tooltip>
+          ) : null}
           <Tooltip label={t("openExtensions")}>
             <IconButton
               className="extension-trigger"
@@ -531,14 +612,32 @@ export function ConversationPanel({
 
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{runAnnouncement}</div>
 
-      {runNotice !== undefined ? (
-        runNotice.error
-          ? <ErrorCard title={t("runActionAttention")} message={runNotice.message} actionLabel={t("dismiss")} onAction={() => setRunNotice(undefined)} />
-          : <div className="run-notice" role="status">{runNotice.message}</div>
+      {agentActivity !== undefined && agentActivity.activeAgents > 0 ? (
+        <Button
+          className="agent-activity-strip sg-bounded-content"
+          variant="quiet"
+          type="button"
+          onClick={() => setAgentActivityOpen(true)}
+        >
+          <span className="agent-activity-pulse" aria-hidden="true" />
+          <strong>{t("agentActiveCount", { count: agentActivity.activeAgents })}</strong>
+          <span>{agentActivity.items.find((item) => !isTerminalAgentStatus(item.status))?.objective}</span>
+          <small>{t("openAgentActivity")}</small>
+        </Button>
+      ) : null}
+
+      {runContextError ? (
+        <ErrorCard
+          title={t("runContextUnavailable")}
+          message={t("runContextUnavailableDetail")}
+          actionLabel={runContextBusy ? t("retrying") : t("retryRunContext")}
+          actionDisabled={runContextBusy}
+          onAction={() => setRunContextReload((value) => value + 1)}
+        />
       ) : null}
 
       <div
-        className="timeline"
+        className="timeline sg-bounded-content"
         ref={timelineRef}
         role="log"
         aria-live="off"
@@ -627,6 +726,8 @@ export function ConversationPanel({
         onReasoningEffortChange={setReasoningEffort}
         onNewSession={onNewSession}
         onOpenSessionPicker={onOpenSessionPicker}
+        onOpenSettings={onOpenSettings}
+        onOpenSupport={onOpenSupport}
         onOpenAgentWorkbench={(query) => {
           setExtensionWorkbenchKind("agents");
           setExtensionWorkbenchQuery(query);
@@ -650,6 +751,21 @@ export function ConversationPanel({
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active} onRerun={() => void rerunVerification()} />
         </Drawer>
       ) : null}
+      <Drawer
+        id="agent-activity-inspector"
+        open={agentActivityOpen}
+        title={t("agentActivity")}
+        description={t("agentActivityDetail")}
+        returnFocusRef={agentActivityTriggerRef}
+        onOpenChange={setAgentActivityOpen}
+      >
+        <AgentActivityPanel
+          items={agentActivity?.items ?? []}
+          error={agentActivityError}
+          t={t}
+        />
+        {agentActivityBusy ? <span className="agent-activity-refreshing">{t("loading")}</span> : null}
+      </Drawer>
       <Drawer
         id="extension-workbench"
         open={extensionWorkbenchOpen}
@@ -680,6 +796,36 @@ export function ConversationPanel({
         )}
       </Drawer>
     </div>
+  );
+}
+
+function isTerminalAgentStatus(status: import("./types").AgentActivityStatus): boolean {
+  return ["completed", "failed", "cancelled", "interrupted", "unavailable"].includes(status);
+}
+
+function ConversationActivity({
+  state,
+  t,
+}: {
+  readonly state?: RunStreamState;
+  readonly t: Translate;
+}) {
+  const effectiveState = state ?? "idle";
+  const label = (() => {
+    switch (effectiveState) {
+      case "idle": return t("conversationIdle");
+      case "connecting": return t("conversationConnecting");
+      case "live": return t("conversationLive");
+      case "reconnecting": return t("conversationReconnecting");
+      case "terminal": return t("conversationTerminal");
+      case "error": return t("conversationStreamError");
+    }
+  })();
+  return (
+    <span className={`conversation-activity stream-${effectiveState}`} role="status">
+      <span className="conversation-activity-dot" aria-hidden="true" />
+      {label}
+    </span>
   );
 }
 

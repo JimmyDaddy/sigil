@@ -81,6 +81,83 @@ fn run_context_decodes_exact_typed_server_contract() {
 }
 
 #[test]
+fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
+    let activity: crate::DesktopAgentActivityView = serde_json::from_value(serde_json::json!({
+        "total_agents": 1,
+        "active_agents": 0,
+        "terminal_agents": 1,
+        "items": [{
+            "thread_id": "agent_review",
+            "profile_id": "explore",
+            "display_name": "Repository review",
+            "objective": "Inspect the architecture",
+            "status": "completed",
+            "handoff_status": "returned",
+            "result_summary": "The bounded result reached the parent conversation.",
+            "result_summary_truncated": false,
+            "usage": {
+                "input_tokens": 240,
+                "output_tokens": 80,
+                "total_tokens": 320,
+                "cached_tokens": 40
+            }
+        }]
+    }))
+    .expect("agent activity should decode");
+
+    assert_eq!(activity.total_agents, 1);
+    assert_eq!(activity.items[0].thread_id, "agent_review");
+    assert_eq!(
+        activity.items[0].handoff_status,
+        crate::DesktopAgentHandoffStatus::Returned
+    );
+    assert_eq!(
+        activity.items[0]
+            .usage
+            .as_ref()
+            .map(|usage| usage.total_tokens),
+        Some(320)
+    );
+    let debug = format!("{activity:?}");
+    assert!(!debug.contains("session_ref"));
+    assert!(!debug.contains("output_hash"));
+    assert!(!debug.contains("changed_paths"));
+}
+
+#[test]
+fn support_report_decodes_only_the_path_free_contract() {
+    let report: crate::DesktopSupportDoctorReport = serde_json::from_value(serde_json::json!({
+        "generated_at_unix_ms": 123,
+        "version": "0.0.1-test",
+        "commit": "abc123",
+        "target": "aarch64-apple-darwin",
+        "profile": "debug",
+        "environment": {
+            "os": "macos",
+            "architecture": "aarch64",
+            "terminal_family": "other"
+        },
+        "summary": { "overall_status": "warn", "ok": 4, "warn": 1, "error": 0 },
+        "checks": [{
+            "status": "warn",
+            "name": "configuration",
+            "summary": "review one setting",
+            "remediation": "update configuration"
+        }],
+        "privacy": {
+            "included": ["build metadata"],
+            "excluded": ["local paths"],
+            "review_before_sharing": true
+        }
+    }))
+    .expect("support report should decode");
+
+    assert_eq!(report.summary.warn, 1);
+    assert_eq!(report.checks[0].name, "configuration");
+    assert_eq!(report.privacy.excluded, ["local paths"]);
+}
+
+#[test]
 fn session_management_contract_is_exact_and_path_free() {
     let rename = DesktopSessionRenameRequest {
         session_ref: "managed.jsonl".to_owned(),
@@ -127,6 +204,28 @@ fn session_management_contract_is_exact_and_path_free() {
         }))
         .expect("quarantine receipt should decode");
     assert_eq!(quarantine_receipt.projection_generation, Some(3));
+
+    let delete_invalid = DesktopSessionInvalidSourceDeleteRequest {
+        session_ref: "broken.jsonl".to_owned(),
+        source_bytes: 17,
+        source_modified_at_unix_ms: 42,
+    };
+    assert_eq!(
+        serde_json::to_value(delete_invalid).expect("invalid source delete should encode"),
+        serde_json::json!({
+            "session_ref": "broken.jsonl",
+            "source_bytes": 17,
+            "source_modified_at_unix_ms": 42
+        })
+    );
+    let delete_invalid_receipt =
+        serde_json::from_value::<DesktopSessionInvalidSourceDeleteReceipt>(serde_json::json!({
+            "session_ref": "broken.jsonl",
+            "operation_id": "invalid-source-delete:1",
+            "projection_generation": 4
+        }))
+        .expect("invalid source delete receipt should decode");
+    assert_eq!(delete_invalid_receipt.projection_generation, Some(4));
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 mod auth;
 mod command_store;
@@ -13,7 +13,9 @@ mod openapi;
 mod production_driver;
 mod protocol;
 mod registry;
+mod session_catalog_batch;
 mod sse;
+mod support;
 
 pub use auth::{HttpAuthError, HttpAuthValidator};
 pub use command_store::{HttpCommandStoreError, HttpDurableCommandStore};
@@ -29,8 +31,9 @@ pub use driver::{
     HttpRunDriverStart, HttpSessionOpenBindingError,
 };
 pub use dto::{
-    HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationAgentBinding,
-    HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
+    HTTP_APPROVAL_POLICY_VERSION, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpAgentActivityItem,
+    HttpAgentActivityStatus, HttpAgentActivityView, HttpAgentHandoffStatus, HttpAgentUsageSummary,
+    HttpApplicationAgentBinding, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
     HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
@@ -38,12 +41,19 @@ pub use dto::{
     HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
     HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot, HttpRunStartCommandReceipt,
     HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerAuthentication,
-    HttpServerCapabilities, HttpServerInfo, HttpSessionBinding, HttpSessionCreateRequest,
-    HttpSessionDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
+    HttpServerCapabilities, HttpServerInfo, HttpSessionBinding, HttpSessionCatalogBatchAction,
+    HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchItem,
+    HttpSessionCatalogBatchOutcome, HttpSessionCatalogBatchPlan, HttpSessionCatalogBatchPlanItem,
+    HttpSessionCatalogBatchPlanRequest, HttpSessionCatalogBatchPlanStatus,
+    HttpSessionCatalogBatchReceipt, HttpSessionCatalogBatchReceiptItem, HttpSessionCreateRequest,
+    HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
+    HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
     HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
     HttpSessionSnapshot, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpSupportBundleExport, HttpSupportCheck, HttpSupportDoctorReport, HttpSupportEnvironment,
+    HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};
@@ -58,6 +68,7 @@ pub use sse::{
     HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError, HttpRunEventSequencer,
     HttpSseError, HttpSseEvent, HttpTransientEventView, public_run_event_to_sse,
 };
+pub use support::HttpSupportContext;
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

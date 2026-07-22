@@ -38,24 +38,31 @@ describe("Sigil UI primitives", () => {
     fireEvent.compositionEnd(prompt);
     expect(prompt.value).toBe("你好");
     expect(prompt.getAttribute("aria-invalid")).toBe("true");
-    expect(screen.getByLabelText("State").tagName).toBe("SELECT");
+    const state = screen.getByLabelText("State");
+    expect(state.tagName).toBe("SELECT");
+    expect(state.parentElement?.classList.contains("sg-select-control")).toBe(true);
+    expect(state.parentElement?.querySelector(".sg-select-indicator")).toBeTruthy();
     expect(screen.getByLabelText("Pinned").getAttribute("type")).toBe("checkbox");
   });
 
   it("provides disclosure, tooltip, toast, and bounded button states", async () => {
     const user = userEvent.setup();
+    const dismissToast = vi.fn();
     render(
       <>
         <Button busy>Saving</Button>
         <Collapsible label="Evidence" summary="2 items"><p>Receipt</p></Collapsible>
         <Tooltip label="Nonessential hint"><button type="button">Hover target</button></Tooltip>
-        <Toast>Saved locally</Toast>
+        <Toast tone="success" title="Saved" timeoutMs={4_000} onDismiss={dismissToast}>Saved locally</Toast>
       </>,
     );
     expect((screen.getByRole("button", { name: "Saving" }) as HTMLButtonElement).disabled).toBe(true);
     await user.hover(screen.getByRole("button", { name: "Hover target" }));
     expect(screen.getByRole("tooltip").textContent).toBe("Nonessential hint");
-    expect(screen.getByRole("status").textContent).toBe("Saved locally");
+    expect(screen.getByRole("status").textContent).toContain("Saved locally");
+    expect(screen.getByRole("status").classList.contains("sg-toast-success")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Dismiss notification" }));
+    expect(dismissToast).toHaveBeenCalledOnce();
     await user.click(screen.getByText("Evidence"));
     expect((screen.getByText("Evidence").closest("details") as HTMLDetailsElement).open).toBe(true);
   });
@@ -76,7 +83,7 @@ describe("Sigil UI primitives", () => {
   });
 
   it("moves an edge popover back inside the visible viewport", async () => {
-    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       return {
         x: -52,
         y: 40,
@@ -95,8 +102,26 @@ describe("Sigil UI primitives", () => {
     await user.click(screen.getByRole("button", { name: "Edge filters" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Edge filters" }).style.transform).toBe("translateX(64px)");
+      expect(screen.getByRole("dialog", { name: "Edge filters" }).style.left).toBe("12px");
     });
+    bounds.mockRestore();
+  });
+
+  it("portals and flips a bottom-edge popover above its trigger", async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("sg-popover-panel")) {
+        return { x: 0, y: 0, width: 180, height: 120, top: 0, right: 180, bottom: 120, left: 0, toJSON: () => ({}) };
+      }
+      return { x: 400, y: 700, width: 40, height: 32, top: 700, right: 440, bottom: 732, left: 400, toJSON: () => ({}) };
+    });
+    const user = userEvent.setup();
+    const { container } = render(<Popover label="Bottom actions"><span>Visible actions</span></Popover>);
+
+    await user.click(screen.getByRole("button", { name: "Bottom actions" }));
+
+    const panel = await screen.findByRole("dialog", { name: "Bottom actions" });
+    expect(container.contains(panel)).toBe(false);
+    await waitFor(() => expect(panel.style.top).toBe("572px"));
     bounds.mockRestore();
   });
 
@@ -154,6 +179,7 @@ describe("Sigil UI primitives", () => {
     render(<Fixture />);
     const trigger = screen.getByRole("button", { name: "Open dialog" });
     await user.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Confirm" }).classList.contains("sg-modal-side-end")).toBe(false);
     const close = screen.getByRole("button", { name: "Close Confirm" });
     expect(document.activeElement).toBe(close);
     const last = screen.getByRole("button", { name: "Last" });
@@ -194,6 +220,6 @@ describe("Sigil UI primitives", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Open drawer" }));
-    expect(screen.getByRole("dialog", { name: "Navigation" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Navigation" }).classList.contains("sg-modal-side-end")).toBe(true);
   });
 });

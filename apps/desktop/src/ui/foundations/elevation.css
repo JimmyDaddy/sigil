@@ -4,5 +4,6 @@
   --sg-sys-z-topbar: 10;
   --sg-sys-z-popover: 20;
   --sg-sys-z-tooltip: 40;
+  --sg-sys-z-toast: 60;
   --sg-sys-z-modal: 100;
 }
