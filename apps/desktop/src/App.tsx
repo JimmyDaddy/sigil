@@ -48,6 +48,18 @@ interface PendingSessionRename {
   entry: CatalogEntry;
   displayName: string;
 }
+interface WorkspaceRecoveryState {
+  readonly operation: "bootstrap" | "picker" | "recent";
+  readonly code?: string;
+  readonly message: string;
+  readonly recent?: RecentWorkspaceSummary;
+  readonly actions: readonly WorkspaceRecoveryAction[];
+}
+type WorkspaceRecoveryAction =
+  | "retry_current"
+  | "open_another_workspace"
+  | "open_diagnostics"
+  | "show_details";
 const EMPTY_CATALOG: CatalogPage = {
   workspaceId: "",
   generation: 0,
@@ -83,6 +95,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [message, setMessage] = useState(() => t("startingSigil"));
+  const [workspaceRecovery, setWorkspaceRecovery] = useState<WorkspaceRecoveryState>();
   const [workspaceHealthError, setWorkspaceHealthError] = useState<string>();
   const [historyState, setHistoryState] = useState<HistoryState>("idle");
   const [catalog, setCatalog] = useState<CatalogPage>(EMPTY_CATALOG);
@@ -98,6 +111,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
+  const [failedSessionEntry, setFailedSessionEntry] = useState<CatalogEntry>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
   const [pendingSessionDelete, setPendingSessionDelete] = useState<CatalogEntry>();
@@ -166,6 +180,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const refresh = useCallback(async () => {
     setLoadState("loading");
     setMessage(t("checkingWorkspaces"));
+    setWorkspaceRecovery(undefined);
     try {
       const bootstrap = await bridge.bootstrap();
       applyBootstrap(bootstrap);
@@ -189,7 +204,14 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           return;
         } catch (error) {
           setLoadState("error");
-          setMessage(errorMessage(error) ?? t("lastWorkspaceRestoreFailed"));
+          const recovery = workspaceRecoveryFromError(
+            "recent",
+            error,
+            t("lastWorkspaceRestoreFailed"),
+            mostRecentWorkspace,
+          );
+          setWorkspaceRecovery(recovery);
+          setMessage(recovery.message);
           return;
         }
       }
@@ -199,9 +221,15 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           ? t("chooseWorkspaceBegin")
           : t("sigilReady"),
       );
-    } catch {
+    } catch (error) {
       setLoadState("error");
-      setMessage(t("sigilStartFailed"));
+      const recovery = workspaceRecoveryFromError(
+        "bootstrap",
+        error,
+        t("sigilStartFailed"),
+      );
+      setWorkspaceRecovery(recovery);
+      setMessage(recovery.message);
     }
   }, [applyBootstrap, bridge, t]);
 
@@ -292,8 +320,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setSessionActionState("idle");
     setConversationNavigation(undefined);
     setSessionMessage(undefined);
+    setFailedSessionEntry(undefined);
     setWorkspaceRunContext(undefined);
     setDefaultModel(activeWorkspaceId === undefined ? undefined : readDefaultModel(activeWorkspaceId));
+    if (activeWorkspaceId !== undefined) setWorkspaceRecovery(undefined);
   }, [activeWorkspaceId]);
 
   const captureRunContext = useCallback((context: RunContext) => {
@@ -313,6 +343,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       ...current.filter((candidate) => candidate.id !== workspace.id),
     ]);
     setActiveWorkspaceId(workspace.id);
+    setWorkspaceRecovery(undefined);
   };
 
   const pickWorkspace = async () => {
@@ -331,17 +362,31 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setLoadState("ready");
       const readyMessage = t("workspaceReady", { name: selection.workspace.displayName });
       setMessage(readyMessage);
-    } catch {
+    } catch (error) {
       setLoadState("error");
-      setMessage(
+      const recovery = workspaceRecoveryFromError(
+        "picker",
+        error,
         t("workspaceOpenFailed"),
+        undefined,
+        activeWorkspace !== undefined,
       );
+      if (activeWorkspace !== undefined) {
+        setLoadState("ready");
+        setWorkspaceRecovery(undefined);
+        setMessage(recovery.message);
+        notify({ message: recovery.message, tone: "error" });
+        return;
+      }
+      setWorkspaceRecovery(recovery);
+      setMessage(recovery.message);
     }
   };
 
   const openRecentWorkspace = async (recent: RecentWorkspaceSummary) => {
     if (recent.isOpen) {
       setActiveWorkspaceId(recent.id);
+      setWorkspaceRecovery(undefined);
       setNavigationOpen(false);
       return;
     }
@@ -356,8 +401,37 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setMessage(readyMessage);
     } catch (error) {
       setLoadState("error");
-      setMessage(errorMessage(error) ?? t("recentWorkspaceOpenFailed"));
+      const recovery = workspaceRecoveryFromError(
+        "recent",
+        error,
+        t("recentWorkspaceOpenFailed"),
+        recent,
+        activeWorkspace !== undefined,
+      );
+      if (activeWorkspace !== undefined) {
+        setLoadState("ready");
+        setWorkspaceRecovery(undefined);
+        setMessage(recovery.message);
+        notify({ message: recovery.message, tone: "error" });
+        return;
+      }
+      setWorkspaceRecovery(recovery);
+      setMessage(recovery.message);
     }
+  };
+
+  const retryWorkspaceRecovery = async () => {
+    const recovery = workspaceRecovery;
+    if (recovery === undefined || !recovery.actions.includes("retry_current")) return;
+    if (recovery.operation === "recent" && recovery.recent !== undefined) {
+      await openRecentWorkspace(recovery.recent);
+      return;
+    }
+    if (recovery.operation === "picker") {
+      await pickWorkspace();
+      return;
+    }
+    await refresh();
   };
 
   const closeWorkspace = async (workspaceId: string, confirmed = false) => {
@@ -404,6 +478,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const createSession = async (modelName?: string): Promise<boolean> => {
     if (activeWorkspaceId === undefined) return false;
     setSessionActionState("working");
+    setFailedSessionEntry(undefined);
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
     try {
@@ -438,6 +513,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       return;
     }
     setSessionActionState("working");
+    setFailedSessionEntry(undefined);
     setConversationNavigation({
       kind: "opening",
       sessionRef: entry.sessionRef,
@@ -460,9 +536,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
+      setFailedSessionEntry(undefined);
     } catch {
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
+      setFailedSessionEntry(entry);
       setConversationNavigation(undefined);
     }
   };
@@ -588,6 +666,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setPinnedOnly(false);
       }}
       onRetry={() => void loadHistory(activeWorkspace.id)}
+      onRetrySession={failedSessionEntry === undefined ? undefined : () => void openSession(failedSessionEntry)}
       onLoadMore={() => {
         if (catalog.nextCursor !== undefined) void loadHistory(activeWorkspace.id, catalog.nextCursor);
       }}
@@ -755,14 +834,50 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           ) : activeWorkspace === undefined && (loadState === "loading" || loadState === "working") ? (
             <LoadingState label={message} />
           ) : activeWorkspace === undefined ? (
-            <div className="welcome-state">
+            <div className={`welcome-state${workspaceRecovery === undefined ? "" : " workspace-recovery"}`} role={workspaceRecovery === undefined ? undefined : "alert"}>
               <span className="welcome-mark" aria-hidden="true">
                 <img className="brand-mark-light" src={sigilMarkLight} alt="" />
                 <img className="brand-mark-dark" src={sigilMarkDark} alt="" />
               </span>
-              <h1>{t("openWorkspaceTitle")}</h1>
-              <p>{t("openWorkspaceDetail")}</p>
-              <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>{t("openWorkspace")}</Button>
+              {workspaceRecovery === undefined ? (
+                <>
+                  <h1>{t("openWorkspaceTitle")}</h1>
+                  <p>{t("openWorkspaceDetail")}</p>
+                  <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>{t("openWorkspace")}</Button>
+                </>
+              ) : (
+                <>
+                  <h1>{t("workspaceRecoveryTitle")}</h1>
+                  <p>{workspaceRecovery.operation === "recent"
+                    ? t("workspaceRecoveryRecentDetail")
+                    : workspaceRecovery.operation === "picker"
+                      ? t("workspaceRecoveryPickerDetail")
+                      : t("workspaceRecoveryBootstrapDetail")}</p>
+                  <div className="workspace-recovery-actions">
+                    {workspaceRecovery.actions.includes("retry_current") ? (
+                      <Button type="button" variant="primary" onClick={() => void retryWorkspaceRecovery()}>{t("retry")}</Button>
+                    ) : null}
+                    {workspaceRecovery.actions.includes("open_another_workspace") ? (
+                      <Button type="button" onClick={() => void pickWorkspace()}>{t("openAnotherWorkspace")}</Button>
+                    ) : null}
+                    {workspaceRecovery.actions.includes("open_diagnostics") ? (
+                      <Button type="button" onClick={() => navigate("support")}>{t("openSupport")}</Button>
+                    ) : null}
+                  </div>
+                  {workspaceRecovery.actions.includes("show_details") ? (
+                    <details className="workspace-recovery-details">
+                      <summary>{t("showDetails")}</summary>
+                      <dl>
+                        {workspaceRecovery.code === undefined ? null : (
+                          <><dt>{t("errorCode")}</dt><dd>{workspaceRecovery.code}</dd></>
+                        )}
+                        <dt>{t("errorMessage")}</dt>
+                        <dd>{workspaceRecovery.message}</dd>
+                      </dl>
+                    </details>
+                  ) : null}
+                </>
+              )}
             </div>
           ) : selectedSession === undefined ? (
             <div className="conversation-empty">
@@ -804,8 +919,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         </section>
       </main>
 
-      <div className="sr-only" role="status" aria-live="polite">{message}</div>
-      {workspaceHealthError !== undefined || loadState !== "ready" ? (
+      <div className="sr-only" role="status" aria-live="polite">{workspaceRecovery === undefined ? message : ""}</div>
+      {workspaceRecovery === undefined && (workspaceHealthError !== undefined || loadState !== "ready") ? (
         <footer className="statusbar" role={loadState === "error" ? "alert" : "status"} aria-live="polite">
           <span className={`status-dot status-${workspaceHealthError !== undefined || loadState === "error" ? "crashed" : "ready"}`} aria-hidden="true" />
           {workspaceHealthError ?? message}
@@ -1065,4 +1180,75 @@ function errorCode(error: unknown): string | undefined {
 function errorMessage(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
   return typeof error.message === "string" ? error.message : undefined;
+}
+
+function workspaceRecoveryFromError(
+  operation: WorkspaceRecoveryState["operation"],
+  error: unknown,
+  fallbackMessage: string,
+  recent?: RecentWorkspaceSummary,
+  diagnosticsAvailable = false,
+): WorkspaceRecoveryState {
+  const rawCode = errorCode(error);
+  const code = rawCode !== undefined && /^[a-z0-9_.-]{1,80}$/i.test(rawCode)
+    ? rawCode
+    : undefined;
+  const rawMessage = errorMessage(error)?.replace(/\s+/g, " ").trim();
+  const message = (rawMessage === undefined || rawMessage.length === 0 ? fallbackMessage : rawMessage)
+    .slice(0, 512);
+  const projectedActions = recoveryActionsFromError<WorkspaceRecoveryAction>(error, [
+    "retry_current",
+    "open_another_workspace",
+    "open_diagnostics",
+    "show_details",
+  ]);
+  const actions = projectedActions ?? fallbackWorkspaceRecoveryActions(
+    operation,
+    code,
+    diagnosticsAvailable,
+    rawCode !== undefined || (rawMessage !== undefined && rawMessage.length > 0),
+  );
+  return {
+    operation,
+    code,
+    message,
+    recent,
+    actions,
+  };
+}
+
+const RETRYABLE_WORKSPACE_CODES = new Set([
+  "desktop_bootstrap_failed",
+  "recent_workspaces_unavailable",
+  "workspace_request_failed",
+  "workspace_server_request_failed",
+  "workspace_server_start_failed",
+  "workspace_server_unavailable",
+]);
+
+function fallbackWorkspaceRecoveryActions(
+  operation: WorkspaceRecoveryState["operation"],
+  code: string | undefined,
+  diagnosticsAvailable: boolean,
+  hasDetails: boolean,
+): WorkspaceRecoveryAction[] {
+  const actions: WorkspaceRecoveryAction[] = [];
+  if (code !== undefined && RETRYABLE_WORKSPACE_CODES.has(code)) actions.push("retry_current");
+  if (operation !== "picker") actions.push("open_another_workspace");
+  if (diagnosticsAvailable) actions.push("open_diagnostics");
+  if (hasDetails) actions.push("show_details");
+  return actions;
+}
+
+function recoveryActionsFromError<Action extends string>(
+  error: unknown,
+  allowed: readonly Action[],
+): Action[] | undefined {
+  if (typeof error !== "object" || error === null || !("recoveryActions" in error)) return undefined;
+  const actions = error.recoveryActions;
+  if (!Array.isArray(actions)) return undefined;
+  const allowedActions = new Set<string>(allowed);
+  return [...new Set(actions.filter((action): action is Action =>
+    typeof action === "string" && allowedActions.has(action),
+  ))];
 }

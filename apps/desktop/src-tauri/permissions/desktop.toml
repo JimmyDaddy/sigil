@@ -41,7 +41,7 @@ commands.allow = ["desktop_plan_session_catalog_batch", "desktop_execute_session
 [[permission]]
 identifier = "allow-desktop-session"
 description = "Allows the main local window to create, reopen, read, rename, quarantine, or confirm deletion of one bounded server-owned conversation source."
-commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_rename_session", "desktop_delete_session", "desktop_quarantine_session", "desktop_delete_invalid_session_source", "desktop_transcript", "desktop_run_context", "desktop_agent_activity"]
+commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_rename_session", "desktop_delete_session", "desktop_quarantine_session", "desktop_delete_invalid_session_source", "desktop_transcript", "desktop_continuity", "desktop_run_context", "desktop_agent_activity"]
 
 [[permission]]
 identifier = "allow-desktop-run"

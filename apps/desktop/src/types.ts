@@ -113,6 +113,26 @@ export interface SessionSummary {
   foregroundRunId?: string;
 }
 
+export interface ForegroundRunOwner {
+  runId: string;
+  ownerRevision: string;
+}
+
+export type ContinuityRecoveryAction =
+  | "retry_current"
+  | "open_another_workspace"
+  | "open_diagnostics"
+  | "show_details"
+  | "continue_read_only";
+
+export interface ConversationContinuity {
+  durableFrontier: {
+    throughStreamSequence: number;
+  };
+  foregroundOwner?: ForegroundRunOwner;
+  recoveryActions: ContinuityRecoveryAction[];
+}
+
 export interface SessionOpenInput {
   sessionRef: string;
   sessionId: string;
@@ -408,6 +428,12 @@ export interface RunAttachment {
   streamState: RunStreamState;
   streamMessage?: string;
   hasGap: boolean;
+}
+
+export interface RunAttachInput {
+  sessionId: string;
+  runId: string;
+  ownerRevision: string;
 }
 
 export interface ApprovalDecisionSummary {

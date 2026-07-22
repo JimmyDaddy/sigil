@@ -1,7 +1,8 @@
 use super::*;
 use sigil_desktop::{
-    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopContinuityRecoveryAction, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
+    DesktopSessionContinuityView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
+    DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
 };
 
 #[test]
@@ -48,6 +49,95 @@ fn incompatible_runtime_projection_is_actionable_and_path_free() {
     assert_eq!(projected.code, "workspace_server_incompatible");
     assert!(projected.message.contains("out of sync"));
     assert!(!projected.message.contains('/'));
+    assert_eq!(
+        projected.recovery_actions,
+        [
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]
+    );
+}
+
+#[test]
+fn command_error_recovery_actions_are_bounded_deduplicated_and_camel_case() {
+    let projected = DesktopCommandError::new("temporary", "Temporary failure")
+        .with_recovery_actions([
+            DesktopRecoveryAction::ShowDetails,
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::ShowDetails,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+        ]);
+
+    let json = serde_json::to_value(projected).expect("command error should serialize");
+    assert_eq!(
+        json.get("recoveryActions"),
+        Some(&serde_json::json!([
+            "retry_current",
+            "open_another_workspace",
+            "show_details"
+        ]))
+    );
+    assert!(json.get("recovery_actions").is_none());
+}
+
+#[test]
+fn default_command_errors_do_not_invent_recovery_actions() {
+    let json = serde_json::to_value(DesktopCommandError::new("fatal", "Fatal failure"))
+        .expect("command error should serialize");
+
+    assert!(json.get("recoveryActions").is_none());
+}
+
+#[test]
+fn transient_and_terminal_workspace_errors_offer_only_safe_actions() {
+    let transient = project_manager_error(DesktopWorkspaceManagerError::WorkspaceUnavailable);
+    assert_eq!(
+        transient.recovery_actions,
+        [
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]
+    );
+
+    for terminal in [
+        project_manager_error(DesktopWorkspaceManagerError::InvalidWorkspace),
+        project_manager_error(DesktopWorkspaceManagerError::IdentityCollision),
+        project_recent_error(RecentWorkspaceStoreError::UnknownWorkspace),
+    ] {
+        assert!(
+            !terminal
+                .recovery_actions
+                .contains(&DesktopRecoveryAction::RetryCurrent)
+        );
+        assert!(
+            terminal
+                .recovery_actions
+                .contains(&DesktopRecoveryAction::OpenAnotherWorkspace)
+        );
+        assert!(
+            terminal
+                .recovery_actions
+                .contains(&DesktopRecoveryAction::ShowDetails)
+        );
+    }
+}
+
+#[test]
+fn diagnostics_are_offered_only_after_a_workspace_client_route_exists() {
+    let unavailable = project_manager_error(DesktopWorkspaceManagerError::WorkspaceUnavailable);
+    assert!(
+        !unavailable
+            .recovery_actions
+            .contains(&DesktopRecoveryAction::OpenDiagnostics)
+    );
+
+    let request = project_client_error(DesktopClientError::RequestFailed);
+    assert!(
+        request
+            .recovery_actions
+            .contains(&DesktopRecoveryAction::OpenDiagnostics)
+    );
 }
 
 #[test]
@@ -151,6 +241,51 @@ fn session_projection_drops_server_private_durable_fields() {
     assert!(!projection.contains(private_path));
     assert!(!projection.contains("durable-secret-scope"));
     assert_eq!(summary.run_count, 1);
+}
+
+#[test]
+fn continuity_projection_drops_private_scope_and_preserves_exact_owner_revision() {
+    let owner_revision = format!("sha256:{}", "a".repeat(64));
+    let projected = DesktopConversationContinuity::from(DesktopSessionContinuityView {
+        durable_session_scope_id: "durable-secret-scope".to_owned(),
+        durable_frontier: DesktopDurableSessionFrontier {
+            through_stream_sequence: 42,
+        },
+        foreground_owner: Some(DesktopForegroundRunOwner {
+            run_id: "http-run-1".to_owned(),
+            owner_revision: owner_revision.clone(),
+        }),
+        recovery_actions: vec![
+            DesktopContinuityRecoveryAction::RetryCurrent,
+            DesktopContinuityRecoveryAction::ContinueReadOnly,
+        ],
+    });
+    let json = serde_json::to_value(projected).expect("continuity should serialize");
+
+    assert_eq!(json["durableFrontier"]["throughStreamSequence"], 42);
+    assert_eq!(json["foregroundOwner"]["runId"], "http-run-1");
+    assert_eq!(json["foregroundOwner"]["ownerRevision"], owner_revision);
+    assert_eq!(
+        json["recoveryActions"],
+        serde_json::json!(["retry_current", "continue_read_only"])
+    );
+    assert!(!json.to_string().contains("durable-secret-scope"));
+}
+
+#[test]
+fn owner_revision_validation_requires_the_exact_opaque_format() {
+    assert!(validate_owner_revision(&format!("sha256:{}", "a".repeat(64))).is_ok());
+
+    for invalid in [
+        "",
+        "sha256:abcd",
+        &format!("sha256:{}", "A".repeat(64)),
+        &format!("sha256:{}", "g".repeat(64)),
+        &format!("sha512:{}", "a".repeat(64)),
+    ] {
+        let error = validate_owner_revision(invalid).expect_err("invalid revision must fail");
+        assert_eq!(error.code, "run_owner_revision_invalid");
+    }
 }
 
 #[test]

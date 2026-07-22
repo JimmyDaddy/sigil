@@ -4,6 +4,8 @@ export type HttpServerInfo = components["schemas"]["ServerInfo"];
 export type HttpSessionCatalogPage =
   components["schemas"]["SessionCatalogPage"];
 export type HttpSessionSnapshot = components["schemas"]["SessionSnapshot"];
+export type HttpSessionContinuityView =
+  components["schemas"]["SessionContinuityView"];
 export type HttpSessionTranscriptPage =
   components["schemas"]["SessionTranscriptPage"];
 export type HttpRunSnapshot = components["schemas"]["RunSnapshot"];

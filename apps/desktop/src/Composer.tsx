@@ -20,6 +20,7 @@ const MAX_COMPOSER_HEIGHT = 176;
 export function Composer({
   draftKey,
   active,
+  submissionBlocked,
   submitting,
   controlBusy,
   composerRef,
@@ -44,6 +45,7 @@ export function Composer({
 }: {
   draftKey: string;
   active: boolean;
+  submissionBlocked: boolean;
   submitting: boolean;
   controlBusy: boolean;
   composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -106,7 +108,7 @@ export function Composer({
 
   const submit = async () => {
     let nextPrompt = prompt.trim();
-    if (nextPrompt === "" || active || submitting) return;
+    if (nextPrompt === "" || active || submissionBlocked || submitting) return;
     const command = resolveCommand(runContext, nextPrompt);
     if (command !== undefined) {
       if (await executeCommand(command.suggestion, command.argument)) clearComposer();
@@ -311,7 +313,7 @@ export function Composer({
             setActiveSuggestion(0);
             writeDraft(draftKey, event.target.value);
           }}
-          placeholder={active ? t("activePrompt") : t("prompt")}
+          placeholder={submissionBlocked ? t("readOnlyRecoveryPrompt") : active ? t("activePrompt") : t("prompt")}
           rows={1}
           onKeyDown={(event) => {
             if (suggestionsOpen) {
@@ -351,7 +353,7 @@ export function Composer({
                   className="composer-model-select"
                   ref={modelSelectRef}
                   value={selectedModelName ?? runContext?.modelName ?? ""}
-                  disabled={active || runContextBusy || models.length < 2}
+                  disabled={active || submissionBlocked || runContextBusy || models.length < 2}
                   onChange={(event) => onModelChange(event.target.value)}
                 >
                   {models.length === 0 ? <option value="">{modelName}</option> : models.map((model) => (
@@ -368,7 +370,7 @@ export function Composer({
                 containerClassName="composer-mode-field"
                 className="composer-mode-select"
                 value={permissionMode}
-                disabled={active || runContextBusy}
+                disabled={active || submissionBlocked || runContextBusy}
                 onChange={(event) => onPermissionModeChange(event.target.value as PermissionMode)}
               >
                 {permissionModes.map((mode) => (
@@ -385,7 +387,7 @@ export function Composer({
                   className="composer-effort-select"
                   ref={effortSelectRef}
                   value={reasoningEffort ?? ""}
-                  disabled={active || runContextBusy}
+                  disabled={active || submissionBlocked || runContextBusy}
                   onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}
                 >
                   {reasoningEffort === undefined ? <option value="">{t("effortUnavailable")}</option> : null}
@@ -398,24 +400,24 @@ export function Composer({
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
           {active ? (
-            <Tooltip label={t("stopRunHint")}>
+            <Tooltip label={submissionBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
               <IconButton
                 className="composer-submit composer-stop"
                 type="button"
                 aria-label={t("stopRun")}
                 icon={<Icon name="stop" />}
-                disabled={controlBusy}
+                disabled={controlBusy || submissionBlocked}
                 onClick={onCancel}
               />
             </Tooltip>
           ) : (
-            <Tooltip label={submitting ? t("startingRun") : t("sendMessageHint")}>
+            <Tooltip label={submissionBlocked ? t("sendBlockedUntilContinuityChecked") : submitting ? t("startingRun") : t("sendMessageHint")}>
               <IconButton
                 className="composer-submit sg-icon-button-primary"
                 type="submit"
                 aria-label={t("sendMessage")}
                 icon={<Icon name="send" />}
-                disabled={prompt.trim() === "" || submitting}
+                disabled={prompt.trim() === "" || submissionBlocked || submitting}
                 aria-busy={submitting || undefined}
               />
             </Tooltip>

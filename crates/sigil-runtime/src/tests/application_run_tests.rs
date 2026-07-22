@@ -24,14 +24,42 @@ use super::{
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
     admit_application_agent_binding, admit_application_model_selection,
     admit_application_reasoning_effort, admit_application_skill_binding,
-    application_run_context_view, application_run_input, application_session_transcript_page,
-    application_terminal_projection, application_verification_view,
-    attach_application_request_context, bind_application_session,
+    application_run_context_view, application_run_input, application_session_frontier_view,
+    application_session_transcript_page, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, default_application_session_path,
     optional_eager_mcp_warning, record_application_preparation_cancellation,
     rerun_application_verification, validate_execution_contract,
 };
+
+#[test]
+fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+    })?;
+    session.append_user_message(ModelMessage::user("hello"))?;
+    let scope = session.session_scope_id().to_owned();
+
+    let before = std::fs::read(&path)?;
+    let frontier = application_session_frontier_view(&path, &scope)?;
+    let after = std::fs::read(&path)?;
+
+    assert_eq!(frontier.session_scope_id, scope);
+    assert_eq!(frontier.through_stream_sequence, 2);
+    assert_eq!(
+        before, after,
+        "frontier reads must not mutate durable truth"
+    );
+    assert!(application_session_frontier_view(&path, "another-scope").is_err());
+    assert!(application_session_frontier_view(&path, "").is_err());
+    Ok(())
+}
 
 struct RejectingDisclosurePresenter;
 

@@ -5,9 +5,9 @@ use thiserror::Error as ThisError;
 
 use crate::dto::{
     HttpAgentActivityView, HttpApplicationAgentBinding, HttpApplicationSkillBinding,
-    HttpApprovalDecisionRecord, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
-    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpApprovalDecisionRecord, HttpDurableSessionFrontier, HttpRunContextView, HttpRunSnapshot,
+    HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -134,6 +134,20 @@ pub trait HttpRunDriver: Send + Sync {
     ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
         Err(HttpRunDriverError::new(
             "transcript projection is unavailable",
+        ))
+    }
+
+    /// Reads the current scope-checked durable frontier without mutating session truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable scope validation or projection fails.
+    fn session_frontier(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpDurableSessionFrontier, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "session frontier projection is unavailable",
         ))
     }
 

@@ -13,6 +13,7 @@ import { presentTool, ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
   CatalogPage,
+  ConversationContinuity,
   DesktopBootstrap,
   RunContext,
   RunStreamStatus,
@@ -172,6 +173,10 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       totalMessages: 0,
       messages: [],
     }),
+    continuity: async () => ({
+      durableFrontier: { throughStreamSequence: 0 },
+      recoveryActions: [],
+    }),
     runContext: async () => defaultRunContext,
     agentActivity: async () => ({
       totalAgents: 0,
@@ -186,10 +191,10 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       permissionMode: "manual",
       streamSequence: 0,
     }),
-    attachRun: async (_workspaceId, sessionId, runId) => ({
+    attachRun: async (_workspaceId, input) => ({
       run: {
-        id: runId,
-        sessionId,
+        id: input.runId,
+        sessionId: input.sessionId,
         status: "running",
         permissionMode: "manual",
         streamSequence: 0,
@@ -773,7 +778,49 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
   });
 
-  it("surfaces the actionable native error when a recent workspace cannot reopen", async () => {
+  it("retries the exact recent workspace and exposes only bounded safe recovery details", async () => {
+    const user = userEvent.setup();
+    const nativeMessage = `${"The desktop runtime is out of sync. ".repeat(30)}Restart the development app.`;
+    const openRecentWorkspace = vi.fn()
+      .mockRejectedValueOnce({
+        code: "workspace_server_unavailable",
+        message: nativeMessage,
+        path: "/Users/private/project",
+        token: "secret-bearer",
+      })
+      .mockResolvedValueOnce(workspace);
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [],
+        recentWorkspaces: [
+          { id: workspace.id, displayName: "sigil", isOpen: false },
+        ],
+      }),
+      openRecentWorkspace,
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("heading", { name: "Workspace needs attention" })).toBeTruthy();
+    const details = screen.getByText("Show details").closest("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    await user.click(screen.getByText("Show details"));
+    expect(details.open).toBe(true);
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("workspace_server_unavailable");
+    expect(alert.textContent).toContain(nativeMessage.slice(0, 512));
+    expect(alert.textContent).not.toContain("Restart the development app.");
+    expect(alert.textContent).not.toContain("/Users/private/project");
+    expect(alert.textContent).not.toContain("secret-bearer");
+    expect(document.querySelector(".statusbar")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(openRecentWorkspace).toHaveBeenNthCalledWith(1, workspace.id);
+    expect(openRecentWorkspace).toHaveBeenNthCalledWith(2, workspace.id);
+  });
+
+  it("does not infer retry for an incompatible workspace runtime", async () => {
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -784,15 +831,84 @@ describe("desktop workspace and history shell", () => {
       }),
       openRecentWorkspace: async () => Promise.reject({
         code: "workspace_server_incompatible",
-        message: "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
+        message: "The desktop runtime is out of sync.",
+        recoveryActions: ["open_another_workspace", "show_details"],
       }),
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByRole("heading", { name: "Open a workspace" });
-    expect((await screen.findByRole("alert")).textContent).toContain(
-      "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
-    );
+    expect(await screen.findByRole("heading", { name: "Workspace needs attention" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open another workspace" })).toBeTruthy();
+    expect(screen.getByText("Show details")).toBeTruthy();
+  });
+
+  it("keeps workspace recovery available when choosing another workspace is cancelled", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [],
+        recentWorkspaces: [{ id: workspace.id, displayName: "sigil", isOpen: false }],
+      }),
+      openRecentWorkspace: async () => Promise.reject({
+        code: "recent_workspace_unknown",
+        message: "The recent workspace is no longer available.",
+      }),
+      pickWorkspace: async () => ({ cancelled: true }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("heading", { name: "Workspace needs attention" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Open another workspace" }));
+    expect(await screen.findByRole("heading", { name: "Workspace needs attention" })).toBeTruthy();
+    expect(screen.getByText("The recent workspace is no longer available.")).toBeTruthy();
+  });
+
+  it("replaces stale recent-workspace recovery when the workspace picker fails", async () => {
+    const user = userEvent.setup();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [],
+        recentWorkspaces: [{ id: workspace.id, displayName: "sigil", isOpen: false }],
+      }),
+      openRecentWorkspace: async () => Promise.reject({
+        code: "recent_workspace_unknown",
+        message: "The recent workspace is no longer available.",
+        recoveryActions: ["open_another_workspace", "show_details"],
+      }),
+      pickWorkspace: async () => Promise.reject({
+        code: "workspace_server_start_failed",
+        message: "The selected workspace runtime could not start.",
+        recoveryActions: ["retry_current", "show_details"],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("The recent workspace is no longer available.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open another workspace" }));
+
+    expect(await screen.findByText("The selected workspace runtime could not start.")).toBeTruthy();
+    expect(screen.queryByText("The recent workspace is no longer available.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open another workspace" })).toBeNull();
+  });
+
+  it("recovers from bootstrap failure without duplicating the failure in the footer", async () => {
+    const user = userEvent.setup();
+    const bootstrap = vi.fn()
+      .mockRejectedValueOnce({ code: "desktop_bootstrap_failed", message: "The local service did not answer.", path: "/private" })
+      .mockResolvedValueOnce({ protocolVersion: 2, workspaces: [], recentWorkspaces: [] });
+    render(<App bridge={bridgeWith({ bootstrap })} />);
+
+    expect(await screen.findByRole("heading", { name: "Workspace needs attention" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).not.toContain("/private");
+    expect(document.querySelector(".statusbar")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
+    expect(bootstrap).toHaveBeenCalledTimes(2);
   });
 
   it("resizes and persists the desktop conversation sidebar", async () => {
@@ -940,6 +1056,48 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByRole("status", { name: "Opening conversation…" })).toBeNull();
   });
 
+  it("retries the exact failed conversation without refreshing the catalog", async () => {
+    const user = userEvent.setup();
+    const entry = {
+      sessionRef: "retry.jsonl",
+      sessionId: "durable-retry",
+      sourceState: "ready" as const,
+      sourceBytes: 512,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+      title: "Retry this conversation",
+      userMessageCount: 1,
+      assistantMessageCount: 1,
+      toolResultCount: 0,
+      pinned: false,
+    };
+    const catalog = vi.fn(async () => ({ ...emptyCatalog, entries: [entry] }));
+    const openSession = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary open failure"))
+      .mockResolvedValueOnce({ id: "adapter-retry", label: entry.title, runCount: 1 });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog,
+      openSession,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Retry this conversation/ }));
+    expect(await screen.findByRole("button", { name: "Retry conversation" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry conversation" }));
+    expect(await screen.findByRole("heading", { name: "Retry this conversation" })).toBeTruthy();
+    expect(openSession).toHaveBeenCalledTimes(2);
+    expect(openSession).toHaveBeenNthCalledWith(1, workspace.id, {
+      sessionRef: entry.sessionRef,
+      sessionId: entry.sessionId,
+      label: entry.title,
+    });
+    expect(openSession).toHaveBeenNthCalledWith(2, workspace.id, {
+      sessionRef: entry.sessionRef,
+      sessionId: entry.sessionId,
+      label: entry.title,
+    });
+    expect(catalog).toHaveBeenCalledTimes(1);
+  });
+
   it("previews and executes selected conversation mutations through the batch contract", async () => {
     const user = userEvent.setup();
     const entry = {
@@ -1040,11 +1198,15 @@ describe("desktop workspace and history shell", () => {
     let resolveOpen: ((session: SessionSummary) => void) | undefined;
     let resolveTranscript: ((page: { totalMessages: number; messages: []; }) => void) | undefined;
     let resolveRunContext: ((context: RunContext) => void) | undefined;
+    let resolveContinuity: ((continuity: ConversationContinuity) => void) | undefined;
     const transcript = vi.fn(() => new Promise<{ totalMessages: number; messages: []; }>((resolve) => {
       resolveTranscript = resolve;
     }));
     const runContext = vi.fn(() => new Promise<RunContext>((resolve) => {
       resolveRunContext = resolve;
+    }));
+    const continuity = vi.fn(() => new Promise<ConversationContinuity>((resolve) => {
+      resolveContinuity = resolve;
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
@@ -1072,6 +1234,7 @@ describe("desktop workspace and history shell", () => {
       }),
       transcript,
       runContext,
+      continuity,
     });
     render(<App bridge={bridge} />);
 
@@ -1089,6 +1252,7 @@ describe("desktop workspace and history shell", () => {
     });
     await waitFor(() => expect(transcript).toHaveBeenCalledOnce());
     await waitFor(() => expect(runContext).toHaveBeenCalledOnce());
+    await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
     expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
 
     await act(async () => {
@@ -1098,6 +1262,14 @@ describe("desktop workspace and history shell", () => {
 
     await act(async () => {
       resolveRunContext?.(defaultRunContext);
+    });
+    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+
+    await act(async () => {
+      resolveContinuity?.({
+        durableFrontier: { throughStreamSequence: 0 },
+        recoveryActions: [],
+      });
     });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
     expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
@@ -1283,6 +1455,14 @@ describe("desktop workspace and history shell", () => {
         runCount: 1,
         foregroundRunId: "run-active",
       }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 2 },
+        foregroundOwner: {
+          runId: "run-active",
+          ownerRevision: `sha256:${"a".repeat(64)}`,
+        },
+        recoveryActions: ["retry_current", "continue_read_only"],
+      }),
       subscribeRunEvents: async (listener) => {
         order.push("events");
         eventListener = listener;
@@ -1292,8 +1472,13 @@ describe("desktop workspace and history shell", () => {
         order.push("status");
         return () => undefined;
       },
-      attachRun: async () => {
+      attachRun: async (_workspaceId, input) => {
         order.push("attach");
+        expect(input).toEqual({
+          sessionId: "http-session-active",
+          runId: "run-active",
+          ownerRevision: `sha256:${"a".repeat(64)}`,
+        });
         return {
           run: {
             id: "run-active",
@@ -1325,6 +1510,336 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "Stop run" }));
     expect(cancelledRun).toBe("run-active");
+  });
+
+  it.each(["event", "status"] as const)(
+    "blocks and re-probes when an unexpected nonterminal run %s arrives after an idle proof",
+    async (signal) => {
+      const user = userEvent.setup();
+      let eventListener: ((event: TimelineEvent) => void) | undefined;
+      let statusListener: ((status: RunStreamStatus) => void) | undefined;
+      let resolveReprobe: ((continuity: ConversationContinuity) => void) | undefined;
+      const owner: ConversationContinuity = {
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: {
+          runId: "run-after-idle",
+          ownerRevision: `sha256:${"f".repeat(64)}`,
+        },
+        recoveryActions: ["retry_current", "continue_read_only"],
+      };
+      const continuity = vi.fn()
+        .mockResolvedValueOnce({
+          durableFrontier: { throughStreamSequence: 0 },
+          recoveryActions: [],
+        })
+        .mockImplementationOnce(() => new Promise<ConversationContinuity>((resolve) => {
+          resolveReprobe = resolve;
+        }))
+        .mockResolvedValueOnce(owner);
+      const attachRun = vi.fn(async () => ({
+        run: {
+          id: "run-after-idle",
+          sessionId: "http-after-idle",
+          status: "running" as const,
+          permissionMode: "manual" as const,
+          streamSequence: 1,
+        },
+        events: [],
+        streamState: "live" as const,
+        hasGap: false,
+      }));
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        catalog: async () => ({
+          ...emptyCatalog,
+          entries: [{
+            sessionRef: "after-idle.jsonl",
+            sessionId: "durable-after-idle",
+            sourceState: "ready",
+            sourceBytes: 512,
+            sourceModifiedAtUnixMs: 1_784_419_200_000,
+            title: "After idle session",
+            userMessageCount: 1,
+            assistantMessageCount: 1,
+            toolResultCount: 0,
+            pinned: false,
+          }],
+        }),
+        openSession: async () => ({ id: "http-after-idle", label: "After idle session", runCount: 1 }),
+        continuity,
+        attachRun,
+        subscribeRunEvents: async (listener) => {
+          eventListener = listener;
+          return () => undefined;
+        },
+        subscribeRunStreamStatus: async (listener) => {
+          statusListener = listener;
+          return () => undefined;
+        },
+      })} />);
+
+      await user.click(await screen.findByRole("button", { name: /^After idle session/ }));
+      const send = await screen.findByRole("button", { name: "Send message" });
+      await waitFor(() => expect(continuity).toHaveBeenCalledTimes(1));
+      await user.type(screen.getByRole("textbox", { name: "Message Sigil" }), "Keep this draft pending");
+      expect((send as HTMLButtonElement).disabled).toBe(false);
+      await waitFor(() => {
+        expect(eventListener).toBeDefined();
+        expect(statusListener).toBeDefined();
+      });
+
+      act(() => {
+        if (signal === "event") {
+          eventListener?.({
+            workspaceId: workspace.id,
+            sessionId: "http-after-idle",
+            runId: "run-after-idle",
+            sequence: 1,
+            replayable: false,
+            kind: "run_started",
+            text: "Work started elsewhere",
+          });
+        } else {
+          statusListener?.({
+            workspaceId: workspace.id,
+            sessionId: "http-after-idle",
+            runId: "run-after-idle",
+            state: "live",
+          });
+        }
+      });
+
+      expect((send as HTMLButtonElement).disabled).toBe(true);
+      await waitFor(() => expect(continuity).toHaveBeenCalledTimes(2));
+      expect(attachRun).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveReprobe?.(owner);
+      });
+      await waitFor(() => expect(attachRun).toHaveBeenCalledWith(workspace.id, {
+        sessionId: "http-after-idle",
+        runId: "run-after-idle",
+        ownerRevision: owner.foregroundOwner?.ownerRevision,
+      }));
+      await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
+      expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    },
+  );
+
+  it("re-probes a changed foreground owner before enabling the composer", async () => {
+    const user = userEvent.setup();
+    const continuity = vi.fn()
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 4 },
+        foregroundOwner: {
+          runId: "run-stale",
+          ownerRevision: `sha256:${"b".repeat(64)}`,
+        },
+        recoveryActions: ["retry_current", "continue_read_only"],
+      })
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 5 },
+        recoveryActions: [],
+      });
+    const attachRun = vi.fn(async () => Promise.reject({
+      code: "run_owner_changed",
+      message: "The foreground owner changed.",
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "owner-race.jsonl",
+          sessionId: "durable-owner-race",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Owner race session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-owner-race", label: "Owner race session", runCount: 1 }),
+      continuity,
+      attachRun,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Owner race session/ }));
+    const input = await screen.findByRole("textbox", { name: "Message Sigil" });
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(2));
+    expect(attachRun).toHaveBeenCalledTimes(1);
+    await user.type(input, "Continue safely");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("Live controls need attention")).toBeNull();
+  });
+
+  it("rejects an attachment whose owner changes after attach and confirms a fresh idle frontier", async () => {
+    const user = userEvent.setup();
+    const owner = (runId: string, revision: string): ConversationContinuity => ({
+      durableFrontier: { throughStreamSequence: 9 },
+      foregroundOwner: { runId, ownerRevision: `sha256:${revision.repeat(64)}` },
+      recoveryActions: ["retry_current", "continue_read_only"],
+    });
+    const continuity = vi.fn()
+      .mockResolvedValueOnce(owner("run-before-race", "d"))
+      .mockResolvedValueOnce(owner("run-after-race", "e"))
+      .mockResolvedValueOnce({ durableFrontier: { throughStreamSequence: 10 }, recoveryActions: [] });
+    const attachRun = vi.fn(async (_workspaceId, input) => ({
+      run: {
+        id: input.runId,
+        sessionId: input.sessionId,
+        status: "running" as const,
+        permissionMode: "manual" as const,
+        streamSequence: 1,
+      },
+      events: [],
+      streamState: "live" as const,
+      hasGap: false,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "post-attach-race.jsonl",
+          sessionId: "durable-post-attach-race",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Post attach race",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-post-attach-race", label: "Post attach race", runCount: 1 }),
+      continuity,
+      attachRun,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Post attach race/ }));
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
+    expect(attachRun).toHaveBeenCalledTimes(1);
+    const input = screen.getByRole("textbox", { name: "Message Sigil" });
+    await user.type(input, "No stale owner window");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps a failed live attachment read-only until an explicit fresh retry succeeds", async () => {
+    const user = userEvent.setup();
+    const continuity = vi.fn()
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 7 },
+        foregroundOwner: {
+          runId: "run-unreachable",
+          ownerRevision: `sha256:${"c".repeat(64)}`,
+        },
+        recoveryActions: ["retry_current", "continue_read_only"],
+      })
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 8 },
+        recoveryActions: [],
+      });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "read-only-recovery.jsonl",
+          sessionId: "durable-read-only-recovery",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Recovery session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-read-only-recovery", label: "Recovery session", runCount: 1 }),
+      transcript: async () => ({
+        totalMessages: 1,
+        messages: [{
+          ordinal: 1,
+          messageId: "saved-answer",
+          role: "assistant",
+          content: "Saved transcript remains readable.",
+          assistantKind: "final_answer",
+          imageAttachmentCount: 0,
+          truncated: false,
+          originalContentBytes: 34,
+        }],
+      }),
+      continuity,
+      attachRun: async () => Promise.reject({
+        code: "run_stream_unavailable",
+        message: "The live stream is unavailable.",
+      }),
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Recovery session/ }));
+    expect(await screen.findByText("Saved transcript remains readable.")).toBeTruthy();
+    expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+    const input = screen.getByRole("textbox", { name: "Message Sigil" });
+    await user.type(input, "Keep this draft while recovering");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Continue read-only" }));
+    expect(screen.getByText("Conversation is read-only")).toBeTruthy();
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
+
+    await user.click(screen.getByRole("button", { name: "Retry connection" }));
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("Conversation is read-only")).toBeNull());
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft while recovering");
+  });
+
+  it("renders only the recovery actions projected by a failed attachment", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "bounded-recovery.jsonl",
+          sessionId: "durable-bounded-recovery",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Bounded recovery session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-bounded-recovery", label: "Bounded recovery session", runCount: 1 }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 3 },
+        foregroundOwner: {
+          runId: "run-bounded-recovery",
+          ownerRevision: `sha256:${"a".repeat(64)}`,
+        },
+        recoveryActions: ["retry_current", "continue_read_only"],
+      }),
+      attachRun: async () => Promise.reject({
+        code: "run_stream_unavailable",
+        message: "The live stream is unavailable.",
+        recoveryActions: ["retry_current"],
+      }),
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Bounded recovery session/ }));
+    expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry connection" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Continue read-only" })).toBeNull();
   });
 
   it("keeps the opened conversation mounted while history filters refresh", async () => {

@@ -133,6 +133,13 @@
 .conversation-loading-overlay { position: absolute; z-index: 4; inset: 0; background: color-mix(in srgb, var(--sg-sys-color-canvas) 96%, transparent); backdrop-filter: blur(3px); }
 .welcome-state { display: grid; width: min(420px, 100%); height: 100%; margin: 0 auto; align-content: center; justify-items: center; padding: var(--sg-sys-space-6); text-align: center; }
 .welcome-mark { display: block; width: 44px; height: 44px; margin-bottom: var(--sg-sys-space-4); }
+.workspace-recovery { width: min(560px, 100%); }
+.workspace-recovery-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--sg-sys-space-2); }
+.workspace-recovery-details { width: 100%; margin-top: var(--sg-sys-space-3); border-top: 1px solid var(--sg-sys-color-outline); color: var(--sg-sys-color-on-surface-variant); text-align: left; }
+.workspace-recovery-details summary { width: fit-content; margin: var(--sg-sys-space-3) auto 0; cursor: pointer; font-size: 13px; font-weight: 600; }
+.workspace-recovery-details dl { display: grid; min-width: 0; margin: var(--sg-sys-space-3) 0 0; grid-template-columns: max-content minmax(0, 1fr); gap: 8px var(--sg-sys-space-3); font-size: 12px; line-height: 1.5; }
+.workspace-recovery-details dt { font-weight: 600; }
+.workspace-recovery-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--sg-sys-color-on-surface); }
 .conversation-empty { display: grid; width: min(520px, 100%); height: 100%; margin: 0 auto; align-content: center; justify-items: center; padding: var(--sg-sys-space-6); text-align: center; }
 .conversation-empty h1, .welcome-state h1 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: -.025em; }
 .conversation-empty > p:not(.eyebrow), .welcome-state > p { max-width: 440px; margin: 10px 0 var(--sg-sys-space-5); color: var(--sg-sys-color-on-surface-variant); font-size: 14px; line-height: 1.55; }

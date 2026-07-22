@@ -707,6 +707,16 @@
         ],
         "type": "object"
       },
+      "ContinuityRecoveryAction": {
+        "enum": [
+          "retry_current",
+          "open_another_workspace",
+          "open_diagnostics",
+          "show_details",
+          "continue_read_only"
+        ],
+        "type": "string"
+      },
       "DisclosureListResponse": {
         "properties": {
           "disclosures": {
@@ -718,6 +728,19 @@
         },
         "required": [
           "disclosures"
+        ],
+        "type": "object"
+      },
+      "DurableSessionFrontier": {
+        "additionalProperties": false,
+        "properties": {
+          "through_stream_sequence": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "through_stream_sequence"
         ],
         "type": "object"
       },
@@ -764,6 +787,23 @@
         "required": [
           "kind",
           "id"
+        ],
+        "type": "object"
+      },
+      "ForegroundRunOwner": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_revision": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "owner_revision"
         ],
         "type": "object"
       },
@@ -1060,6 +1100,16 @@
             "type": [
               "integer",
               "null"
+            ]
+          },
+          "foreground_owner": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ForegroundRunOwner"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "replayed": {
@@ -1640,6 +1690,41 @@
           "identity_conflict_count",
           "truncated_source_count",
           "entries"
+        ],
+        "type": "object"
+      },
+      "SessionContinuityView": {
+        "additionalProperties": false,
+        "properties": {
+          "durable_frontier": {
+            "$ref": "#/components/schemas/DurableSessionFrontier"
+          },
+          "durable_session_scope_id": {
+            "type": "string"
+          },
+          "foreground_owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ForegroundRunOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_actions": {
+            "items": {
+              "$ref": "#/components/schemas/ContinuityRecoveryAction"
+            },
+            "maxItems": 5,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "durable_session_scope_id",
+          "durable_frontier",
+          "recovery_actions"
         ],
         "type": "object"
       },
@@ -2711,6 +2796,24 @@
           },
           {
             "in": "header",
+            "name": "X-Sigil-Session-Id",
+            "required": true,
+            "schema": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Sigil-Owner-Revision",
+            "required": true,
+            "schema": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
             "name": "Last-Event-ID",
             "required": false,
             "schema": {
@@ -2728,6 +2831,9 @@
               }
             },
             "description": "Continuous text/event-stream until terminal, disconnect, lag, or shutdown"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3259,6 +3365,38 @@
           }
         },
         "summary": "Read bounded child-agent lifecycle and result handoff state"
+      }
+    },
+    "/sessions/{session_id}/continuity": {
+      "get": {
+        "description": "Revalidates the durable session frontier and returns one nested process-local foreground owner with an opaque revision for exact attach admission.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionContinuityView"
+                }
+              }
+            },
+            "description": "Fresh conversation continuity proof"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Probe durable frontier and current foreground ownership"
       }
     },
     "/sessions/{session_id}/run-context": {

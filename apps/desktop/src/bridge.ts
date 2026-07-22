@@ -8,6 +8,7 @@ import type {
   AgentBinding,
   CatalogPage,
   CatalogRequest,
+  ConversationContinuity,
   DesktopBootstrap,
   SessionOpenInput,
   SessionCatalogBatchExecuteInput,
@@ -22,6 +23,7 @@ import type {
   SessionQuarantineSummary,
   SessionRenameInput,
   SessionSummary,
+  RunAttachInput,
   RunStreamStatus,
   RunAttachment,
   PermissionMode,
@@ -81,6 +83,7 @@ export interface DesktopBridge {
     sessionId: string,
     request: TranscriptRequest,
   ): Promise<TranscriptPage>;
+  continuity(workspaceId: string, sessionId: string): Promise<ConversationContinuity>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
   agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
   startRun(
@@ -95,7 +98,7 @@ export interface DesktopBridge {
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
   ): Promise<RunSummary>;
-  attachRun(workspaceId: string, sessionId: string, runId: string): Promise<RunAttachment>;
+  attachRun(workspaceId: string, input: RunAttachInput): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
   resolveApproval(
     workspaceId: string,
@@ -170,6 +173,8 @@ export const desktopBridge: DesktopBridge = {
       sessionId,
       request,
     }),
+  continuity: (workspaceId, sessionId) =>
+    invoke<ConversationContinuity>("desktop_continuity", { workspaceId, sessionId }),
   runContext: (workspaceId, sessionId) =>
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
   agentActivity: (workspaceId, sessionId) =>
@@ -200,10 +205,10 @@ export const desktopBridge: DesktopBridge = {
         agentBinding,
       },
     }),
-  attachRun: (workspaceId, sessionId, runId) =>
+  attachRun: (workspaceId, input) =>
     invoke<RunAttachment>("desktop_attach_run", {
       workspaceId,
-      input: { sessionId, runId },
+      input,
     }),
   cancelRun: (workspaceId, sessionId, runId) =>
     invoke<RunSummary>("desktop_cancel_run", {

@@ -388,6 +388,28 @@ pub(crate) struct DesktopSessionSummary {
     pub(crate) foreground_run_id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopDurableFrontierSummary {
+    pub(crate) through_stream_sequence: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopForegroundRunOwnerSummary {
+    pub(crate) run_id: String,
+    pub(crate) owner_revision: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationContinuity {
+    pub(crate) durable_frontier: DesktopDurableFrontierSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) foreground_owner: Option<DesktopForegroundRunOwnerSummary>,
+    pub(crate) recovery_actions: Vec<&'static str>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopTranscriptRequest {
@@ -455,6 +477,7 @@ pub(crate) struct DesktopAgentBindingInput {
 pub(crate) struct DesktopRunAttachInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
+    pub(crate) owner_revision: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -845,6 +868,39 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
             label: value.label,
             run_count: value.run_ids.len(),
             foreground_run_id: value.foreground_run_id,
+        }
+    }
+}
+
+impl From<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationContinuity {
+    fn from(value: sigil_desktop::DesktopSessionContinuityView) -> Self {
+        Self {
+            durable_frontier: DesktopDurableFrontierSummary {
+                through_stream_sequence: value.durable_frontier.through_stream_sequence,
+            },
+            foreground_owner: value.foreground_owner.map(|owner| {
+                DesktopForegroundRunOwnerSummary {
+                    run_id: owner.run_id,
+                    owner_revision: owner.owner_revision,
+                }
+            }),
+            recovery_actions: value
+                .recovery_actions
+                .into_iter()
+                .map(|action| match action {
+                    sigil_desktop::DesktopContinuityRecoveryAction::RetryCurrent => "retry_current",
+                    sigil_desktop::DesktopContinuityRecoveryAction::OpenAnotherWorkspace => {
+                        "open_another_workspace"
+                    }
+                    sigil_desktop::DesktopContinuityRecoveryAction::OpenDiagnostics => {
+                        "open_diagnostics"
+                    }
+                    sigil_desktop::DesktopContinuityRecoveryAction::ShowDetails => "show_details",
+                    sigil_desktop::DesktopContinuityRecoveryAction::ContinueReadOnly => {
+                        "continue_read_only"
+                    }
+                })
+                .collect(),
         }
     }
 }

@@ -274,6 +274,14 @@ export function createCatalogWorkbenchBridge(
       items: input.items.map((item) => ({ sessionRef: item.sessionRef, outcome: "completed" })),
     }),
     transcript: async () => transcript,
+    continuity: async () => ({
+      durableFrontier: { throughStreamSequence: 3 },
+      foregroundOwner: {
+        runId: attachment.run.id,
+        ownerRevision: `sha256:${"c".repeat(64)}`,
+      },
+      recoveryActions: ["retry_current", "continue_read_only"],
+    }),
     runContext: async () => runContext,
     agentActivity: async () => ({
       totalAgents: 0,

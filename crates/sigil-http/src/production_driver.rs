@@ -17,10 +17,10 @@ use sigil_runtime::application_run::{
     ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
     application_agent_activity_view, application_run_context_view,
-    application_session_transcript_page, application_verification_view,
-    bind_application_session_with_model, bind_existing_application_session,
-    prepare_application_run, record_application_preparation_cancellation,
-    rerun_application_verification,
+    application_session_frontier_view, application_session_transcript_page,
+    application_verification_view, bind_application_session_with_model,
+    bind_existing_application_session, prepare_application_run,
+    record_application_preparation_cancellation, rerun_application_verification,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
@@ -278,6 +278,20 @@ impl HttpRunDriver for HttpProductionRunDriver {
         Ok(HttpSessionBinding {
             session_scope_id: binding.session_scope_id,
             session_log_path: binding.session_log_path.display().to_string(),
+        })
+    }
+
+    fn session_frontier(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<crate::HttpDurableSessionFrontier, HttpRunDriverError> {
+        let frontier = application_session_frontier_view(
+            std::path::Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpRunDriverError::new("durable session frontier is unavailable"))?;
+        Ok(crate::HttpDurableSessionFrontier {
+            through_stream_sequence: frontier.through_stream_sequence,
         })
     }
 

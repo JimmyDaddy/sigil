@@ -241,16 +241,17 @@ fn http_request(
     token: Option<&str>,
     body: Option<&str>,
 ) -> (u16, String) {
-    http_request_with_last_event_id(address, method, path, token, body, None)
+    http_request_with_headers(address, method, path, token, body, None, None)
 }
 
-fn http_request_with_last_event_id(
+fn http_request_with_headers(
     address: SocketAddr,
     method: &str,
     path: &str,
     token: Option<&str>,
     body: Option<&str>,
     last_event_id: Option<&str>,
+    run_owner: Option<(&str, &str)>,
 ) -> (u16, String) {
     let body = body.unwrap_or_default();
     let authorization = token
@@ -259,8 +260,15 @@ fn http_request_with_last_event_id(
     let replay_cursor = last_event_id
         .map(|cursor| format!("Last-Event-ID: {cursor}\r\n"))
         .unwrap_or_default();
+    let run_owner = run_owner
+        .map(|(session_id, owner_revision)| {
+            format!(
+                "x-sigil-session-id: {session_id}\r\nx-sigil-owner-revision: {owner_revision}\r\n"
+            )
+        })
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}{replay_cursor}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}{replay_cursor}{run_owner}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let mut stream = TcpStream::connect(address).expect("serve endpoint should accept a client");
@@ -648,8 +656,18 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         )
         .await
         .expect("run should start");
+    let owner = receipt
+        .foreground_owner
+        .as_ref()
+        .expect("started run should return exact foreground ownership");
     let mut stream = client
-        .run_events(&session.durable_session_scope_id, &receipt.run.id, None)
+        .run_events(
+            &session.id,
+            &session.durable_session_scope_id,
+            &receipt.run.id,
+            &owner.owner_revision,
+            None,
+        )
         .await
         .expect("authenticated SSE should connect");
     let mut kinds = Vec::new();
@@ -683,34 +701,23 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
 
     let first_cursor = first_cursor.expect("run start should provide a durable cursor");
-    let mut replay = client
+    let replay_error = client
         .run_events(
+            &session.id,
             &session.durable_session_scope_id,
             &receipt.run.id,
+            &owner.owner_revision,
             Some(&first_cursor),
         )
         .await
-        .expect("durable suffix replay should connect");
-    let mut replay_kinds = Vec::new();
-    while let Some(event) = replay
-        .next_event()
-        .await
-        .expect("durable suffix should decode")
-    {
-        replay_kinds.push(
-            event
-                .into_timeline(
-                    &opened.id,
-                    &session.durable_session_scope_id,
-                    &receipt.run.id,
-                    &session.id,
-                )
-                .expect("replayed event should narrow")
-                .kind,
-        );
-    }
-    assert!(!replay_kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
-    assert!(replay_kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
+        .expect_err("terminal run must no longer admit a foreground live follower");
+    assert!(matches!(
+        replay_error,
+        sigil_desktop::DesktopClientError::Rejected {
+            status: 409,
+            code: Some(code),
+        } if code == "run_no_longer_foreground"
+    ));
 
     provider.join().expect("provider fixture should stop");
     assert!(
@@ -832,13 +839,19 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
         .as_str()
         .expect("run id should exist")
         .to_owned();
+    let owner_revision = run["foreground_owner"]["owner_revision"]
+        .as_str()
+        .expect("run receipt should include exact foreground ownership")
+        .to_owned();
 
-    let (events_status, events_body) = http_request(
+    let (events_status, events_body) = http_request_with_headers(
         server.address,
         "GET",
         &format!("/runs/{run_id}/events"),
         Some(token),
         None,
+        None,
+        Some((&session_id, &owner_revision)),
     );
     assert_eq!(events_status, 200);
     assert!(events_body.contains("event: run_event"));
@@ -849,18 +862,19 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
         .filter_map(|line| line.strip_prefix("id: "))
         .next_back()
         .expect("terminal durable SSE should include a replay cursor");
-    let (reconnect_status, reconnect_body) = http_request_with_last_event_id(
+    let (reconnect_status, reconnect_body) = http_request_with_headers(
         server.address,
         "GET",
         &format!("/runs/{run_id}/events"),
         Some(token),
         None,
         Some(last_event_id),
+        Some((&session_id, &owner_revision)),
     );
-    assert_eq!(reconnect_status, 200);
+    assert_eq!(reconnect_status, 409);
     assert!(
-        !reconnect_body.contains("event: run_event"),
-        "cursor at the terminal event should replay an empty suffix"
+        reconnect_body.contains("run_no_longer_foreground"),
+        "terminal live followers must use the durable transcript instead: {reconnect_body}"
     );
     provider.join().expect("provider fixture should join");
 
@@ -979,12 +993,17 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     let resumed_run_id = resumed["run"]["id"]
         .as_str()
         .expect("resumed run id should exist");
-    let (events_status, events_body) = http_request(
+    let resumed_owner_revision = resumed["foreground_owner"]["owner_revision"]
+        .as_str()
+        .expect("resumed receipt should include exact foreground ownership");
+    let (events_status, events_body) = http_request_with_headers(
         restarted.address,
         "GET",
         &format!("/runs/{resumed_run_id}/events"),
         Some(token),
         None,
+        None,
+        Some((&reopened_session_id, resumed_owner_revision)),
     );
     assert_eq!(events_status, 200);
     assert!(events_body.contains("reopened process answer"));

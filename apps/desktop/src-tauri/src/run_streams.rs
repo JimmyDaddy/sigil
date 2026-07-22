@@ -84,6 +84,7 @@ impl DesktopRunStreamOwner {
         workspace_id: String,
         renderer_session_id: String,
         durable_session_id: String,
+        owner_revision: String,
         run: DesktopRunSnapshot,
     ) {
         let _ = self
@@ -93,6 +94,7 @@ impl DesktopRunStreamOwner {
                 workspace_id,
                 renderer_session_id,
                 durable_session_id,
+                owner_revision,
                 run,
                 false,
             )
@@ -106,6 +108,7 @@ impl DesktopRunStreamOwner {
         workspace_id: String,
         renderer_session_id: String,
         durable_session_id: String,
+        owner_revision: String,
         run: DesktopRunSnapshot,
     ) -> DesktopRunProjectionSnapshot {
         let initial_gap = run.stream_sequence > 0;
@@ -115,6 +118,7 @@ impl DesktopRunStreamOwner {
             workspace_id,
             renderer_session_id,
             durable_session_id,
+            owner_revision,
             run,
             initial_gap,
         )
@@ -129,6 +133,7 @@ impl DesktopRunStreamOwner {
         workspace_id: String,
         renderer_session_id: String,
         durable_session_id: String,
+        owner_revision: String,
         run: DesktopRunSnapshot,
         initial_gap: bool,
     ) -> DesktopRunProjectionSnapshot {
@@ -175,6 +180,7 @@ impl DesktopRunStreamOwner {
                 workspace_id,
                 renderer_session_id,
                 durable_session_id,
+                owner_revision,
                 run,
                 initial_cursor,
                 initial_sequence,
@@ -352,6 +358,7 @@ async fn follow_run(
     workspace_id: String,
     renderer_session_id: String,
     durable_session_id: String,
+    owner_revision: String,
     initial_run: DesktopRunSnapshot,
     mut cursor: Option<String>,
     mut last_sequence: u64,
@@ -370,7 +377,13 @@ async fn follow_run(
     let mut attempts = 0_u8;
     loop {
         let connection = client
-            .run_events(&durable_session_id, &run_id, cursor.as_deref())
+            .run_events(
+                &renderer_session_id,
+                &durable_session_id,
+                &run_id,
+                &owner_revision,
+                cursor.as_deref(),
+            )
             .await;
         let mut stream = match connection {
             Ok(stream) => {

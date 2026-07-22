@@ -23,7 +23,7 @@ use crate::{
     },
     commands::{
         desktop_agent_activity, desktop_attach_run, desktop_bootstrap, desktop_cancel_run,
-        desktop_catalog, desktop_close_workspace, desktop_create_session,
+        desktop_catalog, desktop_close_workspace, desktop_continuity, desktop_create_session,
         desktop_delete_invalid_session_source, desktop_delete_session,
         desktop_execute_session_catalog_batch, desktop_export_support_bundle,
         desktop_open_external_url, desktop_open_recent_workspace, desktop_open_session,
@@ -118,6 +118,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_delete_invalid_session_source,
             desktop_quarantine_session,
             desktop_transcript,
+            desktop_continuity,
             desktop_run_context,
             desktop_agent_activity,
             desktop_start_run,

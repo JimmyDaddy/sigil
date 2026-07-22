@@ -44,6 +44,17 @@
 .timeline > * { min-width: 0; max-width: 100%; }
 .transcript-pagination { display: flex; justify-content: center; padding: 2px 0 5px; }
 .timeline-gap { padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-warning); border-radius: 9px; color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 13px; line-height: 1.45; }
+.continuity-state, .continuity-recovery { display: grid; min-width: 0; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
+.continuity-state { grid-template-columns: auto minmax(0, 1fr); color: var(--sg-sys-color-on-surface-variant); }
+.continuity-state-pulse { width: 9px; height: 9px; border: 2px solid var(--sg-sys-color-primary); border-radius: var(--sg-sys-radius-full); animation: conversation-activity-pulse 1.4s ease-in-out infinite; }
+.continuity-state strong, .continuity-recovery strong { color: var(--sg-sys-color-on-surface); font-size: 12px; }
+.continuity-state p, .continuity-recovery p { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; line-height: 1.45; }
+.continuity-recovery { grid-template-columns: auto minmax(0, 1fr) auto; border-color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); }
+.continuity-recovery.is-read-only { border-color: var(--sg-sys-color-outline-variant); background: var(--sg-sys-color-surface-container-low); }
+.continuity-recovery-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: var(--sg-sys-radius-full); color: var(--sg-domain-color-on-warning); background: var(--sg-sys-color-surface-container-high); }
+.continuity-recovery-icon .sg-icon { width: 16px; height: 16px; }
+.continuity-recovery-copy { min-width: 0; }
+.continuity-recovery-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .timeline-empty { display: grid; min-height: 150px; place-content: center; gap: 7px; color: var(--sg-sys-color-on-surface-subtle); text-align: center; }
 .timeline-empty span { max-width: 600px; font-size: 12px; line-height: 1.5; }
 .timeline-row { max-width: min(82%, 720px); padding: 11px 13px; border: 1px solid var(--sg-sys-color-outline); border-radius: 11px; background: var(--sg-sys-color-surface-container); }

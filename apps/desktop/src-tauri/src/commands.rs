@@ -30,9 +30,10 @@ use crate::{
     ipc::{
         DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
-        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState, DesktopExternalUrlInput,
-        DesktopRunAttachInput, DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext,
-        DesktopRunStartInput, DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
+        DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
+        DesktopConversationContinuity, DesktopExternalUrlInput, DesktopRunAttachInput,
+        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
+        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
         DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
         DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
         DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
@@ -56,6 +57,17 @@ const MAX_SUPPORT_BUNDLE_BYTES: usize = 256 * 1024;
 pub(crate) struct DesktopCommandError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recovery_actions: Vec<DesktopRecoveryAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopRecoveryAction {
+    RetryCurrent,
+    OpenAnotherWorkspace,
+    OpenDiagnostics,
+    ShowDetails,
 }
 
 impl DesktopCommandError {
@@ -63,7 +75,20 @@ impl DesktopCommandError {
         Self {
             code,
             message: message.into(),
+            recovery_actions: Vec::new(),
         }
+    }
+
+    fn with_recovery_actions(
+        mut self,
+        actions: impl IntoIterator<Item = DesktopRecoveryAction>,
+    ) -> Self {
+        self.recovery_actions = actions
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self
     }
 }
 
@@ -340,6 +365,11 @@ pub(crate) async fn desktop_pick_workspace(
             "workspace_picker_unavailable",
             "The native workspace picker is unavailable.",
         )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ])
     })?
     else {
         return Ok(DesktopWorkspaceSelection {
@@ -352,6 +382,10 @@ pub(crate) async fn desktop_pick_workspace(
             "workspace_selection_invalid",
             "The selected workspace cannot be opened as a local folder.",
         )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ])
     })?;
     let display_name = workspace_display_name(&workspace_root)?;
     let config_path = workspace_root.join("sigil.toml");
@@ -392,7 +426,11 @@ pub(crate) async fn desktop_open_recent_workspace(
         return Err(DesktopCommandError::new(
             "recent_workspace_id_invalid",
             "The recent workspace identifier is invalid.",
-        ));
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]));
     }
     let (workspace_root, display_name) = state
         .recent_workspaces
@@ -488,22 +526,13 @@ pub(crate) async fn desktop_attach_run(
     validate_workspace_id(&workspace_id)?;
     validate_session_id(&input.session_id)?;
     validate_session_id(&input.run_id)?;
+    validate_owner_revision(&input.owner_revision)?;
     let client = state
         .manager
         .lock()
         .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
-    let session = client
-        .session(&input.session_id)
-        .await
-        .map_err(project_client_error)?;
-    if session.foreground_run_id.as_deref() != Some(input.run_id.as_str()) {
-        return Err(DesktopCommandError::new(
-            "run_no_longer_foreground",
-            "The run is no longer the active run for this conversation.",
-        ));
-    }
     let run = client
         .run(&input.run_id)
         .await
@@ -514,6 +543,30 @@ pub(crate) async fn desktop_attach_run(
             "The run does not belong to this conversation.",
         ));
     }
+    // Keep this fresh owner probe as the final server read before opening the follower. The
+    // opaque revision is valid only for this exact foreground ownership transition.
+    let continuity = client
+        .continuity(&input.session_id)
+        .await
+        .map_err(project_client_error)?;
+    let Some(owner) = continuity.foreground_owner.as_ref() else {
+        return Err(DesktopCommandError::new(
+            "run_no_longer_foreground",
+            "The run is no longer the active run for this conversation.",
+        ));
+    };
+    if owner.run_id != input.run_id {
+        return Err(DesktopCommandError::new(
+            "run_no_longer_foreground",
+            "The run is no longer the active run for this conversation.",
+        ));
+    }
+    if owner.owner_revision != input.owner_revision {
+        return Err(DesktopCommandError::new(
+            "run_owner_changed",
+            "The active run owner changed. Refresh the conversation before reconnecting.",
+        ));
+    }
     let projection = state
         .run_streams
         .attach(
@@ -521,7 +574,8 @@ pub(crate) async fn desktop_attach_run(
             client,
             workspace_id,
             input.session_id,
-            session.durable_session_scope_id,
+            continuity.durable_session_scope_id,
+            input.owner_revision,
             run.clone(),
         )
         .await;
@@ -532,6 +586,27 @@ pub(crate) async fn desktop_attach_run(
         stream_message: projection.stream_message,
         has_gap: projection.has_gap,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_continuity(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopConversationContinuity, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .continuity(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
 }
 
 #[tauri::command]
@@ -582,17 +657,23 @@ pub(crate) async fn desktop_start_run(
         .await
         .map_err(project_client_error)?;
     let response = DesktopRunSummary::from(receipt.run.clone());
-    state
-        .run_streams
-        .start(
-            app,
-            client,
-            workspace_id,
-            input.session_id,
-            session.durable_session_scope_id,
-            receipt.run,
-        )
-        .await;
+    if let Some(owner) = receipt
+        .foreground_owner
+        .filter(|owner| owner.run_id == receipt.run.id)
+    {
+        state
+            .run_streams
+            .start(
+                app,
+                client,
+                workspace_id,
+                input.session_id,
+                session.durable_session_scope_id,
+                owner.owner_revision,
+                receipt.run,
+            )
+            .await;
+    }
     Ok(response)
 }
 
@@ -1236,6 +1317,26 @@ fn validate_session_id(value: &str) -> Result<(), DesktopCommandError> {
     Ok(())
 }
 
+fn validate_owner_revision(value: &str) -> Result<(), DesktopCommandError> {
+    let Some(hash) = value.strip_prefix("sha256:") else {
+        return Err(DesktopCommandError::new(
+            "run_owner_revision_invalid",
+            "The active run owner revision is invalid.",
+        ));
+    };
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(DesktopCommandError::new(
+            "run_owner_revision_invalid",
+            "The active run owner revision is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt(value: &str) -> Result<(), DesktopCommandError> {
     if value.trim().is_empty()
         || value.len() > 256 * 1024
@@ -1280,6 +1381,10 @@ fn workspace_display_name(path: &Path) -> Result<String, DesktopCommandError> {
                 "workspace_name_invalid",
                 "The selected workspace does not have a usable display name.",
             )
+            .with_recovery_actions([
+                DesktopRecoveryAction::OpenAnotherWorkspace,
+                DesktopRecoveryAction::ShowDetails,
+            ])
         })
 }
 
@@ -1305,12 +1410,14 @@ pub(crate) fn resolve_sigil_binary() -> Result<PathBuf, DesktopCommandError> {
             "sigil_binary_unavailable",
             "The bundled Sigil runtime cannot be located.",
         )
+        .with_recovery_actions([DesktopRecoveryAction::ShowDetails])
     })?;
     let parent = executable.parent().ok_or_else(|| {
         DesktopCommandError::new(
             "sigil_binary_unavailable",
             "The bundled Sigil runtime cannot be located.",
         )
+        .with_recovery_actions([DesktopRecoveryAction::ShowDetails])
     })?;
     if let Some(binary) = resolve_sigil_binary_from_directory(parent, cfg!(debug_assertions)) {
         return Ok(binary);
@@ -1318,7 +1425,8 @@ pub(crate) fn resolve_sigil_binary() -> Result<PathBuf, DesktopCommandError> {
     Err(DesktopCommandError::new(
         "sigil_binary_unavailable",
         "The bundled Sigil runtime cannot be located.",
-    ))
+    )
+    .with_recovery_actions([DesktopRecoveryAction::ShowDetails]))
 }
 
 fn resolve_sigil_binary_from_directory(parent: &Path, prefer_developer: bool) -> Option<PathBuf> {
@@ -1344,37 +1452,73 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
         | DesktopWorkspaceManagerError::InvalidDisplayName => DesktopCommandError::new(
             "workspace_invalid",
             "The selected workspace is not available.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopWorkspaceManagerError::UnknownWorkspace => {
             DesktopCommandError::new("workspace_not_open", "The workspace is no longer open.")
+                .with_recovery_actions([
+                    DesktopRecoveryAction::OpenAnotherWorkspace,
+                    DesktopRecoveryAction::ShowDetails,
+                ])
         }
         DesktopWorkspaceManagerError::WorkspaceUnavailable
         | DesktopWorkspaceManagerError::ProcessStatusUnavailable => DesktopCommandError::new(
             "workspace_server_unavailable",
             "The workspace server is unavailable.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopWorkspaceManagerError::IdentityCollision => DesktopCommandError::new(
             "workspace_identity_collision",
             "The workspace identity conflicts with another open workspace.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopWorkspaceManagerError::Launch(DesktopLaunchError::IncompatibleServer(_)) => {
             DesktopCommandError::new(
                 "workspace_server_incompatible",
                 "The desktop runtime is out of sync. Restart the development app or rebuild the package.",
             )
+            .with_recovery_actions([
+                DesktopRecoveryAction::OpenAnotherWorkspace,
+                DesktopRecoveryAction::ShowDetails,
+            ])
         }
         DesktopWorkspaceManagerError::Launch(_) => DesktopCommandError::new(
             "workspace_server_start_failed",
             "The workspace server could not be started. Confirm that sigil.toml is present and valid.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopWorkspaceManagerError::Shutdown(_) => DesktopCommandError::new(
             "workspace_server_stop_failed",
             "The workspace server could not be stopped cleanly.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopWorkspaceManagerError::Client(_) => DesktopCommandError::new(
             "workspace_server_request_failed",
             "The workspace server request failed.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
     }
 }
 
@@ -1385,24 +1529,38 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
         } if code == "stale_cursor" => DesktopCommandError::new(
             "catalog_stale",
             "History changed while loading more. Refresh from the first page.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopClientError::Rejected { .. } => DesktopCommandError::new(
             "workspace_request_rejected",
             "The workspace server rejected the request.",
-        ),
+        )
+        .with_recovery_actions([DesktopRecoveryAction::ShowDetails]),
         DesktopClientError::InvalidRoute
         | DesktopClientError::InvalidResponse
         | DesktopClientError::InvalidEventStream
         | DesktopClientError::ProtocolEvent(_) => DesktopCommandError::new(
             "workspace_protocol_invalid",
             "The workspace server returned an incompatible response.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenDiagnostics,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         DesktopClientError::RequestFailed
         | DesktopClientError::ResponseTooLarge
         | DesktopClientError::EventStreamGap => DesktopCommandError::new(
             "workspace_request_failed",
             "The workspace server request failed.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenDiagnostics,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
     }
 }
 
@@ -1447,17 +1605,30 @@ fn project_recent_error(error: RecentWorkspaceStoreError) -> DesktopCommandError
         RecentWorkspaceStoreError::UnknownWorkspace => DesktopCommandError::new(
             "recent_workspace_unknown",
             "The recent workspace is no longer available.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
         RecentWorkspaceStoreError::InvalidFile | RecentWorkspaceStoreError::InvalidRecord => {
             DesktopCommandError::new(
                 "recent_workspaces_invalid",
                 "The recent workspace list is invalid.",
             )
+            .with_recovery_actions([
+                DesktopRecoveryAction::OpenAnotherWorkspace,
+                DesktopRecoveryAction::ShowDetails,
+            ])
         }
         RecentWorkspaceStoreError::Unavailable => DesktopCommandError::new(
             "recent_workspaces_unavailable",
             "The recent workspace list is unavailable.",
-        ),
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
     }
 }
 

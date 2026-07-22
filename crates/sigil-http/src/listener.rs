@@ -47,6 +47,8 @@ const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
 const HTTP_SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP_GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_SESSION_ID_HEADER: &str = "x-sigil-session-id";
+const HTTP_OWNER_REVISION_HEADER: &str = "x-sigil-owner-revision";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -731,6 +733,19 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/continuity"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.session_continuity(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/transcript"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
@@ -911,13 +926,37 @@ async fn stream_run_events(
         )
         .await;
     };
-    let mut subscriber = event_bus.subscribe();
-    let run = match registry.get_run(run_id) {
-        Ok(run) => run,
-        Err(error) => return write_http_response(stream, registry_error_response(error)).await,
+    let Some(session_id) = request
+        .header(HTTP_SESSION_ID_HEADER)
+        .filter(|value| !value.is_empty() && value.len() <= 512)
+    else {
+        return write_http_response(
+            stream,
+            http_error_response(
+                400,
+                "run_owner_admission_required",
+                "run event streams require an exact session and foreground owner revision",
+            ),
+        )
+        .await;
     };
-    let session = match registry.get_session(&run.session_id) {
-        Ok(session) => session,
+    let Some(owner_revision) = request
+        .header(HTTP_OWNER_REVISION_HEADER)
+        .filter(|value| valid_owner_revision(value))
+    else {
+        return write_http_response(
+            stream,
+            http_error_response(
+                400,
+                "run_owner_admission_required",
+                "run event streams require an exact session and foreground owner revision",
+            ),
+        )
+        .await;
+    };
+    let mut subscriber = event_bus.subscribe();
+    let (session, run) = match registry.admit_run_event_stream(session_id, run_id, owner_revision) {
+        Ok(admission) => admission,
         Err(error) => return write_http_response(stream, registry_error_response(error)).await,
     };
     let events = match event_bus.replay_run_after(
@@ -1003,6 +1042,15 @@ fn run_events_route_id(path: &str) -> Option<&str> {
     path.strip_prefix("/runs/")
         .and_then(|suffix| suffix.strip_suffix("/events"))
         .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+}
+
+fn valid_owner_revision(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 async fn write_sse_response_head(stream: &mut TcpStream) -> Result<(), HttpListenerError> {
@@ -1316,6 +1364,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::CommandPathSessionMismatch { .. }
         | HttpRegistryError::StaleCommandSequence { .. }
         | HttpRegistryError::RunNotActive { .. }
+        | HttpRegistryError::RunNoLongerForeground { .. }
+        | HttpRegistryError::RunOwnerChanged { .. }
         | HttpRegistryError::ApprovalNotPending { .. }
         | HttpRegistryError::ApprovalRequestChanged { .. }
         | HttpRegistryError::ApprovalToolCallChanged { .. }
@@ -1350,6 +1400,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::DurableSessionNotReady => "durable_session_not_ready",
         HttpRegistryError::DurableSessionIdentityChanged => "durable_session_identity_changed",
         HttpRegistryError::DurableSessionUnavailable => "durable_session_unavailable",
+        HttpRegistryError::RunNoLongerForeground { .. } => "run_no_longer_foreground",
+        HttpRegistryError::RunOwnerChanged { .. } => "run_owner_changed",
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())

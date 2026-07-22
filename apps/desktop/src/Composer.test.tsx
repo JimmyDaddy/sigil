@@ -193,6 +193,7 @@ const context: RunContext = {
 };
 
 function renderComposer(overrides: {
+  submissionBlocked?: boolean;
   onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
@@ -217,6 +218,7 @@ function renderComposer(overrides: {
       <Composer
         draftKey="composer-test"
         active={false}
+        submissionBlocked={overrides.submissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
         composerRef={createRef<HTMLTextAreaElement>()}
@@ -243,6 +245,22 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
+  it("keeps the draft editable but blocks run actions until continuity is verified", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ submissionBlocked: true });
+    const input = screen.getByRole("textbox");
+
+    await user.type(input, "Keep this draft");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    for (const select of screen.getAllByRole("combobox")) {
+      expect((select as HTMLSelectElement).disabled).toBe(true);
+    }
+  });
+
   it("selects an exact skill binding and submits only the task prompt", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer();

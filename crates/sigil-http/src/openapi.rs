@@ -360,6 +360,22 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/continuity": {
+                "get": {
+                    "summary": "Probe durable frontier and current foreground ownership",
+                    "description": "Revalidates the durable session frontier and returns one nested process-local foreground owner with an opaque revision for exact attach admission.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Fresh conversation continuity proof",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionContinuityView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
             "/sessions/{session_id}/transcript": {
                 "get": {
                     "summary": "Read one bounded chronological page of durable conversation messages",
@@ -545,6 +561,18 @@ pub fn http_openapi_document() -> Value {
                     "parameters": [
                         { "$ref": "#/components/parameters/RunId" },
                         {
+                            "name": "X-Sigil-Session-Id",
+                            "in": "header",
+                            "required": true,
+                            "schema": { "type": "string", "maxLength": 512 }
+                        },
+                        {
+                            "name": "X-Sigil-Owner-Revision",
+                            "in": "header",
+                            "required": true,
+                            "schema": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                        },
+                        {
                             "name": "Last-Event-ID",
                             "in": "header",
                             "required": false,
@@ -560,6 +588,7 @@ pub fn http_openapi_document() -> Value {
                                 }
                             }
                         },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
                         "409": { "$ref": "#/components/responses/Conflict" }
@@ -844,6 +873,48 @@ pub fn http_openapi_document() -> Value {
                         "durable_session_scope_id": { "type": "string" },
                         "session_log_path": { "type": "string" },
                         "foreground_run_id": { "type": ["string", "null"] }
+                    }
+                },
+                "DurableSessionFrontier": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["through_stream_sequence"],
+                    "properties": {
+                        "through_stream_sequence": { "type": "integer", "format": "uint64" }
+                    }
+                },
+                "ForegroundRunOwner": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["run_id", "owner_revision"],
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "owner_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                    }
+                },
+                "ContinuityRecoveryAction": {
+                    "type": "string",
+                    "enum": ["retry_current", "open_another_workspace", "open_diagnostics", "show_details", "continue_read_only"]
+                },
+                "SessionContinuityView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["durable_session_scope_id", "durable_frontier", "recovery_actions"],
+                    "properties": {
+                        "durable_session_scope_id": { "type": "string" },
+                        "durable_frontier": { "$ref": "#/components/schemas/DurableSessionFrontier" },
+                        "foreground_owner": {
+                            "anyOf": [
+                                { "$ref": "#/components/schemas/ForegroundRunOwner" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "recovery_actions": {
+                            "type": "array",
+                            "maxItems": 5,
+                            "uniqueItems": true,
+                            "items": { "$ref": "#/components/schemas/ContinuityRecoveryAction" }
+                        }
                     }
                 },
                 "SessionListResponse": {
@@ -1272,6 +1343,12 @@ pub fn http_openapi_document() -> Value {
                         "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
                         "correlation_id": { "type": ["string", "null"] },
                         "run": { "$ref": "#/components/schemas/RunSnapshot" },
+                        "foreground_owner": {
+                            "oneOf": [
+                                { "$ref": "#/components/schemas/ForegroundRunOwner" },
+                                { "type": "null" }
+                            ]
+                        },
                         "replayed": { "type": "boolean" }
                     }
                 },

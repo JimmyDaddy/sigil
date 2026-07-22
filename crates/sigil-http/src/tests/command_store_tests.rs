@@ -34,6 +34,7 @@ fn receipt(command_id: &str) -> HttpRunStartCommandReceipt {
             pending_approval_call_ids: Vec::new(),
             stream_sequence: 1,
         },
+        foreground_owner: None,
         replayed: false,
     }
 }

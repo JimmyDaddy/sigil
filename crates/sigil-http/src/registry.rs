@@ -26,10 +26,11 @@ use crate::{
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
-        HttpApprovalDecisionRequest, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
-        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
-        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-        HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
+        HttpApprovalDecisionRequest, HttpContinuityRecoveryAction, HttpForegroundRunOwner,
+        HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt,
+        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
+        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
+        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
         HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
         HttpVerificationRerunRequest, HttpVerificationView,
     },
@@ -89,6 +90,12 @@ pub enum HttpRegistryError {
     /// The run cannot accept this operation in its current state.
     #[error("http run {run_id} is not active")]
     RunNotActive { run_id: String },
+    /// The addressed run no longer owns the session's foreground event stream.
+    #[error("http run {run_id} no longer owns foreground session {session_id}")]
+    RunNoLongerForeground { session_id: String, run_id: String },
+    /// The caller's opaque foreground owner revision is stale.
+    #[error("http run {run_id} foreground owner changed for session {session_id}")]
+    RunOwnerChanged { session_id: String, run_id: String },
     /// The approval call id is not currently pending for the run.
     #[error("http approval not pending for run {run_id} call {call_id}")]
     ApprovalNotPending { run_id: String, call_id: String },
@@ -276,6 +283,7 @@ impl HttpSessionRunRegistry {
             run_ids: Vec::new(),
             binding,
             foreground_run_id: None,
+            foreground_owner_generation: 0,
             verification_in_progress: false,
         };
         let snapshot = session.snapshot();
@@ -337,6 +345,7 @@ impl HttpSessionRunRegistry {
             run_ids: Vec::new(),
             binding,
             foreground_run_id: None,
+            foreground_owner_generation: 0,
             verification_in_progress: false,
         };
         let snapshot = session.snapshot();
@@ -417,6 +426,100 @@ impl HttpSessionRunRegistry {
             .ok_or_else(|| HttpRegistryError::SessionNotFound {
                 session_id: session_id.to_owned(),
             })
+    }
+
+    /// Probes durable frontier and process-local foreground ownership for one session.
+    ///
+    /// The durable projection is read before the final owner snapshot. Attach admission must echo
+    /// the returned opaque owner revision and re-probe immediately before opening a live follower.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or the durable frontier cannot be proven.
+    pub fn session_continuity(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpSessionContinuityView, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let durable_frontier =
+            catch_unwind(AssertUnwindSafe(|| self.driver.session_frontier(&session)))
+                .map_err(|_| HttpRegistryError::DriverPanicked {
+                    operation: "continuity frontier",
+                    run_id: session_id.to_owned(),
+                })?
+                .map_err(|error| HttpRegistryError::DriverRejected {
+                    operation: "continuity frontier",
+                    run_id: session_id.to_owned(),
+                    message: error.message,
+                })?;
+        let state = self.lock_state();
+        let current =
+            state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?;
+        let foreground_owner = current.foreground_owner();
+        let recovery_actions = if foreground_owner.is_some() {
+            vec![
+                HttpContinuityRecoveryAction::RetryCurrent,
+                HttpContinuityRecoveryAction::ContinueReadOnly,
+            ]
+        } else {
+            Vec::new()
+        };
+        Ok(HttpSessionContinuityView {
+            durable_session_scope_id: current.binding.session_scope_id.clone(),
+            durable_frontier,
+            foreground_owner,
+            recovery_actions,
+        })
+    }
+
+    /// Admits one exact replay-plus-live follower against the current foreground owner.
+    ///
+    /// The session, run and opaque owner revision are compared under one registry state lock.
+    /// Subscribe to the event bus before invoking this method so a terminal event racing after
+    /// this admission linearization point cannot be missed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session or run is unknown, the run is not the current foreground
+    /// owner, or the supplied owner revision is stale.
+    pub fn admit_run_event_stream(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        owner_revision: &str,
+    ) -> Result<(HttpSessionSnapshot, HttpRunSnapshot), HttpRegistryError> {
+        let state = self.lock_state();
+        let run = state
+            .runs
+            .get(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        let session =
+            state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?;
+        if run.session_id != session_id || session.foreground_run_id.as_deref() != Some(run_id) {
+            return Err(HttpRegistryError::RunNoLongerForeground {
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+            });
+        }
+        if session.foreground_owner_revision() != owner_revision {
+            return Err(HttpRegistryError::RunOwnerChanged {
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+            });
+        }
+        Ok((session.snapshot(), run.snapshot()))
     }
 
     /// Projects one bounded chronological transcript page for an existing adapter session.
@@ -561,6 +664,8 @@ impl HttpSessionRunRegistry {
                 prompt_preview(&prompt),
             );
             session.run_ids.push(run_id.clone());
+            session.foreground_owner_generation =
+                session.foreground_owner_generation.saturating_add(1);
             session.foreground_run_id = Some(run_id.clone());
             let session_snapshot = session.snapshot();
             let run_snapshot = run.snapshot();
@@ -747,16 +852,23 @@ impl HttpSessionRunRegistry {
                 HttpCommandClaim::Wait(reservation) => return reservation.wait_for_start(),
             };
         let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let result =
-            self.start_run(session_id, command.payload)
-                .map(|run| HttpRunStartCommandReceipt {
-                    command_id: command.command_id,
-                    client_id: command.client_id,
-                    session_id: command.session_id,
-                    correlation_id: command.correlation_id,
-                    run,
-                    replayed: false,
-                });
+        let result = self.start_run(session_id, command.payload).map(|run| {
+            let foreground_owner = self
+                .lock_state()
+                .sessions
+                .get(session_id)
+                .and_then(HttpSessionState::foreground_owner)
+                .filter(|owner| owner.run_id == run.id);
+            HttpRunStartCommandReceipt {
+                command_id: command.command_id,
+                client_id: command.client_id,
+                session_id: command.session_id,
+                correlation_id: command.correlation_id,
+                run,
+                foreground_owner,
+                replayed: false,
+            }
+        });
         completion.complete(HttpCommandCompletion::Start(result.clone()))?;
         result
     }
@@ -1941,6 +2053,8 @@ impl HttpRegistryState {
         })?;
         if session.foreground_run_id.as_deref() == Some(run_id) {
             session.foreground_run_id = None;
+            session.foreground_owner_generation =
+                session.foreground_owner_generation.saturating_add(1);
         }
         self.runs
             .get(run_id)
@@ -1978,10 +2092,36 @@ struct HttpSessionState {
     run_ids: Vec<String>,
     binding: HttpSessionBinding,
     foreground_run_id: Option<String>,
+    foreground_owner_generation: u64,
     verification_in_progress: bool,
 }
 
 impl HttpSessionState {
+    fn foreground_owner(&self) -> Option<HttpForegroundRunOwner> {
+        self.foreground_run_id
+            .as_ref()
+            .map(|run_id| HttpForegroundRunOwner {
+                run_id: run_id.clone(),
+                owner_revision: self.foreground_owner_revision(),
+            })
+    }
+
+    fn foreground_owner_revision(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"sigil-http-foreground-owner-v1\0");
+        update_owner_revision_component(&mut hasher, self.id.as_bytes());
+        update_owner_revision_component(&mut hasher, self.binding.session_scope_id.as_bytes());
+        update_owner_revision_component(
+            &mut hasher,
+            &self.foreground_owner_generation.to_be_bytes(),
+        );
+        update_owner_revision_component(
+            &mut hasher,
+            self.foreground_run_id.as_deref().unwrap_or("").as_bytes(),
+        );
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
     fn snapshot(&self) -> HttpSessionSnapshot {
         HttpSessionSnapshot {
             id: self.id.clone(),
@@ -1992,6 +2132,11 @@ impl HttpSessionState {
             foreground_run_id: self.foreground_run_id.clone(),
         }
     }
+}
+
+fn update_owner_revision_component(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value);
 }
 
 struct HttpRunState {

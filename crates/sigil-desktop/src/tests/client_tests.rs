@@ -11,6 +11,13 @@ fn error_code_projection_accepts_only_bounded_machine_labels() {
 }
 
 #[test]
+fn event_stream_owner_revision_requires_exact_opaque_format() {
+    assert!(validate_owner_revision(&format!("sha256:{}", "a".repeat(64))).is_ok());
+    assert!(validate_owner_revision(&format!("sha256:{}", "A".repeat(64))).is_err());
+    assert!(validate_owner_revision("sha256:short").is_err());
+}
+
+#[test]
 fn typed_client_debug_never_projects_transport_or_bearer_material() {
     let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
     let client = DesktopHttpClient::new(
@@ -78,6 +85,32 @@ fn run_context_decodes_exact_typed_server_contract() {
         context.model_selection,
         crate::DesktopModelSelectionPolicy::PerRun
     );
+}
+
+#[test]
+fn continuity_decodes_nested_owner_and_redacts_durable_scope_from_debug() {
+    let continuity: crate::DesktopSessionContinuityView =
+        serde_json::from_value(serde_json::json!({
+            "durable_session_scope_id": "durable-private-scope",
+            "durable_frontier": { "through_stream_sequence": 17 },
+            "foreground_owner": {
+                "run_id": "http-run-7",
+                "owner_revision": format!("sha256:{}", "a".repeat(64))
+            },
+            "recovery_actions": ["retry_current", "continue_read_only"]
+        }))
+        .expect("continuity should decode");
+
+    assert_eq!(continuity.durable_frontier.through_stream_sequence, 17);
+    assert_eq!(
+        continuity
+            .foreground_owner
+            .as_ref()
+            .map(|owner| owner.run_id.as_str()),
+        Some("http-run-7")
+    );
+    assert_eq!(continuity.recovery_actions.len(), 2);
+    assert!(!format!("{continuity:?}").contains("durable-private-scope"));
 }
 
 #[test]

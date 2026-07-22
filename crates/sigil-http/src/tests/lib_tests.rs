@@ -32,19 +32,19 @@ use super::{
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
     HttpAuthValidator, HttpCommandEnvelope, HttpContextWindowSource, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpLiveEventBus,
-    HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval,
-    HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
-    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpReasoningEffort,
-    HttpRegistryError, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
-    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
-    HttpSupportContext, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
+    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -1348,6 +1348,9 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
     .await;
     assert_eq!(status, 201);
     assert_eq!(start_receipt["run"]["id"], "http-run-1");
+    let owner_revision = start_receipt["foreground_owner"]["owner_revision"]
+        .as_str()
+        .expect("start receipt should bind the initial follower");
 
     let waiting = registry
         .register_approval_request("http-run-1", pending_approval("call-1", "write_file"))
@@ -1411,7 +1414,13 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
 
     let (event_status, event_content_type, event_body) = http_raw_exchange(
         address,
-        http_get("/runs/http-run-1/events", Some("secret-token"), None),
+        http_run_events_get(
+            "/runs/http-run-1/events",
+            Some("secret-token"),
+            "http-session-1",
+            owner_revision,
+            None,
+        ),
     )
     .await;
     assert_eq!(event_status, 200);
@@ -1424,9 +1433,11 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
 
     let (event_status, _event_content_type, event_body) = http_raw_exchange(
         address,
-        http_get(
+        http_run_events_get(
             "/runs/http-run-1/events",
             Some("secret-token"),
+            "http-session-1",
+            owner_revision,
             Some("sigil-http-run-v1:scope-http-session-1:http-run-1:1"),
         ),
     )
@@ -1481,7 +1492,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
 
 #[tokio::test]
 async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_events() {
-    let (address, shutdown, _driver, registry, event_bus) =
+    let (address, shutdown, driver, registry, event_bus) =
         spawn_test_http_server_with_registry_and_events().await;
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
@@ -1490,6 +1501,13 @@ async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_event
             run_start("stream events", HttpPermissionMode::ReadOnly),
         )
         .expect("run should start");
+    driver.set_session_frontier(1);
+    let owner_revision = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("run should own the session")
+        .owner_revision;
     event_bus
         .publish_run_event(PublicRunEvent::new(
             &session.durable_session_scope_id,
@@ -1506,9 +1524,11 @@ async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_event
         .expect("SSE client should connect");
     stream
         .write_all(
-            http_get(
+            http_run_events_get(
                 &format!("/runs/{}/events", run.id),
                 Some("secret-token"),
+                &session.id,
+                &owner_revision,
                 None,
             )
             .as_bytes(),
@@ -1581,6 +1601,13 @@ async fn graceful_shutdown_reaps_idle_connections_cancels_runs_and_stops_command
             run_start("wait for shutdown", HttpPermissionMode::ReadOnly),
         )
         .expect("run should start");
+    driver.set_session_frontier(1);
+    let owner_revision = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("run should own the session")
+        .owner_revision;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let serving = tokio::spawn(async move {
         server
@@ -1593,9 +1620,11 @@ async fn graceful_shutdown_reaps_idle_connections_cancels_runs_and_stops_command
         .await
         .expect("idle client should connect");
     idle.write_all(
-        http_get(
+        http_run_events_get(
             &format!("/runs/{}/events", run.id),
             Some("secret-token"),
+            &session.id,
+            &owner_revision,
             None,
         )
         .as_bytes(),
@@ -1773,6 +1802,27 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
+    assert!(
+        document["paths"]["/sessions/{session_id}/continuity"]["get"]["responses"]["200"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["SessionContinuityView"]["properties"]["foreground_owner"]
+            ["anyOf"][0]["$ref"],
+        "#/components/schemas/ForegroundRunOwner"
+    );
+    assert!(
+        document["paths"]["/runs/{run_id}/events"]["get"]["parameters"]
+            .as_array()
+            .is_some_and(|parameters| parameters.iter().any(|parameter| {
+                parameter["name"] == "X-Sigil-Owner-Revision" && parameter["required"] == true
+            }))
+    );
+    assert_eq!(
+        document["components"]["schemas"]["RunStartCommandReceipt"]["properties"]["foreground_owner"]
+            ["oneOf"][0]["$ref"],
+        "#/components/schemas/ForegroundRunOwner"
+    );
     assert!(
         document["paths"]["/sessions/{session_id}/transcript"]["get"]["responses"]["200"]
             .is_object()
@@ -2388,6 +2438,252 @@ fn session_create_get_returns_stable_snapshot() {
             session_id: "missing".to_owned()
         })
     );
+}
+
+#[test]
+fn continuity_probe_combines_durable_frontier_with_exact_owner_revision() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    driver.set_session_frontier(7);
+
+    let idle = registry
+        .session_continuity(&session.id)
+        .expect("idle continuity should project");
+    assert_eq!(
+        idle.durable_session_scope_id,
+        session.durable_session_scope_id
+    );
+    assert_eq!(idle.durable_frontier.through_stream_sequence, 7);
+    assert_eq!(idle.foreground_owner, None);
+    assert!(idle.recovery_actions.is_empty());
+
+    let first = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "first".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                ..HttpRunStartRequest::default()
+            },
+        )
+        .expect("run should start");
+    let active = registry
+        .session_continuity(&session.id)
+        .expect("active continuity should project");
+    let owner = active
+        .foreground_owner
+        .expect("active run should own the session");
+    assert_eq!(owner.run_id, first.id);
+    assert!(owner.owner_revision.starts_with("sha256:"));
+    assert_eq!(owner.owner_revision.len(), 71);
+    assert_eq!(active.recovery_actions.len(), 2);
+    assert_eq!(
+        registry
+            .session_continuity(&session.id)
+            .expect("unchanged owner should remain stable")
+            .foreground_owner
+            .expect("owner should remain present")
+            .owner_revision,
+        owner.owner_revision
+    );
+    let (admitted_session, admitted_run) = registry
+        .admit_run_event_stream(&session.id, &first.id, &owner.owner_revision)
+        .expect("exact foreground owner should admit a follower");
+    assert_eq!(admitted_session.id, session.id);
+    assert_eq!(admitted_run.id, first.id);
+    assert!(matches!(
+        registry.admit_run_event_stream(
+            &session.id,
+            &first.id,
+            &format!("sha256:{}", "f".repeat(64)),
+        ),
+        Err(HttpRegistryError::RunOwnerChanged { .. })
+    ));
+
+    registry
+        .register_approval_request(&first.id, pending_approval("call-stable", "write_file"))
+        .expect("approval wait should retain foreground ownership");
+    assert_eq!(
+        registry
+            .session_continuity(&session.id)
+            .expect("waiting continuity should project")
+            .foreground_owner
+            .expect("waiting run should retain owner")
+            .owner_revision,
+        owner.owner_revision
+    );
+    registry
+        .expire_approval_request(&first.id, "call-stable")
+        .expect("approval expiry should return to running");
+    registry
+        .cancel_run(&first.id)
+        .expect("cancel request should retain ownership until terminal");
+    assert_eq!(
+        registry
+            .session_continuity(&session.id)
+            .expect("cancel continuity should project")
+            .foreground_owner
+            .expect("cancel-requested run should retain owner")
+            .owner_revision,
+        owner.owner_revision
+    );
+    registry
+        .record_run_execution_uncertain(&first.id)
+        .expect("uncertain execution should remain fail-closed");
+    assert_eq!(
+        registry
+            .session_continuity(&session.id)
+            .expect("uncertain continuity should project")
+            .foreground_owner
+            .expect("uncertain run should retain owner")
+            .owner_revision,
+        owner.owner_revision
+    );
+
+    registry
+        .record_run_terminal(&first.id, HttpRunTerminalOutcome::Interrupted)
+        .expect("terminal should release owner");
+    assert!(matches!(
+        registry.admit_run_event_stream(&session.id, &first.id, &owner.owner_revision),
+        Err(HttpRegistryError::RunNoLongerForeground { .. })
+    ));
+    let second = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "second".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                ..HttpRunStartRequest::default()
+            },
+        )
+        .expect("second run should start");
+    let next_owner = registry
+        .session_continuity(&session.id)
+        .expect("new owner should project")
+        .foreground_owner
+        .expect("new owner should exist");
+    assert_eq!(next_owner.run_id, second.id);
+    assert_ne!(next_owner.owner_revision, owner.owner_revision);
+}
+
+#[tokio::test]
+async fn continuity_route_requires_auth_and_returns_nested_owner() {
+    let (address, shutdown, driver, registry, _) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should create");
+    driver.set_session_frontier(11);
+    let run = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "continue".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                ..HttpRunStartRequest::default()
+            },
+        )
+        .expect("run should start");
+    let path = format!("/sessions/{}/continuity", session.id);
+
+    let (status, body) = http_raw_request(address, http_get(&path, None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["durable_frontier"]["through_stream_sequence"], 11);
+    assert_eq!(body["foreground_owner"]["run_id"], run.id);
+    assert!(
+        body["foreground_owner"]["owner_revision"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:"))
+    );
+    assert_eq!(
+        body["recovery_actions"],
+        json!(["retry_current", "continue_read_only"])
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn run_event_stream_rejects_missing_stale_and_replaced_owner_admission() {
+    let (address, shutdown, driver, registry, _) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    driver.set_session_frontier(3);
+    let first = registry
+        .start_run(
+            &session.id,
+            run_start("first follower", HttpPermissionMode::ReadOnly),
+        )
+        .expect("first run should start");
+    let first_revision = registry
+        .session_continuity(&session.id)
+        .expect("first continuity should project")
+        .foreground_owner
+        .expect("first run should own the session")
+        .owner_revision;
+    let path = format!("/runs/{}/events", first.id);
+
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "run_owner_admission_required");
+
+    let stale_revision = format!("sha256:{}", "f".repeat(64));
+    let (status, body) = http_raw_request(
+        address,
+        http_run_events_get(
+            &path,
+            Some("secret-token"),
+            &session.id,
+            &stale_revision,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "run_owner_changed");
+
+    registry
+        .record_run_terminal(&first.id, HttpRunTerminalOutcome::Finished)
+        .expect("terminal should release first owner");
+    let (status, body) = http_raw_request(
+        address,
+        http_run_events_get(
+            &path,
+            Some("secret-token"),
+            &session.id,
+            &first_revision,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "run_no_longer_foreground");
+
+    let second = registry
+        .start_run(
+            &session.id,
+            run_start("replacement follower", HttpPermissionMode::ReadOnly),
+        )
+        .expect("replacement run should start");
+    let (status, body) = http_raw_request(
+        address,
+        http_run_events_get(
+            &format!("/runs/{}/events", second.id),
+            Some("secret-token"),
+            &session.id,
+            &first_revision,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "run_owner_changed");
+    let _ = shutdown.send(());
 }
 
 #[test]
@@ -3988,6 +4284,7 @@ struct RecordingRunDriver {
     transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
     transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
     run_context_view: Mutex<Option<HttpRunContextView>>,
+    session_frontier: Mutex<Option<HttpDurableSessionFrontier>>,
 }
 
 impl RecordingRunDriver {
@@ -4057,6 +4354,12 @@ impl RecordingRunDriver {
 
     fn set_run_context_view(&self, view: HttpRunContextView) {
         *lock(&self.run_context_view) = Some(view);
+    }
+
+    fn set_session_frontier(&self, through_stream_sequence: u64) {
+        *lock(&self.session_frontier) = Some(HttpDurableSessionFrontier {
+            through_stream_sequence,
+        });
     }
 }
 
@@ -4144,6 +4447,15 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.transcript_page)
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test transcript page is missing"))
+    }
+
+    fn session_frontier(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<HttpDurableSessionFrontier, HttpRunDriverError> {
+        lock(&self.session_frontier)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("test session frontier is missing"))
     }
 
     fn run_context_view(
@@ -4308,6 +4620,24 @@ fn http_get(path: &str, token: Option<&str>, last_event_id: Option<&str>) -> Str
         .map(|id| format!("last-event-id: {id}\r\n"))
         .unwrap_or_default();
     format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n{auth}{last_event_id}\r\n")
+}
+
+fn http_run_events_get(
+    path: &str,
+    token: Option<&str>,
+    session_id: &str,
+    owner_revision: &str,
+    last_event_id: Option<&str>,
+) -> String {
+    let auth = token
+        .map(|token| format!("authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let last_event_id = last_event_id
+        .map(|id| format!("last-event-id: {id}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "GET {path} HTTP/1.1\r\nhost: localhost\r\n{auth}x-sigil-session-id: {session_id}\r\nx-sigil-owner-revision: {owner_revision}\r\n{last_event_id}\r\n"
+    )
 }
 
 async fn http_raw_request(address: SocketAddr, request: String) -> (u16, Value) {

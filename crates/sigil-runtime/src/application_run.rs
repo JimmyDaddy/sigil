@@ -89,6 +89,15 @@ pub struct ApplicationTranscriptPage {
     pub next_before: Option<u64>,
 }
 
+/// Read-only durable frontier for one scope-checked application session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationSessionFrontierView {
+    /// Durable session scope proven while reading the append-only stream.
+    pub session_scope_id: String,
+    /// Highest durable stream sequence visible to this read.
+    pub through_stream_sequence: u64,
+}
+
 /// Stable preparation failure class used by machine adapters without parsing error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationRunPrepareErrorClass {
@@ -1377,18 +1386,7 @@ fn application_bound_session_entries(
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<Vec<SessionLogEntry>> {
-    let records = JsonlSessionStore::read_event_records(session_path)?;
-    let actual_session_scope_id = records
-        .first()
-        .map(|record| record.session_id().to_owned())
-        .ok_or_else(|| anyhow!("durable application session has no session identity"))?;
-    if actual_session_scope_id != expected_session_scope_id
-        || records
-            .iter()
-            .any(|record| record.session_id() != expected_session_scope_id)
-    {
-        bail!("durable application session scope does not match the bound session");
-    }
+    let records = application_bound_session_records(session_path, expected_session_scope_id)?;
     records
         .iter()
         .filter_map(|record| {
@@ -1403,6 +1401,53 @@ fn application_bound_session_entries(
                 .context("failed to decode durable application session entry")
         })
         .collect()
+}
+
+fn application_bound_session_records(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<Vec<sigil_kernel::SessionStreamRecord>> {
+    let records = JsonlSessionStore::read_event_records(session_path)?;
+    let actual_session_scope_id = records
+        .first()
+        .map(|record| record.session_id().to_owned())
+        .ok_or_else(|| anyhow!("durable application session has no session identity"))?;
+    if actual_session_scope_id != expected_session_scope_id
+        || records
+            .iter()
+            .any(|record| record.session_id() != expected_session_scope_id)
+    {
+        bail!("durable application session scope does not match the bound session");
+    }
+    Ok(records)
+}
+
+/// Reads the current append-only durable frontier for one bound application session.
+///
+/// This projection performs no writes and does not infer foreground ownership. The application
+/// adapter combines it with its own process-local owner registry after the durable scope has been
+/// revalidated.
+///
+/// # Errors
+///
+/// Returns an error when the expected scope is empty, the durable stream is empty or malformed,
+/// or any record belongs to another session scope.
+pub fn application_session_frontier_view(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<ApplicationSessionFrontierView> {
+    if expected_session_scope_id.is_empty() {
+        bail!("expected continuity session scope must not be empty");
+    }
+    let records = application_bound_session_records(session_path, expected_session_scope_id)?;
+    let through_stream_sequence = records
+        .last()
+        .map(sigil_kernel::SessionStreamRecord::stream_sequence)
+        .ok_or_else(|| anyhow!("durable application session has no frontier"))?;
+    Ok(ApplicationSessionFrontierView {
+        session_scope_id: expected_session_scope_id.to_owned(),
+        through_stream_sequence,
+    })
 }
 
 /// Reads one renderer-safe, bounded child-agent activity projection for a bound session.

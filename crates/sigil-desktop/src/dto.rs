@@ -295,6 +295,57 @@ impl fmt::Debug for DesktopSessionSnapshot {
     }
 }
 
+/// Read-only durable frontier returned by one continuity probe.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopDurableSessionFrontier {
+    pub through_stream_sequence: u64,
+}
+
+/// Exact process-local foreground owner and its opaque attach revision.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopForegroundRunOwner {
+    pub run_id: String,
+    pub owner_revision: String,
+}
+
+/// Server-admitted recovery action for a continuity state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopContinuityRecoveryAction {
+    RetryCurrent,
+    OpenAnotherWorkspace,
+    OpenDiagnostics,
+    ShowDetails,
+    ContinueReadOnly,
+}
+
+/// Fresh durable-frontier and foreground-owner proof from the authenticated server.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionContinuityView {
+    /// Private durable scope used only by the native attachment boundary.
+    pub durable_session_scope_id: String,
+    pub durable_frontier: DesktopDurableSessionFrontier,
+    #[serde(default)]
+    pub foreground_owner: Option<DesktopForegroundRunOwner>,
+    #[serde(default)]
+    pub recovery_actions: Vec<DesktopContinuityRecoveryAction>,
+}
+
+impl fmt::Debug for DesktopSessionContinuityView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopSessionContinuityView")
+            .field("durable_session_scope_id", &"<redacted>")
+            .field("durable_frontier", &self.durable_frontier)
+            .field("foreground_owner", &self.foreground_owner)
+            .field("recovery_actions", &self.recovery_actions)
+            .finish()
+    }
+}
+
 /// Response from listing process-local session handles.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -745,6 +796,8 @@ pub struct DesktopRunStartCommandReceipt {
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub run: DesktopRunSnapshot,
+    #[serde(default)]
+    pub foreground_owner: Option<DesktopForegroundRunOwner>,
     pub replayed: bool,
 }
 

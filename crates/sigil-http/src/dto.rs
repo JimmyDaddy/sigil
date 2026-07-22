@@ -507,6 +507,51 @@ pub struct HttpSessionSnapshot {
     pub foreground_run_id: Option<String>,
 }
 
+/// Read-only durable frontier revalidated for one bound session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpDurableSessionFrontier {
+    /// Highest durable session-stream sequence visible to this probe.
+    pub through_stream_sequence: u64,
+}
+
+/// Exact process-local foreground owner returned by one fresh continuity probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpForegroundRunOwner {
+    /// Active run that owns this adapter session.
+    pub run_id: String,
+    /// Opaque owner generation echoed by exact attach admission.
+    pub owner_revision: String,
+}
+
+/// Recovery actions a client may offer without inferring capability from error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpContinuityRecoveryAction {
+    RetryCurrent,
+    OpenAnotherWorkspace,
+    OpenDiagnostics,
+    ShowDetails,
+    ContinueReadOnly,
+}
+
+/// Fresh continuity proof for one process-local adapter session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionContinuityView {
+    /// Durable scope revalidated by the runtime. Native IPC must not project this field.
+    pub durable_session_scope_id: String,
+    /// Current read-only durable frontier.
+    pub durable_frontier: HttpDurableSessionFrontier,
+    /// Current process-local foreground owner, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_owner: Option<HttpForegroundRunOwner>,
+    /// Bounded recovery actions allowed for the current owner state.
+    #[serde(default)]
+    pub recovery_actions: Vec<HttpContinuityRecoveryAction>,
+}
+
 /// User-visible role returned by the bounded transcript endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1154,6 +1199,9 @@ pub struct HttpRunStartCommandReceipt {
     pub correlation_id: Option<String>,
     /// Run snapshot produced by the existing registry/driver path.
     pub run: HttpRunSnapshot,
+    /// Exact foreground owner admitted for the initial live follower, when still active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_owner: Option<HttpForegroundRunOwner>,
     /// Whether this response was replayed from a prior command id.
     pub replayed: bool,
 }

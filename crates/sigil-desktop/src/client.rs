@@ -13,14 +13,14 @@ use crate::{
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
         DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
-        DesktopSessionCatalogPage, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-        DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
-        DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
-        DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
-        DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
-        DesktopSupportBundleExport, DesktopSupportDoctorReport, DesktopTranscriptQuery,
-        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
-        DesktopVerificationView,
+        DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
+        DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteReceipt,
+        DesktopSessionInvalidSourceDeleteRequest, DesktopSessionListResponse,
+        DesktopSessionMutationReceipt, DesktopSessionOpenRequest, DesktopSessionQuarantineReceipt,
+        DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopSessionSnapshot,
+        DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
+        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
+        DesktopVerificationRerunRequest, DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -222,6 +222,18 @@ impl DesktopHttpClient {
             .await
     }
 
+    /// Probes the current durable frontier and exact process-local foreground owner.
+    pub async fn continuity(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopSessionContinuityView, DesktopClientError> {
+        self.get_json(
+            self.route(["sessions", session_id, "continuity"])?,
+            StatusCode::OK,
+        )
+        .await
+    }
+
     /// Reads one bounded chronological durable transcript page.
     pub async fn transcript(
         &self,
@@ -270,11 +282,15 @@ impl DesktopHttpClient {
     pub async fn run_events(
         &self,
         session_id: &str,
+        durable_session_id: &str,
         run_id: &str,
+        owner_revision: &str,
         last_event_id: Option<&str>,
     ) -> Result<DesktopRunEventStream, DesktopClientError> {
         validate_stream_identity(session_id)?;
+        validate_stream_identity(durable_session_id)?;
         validate_stream_identity(run_id)?;
+        validate_owner_revision(owner_revision)?;
         if let Some(cursor) = last_event_id {
             validate_replay_cursor(cursor)?;
         }
@@ -282,7 +298,9 @@ impl DesktopHttpClient {
             .client
             .get(self.route(["runs", run_id, "events"])?)
             .bearer_auth(self.bearer.expose())
-            .header(header::ACCEPT, "text/event-stream");
+            .header(header::ACCEPT, "text/event-stream")
+            .header("X-Sigil-Session-Id", session_id)
+            .header("X-Sigil-Owner-Revision", owner_revision);
         if let Some(cursor) = last_event_id {
             request = request.header("Last-Event-ID", cursor);
         }
@@ -309,7 +327,7 @@ impl DesktopHttpClient {
         Ok(DesktopRunEventStream {
             response,
             buffer: Vec::new(),
-            session_id: session_id.to_owned(),
+            session_id: durable_session_id.to_owned(),
             run_id: run_id.to_owned(),
             ended: false,
         })
@@ -633,6 +651,20 @@ fn validate_stream_identity(value: &str) -> Result<(), DesktopClientError> {
         || value.len() > 512
         || value.contains('/')
         || value.chars().any(char::is_control)
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_owner_revision(value: &str) -> Result<(), DesktopClientError> {
+    let Some(hash) = value.strip_prefix("sha256:") else {
+        return Err(DesktopClientError::InvalidRoute);
+    };
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
         return Err(DesktopClientError::InvalidRoute);
     }

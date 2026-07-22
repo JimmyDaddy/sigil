@@ -26,6 +26,7 @@ interface SessionRailProps {
   readonly onPinnedOnlyChange: (value: boolean) => void;
   readonly onClearFilters: () => void;
   readonly onRetry: () => void;
+  readonly onRetrySession?: () => void;
   readonly onLoadMore: () => void;
   readonly onOpen: (entry: CatalogEntry) => void;
   readonly onRename: (entry: CatalogEntry) => void;
@@ -53,6 +54,7 @@ export function SessionRail({
   onPinnedOnlyChange,
   onClearFilters,
   onRetry,
+  onRetrySession,
   onLoadMore,
   onOpen,
   onRename,
@@ -116,7 +118,12 @@ export function SessionRail({
         </div>
       ) : null}
       {sessionErrorMessage === undefined ? null : (
-        <ErrorCard title={t("conversationUnavailable")} message={sessionErrorMessage} actionLabel={t("refreshConversations")} onAction={onRetry} />
+        <ErrorCard
+          title={t("conversationUnavailable")}
+          message={sessionErrorMessage}
+          actionLabel={onRetrySession === undefined ? undefined : t("retryConversation")}
+          onAction={onRetrySession}
+        />
       )}
       <div className="session-rail-scroll">
         <HistoryContent

@@ -159,6 +159,7 @@ function FixtureSurface({
           <Composer
             draftKey="sigil:catalog-composer"
             active={fixture.composer.active}
+            submissionBlocked={false}
             submitting={false}
             controlBusy={false}
             composerRef={composerRef}

@@ -264,7 +264,9 @@ export interface paths {
         get: {
             parameters: {
                 query?: never;
-                header?: {
+                header: {
+                    "X-Sigil-Session-Id": string;
+                    "X-Sigil-Owner-Revision": string;
                     "Last-Event-ID"?: string;
                 };
                 path: {
@@ -283,6 +285,7 @@ export interface paths {
                         "text/event-stream": string;
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
@@ -865,6 +868,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/continuity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Probe durable frontier and current foreground ownership
+         * @description Revalidates the durable session frontier and returns one nested process-local foreground owner with an opaque revision for exact attach admission.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Fresh conversation continuity proof */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionContinuityView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/run-context": {
         parameters: {
             query?: never;
@@ -1318,8 +1365,14 @@ export interface components {
             protocol_version: 2;
             session_id: string;
         };
+        /** @enum {string} */
+        ContinuityRecoveryAction: "retry_current" | "open_another_workspace" | "open_diagnostics" | "show_details" | "continue_read_only";
         DisclosureListResponse: {
             disclosures: Record<string, never>[];
+        };
+        DurableSessionFrontier: {
+            /** Format: uint64 */
+            through_stream_sequence: number;
         };
         ErrorResponse: {
             error: {
@@ -1331,6 +1384,10 @@ export interface components {
             id: string;
             /** @enum {string} */
             kind: "run" | "workspace" | "task" | "step" | "agent" | "changeset";
+        };
+        ForegroundRunOwner: {
+            owner_revision: string;
+            run_id: string;
         };
         HealthResponse: {
             /** @constant */
@@ -1397,6 +1454,7 @@ export interface components {
             correlation_id?: string | null;
             /** Format: uint64 */
             expected_stream_sequence?: number | null;
+            foreground_owner?: components["schemas"]["ForegroundRunOwner"] | null;
             replayed: boolean;
             run: components["schemas"]["RunSnapshot"];
             session_id: string;
@@ -1540,6 +1598,12 @@ export interface components {
             /** Format: uint64 */
             truncated_source_count: number;
             workspace_id: string;
+        };
+        SessionContinuityView: {
+            durable_frontier: components["schemas"]["DurableSessionFrontier"];
+            durable_session_scope_id: string;
+            foreground_owner?: components["schemas"]["ForegroundRunOwner"] | null;
+            recovery_actions: components["schemas"]["ContinuityRecoveryAction"][];
         };
         SessionCreateRequest: {
             label?: string;
