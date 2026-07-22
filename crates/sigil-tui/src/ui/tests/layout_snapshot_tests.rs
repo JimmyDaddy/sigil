@@ -467,6 +467,13 @@ fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyho
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
+    app.session_browser.history = vec![crate::sessions::SessionHistoryEntry {
+        path: Path::new(".sigil/sessions/layout-snapshot.jsonl").to_path_buf(),
+        label: "layout-snapshot".to_owned(),
+        title: Some("Layout snapshot".to_owned()),
+        modified_epoch_secs: 1,
+        bytes: 128,
+    }];
     app.composer.input = "/resume".to_owned();
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);

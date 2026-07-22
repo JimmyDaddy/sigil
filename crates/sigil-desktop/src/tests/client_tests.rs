@@ -115,27 +115,26 @@ fn continuity_decodes_nested_owner_and_redacts_durable_scope_from_debug() {
 
 #[test]
 fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
-    let review: crate::DesktopCompactionReview =
-        serde_json::from_value(serde_json::json!({
-            "preview_id": "compact-preview-1",
-            "folded_event_count": 8,
-            "retained_event_count": 4,
-            "admission": {
-                "kind": "ready",
-                "economics": {
-                    "before_input_tokens": 12_000,
-                    "target_input_tokens": 4_000,
-                    "context_window_tokens": 128_000,
-                    "output_tokens": 8_000,
-                    "safety_buffer_tokens": 2_000,
-                    "savings_tokens": 8_000,
-                    "savings_ratio_ppm": 666_666,
-                    "minimum_savings_tokens": 1_000,
-                    "minimum_savings_ratio_ppm": 100_000
-                }
+    let review: crate::DesktopCompactionReview = serde_json::from_value(serde_json::json!({
+        "preview_id": "compact-preview-1",
+        "folded_event_count": 8,
+        "retained_event_count": 4,
+        "admission": {
+            "kind": "ready",
+            "economics": {
+                "before_input_tokens": 12_000,
+                "target_input_tokens": 4_000,
+                "context_window_tokens": 128_000,
+                "output_tokens": 8_000,
+                "safety_buffer_tokens": 2_000,
+                "savings_tokens": 8_000,
+                "savings_ratio_ppm": 666_666,
+                "minimum_savings_tokens": 1_000,
+                "minimum_savings_ratio_ppm": 100_000
             }
-        }))
-        .expect("compaction review should decode");
+        }
+    }))
+    .expect("compaction review should decode");
 
     assert_eq!(review.preview_id.as_deref(), Some("compact-preview-1"));
     assert!(matches!(
@@ -143,9 +142,11 @@ fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
         crate::DesktopCompactionAdmission::Ready { .. }
     ));
     assert_eq!(
-        serde_json::to_value(crate::DesktopConversationRecoveryCommandAction::ApplyCompaction {
-            preview_id: "compact-preview-1".to_owned(),
-        })
+        serde_json::to_value(
+            crate::DesktopConversationRecoveryCommandAction::ApplyCompaction {
+                preview_id: "compact-preview-1".to_owned(),
+            }
+        )
         .expect("compaction action should encode"),
         serde_json::json!({
             "kind": "apply_compaction",

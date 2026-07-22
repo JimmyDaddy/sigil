@@ -317,9 +317,6 @@
 .approval-command { display: grid; gap: 6px; }
 .approval-command > strong { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .approval-command > pre { max-height: 180px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); white-space: pre-wrap; overflow-wrap: anywhere; }
-.approval-command { display: grid; gap: 6px; }
-.approval-command > strong { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-.approval-command > pre { max-height: 180px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval-dock dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sg-sys-space-2); margin: 0; }
 .approval-dock dl div { padding: var(--sg-sys-space-2); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); }
 .approval-dock dt { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; text-transform: uppercase; }
