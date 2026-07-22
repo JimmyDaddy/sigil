@@ -50,6 +50,10 @@ fn recorder_retries_exact_start_and_terminal_as_no_ops() -> Result<()> {
     assert!(!recorder.append_started(&start)?);
     assert!(recorder.append_finalized(&final_entry)?);
     assert!(!recorder.append_finalized(&final_entry)?);
+    assert!(
+        !recorder.append_finalized(&succeeded("run-1", 21)?)?,
+        "a retry of the same terminal intent must keep the first durable timestamp"
+    );
 
     let lifecycle = JsonlSessionStore::read_event_records(store.path())?
         .iter()
@@ -61,6 +65,47 @@ fn recorder_retries_exact_start_and_terminal_as_no_ops() -> Result<()> {
             ConversationRunLifecycleRecordV1::ConversationRunStartedV1(start),
             ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(final_entry),
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn recorder_recovers_one_unfinished_run_and_rejects_overlapping_history() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("provider", "model").with_store(store.clone());
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+
+    assert!(!recorder.reconcile_unfinished(10)?);
+    assert!(recorder.append_started(&started("run-1", 11)?)?);
+    assert!(recorder.reconcile_unfinished(12)?);
+    assert!(!recorder.reconcile_unfinished(13)?);
+
+    let lifecycle = JsonlSessionStore::read_event_records(store.path())?
+        .iter()
+        .filter_map(|record| conversation_run_lifecycle_record_from_stream(record).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Interrupted
+    ));
+
+    let overlapping = tempfile::tempdir()?;
+    let overlapping_store = JsonlSessionStore::new(overlapping.path().join("session.jsonl"))?;
+    let overlapping_session =
+        Session::new("provider", "model").with_store(overlapping_store.clone());
+    let overlapping_recorder = overlapping_session.conversation_run_lifecycle_recorder()?;
+    assert!(overlapping_recorder.append_started(&started("run-1", 20)?)?);
+    assert!(overlapping_recorder.append_started(&started("run-2", 21)?)?);
+    assert!(
+        overlapping_recorder
+            .reconcile_unfinished(22)
+            .expect_err("overlapping active runs must fail closed")
+            .to_string()
+            .contains("overlapping active runs")
     );
     Ok(())
 }

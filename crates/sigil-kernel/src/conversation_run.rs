@@ -221,6 +221,15 @@ impl ConversationRunFinalizedEntryV1 {
         }
         Ok(())
     }
+
+    fn has_same_terminal_intent(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.run_id == other.run_id
+            && self.status == other.status
+            && self.final_message_id == other.final_message_id
+            && self.safe_summary == other.safe_summary
+            && self.summary_truncated == other.summary_truncated
+    }
 }
 
 /// Typed payload stored in the shared recovery-critical run lifecycle event categories.
@@ -308,8 +317,9 @@ impl ConversationRunLifecycleRecorder {
 
     /// Appends one terminal boundary exactly once after its matching start.
     ///
-    /// Returns `false` for an exact same-entry retry. Conflicting terminals and terminals without a
-    /// matching start fail closed.
+    /// Returns `false` for a retry of the same terminal intent. The first durable timestamp wins,
+    /// so a caller can safely retry after an uncertain append without reproducing the original
+    /// wall-clock value. Conflicting terminals and terminals without a matching start fail closed.
     ///
     /// # Errors
     ///
@@ -332,12 +342,41 @@ impl ConversationRunLifecycleRecorder {
                     bail!("conversation run finalization requires a matching durable start");
                 }
                 match existing.finalized.as_ref() {
-                    Some(finalized) if finalized == &entry => Ok(false),
+                    Some(finalized) if finalized.has_same_terminal_intent(&entry) => Ok(false),
                     Some(_) => bail!("conversation run id has a conflicting terminal"),
                     None => Ok(true),
                 }
             },
         )
+    }
+
+    /// Closes one durable start left open by a previous process interruption.
+    ///
+    /// The caller must own the session's exclusive foreground admission while invoking this
+    /// recovery step. Returns `false` when no unfinished run exists or when the same recovery
+    /// terminal was already persisted by an uncertain earlier attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when lifecycle order is invalid, more than one run is active, the recovery
+    /// timestamp is invalid, or the terminal append conflicts or fails.
+    pub fn reconcile_unfinished(&self, recovered_at_ms: u64) -> Result<bool> {
+        if recovered_at_ms == 0 {
+            bail!("conversation run recovery timestamp must be non-zero");
+        }
+        let records = JsonlSessionStore::read_event_records(self.store.path())?;
+        let Some(started) = active_conversation_run(&records)? else {
+            return Ok(false);
+        };
+        let terminal = ConversationRunFinalizedEntryV1::new(
+            started.run_id(),
+            ConversationRunTerminalStatusV1::Interrupted,
+            None,
+            Some("run interrupted before durable terminal recovery"),
+            recovered_at_ms,
+            &SecretRedactor::empty(),
+        )?;
+        self.append_finalized(&terminal)
     }
 }
 
@@ -422,6 +461,35 @@ fn conversation_run_lifecycle_state(
         }
     }
     Ok(state)
+}
+
+fn active_conversation_run(
+    records: &[SessionStreamRecord],
+) -> Result<Option<ConversationRunStartedEntryV1>> {
+    let mut active: Option<ConversationRunStartedEntryV1> = None;
+    for record in records {
+        let Some(record) = conversation_run_lifecycle_record_from_stream(record)? else {
+            continue;
+        };
+        match record {
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started) => {
+                if active.is_some() {
+                    bail!("conversation run stream contains overlapping active runs");
+                }
+                active = Some(started);
+            }
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized) => {
+                let Some(started) = active.as_ref() else {
+                    bail!("conversation run stream contains a terminal without an active start");
+                };
+                if started.run_id() != finalized.run_id() {
+                    bail!("conversation run terminal belongs to another active run");
+                }
+                active = None;
+            }
+        }
+    }
+    Ok(active)
 }
 
 #[derive(Deserialize)]
