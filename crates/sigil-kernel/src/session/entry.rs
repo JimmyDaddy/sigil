@@ -78,6 +78,22 @@ impl SessionStreamRecord {
         }))
     }
 
+    /// Decodes the canonical session-log entry carried by this validated durable envelope.
+    ///
+    /// Callers outside the kernel should use this method instead of inspecting raw event JSON.
+    /// Unknown recovery-critical events, checksum failures, and malformed embedded entries fail
+    /// closed; known events without a session-log projection return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the envelope or its canonical session entry is invalid.
+    pub fn session_log_entry(&self) -> Result<Option<SessionLogEntry>> {
+        let Some(record) = self.domain_event_record()? else {
+            return Ok(None);
+        };
+        super::session_entry_from_domain_event(&record.event)
+    }
+
     pub fn typed_domain_event_record(&self) -> Result<Option<TypedDomainEventRecord>> {
         match self {
             Self::Stored(event) => {

@@ -9,6 +9,7 @@ pub mod config;
 pub mod context_engine;
 pub mod conversation_fork;
 pub mod conversation_queue;
+pub mod conversation_run;
 pub mod egress;
 pub mod eval;
 pub mod event;
@@ -142,6 +143,13 @@ pub use conversation_queue::{
     ConversationQueueProjection, ConversationQueueRevision,
     MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
+};
+pub use conversation_run::{
+    CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION, ConversationRunFinalizedEntryV1,
+    ConversationRunLifecycleRecordV1, ConversationRunLifecycleRecorder,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, MAX_CONVERSATION_RUN_ID_BYTES,
+    MAX_CONVERSATION_RUN_MESSAGE_ID_BYTES, MAX_CONVERSATION_RUN_SUMMARY_BYTES,
+    conversation_run_lifecycle_record_from_stream,
 };
 pub use egress::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressAuditError,

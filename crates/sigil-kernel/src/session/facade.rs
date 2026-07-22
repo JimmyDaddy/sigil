@@ -381,6 +381,17 @@ impl Session {
         Ok(crate::RunCancellationRecorder::new(store.clone()))
     }
 
+    /// Returns the store-backed recorder for adapter-owned foreground run lifecycle boundaries.
+    pub fn conversation_run_lifecycle_recorder(
+        &self,
+    ) -> std::result::Result<crate::ConversationRunLifecycleRecorder, DurableAuditError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(DurableAuditError::MissingDurableStore)?;
+        Ok(crate::ConversationRunLifecycleRecorder::new(store.clone()))
+    }
+
     /// Returns the store-backed recorder used by pre-egress barriers and lifecycle recovery.
     pub fn egress_audit_recorder(
         &self,
