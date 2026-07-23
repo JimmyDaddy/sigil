@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O3、O4a-O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity、detached background batch slices implemented；O4b3b restart recovery、O5-O8 deferred
+状态：accepted / O0-O4b3b implemented；O5-O8 deferred
 
 创建日期：2026-07-22
 
@@ -554,8 +554,10 @@ V1 不新增模型可见的 polling `await_agents`。Host-owned join 由 complet
 reservation，完成后注入 `agent_batch_results` 并自动恢复 parent。O4b2 最初让 `batch_id` 由
 parent session ref 与外层 tool call id 派生；O4b3b identity slice 已改为由 kernel 传递的
 parent logical run id 与 tool call id 派生，不再把 session 文件路径当作运行身份。detached
-`background` batch 也已接入同一身份、预检和原子 slot reservation；restart reconciliation
-仍留在 O4b3b。
+`background` batch 也已接入同一身份、预检和原子 slot reservation。restart reconciliation
+会在 session writer restore 时依据 durable thread/attempt/result/continuation evidence 收口：
+缺失 live owner 的 thread/attempt 变为 Interrupted，不能证明安全的 continuation 变为 Failed，
+不会重放 provider 请求。
 
 ## 12. Completion-driven continuation
 
@@ -930,13 +932,17 @@ allow_write_subagents = true
   provider 启动并写失败终态。成功后 tool 立即返回，members 真并发运行；空闲 collector 单写
   terminal/result，TUI 沿用 non-blocking `AgentResultContinuation(Pending)` 显示 result-ready，
   有 queued follow-up 时不抢占输入，也不要求模型轮询。
+- O4b3b 的 restart reconciliation 已完成：session writer restore 先为无终态 attempt 追加
+  `AgentRunInterrupted`，再收口仅有 ThreadStarted/Running、尚未来得及写 AttemptStarted 的 crash
+  window；因此 batch 的所有未知 member 都进入 Interrupted terminal，active batch 计数归零。
+  continuation 已为 Started 时，provider delivery outcome 不确定，恢复追加 Failed；Pending 只有在
+  child result 已 durable 时才保留为可继续，否则同样 Failed。恢复条目幂等，第二次 load 不重复
+  追加，也不根据稳定 batch id 或旧 handle reference 自动创建新的 provider request。
 - approved `/plan` 的 `sigil-plan-v2` executable schema 只有在 base/current workspace snapshot 均存在且完全相等时，才直接 promotion 为同一份 `TaskPlan v1 Accepted`，保留 step mapping，不再调用第二个 Planner；snapshot 缺失、旧 `sigil-plan-v1` 或字段不完整的 draft 继续走隔离 planner 兼容路径。draft 会持久化解析出的 schema version；task id 由 plan id 与 plan hash 稳定派生，`TaskCreatedFromPlan` 记录 durable link，`PlanDecisionRecorded(Accepted)` 是最终提交标记。提交前 crash 会继续显示 pending 并幂等补齐同一 task；若期间 workspace drift，则 supersede 已提升 plan、取消未完成 task并要求重新规划。
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity、
-detached background batch slices 已完成；Task DAG 并发、完整诊断通道和 restart batch
-reconciliation 仍属于 O4b3b-O8。
+本 checkpoint 表示 O4b3a 和 O4b3b 已完成；Task DAG 并发与完整诊断通道仍属于 O5-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -986,9 +992,7 @@ reconciliation 仍属于 O4b3b-O8。
 
 ### O4: Completion hub and batch Explore
 
-实施状态：O4a、O4b1、O4b2、O4b3a、O4b3b durable/TUI projection、parent
-logical-run identity 和 detached background batch slices 完成
-（2026-07-23）；O4b3b restart reconciliation deferred。
+实施状态：O4a、O4b1、O4b2、O4b3a 和 O4b3b 完成（2026-07-23）。
 
 - O4a 已为 ordinary chat 的兼容 `spawn_agent(mode=join_before_final)` 接入 root-run
   host join barrier：只有同一 provider turn 的整批调用均为 runtime 明确认识的
@@ -1059,10 +1063,10 @@ logical-run identity 和 detached background batch slices 完成
   占用 `/agent` 可选序号。kernel projection、ordinary batch、planner discovery、TUI row/model 和
   layout hit-area 均有回归测试。
 
-O4b3b 仍包括：
-
-- restart reconciliation：进程重启后依据 durable batch/member/attempt evidence fail closed 地
-  收口未知运行，不把缺失 live handle 的 participant 静默重放为新 provider 请求。
+O4b3b restart reconciliation 会在进程重启后依据 durable batch/member/attempt/result/
+continuation evidence fail closed 地收口未知运行；缺失 live handle 的 participant 不会被静默
+重放为新 provider 请求。只有 durable child result 对应的 Pending continuation 可以恢复为待处理
+通知；Started 或无 durable result 的 Pending continuation 均追加 Failed terminal。
 
 退出条件：2-4 个 Explore 真实重叠；等待期间 provider/model polling turn 为 0；任一预检失败零启动。
 

@@ -1839,6 +1839,77 @@ pub fn interrupted_agent_attempts(entries: &[SessionLogEntry]) -> Vec<AgentRunIn
         .collect()
 }
 
+/// Returns recovery entries for non-terminal agent threads that have no live attempt to
+/// reconcile.
+///
+/// Session restore first interrupts every started attempt. This second pass closes the smaller
+/// crash window where a thread start/status reached durable storage but its attempt start did not.
+/// Threads with an open attempt are left to [`interrupted_agent_attempts`] so attempt-level audit
+/// evidence is not replaced by a thread-only terminal.
+pub fn interrupted_agent_threads(
+    entries: &[SessionLogEntry],
+) -> Vec<AgentThreadStatusChangedEntry> {
+    let projection = AgentThreadStateProjection::from_entries(entries);
+    projection
+        .threads
+        .values()
+        .filter(|thread| {
+            !thread.status.is_terminal()
+                && !thread
+                    .attempts
+                    .values()
+                    .any(|attempt| attempt.interrupted.is_none())
+        })
+        .map(|thread| AgentThreadStatusChangedEntry {
+            thread_id: thread.thread_id.clone(),
+            status: AgentThreadStatus::Interrupted,
+            reason: Some(
+                "agent thread lost its live execution owner during session restore".to_owned(),
+            ),
+            updated_at_ms: None,
+        })
+        .collect()
+}
+
+/// Returns fail-closed recovery entries for parent continuations that cannot be replayed safely.
+///
+/// A `Started` continuation may already have reached the provider and therefore has an unknown
+/// delivery outcome after restart. A `Pending` continuation remains resumable only when the child
+/// result itself is durable; otherwise the process-local child handle disappeared before producing
+/// the context that the parent continuation requires.
+pub fn interrupted_agent_result_continuations(
+    entries: &[SessionLogEntry],
+) -> Vec<AgentResultContinuationEntry> {
+    let continuations = AgentResultContinuationProjection::from_entries(entries);
+    let threads = AgentThreadStateProjection::from_entries(entries);
+    continuations
+        .statuses
+        .into_iter()
+        .filter_map(|(thread_id, status)| {
+            let reason = match status {
+                AgentResultContinuationStatus::Started => {
+                    "parent continuation delivery became uncertain during session restore"
+                }
+                AgentResultContinuationStatus::Pending
+                    if threads
+                        .threads
+                        .get(&thread_id)
+                        .is_none_or(|thread| thread.result.is_none()) =>
+                {
+                    "parent continuation has no durable child result after session restore"
+                }
+                _ => return None,
+            };
+            Some(AgentResultContinuationEntry {
+                thread_id,
+                status: AgentResultContinuationStatus::Failed,
+                reason: Some(reason.to_owned()),
+                updated_at_ms: None,
+            })
+        })
+        .collect()
+}
+
 /// Returns recovery entries for routes that were left non-terminal across process restart.
 pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedEntry> {
     let mut statuses = BTreeMap::<AgentRouteId, AgentRouteStatus>::new();

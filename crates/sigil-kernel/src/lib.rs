@@ -71,6 +71,7 @@ pub use agent_thread::{
     AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, DelegationAuthority,
     DelegationAuthorityRecord, WorkspaceRootSnapshot, closed_agent_routes,
     interrupted_agent_attempts, interrupted_agent_mailbox_messages,
+    interrupted_agent_result_continuations, interrupted_agent_threads,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use cancellation::{

@@ -26,6 +26,7 @@ use crate::{
         AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
         AgentThreadStateProjection, AgentThreadStatusChangedEntry, closed_agent_routes,
         interrupted_agent_attempts, interrupted_agent_mailbox_messages,
+        interrupted_agent_result_continuations, interrupted_agent_threads,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     context_engine::{

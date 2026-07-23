@@ -436,6 +436,20 @@ impl JsonlSessionStore {
             reconciled_entries.push(entry);
         }
 
+        for interruption in interrupted_agent_threads(&entries) {
+            let entry =
+                SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(interruption));
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
+        for interruption in interrupted_agent_result_continuations(&entries) {
+            let entry =
+                SessionLogEntry::Control(ControlEntry::AgentResultContinuation(interruption));
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
         for closed_route in closed_agent_routes(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
             entries.push(entry.clone());

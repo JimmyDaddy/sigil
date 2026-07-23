@@ -1187,6 +1187,214 @@ fn load_from_store_marks_orphan_agent_attempt_as_interrupted() -> Result<()> {
 }
 
 #[test]
+fn load_from_store_reconciles_agent_batch_without_replaying_missing_live_handles() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let batch_id = AgentBatchId::new("batch_restart")?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+            snapshot: sample_snapshot()?,
+        }),
+    ))?;
+
+    let mut completed = sample_started_entry()?;
+    completed.thread_id = thread_id("thread_completed")?;
+    completed.thread_session_ref = session_ref("children/thread_completed.jsonl")?;
+    completed.batch_id = Some(batch_id.clone());
+    completed.batch_member_key = Some(route_id("completed")?);
+    completed.invocation_mode = AgentInvocationMode::Background;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+        completed,
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
+            result: AgentThreadResult {
+                thread_id: thread_id("thread_completed")?,
+                session_ref: session_ref("children/thread_completed.jsonl")?,
+                status: AgentThreadTerminalStatus::Completed,
+                summary: "completed before restart".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:completed".to_owned(),
+                final_answer_ref: None,
+            },
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread_id("thread_completed")?,
+            status: AgentResultContinuationStatus::Pending,
+            reason: Some("result ready".to_owned()),
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+
+    let mut orphan_attempt = sample_started_entry()?;
+    orphan_attempt.thread_id = thread_id("thread_orphan_attempt")?;
+    orphan_attempt.thread_session_ref = session_ref("children/thread_orphan_attempt.jsonl")?;
+    orphan_attempt.batch_id = Some(batch_id.clone());
+    orphan_attempt.batch_member_key = Some(route_id("orphan_attempt")?);
+    orphan_attempt.invocation_mode = AgentInvocationMode::Background;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+        orphan_attempt,
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentRunAttemptStarted(AgentRunAttemptStartedEntry {
+            thread_id: thread_id("thread_orphan_attempt")?,
+            attempt_id: attempt_id("attempt_orphan")?,
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            background: true,
+            provider_background_handle_ref: None,
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread_id("thread_orphan_attempt")?,
+            status: AgentResultContinuationStatus::Pending,
+            reason: Some("joined before restart".to_owned()),
+            updated_at_ms: Some(2),
+        }),
+    ))?;
+
+    let mut orphan_thread = sample_started_entry()?;
+    orphan_thread.thread_id = thread_id("thread_orphan_start")?;
+    orphan_thread.thread_session_ref = session_ref("children/thread_orphan_start.jsonl")?;
+    orphan_thread.batch_id = Some(batch_id.clone());
+    orphan_thread.batch_member_key = Some(route_id("orphan_start")?);
+    orphan_thread.invocation_mode = AgentInvocationMode::Background;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+        orphan_thread,
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+            thread_id: thread_id("thread_orphan_start")?,
+            status: AgentThreadStatus::Running,
+            reason: Some("attempt start not yet durable".to_owned()),
+            updated_at_ms: Some(3),
+        }),
+    ))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-pro", store.clone())?;
+    let projection = session.agent_thread_state_projection();
+    let batch = projection.batches.get(&batch_id).expect("batch projection");
+    let summary = batch.status_summary(&projection.threads);
+
+    assert_eq!(summary.total_members, 3);
+    assert_eq!(summary.active_members, 0);
+    assert_eq!(summary.terminal_members, 3);
+    assert_eq!(summary.problem_members, 2);
+    assert_eq!(projection.graph_summary().active_batches, 0);
+    assert_eq!(
+        projection
+            .threads
+            .get(&thread_id("thread_orphan_attempt")?)
+            .map(|thread| thread.status),
+        Some(AgentThreadStatus::Interrupted)
+    );
+    assert_eq!(
+        projection
+            .threads
+            .get(&thread_id("thread_orphan_start")?)
+            .map(|thread| thread.status),
+        Some(AgentThreadStatus::Interrupted)
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(
+        continuations.pending_thread_ids,
+        vec![thread_id("thread_completed")?]
+    );
+    assert_eq!(
+        continuations
+            .statuses
+            .get(&thread_id("thread_orphan_attempt")?),
+        Some(&AgentResultContinuationStatus::Failed)
+    );
+
+    let first_restore_entries = JsonlSessionStore::read_entries(store.path())?;
+    drop(session);
+    let reloaded = Session::load_from_store("deepseek", "deepseek-v4-pro", store.clone())?;
+    let second_restore_entries = JsonlSessionStore::read_entries(store.path())?;
+    assert_eq!(second_restore_entries.len(), first_restore_entries.len());
+    assert_eq!(
+        reloaded
+            .agent_thread_state_projection()
+            .batches
+            .get(&batch_id)
+            .expect("reloaded batch")
+            .status_summary(&reloaded.agent_thread_state_projection().threads)
+            .active_members,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn load_from_store_fails_started_parent_continuation_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+            snapshot: sample_snapshot()?,
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+        sample_started_entry()?,
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
+            result: AgentThreadResult {
+                thread_id: thread_id("thread_1")?,
+                session_ref: session_ref("children/thread_1.jsonl")?,
+                status: AgentThreadTerminalStatus::Completed,
+                summary: "ready".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:ready".to_owned(),
+                final_answer_ref: None,
+            },
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread_id("thread_1")?,
+            status: AgentResultContinuationStatus::Started,
+            reason: Some("provider dispatch began".to_owned()),
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-pro", store)?;
+
+    assert_eq!(
+        session
+            .agent_result_continuation_projection()
+            .statuses
+            .get(&thread_id("thread_1")?),
+        Some(&AgentResultContinuationStatus::Failed)
+    );
+    assert!(
+        session
+            .agent_result_continuation_projection()
+            .pending_thread_ids
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn interrupted_agent_attempts_skip_terminal_attempts_and_threads() -> Result<()> {
     let started_attempt = |thread: &str, attempt: &str| -> Result<SessionLogEntry> {
         Ok(SessionLogEntry::Control(

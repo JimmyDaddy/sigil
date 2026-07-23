@@ -931,15 +931,20 @@ planner/participant transcript isolation、唯一 parent final synthesis、Plan 
   root logical-run id。runtime 在 child admission 前使用 `root logical-run id + outer tool call
   id` 派生 opaque `AgentBatchId`；缺失或空 identity 时整批拒绝，同一 root run replay 保持稳定，
   不同 root run 互相隔离，且不再依赖 session 文件路径。detached background batch 已复用该
-  durable identity；restart reconciliation 仍需基于它收口未知运行。
+  durable identity。
 - O4b3b detached background batch slice 已支持 `completion_mode=background`。它复用整批
   preflight、session materialization 和 supervisor 原子 slot reservation；每个 member 获得独立
   cancellation owner 与 mailbox。runtime 先创建 gated tasks，再把全部 detached handles 原子写入
   共享 owner，成功后才放行 provider dispatch；注册失败会 abort gated tasks 并为已 Started
   members 写失败终态，因此不会出现半批 provider 启动。成功 tool result 立即返回
   `backgrounded=true`；空闲 collector 后续单写 terminal/result，TUI 通过既有 non-blocking
-  result-ready continuation 展示完成且不抢占 queued follow-up。进程重启后的 batch reconcile
-  仍未实现，缺失 live handle 时不得自动重放 provider。
+  result-ready continuation 展示完成且不抢占 queued follow-up。
+- O4b3b restart reconciliation 已接入 session writer restore。无终态 attempt 先追加
+  `AgentRunInterrupted`；ThreadStarted/Running 已 durable、但 AttemptStarted 尚未 durable 的
+  crash window 再追加 thread-level Interrupted，因此 batch member 全部 terminal 后 active batch
+  自动归零。`AgentResultContinuation::Started` 因 provider delivery outcome 不确定而恢复为
+  Failed；Pending 只有绑定 durable child result 时保留，否则 Failed。恢复结果 append-only、
+  幂等且不创建 provider request，稳定 batch identity 只用于审计与投影，不能作为自动重放授权。
 - Parent agent 在发起 Agent 类 tool call 的同一 model turn 中产生的 pre-tool assistant 文本只作为 live stream 展示，不作为持久 parent session history 重放，并在 TUI 中按 Thinking 样式渲染；这避免“先自己补做，再等待子 agent”的内容污染父上下文。最终面向用户的回答必须发生在 child result/status 已回到 parent 后的后续 turn。
 - Kernel 已提供 `AgentDelegationRequirement`：绑定该 requirement 的 run 会拒绝接受未产生 terminal 或 result-bearing Agent 类工具结果的 final answer，并通过 transient retry prompt 要求模型调用 agent-thread tool；无效输入、tool execution error 或仍处于 running 状态的 agent tool result 不会解除 hard gate。当前 TUI ordinary-chat 生产路径尚未稳定绑定该 requirement，接线与 typed delegation authority 属于 RFC-0053 O1。
 - Task DAG 当前只完成 read-only ready batch selection；`SequentialTaskOrchestrator` 仍按 step 顺序执行。O4b1 completion hub 只接入 ordinary-chat joined children，尚未拆除 task child execution 对 parent `Session` 的可变借用；completion-driven Task coordinator 和串行 parent commit 属于 RFC-0053 O5。
