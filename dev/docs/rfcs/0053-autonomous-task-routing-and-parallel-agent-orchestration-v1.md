@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O3、O4a-O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity slices implemented；O4b3b background/restart recovery、O5-O8 deferred
+状态：accepted / O0-O3、O4a-O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity、detached background batch slices implemented；O4b3b restart recovery、O5-O8 deferred
 
 创建日期：2026-07-22
 
@@ -554,7 +554,8 @@ V1 不新增模型可见的 polling `await_agents`。Host-owned join 由 complet
 reservation，完成后注入 `agent_batch_results` 并自动恢复 parent。O4b2 最初让 `batch_id` 由
 parent session ref 与外层 tool call id 派生；O4b3b identity slice 已改为由 kernel 传递的
 parent logical run id 与 tool call id 派生，不再把 session 文件路径当作运行身份。detached
-`background` batch 和 restart reconciliation 仍留在 O4b3b。
+`background` batch 也已接入同一身份、预检和原子 slot reservation；restart reconciliation
+仍留在 O4b3b。
 
 ## 12. Completion-driven continuation
 
@@ -903,7 +904,7 @@ allow_write_subagents = true
 - direct chat 与 queued follow-up 的 task handoff 会在 `TaskHandoffRequested` / `Resolved` / `TaskRun::Started` 之前追加 `TaskRunCancellationScopeBound`，把 task 绑定到继承的 root run scope，避免 admission→binding 崩溃窗口。恢复只认可最新绑定 scope 上的 `Run` 或同 task `Task` cancellation；后续显式 continue 使用新 scope，因此旧取消不会永久污染 task。
 - O3 已落地 participant isolation：Planner、Executor、Subagent 和 Synthesis 都写入 retry-stable child session，parent 只保存 bounded summary、result ref、attempt/result lifecycle 与 task control state。child 的 assistant/text delta 不再进入 root TUI stream。
 - O4b1 已落地 runtime-owned `AgentCompletionHub` 和 single-delivery terminal envelope：完整 batch 在任何 participant future 被 poll 前拒绝重复 attempt identity；accepted registration 由 consuming hub 每项只产出一个 terminal envelope，同时保留真实 completion order 和稳定 request sequence。现有 O4a join barrier 已复用该 hub，完成顺序可以实时收集，parent durable commit 继续单写，注入模型前继续按原 tool-call sequence 稳定排序。
-- O4b2 已落地普通 chat 的 `spawn_agents` join compatibility surface：schema 接受 2-4 个带稳定 `request_key` 的 participant，整批完成 profile、delegation、permission/tool-safety、provider/session materialization 和 budget 预检后才原子预留全部 active slots。容量或任一成员预检/注册失败时不 poll 任何 provider future；成功批次并发执行，经 completion hub 收口后按 `request_key` 稳定顺序注入 typed `agent_batch_results`，parent 不产生 `wait_agent` polling turn。当前只支持 `join_before_final`；background batch 属于 O4b3b 后续切片。
+- O4b2 已落地普通 chat 的 `spawn_agents` join compatibility surface：schema 接受 2-4 个带稳定 `request_key` 的 participant，整批完成 profile、delegation、permission/tool-safety、provider/session materialization 和 budget 预检后才原子预留全部 active slots。容量或任一成员预检/注册失败时不 poll 任何 provider future；成功 join 批次并发执行，经 completion hub 收口后按 `request_key` 稳定顺序注入 typed `agent_batch_results`，parent 不产生 `wait_agent` polling turn。
 - O4b3a 已为隔离 Task planner 注册 planner-only `request_task_discovery`。每次 planning
   attempt 最多调用一次，默认最多 3 个 probe、硬上限 4；所有 probe 固定使用 trusted built-in
   Explore、`SubagentRead` 和 `SharedReadOnly`。Runtime 在 provider dispatch 前完成重复 id/objective、
@@ -922,13 +923,20 @@ allow_write_subagents = true
   runtime 使用 `root logical-run id + outer tool call id` 派生 opaque `AgentBatchId`，缺失或空
   identity 时整批 fail closed。该身份不作为 provider response handle 暴露给模型，也不再依赖
   session 文件路径；同一 root run 的 tool replay 得到相同 batch id，不同 root run 相互隔离。
+- O4b3b 的 detached background batch slice 已完成：`spawn_agents` 接受
+  `completion_mode=background`，沿用整批 profile、permission/tool-safety、provider/session、
+  budget 预检和原子 slot reservation。每个 member 有独立 cancellation owner 与 mailbox；runtime
+  在所有 detached handles 原子注册前用启动闸门阻止 provider dispatch，注册失败则整批零
+  provider 启动并写失败终态。成功后 tool 立即返回，members 真并发运行；空闲 collector 单写
+  terminal/result，TUI 沿用 non-blocking `AgentResultContinuation(Pending)` 显示 result-ready，
+  有 queued follow-up 时不抢占输入，也不要求模型轮询。
 - approved `/plan` 的 `sigil-plan-v2` executable schema 只有在 base/current workspace snapshot 均存在且完全相等时，才直接 promotion 为同一份 `TaskPlan v1 Accepted`，保留 step mapping，不再调用第二个 Planner；snapshot 缺失、旧 `sigil-plan-v1` 或字段不完整的 draft 继续走隔离 planner 兼容路径。draft 会持久化解析出的 schema version；task id 由 plan id 与 plan hash 稳定派生，`TaskCreatedFromPlan` 记录 durable link，`PlanDecisionRecorded(Accepted)` 是最终提交标记。提交前 crash 会继续显示 pending 并幂等补齐同一 task；若期间 workspace drift，则 supersede 已提升 plan、取消未完成 task并要求重新规划。
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity
-slice 已完成；Task DAG 并发、完整诊断通道、detached background/restart batch 协议仍属于
-O4b3b-O8。
+本 checkpoint 表示 O4b3a 和 O4b3b durable/TUI projection、parent logical-run identity、
+detached background batch slices 已完成；Task DAG 并发、完整诊断通道和 restart batch
+reconciliation 仍属于 O4b3b-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -978,9 +986,9 @@ O4b3b-O8。
 
 ### O4: Completion hub and batch Explore
 
-实施状态：O4a、O4b1、O4b2、O4b3a、O4b3b durable/TUI projection 和 parent
-logical-run identity slices 完成
-（2026-07-23）；O4b3b background/restart slice deferred。
+实施状态：O4a、O4b1、O4b2、O4b3a、O4b3b durable/TUI projection、parent
+logical-run identity 和 detached background batch slices 完成
+（2026-07-23）；O4b3b restart reconciliation deferred。
 
 - O4a 已为 ordinary chat 的兼容 `spawn_agent(mode=join_before_final)` 接入 root-run
   host join barrier：只有同一 provider turn 的整批调用均为 runtime 明确认识的
@@ -1024,6 +1032,13 @@ logical-run identity slices 完成
   `batch_id` / `request_key` 的 bounded `agent_batch_results`，直接触发下一 parent provider
   turn，不调用 `wait_agent`。barrier 回归证明 2 个 Explore 同时 active，模型只有 spawn/results
   两个 turn；容量失败回归证明无 provider dispatch、无 active slot、无 child thread projection。
+- O4b3b detached background batch 复用相同 schema 的
+  `completion_mode=background`。整批预检、session materialization 与 slot reservation 完成后，
+  runtime 为每个 member 建立独立 cancellation owner 和 mailbox；所有 task 先阻塞在
+  provider-start gate，只有 detached handle map 原子注册整批成功后才统一放行。tool 立即返回
+  `backgrounded=true` 和稳定 batch/member identity；TUI 空闲 collector 持久化 terminal/result
+  后走既有 non-blocking result-ready continuation，有 queued follow-up 时只保留 pending notice。
+  单成员 message/cancel/read 能力继续按 member thread id 工作。
 - O4b3a 新增只在隔离 Task planner 临时 registry 可见的 `request_task_discovery`。Planner 不能
   使用通用 `spawn_agent` / `spawn_agents` / `wait_agent`，每个 planning attempt 最多提交一个
   probe batch。默认 3、硬上限 4；`multi_agent_mode=none` 或
@@ -1046,7 +1061,8 @@ logical-run identity slices 完成
 
 O4b3b 仍包括：
 
-- detached `background` batch 与 restart reconciliation。
+- restart reconciliation：进程重启后依据 durable batch/member/attempt evidence fail closed 地
+  收口未知运行，不把缺失 live handle 的 participant 静默重放为新 provider 请求。
 
 退出条件：2-4 个 Explore 真实重叠；等待期间 provider/model polling turn 为 0；任一预检失败零启动。
 

@@ -45,7 +45,10 @@ impl AgentToolRuntime {
                 );
             }
         };
-        if !self.join_batch_eligible || self.run_cancellation.is_none() {
+        let completion_mode = parsed.completion_mode;
+        if completion_mode == AgentInvocationMode::JoinBeforeFinal
+            && (!self.join_batch_eligible || self.run_cancellation.is_none())
+        {
             return batch_spawn_error(
                 call,
                 ToolErrorKind::Unsupported,
@@ -53,10 +56,11 @@ impl AgentToolRuntime {
                 "spawn_agents requires a host-owned root-run join barrier".to_owned(),
             );
         }
-        if self
-            .run_cancellation
-            .as_ref()
-            .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+        if completion_mode == AgentInvocationMode::JoinBeforeFinal
+            && self
+                .run_cancellation
+                .as_ref()
+                .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
         {
             return batch_spawn_error(
                 call,
@@ -178,7 +182,7 @@ impl AgentToolRuntime {
                 authority.clone(),
                 thread_id.clone(),
                 spawn.profile_id.clone(),
-                AgentInvocationMode::JoinBeforeFinal,
+                completion_mode,
                 AgentInvocationSource::Chat,
                 &spawn.objective,
                 &child_registry,
@@ -280,7 +284,7 @@ impl AgentToolRuntime {
                 prompt: spawn.prompt,
                 workspace_root: options.workspace_root.clone(),
                 provider_capabilities: child_capabilities,
-                invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+                invocation_mode: completion_mode,
                 invocation_source: AgentInvocationSource::Chat,
                 delegation_admission,
                 display_name_hint: spawn.display_name_hint,
@@ -349,6 +353,10 @@ impl AgentToolRuntime {
             });
         }
         reservation.commit();
+
+        if completion_mode == AgentInvocationMode::Background {
+            return self.start_background_agent_batch(session, call, handler, &batch_id, started);
+        }
 
         let mut joined_members = Vec::with_capacity(started.len());
         let mut remaining = started.into_iter();
@@ -431,6 +439,166 @@ impl AgentToolRuntime {
                     "batch_id": batch_id.as_str(),
                     "member_count": joined_members.len(),
                     "members": joined_members,
+                }),
+                ..ToolResultMeta::default()
+            },
+        )
+    }
+
+    fn start_background_agent_batch(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        handler: &mut (dyn EventHandler + Send),
+        batch_id: &AgentBatchId,
+        started: Vec<StartedBatchSpawnMember>,
+    ) -> ToolResult {
+        if let Some(missing) = started
+            .iter()
+            .find(|member| member.child_thread.mailbox_rx.is_none())
+        {
+            let request_key = missing.request_key.clone();
+            let mut first_cleanup_error = None;
+            for member in &started {
+                if let Err(error) = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &member.child_thread,
+                    "background batch mailbox was not created".to_owned(),
+                ) {
+                    self.supervisor
+                        .release_runtime_thread(&member.child_thread.thread_id);
+                    if first_cleanup_error.is_none() {
+                        first_cleanup_error = Some(error);
+                    }
+                }
+            }
+            let message = first_cleanup_error.map_or_else(
+                || "background batch mailbox was not created".to_owned(),
+                |error| {
+                    format!("background batch mailbox was not created; cleanup failed: {error:#}")
+                },
+            );
+            return batch_spawn_error(call, ToolErrorKind::Internal, Some(&request_key), message);
+        }
+
+        let mut registrations = Vec::with_capacity(started.len());
+        let mut start_gates = Vec::with_capacity(started.len());
+        let mut background_members = Vec::with_capacity(started.len());
+        for member in started {
+            let StartedBatchSpawnMember {
+                request_key,
+                batch_id: member_batch_id,
+                call: _,
+                mut child_thread,
+                child_agent,
+                child_session,
+                child_input,
+                child_options,
+            } = member;
+            let mailbox_rx = child_thread
+                .mailbox_rx
+                .take()
+                .expect("background batch mailboxes were preflighted");
+            let thread_id = child_thread.thread_id.clone();
+            let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
+            let cancellation_owner = RunCancellationOwner::new();
+            let cancellation_handle = cancellation_owner.handle();
+            let cancellation_task_guard = cancellation_handle
+                .register_task()
+                .expect("new background batch cancellation owner must admit its first task");
+            let child_input = child_input.with_cancellation(cancellation_handle);
+            let run_thread_id = thread_id.clone();
+            let child_session_ref = child_thread.child_session_ref.clone();
+            let event_sink = self.background_runs.event_sink();
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                let _cancellation_task_guard = cancellation_task_guard;
+                start_rx
+                    .await
+                    .map_err(|_| anyhow!("background batch start gate was cancelled"))?;
+                run_background_chat_agent(
+                    run_thread_id,
+                    child_agent,
+                    child_session,
+                    child_session_ref,
+                    child_input,
+                    child_options,
+                    mailbox_rx,
+                    event_sink,
+                )
+                .await
+            });
+            registrations.push((
+                thread_id.clone(),
+                BackgroundChatAgentHandle {
+                    thread: thread_record,
+                    handle,
+                    cancellation_owner,
+                },
+            ));
+            start_gates.push(start_tx);
+            background_members.push(json!({
+                "request_key": request_key.as_str(),
+                "batch_id": member_batch_id.as_str(),
+                "thread_id": thread_id.as_str(),
+                "status": "running",
+            }));
+        }
+
+        if let Err(error) = self.background_runs.insert_batch(&mut registrations) {
+            drop(start_gates);
+            let mut first_cleanup_error = None;
+            for (_, background) in &registrations {
+                background.handle.abort();
+                let thread = background.thread.to_runtime_thread();
+                if let Err(cleanup_error) = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    "background batch registration failed before provider dispatch".to_owned(),
+                ) {
+                    self.supervisor.release_runtime_thread(&thread.thread_id);
+                    if first_cleanup_error.is_none() {
+                        first_cleanup_error = Some(cleanup_error);
+                    }
+                }
+            }
+            let message = first_cleanup_error.map_or_else(
+                || format!("{error:#}"),
+                |cleanup_error| format!("{error:#}; batch cleanup failed: {cleanup_error:#}"),
+            );
+            return batch_spawn_error(call, ToolErrorKind::Internal, None, message);
+        }
+        for start_gate in start_gates {
+            let _ = start_gate.send(());
+        }
+
+        ToolResult::ok(
+            call.id.clone(),
+            call.name.clone(),
+            serde_json::to_string(&json!({
+                "status": "running",
+                "terminal": false,
+                "backgrounded": true,
+                "host_join_registered": false,
+                "batch_id": batch_id.as_str(),
+                "member_count": background_members.len(),
+                "members": background_members,
+                "next_action": "continue only non-overlapping parent work; the host will surface result-ready completion without polling",
+                "do_not_poll": true,
+                "do_not_describe_as_finished": true,
+            }))
+            .unwrap_or_else(|error| format!("failed to serialize background batch status: {error}")),
+            ToolResultMeta {
+                details: json!({
+                    "status": "running",
+                    "terminal": false,
+                    "backgrounded": true,
+                    "host_join_registered": false,
+                    "batch_id": batch_id.as_str(),
+                    "member_count": background_members.len(),
+                    "members": background_members,
                 }),
                 ..ToolResultMeta::default()
             },

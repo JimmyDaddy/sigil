@@ -149,6 +149,39 @@ impl AgentToolBackgroundRuns {
         Ok(())
     }
 
+    /// Atomically registers a detached batch before any member can pass its provider-start gate.
+    ///
+    /// On error the caller retains every registration and can abort the gated tasks without
+    /// dispatching provider work.
+    pub(super) fn insert_batch(
+        &self,
+        registrations: &mut Vec<(AgentThreadId, BackgroundChatAgentHandle)>,
+    ) -> Result<()> {
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        let mut batch_ids = BTreeSet::new();
+        for (thread_id, _) in registrations.iter() {
+            if !batch_ids.insert(thread_id.clone()) {
+                bail!(
+                    "agent background batch contains duplicate thread {}",
+                    thread_id.as_str()
+                );
+            }
+            if handles.contains_key(thread_id) {
+                bail!(
+                    "agent background run {} is already registered",
+                    thread_id.as_str()
+                );
+            }
+        }
+        for (thread_id, handle) in registrations.drain(..) {
+            handles.insert(thread_id, handle);
+        }
+        Ok(())
+    }
+
     pub(super) fn is_running(&self, thread_id: &AgentThreadId) -> bool {
         self.handles
             .lock()

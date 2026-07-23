@@ -73,7 +73,7 @@ fn tool_batch_allows_host_join(calls: &[ToolCall]) -> bool {
             SPAWN_AGENTS_TOOL_NAME => serde_json::from_str::<Value>(&call.args_json)
                 .ok()
                 .and_then(|args| SpawnAgentsArgs::parse(&args).ok())
-                .is_some(),
+                .is_some_and(|args| args.completion_mode == AgentInvocationMode::JoinBeforeFinal),
             _ => false,
         })
 }

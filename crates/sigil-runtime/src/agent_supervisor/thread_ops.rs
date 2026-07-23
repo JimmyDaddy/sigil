@@ -116,10 +116,10 @@ impl AgentSupervisor {
             if active.batch_reserved
                 && active.profile_id == *profile_id
                 && active.attempt_id == *attempt_id
-                && !matches!(invocation_mode, AgentInvocationMode::Background)
-                && mailbox_tx.is_none()
             {
                 active.batch_reserved = false;
+                active.background = matches!(invocation_mode, AgentInvocationMode::Background);
+                active.mailbox_tx = mailbox_tx;
                 return Ok(());
             }
             return Err(format!(

@@ -11,7 +11,7 @@ use super::{
     thread_state::ActiveAgentThread,
 };
 
-/// Atomic runtime-slot reservation for one joined child-agent batch.
+/// Atomic runtime-slot reservation for one child-agent batch.
 pub(crate) struct AgentChildBatchReservation {
     supervisor: AgentSupervisor,
     thread_ids: BTreeSet<AgentThreadId>,
@@ -38,7 +38,7 @@ impl Drop for AgentChildBatchReservation {
 }
 
 impl AgentSupervisor {
-    /// Reserves every runtime slot for one join-before-final batch or reserves none.
+    /// Reserves every runtime slot for one joined or detached chat batch, or reserves none.
     pub(crate) fn reserve_chat_child_batch(
         &self,
         starts: &[AgentChatChildStart],
@@ -48,9 +48,16 @@ impl AgentSupervisor {
         }
         let mut candidates = Vec::with_capacity(starts.len());
         let mut thread_ids = BTreeSet::new();
+        let invocation_mode = starts[0].invocation_mode;
+        if !matches!(
+            invocation_mode,
+            AgentInvocationMode::JoinBeforeFinal | AgentInvocationMode::Background
+        ) {
+            bail!("agent child batch supports only join-before-final or background participants");
+        }
         for start in starts {
-            if start.invocation_mode != AgentInvocationMode::JoinBeforeFinal {
-                bail!("agent child batch only supports join-before-final participants");
+            if start.invocation_mode != invocation_mode {
+                bail!("agent child batch cannot mix invocation modes");
             }
             if start.parent_depth >= self.budget.max_depth {
                 bail!(
@@ -70,7 +77,7 @@ impl AgentSupervisor {
                 ActiveAgentThread {
                     profile_id: start.profile_id.clone(),
                     attempt_id: begin_attempt_id(&thread_id)?,
-                    background: false,
+                    background: invocation_mode == AgentInvocationMode::Background,
                     mailbox_tx: None,
                     batch_reserved: true,
                 },

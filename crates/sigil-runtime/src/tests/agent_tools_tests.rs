@@ -18,26 +18,27 @@ use serde_json::json;
 use sha2::Digest;
 use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
-    AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
-    AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CommandPermissionConfig,
-    CompactionConfig, CompletionRequest, ControlEntry, DelegationAuthority, EventHandler,
-    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode,
-    PermissionConfig, PermissionEvaluationContext, PermissionMode, PermissionPolicyChain,
-    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
-    SessionLogEntry, TaskId, TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    UsageStats, WorkspaceConfig,
+    AgentProfileTrustEntry, AgentRunAttemptId, AgentRunInput, AgentRunOptions, AgentRunOutcome,
+    AgentThreadId, AgentThreadStatus, AgentToolDelegate, AgentTrustState, ApprovalMode,
+    AutoApproveHandler, CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
+    DelegationAuthority, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
+    MessageRole, MultiAgentMode, PermissionConfig, PermissionEvaluationContext, PermissionMode,
+    PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session,
+    SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskStepId, Tool, ToolAccess,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking,
+    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
     AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundRuns,
-    AgentToolProviderFactory, AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
+    AgentToolProviderFactory, AgentToolRuntime, BackgroundChatAgentHandle,
+    BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
     LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
     SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
-    chat_agent_thread_id_for_call, register_agent_tools,
+    chat_agent_thread_id_for_call, hash_text, register_agent_tools,
     register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
     tool_batch_allows_host_join,
 };
@@ -1616,8 +1617,9 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     );
     assert_eq!(
         batch_spec.input_schema["properties"]["completion_mode"]["enum"],
-        json!(["join_before_final"])
+        json!(["join_before_final", "background"])
     );
+    assert!(batch_spec.description.contains("result-ready"));
     Ok(())
 }
 
@@ -2615,6 +2617,240 @@ async fn spawn_agents_preflights_then_overlaps_members_without_model_polling() -
         })
     }));
     assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agents_background_returns_immediately_and_collects_the_whole_batch() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let background_runs = AgentToolBackgroundRuns::default();
+    let provider_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor.clone(),
+        config,
+        registry,
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::clone(&provider_barrier),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    )
+    .with_background_runs(background_runs.clone());
+    let call = ToolCall {
+        id: "call-batch-background".to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "completion_mode": "background",
+            "members": [
+                {
+                    "request_key": "kernel",
+                    "profile_id": "explore",
+                    "objective": "inspect kernel",
+                    "prompt": "inspect kernel"
+                },
+                {
+                    "request_key": "runtime",
+                    "profile_id": "explore",
+                    "objective": "inspect runtime",
+                    "prompt": "inspect runtime"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    runtime.set_join_batch_eligibility(std::slice::from_ref(&call));
+    runtime.set_root_logical_run_id(Some("root-run-batch-background"));
+    let mut session = Session::new("batch-background", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &call,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("background spawn_agents handled");
+
+    assert!(!result.is_error(), "{}", result.content);
+    assert_eq!(result.metadata.details["backgrounded"], true);
+    assert_eq!(result.metadata.details["host_join_registered"], false);
+    assert_eq!(result.metadata.details["member_count"], 2);
+    assert!(background_runs.has_any());
+    assert!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .all(|thread| {
+                thread.invocation_mode == Some(sigil_kernel::AgentInvocationMode::Background)
+                    && !thread.status.is_terminal()
+            })
+    );
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+
+    tokio::time::timeout(Duration::from_secs(1), provider_barrier.wait())
+        .await
+        .expect("both background members should reach provider dispatch");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !background_runs.has_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background batch should finish");
+    let mut collected = runtime
+        .collect_finished_background_runs(&mut session, &mut handler)
+        .await?;
+    collected.sort();
+
+    assert_eq!(collected.len(), 2);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(!background_runs.has_any());
+    let projection = session.agent_thread_state_projection();
+    let batch = projection
+        .batches
+        .values()
+        .next()
+        .expect("background batch projection");
+    assert_eq!(batch.member_thread_ids.len(), 2);
+    assert_eq!(
+        batch.status_summary(&projection.threads).terminal_members,
+        2
+    );
+    assert!(batch.member_thread_ids.iter().all(|thread_id| {
+        projection.threads.get(thread_id).is_some_and(|thread| {
+            thread.status == AgentThreadStatus::Completed && thread.result.is_some()
+        })
+    }));
+    assert!(
+        session
+            .agent_result_continuation_projection()
+            .statuses
+            .is_empty(),
+        "runtime collection leaves result-ready continuation scheduling to the host surface"
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agents_background_registration_failure_dispatches_no_provider() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let provider_started = Arc::new(AtomicBool::new(false));
+    let background_runs = AgentToolBackgroundRuns::default();
+    let logical_run_id = "root-run-batch-registration-failure";
+    let call_id = "call-batch-registration-failure";
+    let batch_id = format!(
+        "batch_{}",
+        &hash_text(&format!("{logical_run_id}:{call_id}"))[..12]
+    );
+    let existing_thread_id = chat_agent_thread_id_for_call(
+        &format!("{batch_id}-member-kernel"),
+        &AgentProfileId::new("explore")?,
+    )?;
+    let existing_cancellation = RunCancellationOwner::new();
+    let existing_handle = tokio::spawn(async {
+        futures::future::pending::<Result<super::background::BackgroundChatAgentResult>>().await
+    });
+    background_runs.insert(
+        existing_thread_id.clone(),
+        BackgroundChatAgentHandle {
+            thread: BackgroundChatAgentThreadRecord {
+                thread_id: existing_thread_id.clone(),
+                attempt_id: AgentRunAttemptId::new("attempt-existing-background")?,
+                profile_id: AgentProfileId::new("explore")?,
+                parent_thread_id: AgentThreadId::new("main")?,
+                child_session_ref: SessionRef::new_relative("children/existing-background.jsonl")?,
+                budget_scope_id: TaskId::new("existing_background_budget")?,
+            },
+            handle: existing_handle,
+            cancellation_owner: existing_cancellation,
+        },
+    )?;
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor.clone(),
+        config,
+        registry,
+        Arc::new(SlowTextProviderFactory {
+            delay: Duration::from_millis(1),
+            started: Arc::clone(&provider_started),
+        }),
+    )
+    .with_background_runs(background_runs.clone());
+    runtime.set_root_logical_run_id(Some(logical_run_id));
+    let call = ToolCall {
+        id: call_id.to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "completion_mode": "background",
+            "members": [
+                {
+                    "request_key": "kernel",
+                    "profile_id": "explore",
+                    "objective": "inspect kernel",
+                    "prompt": "inspect kernel"
+                },
+                {
+                    "request_key": "runtime",
+                    "profile_id": "explore",
+                    "objective": "inspect runtime",
+                    "prompt": "inspect runtime"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    let mut session = Session::new("batch-background-failure", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &call,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("background spawn_agents handled");
+
+    assert!(result.is_error());
+    assert!(result.content.contains("already registered"));
+    assert!(!provider_started.load(Ordering::SeqCst));
+    assert!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .all(|thread| thread.status == AgentThreadStatus::Failed)
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+    assert!(
+        background_runs
+            .reserve_cancellation_scope(&existing_thread_id)?
+            .is_some()
+    );
+    assert!(
+        background_runs
+            .cancel(&existing_thread_id, Duration::ZERO)
+            .await?
+            .is_some()
+    );
+    assert!(!background_runs.has_any());
     Ok(())
 }
 

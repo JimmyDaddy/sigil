@@ -1350,6 +1350,65 @@ fn chat_batch_reservation_is_atomic_and_claimed_by_child_start() -> Result<()> {
 }
 
 #[test]
+fn background_chat_batch_reservation_is_atomic_and_creates_mailboxes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut first = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    first.call_id = "call_background_batch_first".to_owned();
+    first.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut first)?;
+    let mut second = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    second.call_id = "call_background_batch_second".to_owned();
+    second.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut second)?;
+    let starts = vec![first, second];
+
+    let reservation = supervisor.reserve_chat_child_batch(&starts)?;
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let threads = starts
+        .into_iter()
+        .map(|start| supervisor.begin_chat_child_thread(&mut session, &mut handler, start))
+        .collect::<Result<Vec<_>>>()?;
+    reservation.commit();
+
+    assert!(threads.iter().all(|thread| thread.mailbox_rx.is_some()));
+    for thread in threads {
+        supervisor.record_chat_child_failure(
+            &mut session,
+            &mut handler,
+            &thread,
+            "test cleanup".to_owned(),
+        )?;
+    }
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
+fn chat_batch_reservation_rejects_mixed_invocation_modes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let first = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    let mut second = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    second.call_id = "call_background_batch_second".to_owned();
+    second.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut second)?;
+
+    let error = supervisor
+        .reserve_chat_child_batch(&[first, second])
+        .err()
+        .expect("mixed invocation modes should be rejected");
+
+    assert!(error.to_string().contains("cannot mix invocation modes"));
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
 fn dropped_chat_batch_reservation_releases_every_slot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;

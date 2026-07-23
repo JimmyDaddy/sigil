@@ -335,7 +335,7 @@ impl AgentTool {
                 self.surface.profile_index_description
             ),
             AgentToolKind::SpawnBatch => format!(
-                "Spawn 2-4 independent read-only child agents as one host-joined batch. The host preflights the whole batch, reserves every runtime slot atomically, runs accepted members concurrently, and resumes with bounded results without wait_agent polling. Every member must use a trusted model-visible profile whose effective tool contracts are proven read-only. Use this only for non-overlapping delegated scopes.\n{}",
+                "Spawn 2-4 independent read-only child agents as one batch. The host preflights the whole batch, reserves every runtime slot atomically, and runs accepted members concurrently. completion_mode=join_before_final resumes the parent with bounded results without wait_agent polling. completion_mode=background returns immediately; live progress and result-ready continuation are host-driven, so do not poll. Every member must use a trusted model-visible profile whose effective tool contracts are proven read-only. Use this only for non-overlapping delegated scopes.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
@@ -413,9 +413,9 @@ impl AgentTool {
                     },
                     "completion_mode": {
                         "type": "string",
-                        "enum": ["join_before_final"],
+                        "enum": ["join_before_final", "background"],
                         "default": "join_before_final",
-                        "description": "This compatibility slice supports host-owned join. Detached background batches remain deferred."
+                        "description": "Join before the next parent model turn, or detach the whole batch and let the host surface result-ready completion."
                     }
                 },
                 "required": ["members"],
@@ -550,8 +550,9 @@ impl AgentTool {
         Ok(ToolPreview {
             title: format!("Spawn {} agents", parsed.members.len()),
             summary: format!(
-                "{} read-only agents · join before final",
-                parsed.members.len()
+                "{} read-only agents · {}",
+                parsed.members.len(),
+                invocation_mode_label(parsed.completion_mode)
             ),
             body,
             changed_files: Vec::new(),
@@ -610,6 +611,7 @@ pub(super) struct SpawnAgentArgs {
 }
 
 pub(super) struct SpawnAgentsArgs {
+    pub(super) completion_mode: AgentInvocationMode,
     pub(super) members: Vec<SpawnAgentsMemberArgs>,
 }
 
@@ -652,8 +654,11 @@ impl SpawnAgentsArgs {
             .map(parse_invocation_mode)
             .transpose()?
             .unwrap_or(AgentInvocationMode::JoinBeforeFinal);
-        if completion_mode != AgentInvocationMode::JoinBeforeFinal {
-            bail!("spawn_agents currently supports only completion_mode=join_before_final");
+        if !matches!(
+            completion_mode,
+            AgentInvocationMode::JoinBeforeFinal | AgentInvocationMode::Background
+        ) {
+            bail!("spawn_agents completion_mode must be join_before_final or background");
         }
         let members = args
             .get("members")
@@ -676,7 +681,7 @@ impl SpawnAgentsArgs {
                 profile_id: AgentProfileId::new(required_string(member, "profile_id")?)?,
                 objective: required_string(member, "objective")?,
                 prompt: required_string(member, "prompt")?,
-                mode: AgentInvocationMode::JoinBeforeFinal,
+                mode: completion_mode,
                 display_name_hint: optional_string(member, "display_name_hint"),
             };
             parsed.push(SpawnAgentsMemberArgs {
@@ -686,6 +691,9 @@ impl SpawnAgentsArgs {
             });
         }
         parsed.sort_by(|left, right| left.request_key.cmp(&right.request_key));
-        Ok(Self { members: parsed })
+        Ok(Self {
+            completion_mode,
+            members: parsed,
+        })
     }
 }
