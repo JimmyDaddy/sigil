@@ -38,6 +38,25 @@ pub trait TaskChildSessionRunner: Send + Sync {
         H: EventHandler + Send,
         A: ApprovalHandler + Send;
 
+    /// Synchronously prepares a read batch and optionally returns parent-free participant work.
+    ///
+    /// The default keeps the exact requests for the compatibility path below. A detached
+    /// implementation may mutate the parent only during this call, then return a future whose
+    /// lifetime is tied to the runner and live handlers but not to `parent_session`.
+    fn prepare_child_session_batch<'a, H, A>(
+        &'a self,
+        _parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        _handler: &'a mut H,
+        _approval_handler: &'a mut A,
+    ) -> Result<TaskChildSessionBatchPreparation<'a>>
+    where
+        H: EventHandler + Send + 'a,
+        A: ApprovalHandler + Send + 'a,
+    {
+        Ok(TaskChildSessionBatchPreparation::Fallback(requests))
+    }
+
     /// Runs one ready read-only batch and returns member outcomes in request order.
     ///
     /// The default preserves compatibility by executing members sequentially. Runtime

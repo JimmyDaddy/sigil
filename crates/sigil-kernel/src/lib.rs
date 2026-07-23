@@ -482,7 +482,8 @@ pub use task_memory::{
 };
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
-    SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
+    SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchFuture, TaskChildSessionBatchPreparation, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskParticipantRetryError,
     TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput,
     TaskSynthesisSessionRunRequest, TaskVerificationRerunOutput, TaskVerificationRerunRequest,

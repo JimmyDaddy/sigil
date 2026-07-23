@@ -435,10 +435,29 @@ where
                     batch_contexts.push((step, attempt, step_options));
                 }
 
-                let batch_results = self
-                    .child_runner
-                    .run_child_session_batch(session, batch_requests, handler, approval_handler)
-                    .await?;
+                let batch_preparation = self.child_runner.prepare_child_session_batch(
+                    session,
+                    batch_requests,
+                    handler,
+                    approval_handler,
+                )?;
+                let settled_batch =
+                    settle_task_child_session_batch_preparation(batch_preparation).await?;
+                let batch_results = match settled_batch {
+                    SettledTaskChildSessionBatch::Detached(commit) => {
+                        commit.commit(session, handler)?
+                    }
+                    SettledTaskChildSessionBatch::Fallback(batch_requests) => {
+                        self.child_runner
+                            .run_child_session_batch(
+                                session,
+                                batch_requests,
+                                handler,
+                                approval_handler,
+                            )
+                            .await?
+                    }
+                };
                 drop(child_effects);
                 if batch_results.len() != batch_contexts.len() {
                     bail!(
@@ -1473,6 +1492,24 @@ where
             )?;
             return Ok(TaskRunStatus::Completed);
         }
+    }
+}
+
+enum SettledTaskChildSessionBatch {
+    Fallback(Vec<TaskChildSessionRunRequest>),
+    Detached(TaskChildSessionBatchCommitEnvelope),
+}
+
+async fn settle_task_child_session_batch_preparation(
+    preparation: TaskChildSessionBatchPreparation<'_>,
+) -> Result<SettledTaskChildSessionBatch> {
+    match preparation {
+        TaskChildSessionBatchPreparation::Fallback(requests) => {
+            Ok(SettledTaskChildSessionBatch::Fallback(requests))
+        }
+        TaskChildSessionBatchPreparation::Detached(batch_future) => batch_future
+            .await
+            .map(SettledTaskChildSessionBatch::Detached),
     }
 }
 

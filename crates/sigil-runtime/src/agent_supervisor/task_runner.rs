@@ -12,7 +12,8 @@ use sigil_kernel::{
     ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, MultiAgentMode,
     ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
     ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
-    SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
     TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
     TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
@@ -499,13 +500,13 @@ impl AgentSupervisorTaskChildRunner {
     }
 
     fn commit_parallel_read_child<H>(
-        &self,
+        supervisor: &AgentSupervisor,
         parent_session: &mut Session,
         handler: &mut H,
         executed: ExecutedParallelTaskChild,
     ) -> Result<TaskChildSessionRunOutput>
     where
-        H: EventHandler + Send,
+        H: EventHandler + Send + ?Sized,
     {
         let ExecutedParallelTaskChild {
             prepared,
@@ -527,7 +528,7 @@ impl AgentSupervisorTaskChildRunner {
                     TaskChildSessionStatus::Failed,
                     None,
                 )?;
-                self.supervisor.record_task_child_failure(
+                supervisor.record_task_child_failure(
                     parent_session,
                     handler,
                     &prepared.child_thread,
@@ -536,8 +537,7 @@ impl AgentSupervisorTaskChildRunner {
                 return Err(error);
             }
         };
-        let budget_warning = self
-            .supervisor
+        let budget_warning = supervisor
             .validate_usage_budget(&prepared.request.task.task_id, &success.usage)
             .err()
             .map(|error| format!("{error:#}"));
@@ -552,7 +552,7 @@ impl AgentSupervisorTaskChildRunner {
             status,
             Some(hash_text(&success.materialized.final_text)),
         )?;
-        self.supervisor.record_task_child_result(
+        supervisor.record_task_child_result(
             parent_session,
             handler,
             &prepared.child_thread,
@@ -613,10 +613,6 @@ struct ExecutedParallelTaskChild {
 
 struct ParallelTaskCompletionContext {
     request_index: usize,
-    request: TaskChildSessionRunRequest,
-    child_task_id: TaskId,
-    child_session_ref: SessionRef,
-    child_thread: AgentTaskChildThread,
 }
 
 struct TaskChildThreadReleaseGuard {
@@ -1026,19 +1022,19 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         }
     }
 
-    async fn run_child_session_batch<H, A>(
-        &self,
+    fn prepare_child_session_batch<'a, H, A>(
+        &'a self,
         parent_session: &mut Session,
         requests: Vec<TaskChildSessionRunRequest>,
-        handler: &mut H,
-        approval_handler: &mut A,
-    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+        handler: &'a mut H,
+        approval_handler: &'a mut A,
+    ) -> Result<TaskChildSessionBatchPreparation<'a>>
     where
-        H: EventHandler + Send,
-        A: ApprovalHandler + Send,
+        H: EventHandler + Send + 'a,
+        A: ApprovalHandler + Send + 'a,
     {
         if requests.is_empty() {
-            return Ok(Vec::new());
+            return Ok(detached_task_batch_results(Vec::new()));
         }
         let member_count = requests.len();
         let batch_task_id = requests[0].task.task_id.clone();
@@ -1046,19 +1042,19 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let mut attempt_ids = BTreeSet::new();
         for request in &requests {
             if request.task.task_id != batch_task_id || request.plan_version != batch_plan_version {
-                return Ok(rejected_parallel_read_batch(
+                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
                     &requests,
                     anyhow::anyhow!("parallel task child batch mixes task or plan identities"),
-                ));
+                )));
             }
             if !attempt_ids.insert(request.attempt_id.clone()) {
-                return Ok(rejected_parallel_read_batch(
+                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
                     &requests,
                     anyhow::anyhow!(
                         "parallel task child batch contains duplicate attempt {}",
                         request.attempt_id.as_str()
                     ),
-                ));
+                )));
             }
         }
         let mut preflight = Vec::with_capacity(member_count);
@@ -1066,7 +1062,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             match self.preflight_parallel_read_child(parent_session, request) {
                 Ok(member) => preflight.push(member),
                 Err(error) => {
-                    return Ok(rejected_parallel_read_batch(&requests, error));
+                    return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                        &requests, error,
+                    )));
                 }
             }
         }
@@ -1077,7 +1075,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let reservation = match self.supervisor.reserve_task_child_batch(&starts) {
             Ok(reservation) => reservation,
             Err(error) => {
-                return Ok(rejected_parallel_read_batch(&requests, error));
+                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                    &requests, error,
+                )));
             }
         };
         let mut prepared = Vec::with_capacity(member_count);
@@ -1104,7 +1104,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                             reason.to_owned(),
                         );
                     }
-                    return Ok(rejected_parallel_read_batch(&requests, error));
+                    return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                        &requests, error,
+                    )));
                 }
             }
         }
@@ -1121,130 +1123,121 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     .unwrap_or_else(|| member.request.step.title.clone()),
             })
             .collect::<Vec<_>>();
-        let completion_result = {
-            let shared_handler = SharedTaskEventHandler {
-                inner: Arc::new(Mutex::new(handler)),
-            };
-            let shared_approval = SharedTaskApprovalHandler {
-                inner: Arc::new(Mutex::new(approval_handler)),
-            };
-            let registrations = prepared
-                .into_iter()
-                .enumerate()
-                .map(|(request_index, member)| {
-                    let key = member.request.attempt_id.clone();
-                    let context = ParallelTaskCompletionContext {
-                        request_index,
-                        request: member.request.clone(),
-                        child_task_id: member.child_task_id.clone(),
-                        child_session_ref: member.child_session_ref.clone(),
-                        child_thread: member.child_thread.clone(),
-                    };
-                    let mut member_handler = shared_handler.clone();
-                    let mut member_approval = shared_approval.clone();
-                    AgentCompletionRegistration::new(
-                        key,
-                        request_index as u64,
-                        context,
-                        async move {
-                            Ok::<_, anyhow::Error>(
-                                self.execute_parallel_read_child(
-                                    member,
-                                    &mut member_handler,
-                                    &mut member_approval,
-                                )
-                                .await,
-                            )
-                        },
+        let shared_handler = SharedTaskEventHandler {
+            inner: Arc::new(Mutex::new(handler)),
+        };
+        let shared_approval = SharedTaskApprovalHandler {
+            inner: Arc::new(Mutex::new(approval_handler)),
+        };
+        let registrations = prepared
+            .into_iter()
+            .enumerate()
+            .map(|(request_index, member)| {
+                let key = member.request.attempt_id.clone();
+                let context = ParallelTaskCompletionContext { request_index };
+                let mut member_handler = shared_handler.clone();
+                let mut member_approval = shared_approval.clone();
+                AgentCompletionRegistration::new(key, request_index as u64, context, async move {
+                    Ok::<_, anyhow::Error>(
+                        self.execute_parallel_read_child(
+                            member,
+                            &mut member_handler,
+                            &mut member_approval,
+                        )
+                        .await,
                     )
                 })
-                .collect::<Vec<_>>();
-            match AgentCompletionHub::from_batch(registrations) {
-                Ok(completion_hub) => {
-                    let progress_registry = self.supervisor.completion_progress().clone();
-                    let generation = progress_registry.begin(
-                        &batch_task_id,
-                        batch_plan_version,
-                        completion_progress,
-                    );
-                    Ok(completion_hub
-                        .collect_with(|envelope| {
-                            let outcome = match envelope.result.as_ref() {
-                                Ok(executed) if executed.result.is_ok() => {
-                                    TaskCompletionOutcome::Succeeded
-                                }
-                                Ok(_) | Err(_) => TaskCompletionOutcome::Failed,
-                            };
-                            progress_registry.record_arrival(
-                                generation,
-                                envelope.context.request_index,
-                                usize::try_from(envelope.completion_index).unwrap_or(usize::MAX),
-                                outcome,
-                            );
-                        })
-                        .await)
-                }
-                Err(rejection) => {
-                    let (error, registrations) = rejection.into_parts();
-                    let contexts = registrations
-                        .into_iter()
-                        .map(|registration| {
-                            let (_key, _sequence, context, future) = registration.into_parts();
-                            drop(future);
-                            context
-                        })
-                        .collect::<Vec<_>>();
-                    Err((error, contexts))
-                }
-            }
-        };
-        let mut completed = match completion_result {
-            Ok(completed) => completed,
-            Err((error, contexts)) => {
-                let reason = format!("parallel task completion batch rejected: {error}");
-                let mut first_cleanup_error = None;
-                for context in contexts {
-                    let child_session_result = append_task_child_session(
-                        parent_session,
-                        handler,
-                        &context.request,
-                        &context.child_task_id,
-                        &context.child_session_ref,
-                        TaskChildSessionStatus::Failed,
-                        None,
-                    );
-                    let thread_result = self.supervisor.record_task_child_failure(
-                        parent_session,
-                        handler,
-                        &context.child_thread,
-                        reason.clone(),
-                    );
-                    if first_cleanup_error.is_none() {
-                        first_cleanup_error =
-                            child_session_result.err().or_else(|| thread_result.err());
-                    }
-                }
-                if let Some(cleanup_error) = first_cleanup_error {
-                    return Err(anyhow::Error::new(error).context(format!(
-                        "task completion cleanup also failed: {cleanup_error:#}"
-                    )));
-                }
-                return Ok(rejected_parallel_read_batch(
-                    &requests,
-                    anyhow::Error::new(error),
+            })
+            .collect::<Vec<_>>();
+        let completion_hub = match AgentCompletionHub::from_batch(registrations) {
+            Ok(completion_hub) => completion_hub,
+            Err(rejection) => {
+                let (error, registrations) = rejection.into_parts();
+                drop(registrations);
+                drop(shared_handler);
+                drop(shared_approval);
+                return Err(anyhow::Error::new(error).context(
+                    "task completion registration violated prevalidated unique attempt identity",
                 ));
             }
         };
-        completed.sort_by_key(|envelope| envelope.sequence);
+        drop(shared_handler);
+        drop(shared_approval);
+        let progress_registry = self.supervisor.completion_progress().clone();
+        let generation =
+            progress_registry.begin(&batch_task_id, batch_plan_version, completion_progress);
+        let supervisor = self.supervisor.clone();
 
-        Ok(completed
-            .into_iter()
-            .map(|envelope| {
-                envelope.result.and_then(|executed| {
-                    self.commit_parallel_read_child(parent_session, handler, executed)
-                })
-            })
-            .collect())
+        Ok(TaskChildSessionBatchPreparation::Detached(Box::pin(
+            async move {
+                let mut completed = completion_hub
+                    .collect_with(|envelope| {
+                        let outcome = match envelope.result.as_ref() {
+                            Ok(executed) if executed.result.is_ok() => {
+                                TaskCompletionOutcome::Succeeded
+                            }
+                            Ok(_) | Err(_) => TaskCompletionOutcome::Failed,
+                        };
+                        progress_registry.record_arrival(
+                            generation,
+                            envelope.context.request_index,
+                            usize::try_from(envelope.completion_index).unwrap_or(usize::MAX),
+                            outcome,
+                        );
+                    })
+                    .await;
+                completed.sort_by_key(|envelope| envelope.sequence);
+                Ok(TaskChildSessionBatchCommitEnvelope::new(
+                    member_count,
+                    move |parent_session, handler| {
+                        Ok(completed
+                            .into_iter()
+                            .map(|envelope| {
+                                envelope.result.and_then(|executed| {
+                                    Self::commit_parallel_read_child(
+                                        &supervisor,
+                                        parent_session,
+                                        handler,
+                                        executed,
+                                    )
+                                })
+                            })
+                            .collect())
+                    },
+                ))
+            },
+        )))
+    }
+
+    async fn run_child_session_batch<H, A>(
+        &self,
+        parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let preparation =
+            self.prepare_child_session_batch(parent_session, requests, handler, approval_handler)?;
+        let settled = settle_runtime_task_child_batch(preparation).await?;
+        match settled {
+            SettledRuntimeTaskChildBatch::Detached(commit) => {
+                commit.commit(parent_session, handler)
+            }
+            SettledRuntimeTaskChildBatch::Fallback(requests) => {
+                let mut outputs = Vec::with_capacity(requests.len());
+                for request in requests {
+                    outputs.push(
+                        self.run_child_session(parent_session, request, handler, approval_handler)
+                            .await,
+                    );
+                }
+                Ok(outputs)
+            }
+        }
     }
 
     async fn run_synthesis_session<H, A>(
@@ -1356,6 +1349,36 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 Err(error)
             }
         }
+    }
+}
+
+fn detached_task_batch_results<'a>(
+    results: Vec<Result<TaskChildSessionRunOutput>>,
+) -> TaskChildSessionBatchPreparation<'a> {
+    let request_count = results.len();
+    TaskChildSessionBatchPreparation::Detached(Box::pin(async move {
+        Ok(TaskChildSessionBatchCommitEnvelope::new(
+            request_count,
+            move |_parent_session, _handler| Ok(results),
+        ))
+    }))
+}
+
+enum SettledRuntimeTaskChildBatch {
+    Fallback(Vec<TaskChildSessionRunRequest>),
+    Detached(TaskChildSessionBatchCommitEnvelope),
+}
+
+async fn settle_runtime_task_child_batch(
+    preparation: TaskChildSessionBatchPreparation<'_>,
+) -> Result<SettledRuntimeTaskChildBatch> {
+    match preparation {
+        TaskChildSessionBatchPreparation::Fallback(requests) => {
+            Ok(SettledRuntimeTaskChildBatch::Fallback(requests))
+        }
+        TaskChildSessionBatchPreparation::Detached(batch_future) => batch_future
+            .await
+            .map(SettledRuntimeTaskChildBatch::Detached),
     }
 }
 
@@ -1671,7 +1694,7 @@ fn append_task_child_session<H>(
     summary_hash: Option<String>,
 ) -> Result<()>
 where
-    H: EventHandler + Send,
+    H: EventHandler + Send + ?Sized,
 {
     append_control(
         session,

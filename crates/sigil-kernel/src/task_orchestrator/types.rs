@@ -1,6 +1,89 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+type TaskChildSessionBatchCommitAction = Box<
+    dyn FnOnce(
+            &mut Session,
+            &mut (dyn EventHandler + Send),
+        ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+        + Send,
+>;
+
+/// One-shot parent commit returned after a detached read batch has fully settled.
+///
+/// The action owns runtime-private completion material but cannot run until the kernel explicitly
+/// gives it the parent session again. This keeps the parent borrow out of the participant future.
+pub struct TaskChildSessionBatchCommitEnvelope {
+    request_count: usize,
+    commit: TaskChildSessionBatchCommitAction,
+}
+
+impl TaskChildSessionBatchCommitEnvelope {
+    /// Creates a one-shot parent commit for an exact number of batch requests.
+    pub fn new<F>(request_count: usize, commit: F) -> Self
+    where
+        F: FnOnce(
+                &mut Session,
+                &mut (dyn EventHandler + Send),
+            ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+            + Send
+            + 'static,
+    {
+        Self {
+            request_count,
+            commit: Box::new(commit),
+        }
+    }
+
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.request_count
+    }
+
+    /// Applies the runtime-produced completion through the parent single writer exactly once.
+    pub fn commit(
+        self,
+        parent_session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>> {
+        (self.commit)(parent_session, handler)
+    }
+}
+
+impl std::fmt::Debug for TaskChildSessionBatchCommitEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskChildSessionBatchCommitEnvelope")
+            .field("request_count", &self.request_count)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Parent-free participant execution returned by a detached batch preparation.
+pub type TaskChildSessionBatchFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<TaskChildSessionBatchCommitEnvelope>> + Send + 'a>,
+>;
+
+/// Explicit result of the synchronous batch preparation boundary.
+pub enum TaskChildSessionBatchPreparation<'a> {
+    /// Compatibility path for runners that still require the parent session across their await.
+    Fallback(Vec<TaskChildSessionRunRequest>),
+    /// Participant execution whose future cannot borrow the parent session.
+    Detached(TaskChildSessionBatchFuture<'a>),
+}
+
+impl std::fmt::Debug for TaskChildSessionBatchPreparation<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fallback(requests) => formatter
+                .debug_tuple("Fallback")
+                .field(&requests.len())
+                .finish(),
+            Self::Detached(_) => formatter.write_str("Detached(..)"),
+        }
+    }
+}
+
 /// Typed runtime-to-orchestrator failure that carries the complete proof needed to schedule one
 /// bounded provider-pressure retry.
 #[derive(Debug, thiserror::Error)]

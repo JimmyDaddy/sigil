@@ -19,11 +19,12 @@ use sigil_kernel::{
     AgentInvocationSource, AgentRole, AgentRouteId, AgentRunInput, AgentRunOptions,
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
-    DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
-    MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport,
-    RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry,
-    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    ControlEntry, DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore,
+    MemoryConfig, MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
+    SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantPurpose,
     TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanUpdateContext,
     TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
@@ -2786,12 +2787,20 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
-    let outputs = tokio::time::timeout(
+    let preparation =
+        runner.prepare_child_session_batch(&mut session, requests, &mut handler, &mut approval)?;
+    session.append_control(ControlEntry::Note {
+        kind: "parent_borrow_boundary_probe".to_owned(),
+        data: serde_json::json!({"available_during_child_await": true}),
+    })?;
+    let commit = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        runner.run_child_session_batch(&mut session, requests, &mut handler, &mut approval),
+        expect_detached_task_batch(preparation),
     )
     .await
     .expect("parallel provider barrier should complete")?;
+    assert_eq!(commit.request_count(), 2);
+    let outputs = commit.commit(&mut session, &mut handler)?;
 
     assert_eq!(outputs.len(), 2);
     assert_eq!(max_active.load(Ordering::SeqCst), 2);
@@ -2848,6 +2857,17 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
     assert_eq!(batch.members[1].arrival_order, Some(1));
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
+}
+
+async fn expect_detached_task_batch(
+    preparation: TaskChildSessionBatchPreparation<'_>,
+) -> Result<TaskChildSessionBatchCommitEnvelope> {
+    match preparation {
+        TaskChildSessionBatchPreparation::Detached(batch_future) => batch_future.await,
+        TaskChildSessionBatchPreparation::Fallback(_) => {
+            panic!("runtime read batch should use detached execution");
+        }
+    }
 }
 
 #[tokio::test]

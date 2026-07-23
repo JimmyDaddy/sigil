@@ -40,15 +40,15 @@ use crate::{
 };
 
 use super::{
-    StepRunOutput, TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    child_status_from_output, decode_changeset_only_child_output,
-    durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
-    participant_result_entry, planner_prompt, reconcile_task_final_answer_prefix,
-    relevant_verification_receipts, rerun_task_verification_check, route_id_for_call,
-    run_status_from_step_status, run_task_step_verification_checks, step_status_after_readiness,
-    step_status_from_outcome, step_terminal_reason, subagent_step_prompt,
-    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
-    task_step_readiness,
+    StepRunOutput, TaskChildSessionBatchCommitEnvelope, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, child_status_from_output,
+    decode_changeset_only_child_output, durable_workspace_mutation_evidence,
+    latest_relevant_successful_verification_sequence, participant_result_entry, planner_prompt,
+    reconcile_task_final_answer_prefix, relevant_verification_receipts,
+    rerun_task_verification_check, route_id_for_call, run_status_from_step_status,
+    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
+    step_terminal_reason, subagent_step_prompt, task_status_from_step_status,
+    task_step_auto_run_policy, task_step_default_policy, task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -807,6 +807,33 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     assert!(prompt.contains("role subagent_read"));
     assert!(prompt.contains("role subagent_write only for delegated changeset-only"));
     assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
+}
+
+#[test]
+fn task_child_batch_commit_envelope_waits_for_explicit_parent_commit() -> Result<()> {
+    let mut session = Session::new("planner", "model");
+    let original_entry_count = session.entries().len();
+    let commit = TaskChildSessionBatchCommitEnvelope::new(0, |parent_session, _handler| {
+        parent_session.append_control(ControlEntry::Note {
+            kind: "batch_commit_boundary_probe".to_owned(),
+            data: json!({"committed": true}),
+        })?;
+        Ok(Vec::new())
+    });
+
+    assert_eq!(commit.request_count(), 0);
+    assert_eq!(session.entries().len(), original_entry_count);
+
+    let mut handler = crate::event::NoopEventHandler;
+    let outputs = commit.commit(&mut session, &mut handler)?;
+
+    assert!(outputs.is_empty());
+    assert!(matches!(
+        session.entries().last(),
+        Some(SessionLogEntry::Control(ControlEntry::Note { kind, data }))
+            if kind == "batch_commit_boundary_probe" && data == &json!({"committed": true})
+    ));
+    Ok(())
 }
 
 #[test]

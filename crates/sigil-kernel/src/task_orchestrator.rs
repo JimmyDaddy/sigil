@@ -83,7 +83,8 @@ use runner::participant_result_entry;
 pub use runner::{SequentialTaskOrchestrator, reconcile_task_final_answer_prefix};
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
-    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
+    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchFuture, TaskChildSessionBatchPreparation, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskParticipantRetryError, TaskPlannerSessionRunOutput,
     TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
     TaskVerificationRerunOutput, TaskVerificationRerunRequest, task_participant_input_hash,

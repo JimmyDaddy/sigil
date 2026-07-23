@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d3b implemented；O5b2 remainder-O8 deferred
+状态：accepted / O0-O5b2 implemented；O6-O8 deferred
 
 创建日期：2026-07-22
 
@@ -990,8 +990,8 @@ allow_write_subagents = true
 process-local provider route cooldown、O5b2c shared-read-only durable bounded retry、
 O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis retry
 以及 O5b2d3a 实时 route attribution/diagnostics、O5b2d3b completion-arrival 与
-request-order durable commit 双序视图已完成；显式 action/envelope API 等后续项仍属于
-O5b2 remainder-O8。
+request-order durable commit 双序视图，以及显式 prepare/detached future/one-shot commit
+envelope 边界均已完成；后续工作从 O6 开始。
 
 ### O0: Truth baseline and contract correction
 
@@ -1230,9 +1230,18 @@ O5b2d3b 已完成：
   `arrival #N → commit #M` 展示双序进度，info rail 保留完整批次明细；task boundary 会清空
   live snapshot，session log 和恢复投影不记录 arrival order。
 
-O5b2 剩余：
+O5b2 coordinator boundary 已完成：
 
-- 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
+- `TaskChildSessionRunner::prepare_child_session_batch` 是同步 prepare 边界；runtime 只在这个调用
+  内完成 parent-side preflight、reservation 与 Started 持久化，随后返回不借用 parent
+  `Session` 的 detached participant future。旧 runner 返回原 requests，继续走原有
+  `run_child_session_batch` fallback，保持 trait 兼容。
+- detached future 只收集 terminal envelopes，完成后产出 consuming
+  `TaskChildSessionBatchCommitEnvelope`；kernel 在 await 结束后才显式重新交回 parent
+  `Session` 与 event handler，并由 one-shot action 按稳定 request sequence 单写提交。
+- runtime barrier test 在 child future settle 前直接向 parent session 写入 boundary probe，
+  编译期与运行期共同证明 parent mutable borrow 不跨 child await；同一测试继续证明 provider
+  overlap、逆序 arrival 与正序 durable commit。
 
 退出条件：barrier 测试证明 overlap；无 parent mutable borrow 跨 child await；429 不产生 fan-out storm。
 
