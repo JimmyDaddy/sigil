@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d1 implemented；O5b2d2-O8 deferred
+状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d2 implemented；O5b2d3-O8 deferred
 
 创建日期：2026-07-22
 
@@ -750,7 +750,7 @@ child session 的 physical-attempt projection 恰好证明 `ConfirmedNoModelCons
 RateLimited`、零 durable output/side-effect ref 且 child transcript 没有 assistant/tool/effect
 记录时才获得 retry authority；whole-batch preflight 的 cooldown 则使用
 `AdmissionRejectedBeforeDispatch` 零派发证明。普通 transport uncertain、已有 text delta、
-tool/effect、write step、Planner 或 Synthesis 均不自动 retry。Parent 以一个原子 append batch
+tool/effect 或 write step 均不自动 retry；Planner/Synthesis 在 O5b2c 阶段尚未接入。Parent 以一个原子 append batch
 提交旧 attempt `Failed`、`TaskParticipantRetryScheduled` 和 step `Pending`，schedule 绑定
 route fingerprint、retry-stable input hash、旧/新 attempt id、`not_before` 与 proof。默认每个
 step 最多 2 次自动 retry、累计等待最多 120 秒；replacement 使用新 attempt id、child session
@@ -767,6 +767,16 @@ concurrency window。每个 `provider + model` route 独立计数，TUI 的
 route，也不取消已在途请求；429 仍继续使用 O5b2c 的 durable retry authority。窗口、in-flight
 计数与恢复进度属于 supervisor 生命周期内的运行态，不作为 restart 后自动重放授权，也没有
 进入 kernel 公共协议。
+
+O5b2d2 将相同的 durable retry authority 扩展到隔离 Planner 和 Synthesis participant。它们
+仍必须由 child physical-attempt projection 证明 `ConfirmedNoModelConsumption + RateLimited`
+且 child session 没有 assistant、tool result、tool execution/egress、TaskPlan 或 changeset
+记录；Planner 已经调用 discovery/task-plan tool 或 Synthesis 已经产生文本后都不能自动重试。
+失败 attempt 与 `TaskParticipantRetryScheduled` 原子追加，新 attempt 使用独立 child session
+和 logical run；schedule 继续绑定 retry-stable input hash、route、proof 与 `not_before`。Planner
+和每个 plan version 的 Synthesis 各自最多 2 次自动 retry、累计等待最多 120 秒，重启只消费
+未 Started schedule。预算耗尽后 Planner 保持原有 task Failed，Synthesis 保持原有 task Paused
+语义。
 
 ### 15.2 Failure policy
 
@@ -977,9 +987,9 @@ allow_write_subagents = true
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
 本 checkpoint 表示 O4b3a、O4b3b、O5a、O5b1、O5b2a whole-batch admission、O5b2b
-process-local provider route cooldown、O5b2c shared-read-only durable bounded retry 和
-O5b2d1 adaptive provider route concurrency window 已完成；Planner/Synthesis retry、
-completion-arrival 进度、实时 route attribution 与完整诊断通道仍属于 O5b2d2-O8。
+process-local provider route cooldown、O5b2c shared-read-only durable bounded retry、
+O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis retry
+已完成；completion-arrival 进度、实时 route attribution 与完整诊断通道仍属于 O5b2d3-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1180,9 +1190,19 @@ O5b2d1 已完成：
 - adaptive window 是 `AgentSupervisor` 生命周期内的 provider-pressure 运行态，不持久化为
   restart authority，也不新增 kernel 公共并发预算类型。
 
+O5b2d2 已完成：
+
+- 隔离 Planner 与 Synthesis 的 provider 失败只有在 physical attempt 证明
+  `ConfirmedNoModelConsumption + RateLimited`，且 child session 零 assistant/tool/TaskPlan/
+  changeset 时才转换为 retry authority。
+- failed attempt 与 `TaskParticipantRetryScheduled` 原子提交；replacement 使用新 attempt、
+  child session 和 logical run，输入 hash drift 在 dispatch 前 fail closed。
+- Planner 和每个 plan version 的 Synthesis 各自最多自动 retry 2 次、累计等待最多 120 秒；
+  durable pending schedule 可在重启后消费一次。预算耗尽后分别进入 Failed / Paused。
+
 O5b2 剩余：
 
-- Planner/Synthesis 的可证明只读 retry，以及实时 route attribution/diagnostics。
+- 实时 route attribution/diagnostics。
 - completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 

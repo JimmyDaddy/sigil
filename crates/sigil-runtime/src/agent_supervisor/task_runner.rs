@@ -370,7 +370,8 @@ impl AgentSupervisorTaskChildRunner {
             return error;
         }
         self.wrap_retryable_error(
-            request,
+            &request.attempt_id,
+            &request.child_input,
             agent,
             child_session,
             TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
@@ -392,10 +393,27 @@ impl AgentSupervisorTaskChildRunner {
         if !retry_safe_step(&request.step) {
             return error;
         }
+        self.retryable_zero_effect_error(
+            &request.attempt_id,
+            &request.child_input,
+            agent,
+            child_session,
+            error,
+        )
+    }
+
+    fn retryable_zero_effect_error(
+        &self,
+        attempt_id: &TaskParticipantAttemptId,
+        input: &AgentRunInput,
+        agent: &BoxedAgent,
+        child_session: &Session,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
         let Ok(projection) = child_session.provider_physical_attempt_projection() else {
             return error;
         };
-        let logical_run_id = task_participant_logical_run_id(&request.attempt_id);
+        let logical_run_id = task_participant_logical_run_id(attempt_id);
         let attempts = projection.attempts_for_logical_run_id(&logical_run_id);
         let [attempt] = attempts.as_slice() else {
             return error;
@@ -418,6 +436,7 @@ impl AgentSupervisorTaskChildRunner {
                             | ControlEntry::ToolEgress(_)
                             | ControlEntry::ChangeSetProposed(_)
                             | ControlEntry::ChangeSetApplied(_)
+                            | ControlEntry::TaskPlan(_)
                     )
                 )
             })
@@ -425,7 +444,8 @@ impl AgentSupervisorTaskChildRunner {
             return error;
         }
         self.wrap_retryable_error(
-            request,
+            attempt_id,
+            input,
             agent,
             child_session,
             TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
@@ -441,7 +461,8 @@ impl AgentSupervisorTaskChildRunner {
 
     fn wrap_retryable_error(
         &self,
-        request: &TaskChildSessionRunRequest,
+        attempt_id: &TaskParticipantAttemptId,
+        input: &AgentRunInput,
         agent: &BoxedAgent,
         child_session: &Session,
         proof: TaskParticipantRetryProof,
@@ -451,12 +472,12 @@ impl AgentSupervisorTaskChildRunner {
             self.provider_pressure.retry_schedule_delay(
                 agent.provider().name(),
                 child_session.model_name(),
-                &request.attempt_id,
+                attempt_id,
             )
         else {
             return error;
         };
-        let Ok(input_hash) = task_participant_input_hash(&request.child_input) else {
+        let Ok(input_hash) = task_participant_input_hash(input) else {
             return error;
         };
         TaskParticipantRetryError::new(retry_after_ms, route_fingerprint, input_hash, proof, error)
@@ -684,6 +705,13 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let output = match planner_run {
             Ok(output) => output,
             Err(error) => {
+                let error = self.retryable_zero_effect_error(
+                    &request.attempt_id,
+                    &request.child_input,
+                    planner,
+                    &child_session,
+                    error,
+                );
                 self.supervisor.record_task_child_failure(
                     parent_session,
                     handler,
@@ -1102,8 +1130,8 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             synthesis
                 .run_with_approval_input(
                     &mut child_session,
-                    request.child_input,
-                    request.options,
+                    request.child_input.clone(),
+                    request.options.clone(),
                     &mut participant_handler,
                     approval_handler,
                 )
@@ -1112,6 +1140,13 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let output = match synthesis_run {
             Ok(output) => output,
             Err(error) => {
+                let error = self.retryable_zero_effect_error(
+                    &request.attempt_id,
+                    &request.child_input,
+                    synthesis,
+                    &child_session,
+                    error,
+                );
                 self.supervisor.record_task_child_failure(
                     parent_session,
                     handler,

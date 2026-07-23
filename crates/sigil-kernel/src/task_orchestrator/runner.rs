@@ -72,93 +72,130 @@ where
     {
         let has_accepted_plan = admit_or_validate_task_run(session, handler, &request)?;
         if !has_accepted_plan {
-            let attempt = begin_participant_attempt(
-                session,
-                handler,
-                &request,
-                TaskParticipantPurpose::Planner,
-                None,
-                None,
-                AgentRole::Planner,
-            )?;
-            let planner_input = self.bind_cancellation(
-                AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                    planner_prompt(&request.objective),
-                )])
-                .with_task_plan_update(TaskPlanUpdateContext {
-                    task_id: request.task_id.clone(),
-                    max_plan_steps,
-                    max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
-                })
-                .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
-                    task_id: request.task_id.clone(),
-                    attempt_id: Some(attempt.attempt_id.clone()),
-                }))
-                .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
-            );
-            let planner_output = self
-                .child_runner
-                .run_planner_session(
-                    session,
-                    TaskPlannerSessionRunRequest {
-                        task: request.clone(),
-                        attempt_id: attempt.attempt_id.clone(),
-                        child_session_ref: attempt.child_session_ref.clone(),
-                        child_input: planner_input,
-                        options: planner_options,
-                        discovery_options: subagent_read_options.clone(),
-                    },
-                    handler,
-                    approval_handler,
+            loop {
+                let projection = session.task_state_projection();
+                let task = projection
+                    .tasks
+                    .get(&request.task_id)
+                    .ok_or_else(|| anyhow!("task disappeared before planner retry admission"))?;
+                if !await_pending_participant_retry(
+                    task,
+                    TaskParticipantPurpose::Planner,
+                    None,
+                    self.cancellation.as_ref(),
                 )
-                .await;
-            match planner_output {
-                Ok(output) => {
-                    validate_isolated_planner_output(&request, &attempt, &output)?;
-                    append_task_control(
-                        session,
-                        handler,
-                        ControlEntry::TaskPlan(output.accepted_plan.clone()),
-                    )?;
-                    let result = participant_result_entry(
-                        &attempt,
-                        &format!(
-                            "accepted task plan v{} with {} steps",
-                            output.accepted_plan.plan_version,
-                            output.accepted_plan.steps.len()
-                        ),
-                        None,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    )?;
-                    append_participant_result_and_terminal(
-                        session,
-                        handler,
-                        &attempt,
-                        result,
-                        TaskParticipantAttemptStatus::Completed,
-                        None,
-                    )?;
-                }
-                Err(error) => {
-                    append_participant_terminal(
-                        session,
-                        handler,
-                        &attempt,
-                        TaskParticipantAttemptStatus::Failed,
-                        Some(format!("planner failed: {error:#}")),
-                    )?;
+                .await
+                {
                     append_task_run(
                         session,
                         handler,
                         &request,
-                        TaskRunStatus::Failed,
-                        Some(format!(
-                            "task orchestration failed: planner failed: {error:#}"
-                        )),
+                        TaskRunStatus::Cancelled,
+                        Some("task cancelled during planner provider retry backoff".to_owned()),
                     )?;
-                    return Err(error);
+                    bail!("task cancelled during planner provider retry backoff");
+                }
+                let attempt = begin_participant_attempt(
+                    session,
+                    handler,
+                    &request,
+                    TaskParticipantPurpose::Planner,
+                    None,
+                    None,
+                    AgentRole::Planner,
+                )?;
+                let planner_input = self.bind_cancellation(
+                    AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                        planner_prompt(&request.objective),
+                    )])
+                    .with_task_plan_update(TaskPlanUpdateContext {
+                        task_id: request.task_id.clone(),
+                        max_plan_steps,
+                        max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                    })
+                    .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                        task_id: request.task_id.clone(),
+                        attempt_id: Some(attempt.attempt_id.clone()),
+                    }))
+                    .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
+                );
+                validate_scheduled_retry_input(session, &attempt, &planner_input)?;
+                let planner_output = self
+                    .child_runner
+                    .run_planner_session(
+                        session,
+                        TaskPlannerSessionRunRequest {
+                            task: request.clone(),
+                            attempt_id: attempt.attempt_id.clone(),
+                            child_session_ref: attempt.child_session_ref.clone(),
+                            child_input: planner_input,
+                            options: planner_options.clone(),
+                            discovery_options: subagent_read_options.clone(),
+                        },
+                        handler,
+                        approval_handler,
+                    )
+                    .await;
+                match planner_output {
+                    Ok(output) => {
+                        validate_isolated_planner_output(&request, &attempt, &output)?;
+                        append_task_control(
+                            session,
+                            handler,
+                            ControlEntry::TaskPlan(output.accepted_plan.clone()),
+                        )?;
+                        let result = participant_result_entry(
+                            &attempt,
+                            &format!(
+                                "accepted task plan v{} with {} steps",
+                                output.accepted_plan.plan_version,
+                                output.accepted_plan.steps.len()
+                            ),
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                        )?;
+                        append_participant_result_and_terminal(
+                            session,
+                            handler,
+                            &attempt,
+                            result,
+                            TaskParticipantAttemptStatus::Completed,
+                            None,
+                        )?;
+                        break;
+                    }
+                    Err(error) => {
+                        if schedule_control_participant_retry(
+                            session,
+                            handler,
+                            &request,
+                            TaskParticipantPurpose::Planner,
+                            None,
+                            &attempt,
+                            &error,
+                        )? {
+                            continue;
+                        }
+                        append_participant_terminal(
+                            session,
+                            handler,
+                            &attempt,
+                            TaskParticipantAttemptStatus::Failed,
+                            Some(format!("planner failed: {error:#}")),
+                        )?;
+                        append_task_run(
+                            session,
+                            handler,
+                            &request,
+                            TaskRunStatus::Failed,
+                            Some(format!(
+                                "task orchestration failed: planner failed: {error:#}"
+                            )),
+                        )?;
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1284,122 +1321,158 @@ where
             return Ok(TaskRunStatus::Completed);
         }
 
-        let attempt = begin_participant_attempt(
-            session,
-            handler,
-            request,
-            TaskParticipantPurpose::Synthesis,
-            Some(plan_version),
-            None,
-            AgentRole::Planner,
-        )?;
-        let synthesis_prompt = task_synthesis_prompt(session, request, plan_version)?;
-        let child_input = self.bind_cancellation(
-            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                synthesis_prompt,
-            )])
-            .with_run_purpose(AgentRunPurpose::TaskSynthesis(TaskSynthesisContext {
-                task_id: request.task_id.clone(),
-                plan_version,
-                attempt_id: attempt.attempt_id.clone(),
-            }))
-            .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
-        );
-        let output = self
-            .child_runner
-            .run_synthesis_session(
-                session,
-                TaskSynthesisSessionRunRequest {
-                    task: request.clone(),
-                    attempt_id: attempt.attempt_id.clone(),
-                    child_session_ref: attempt.child_session_ref.clone(),
-                    plan_version,
-                    child_input,
-                    options: synthesis_options,
-                },
-                handler,
-                approval_handler,
+        loop {
+            let projection = session.task_state_projection();
+            let task = projection
+                .tasks
+                .get(&request.task_id)
+                .ok_or_else(|| anyhow!("task disappeared before synthesis retry admission"))?;
+            if !await_pending_participant_retry(
+                task,
+                TaskParticipantPurpose::Synthesis,
+                Some(plan_version),
+                self.cancellation.as_ref(),
             )
-            .await;
-        let output = match output {
-            Ok(output) => output,
-            Err(error) => {
+            .await
+            {
+                append_task_run(
+                    session,
+                    handler,
+                    request,
+                    TaskRunStatus::Cancelled,
+                    Some("task cancelled during synthesis provider retry backoff".to_owned()),
+                )?;
+                return Ok(TaskRunStatus::Cancelled);
+            }
+            let attempt = begin_participant_attempt(
+                session,
+                handler,
+                request,
+                TaskParticipantPurpose::Synthesis,
+                Some(plan_version),
+                None,
+                AgentRole::Planner,
+            )?;
+            let synthesis_prompt = task_synthesis_prompt(session, request, plan_version)?;
+            let child_input = self.bind_cancellation(
+                AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                    synthesis_prompt,
+                )])
+                .with_run_purpose(AgentRunPurpose::TaskSynthesis(TaskSynthesisContext {
+                    task_id: request.task_id.clone(),
+                    plan_version,
+                    attempt_id: attempt.attempt_id.clone(),
+                }))
+                .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
+            );
+            validate_scheduled_retry_input(session, &attempt, &child_input)?;
+            let output = self
+                .child_runner
+                .run_synthesis_session(
+                    session,
+                    TaskSynthesisSessionRunRequest {
+                        task: request.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        child_session_ref: attempt.child_session_ref.clone(),
+                        plan_version,
+                        child_input,
+                        options: synthesis_options.clone(),
+                    },
+                    handler,
+                    approval_handler,
+                )
+                .await;
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => {
+                    if schedule_control_participant_retry(
+                        session,
+                        handler,
+                        request,
+                        TaskParticipantPurpose::Synthesis,
+                        Some(plan_version),
+                        &attempt,
+                        &error,
+                    )? {
+                        continue;
+                    }
+                    append_participant_terminal(
+                        session,
+                        handler,
+                        &attempt,
+                        TaskParticipantAttemptStatus::Failed,
+                        Some(format!("final synthesis failed: {error:#}")),
+                    )?;
+                    append_task_run(
+                        session,
+                        handler,
+                        request,
+                        TaskRunStatus::Paused,
+                        Some(format!(
+                            "final synthesis failed and may be retried: {error:#}"
+                        )),
+                    )?;
+                    return Ok(TaskRunStatus::Paused);
+                }
+            };
+            validate_participant_output_identity(
+                &attempt,
+                &output.attempt_id,
+                &output.child_session_ref,
+            )?;
+            let final_text = crate::safe_persistence_text(&output.final_text);
+            if final_text.is_empty() {
                 append_participant_terminal(
                     session,
                     handler,
                     &attempt,
                     TaskParticipantAttemptStatus::Failed,
-                    Some(format!("final synthesis failed: {error:#}")),
+                    Some("final synthesis returned an empty result".to_owned()),
                 )?;
                 append_task_run(
                     session,
                     handler,
                     request,
                     TaskRunStatus::Paused,
-                    Some(format!(
-                        "final synthesis failed and may be retried: {error:#}"
-                    )),
+                    Some("final synthesis returned an empty result and may be retried".to_owned()),
                 )?;
                 return Ok(TaskRunStatus::Paused);
             }
-        };
-        validate_participant_output_identity(
-            &attempt,
-            &output.attempt_id,
-            &output.child_session_ref,
-        )?;
-        let final_text = crate::safe_persistence_text(&output.final_text);
-        if final_text.is_empty() {
-            append_participant_terminal(
+            let result = participant_result_entry(
+                &attempt,
+                &final_text,
+                Some(output.final_answer_ref),
+                output.artifact_refs,
+                output.outcome.changed_files,
+                Vec::new(),
+            )?;
+            append_participant_result_and_terminal(
                 session,
                 handler,
                 &attempt,
-                TaskParticipantAttemptStatus::Failed,
-                Some("final synthesis returned an empty result".to_owned()),
+                result,
+                TaskParticipantAttemptStatus::Completed,
+                None,
+            )?;
+            commit_task_final_answer(
+                session,
+                handler,
+                request,
+                &attempt,
+                &final_text,
+                self.cancellation.as_ref(),
             )?;
             append_task_run(
                 session,
                 handler,
                 request,
-                TaskRunStatus::Paused,
-                Some("final synthesis returned an empty result and may be retried".to_owned()),
+                TaskRunStatus::Completed,
+                Some(format!(
+                    "completed plan v{plan_version} after final synthesis"
+                )),
             )?;
-            return Ok(TaskRunStatus::Paused);
+            return Ok(TaskRunStatus::Completed);
         }
-        let result = participant_result_entry(
-            &attempt,
-            &final_text,
-            Some(output.final_answer_ref),
-            output.artifact_refs,
-            output.outcome.changed_files,
-            Vec::new(),
-        )?;
-        append_participant_result_and_terminal(
-            session,
-            handler,
-            &attempt,
-            result,
-            TaskParticipantAttemptStatus::Completed,
-            None,
-        )?;
-        commit_task_final_answer(
-            session,
-            handler,
-            request,
-            &attempt,
-            &final_text,
-            self.cancellation.as_ref(),
-        )?;
-        append_task_run(
-            session,
-            handler,
-            request,
-            TaskRunStatus::Completed,
-            Some(format!(
-                "completed plan v{plan_version} after final synthesis"
-            )),
-        )?;
-        Ok(TaskRunStatus::Completed)
     }
 }
 
@@ -1492,6 +1565,33 @@ async fn await_pending_step_retries(
     true
 }
 
+async fn await_pending_participant_retry(
+    task: &TaskRunProjection,
+    purpose: TaskParticipantPurpose,
+    plan_version: Option<u32>,
+    cancellation: Option<&RunCancellationHandle>,
+) -> bool {
+    let Some(schedule) = task.pending_participant_retry(purpose, plan_version, None) else {
+        return true;
+    };
+    let now = unix_time_ms();
+    if schedule.not_before_unix_ms <= now {
+        return true;
+    }
+    let sleep = tokio::time::sleep(std::time::Duration::from_millis(
+        schedule.not_before_unix_ms - now,
+    ));
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = cancellation.cancelled() => false,
+            () = sleep => true,
+        }
+    } else {
+        sleep.await;
+        true
+    }
+}
+
 fn validate_scheduled_retry_input(
     session: &Session,
     attempt: &TaskParticipantAttemptEntry,
@@ -1534,65 +1634,24 @@ where
     {
         return Ok(false);
     }
-    let Some(retry) = error.downcast_ref::<TaskParticipantRetryError>() else {
-        return Ok(false);
-    };
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&request.task_id)
-        .ok_or_else(|| anyhow!("task disappeared before retry scheduling"))?;
-    let retry_count = task
-        .participant_retry_schedules
-        .values()
-        .filter(|schedule| {
-            schedule.purpose == TaskParticipantPurpose::Step
-                && schedule.plan_version == Some(plan_version)
-                && schedule.step_id.as_ref() == Some(&step.step_id)
-        })
-        .count();
-    let cumulative_wait = task.participant_retry_wait_ms(
+    let Some((schedule, retry_count)) = build_participant_retry_schedule(
+        session,
+        request,
         TaskParticipantPurpose::Step,
         Some(plan_version),
         Some(&step.step_id),
-    );
-    if retry_count >= MAX_TASK_PARTICIPANT_AUTO_RETRIES
-        || cumulative_wait.saturating_add(retry.retry_after_ms())
-            > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS
-    {
+        attempt,
+        error,
+    )?
+    else {
         return Ok(false);
-    }
-    let retry_ordinal = attempt.ordinal.saturating_add(1);
-    let retry_attempt_id = task_participant_attempt_id(
-        &request.task_id,
-        TaskParticipantPurpose::Step,
-        Some(plan_version),
-        Some(&step.step_id),
-        retry_ordinal,
-    )?;
-    let scheduled_at_unix_ms = unix_time_ms();
-    let schedule = TaskParticipantRetryScheduledEntry {
-        task_id: request.task_id.clone(),
-        failed_attempt_id: attempt.attempt_id.clone(),
-        retry_attempt_id,
-        purpose: TaskParticipantPurpose::Step,
-        retry_ordinal,
-        plan_version: Some(plan_version),
-        step_id: Some(step.step_id.clone()),
-        route_fingerprint: retry.route_fingerprint().to_owned(),
-        input_hash: retry.input_hash().to_owned(),
-        scheduled_at_unix_ms,
-        not_before_unix_ms: scheduled_at_unix_ms.saturating_add(retry.retry_after_ms()),
-        retry_after_ms: retry.retry_after_ms(),
-        proof: retry.proof().clone(),
     };
-    schedule.validate_shape()?;
 
     let mut terminal = attempt.clone();
     terminal.status = TaskParticipantAttemptStatus::Failed;
     terminal.reason = Some(crate::safe_persistence_text(&format!(
         "provider pressure retry scheduled after {} ms",
-        retry.retry_after_ms()
+        schedule.retry_after_ms
     )));
     let pending = TaskStepEntry {
         task_id: request.task_id.clone(),
@@ -1605,7 +1664,7 @@ where
         reason: Some(format!(
             "provider pressure retry {} scheduled after {} ms",
             retry_count.saturating_add(1),
-            retry.retry_after_ms()
+            schedule.retry_after_ms
         )),
     };
     append_task_controls(
@@ -1618,6 +1677,117 @@ where
         ],
     )?;
     Ok(true)
+}
+
+fn schedule_control_participant_retry<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    purpose: TaskParticipantPurpose,
+    plan_version: Option<u32>,
+    attempt: &TaskParticipantAttemptEntry,
+    error: &anyhow::Error,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
+    if purpose == TaskParticipantPurpose::Step {
+        bail!("step retries must use the step-aware retry scheduler");
+    }
+    let Some((schedule, _retry_count)) = build_participant_retry_schedule(
+        session,
+        request,
+        purpose,
+        plan_version,
+        None,
+        attempt,
+        error,
+    )?
+    else {
+        return Ok(false);
+    };
+    let mut terminal = attempt.clone();
+    terminal.status = TaskParticipantAttemptStatus::Failed;
+    terminal.reason = Some(crate::safe_persistence_text(&format!(
+        "provider pressure retry scheduled after {} ms",
+        schedule.retry_after_ms
+    )));
+    append_task_controls(
+        session,
+        handler,
+        vec![
+            ControlEntry::TaskParticipantAttempt(terminal),
+            ControlEntry::TaskParticipantRetryScheduled(schedule),
+        ],
+    )?;
+    Ok(true)
+}
+
+fn build_participant_retry_schedule(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    purpose: TaskParticipantPurpose,
+    plan_version: Option<u32>,
+    step_id: Option<&TaskStepId>,
+    attempt: &TaskParticipantAttemptEntry,
+    error: &anyhow::Error,
+) -> Result<Option<(TaskParticipantRetryScheduledEntry, usize)>> {
+    let Some(retry) = error.downcast_ref::<TaskParticipantRetryError>() else {
+        return Ok(None);
+    };
+    if attempt.purpose != purpose
+        || attempt.plan_version != plan_version
+        || attempt.step_id.as_ref() != step_id
+    {
+        bail!("task participant retry request conflicts with the failed attempt identity");
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&request.task_id)
+        .ok_or_else(|| anyhow!("task disappeared before retry scheduling"))?;
+    let retry_count = task
+        .participant_retry_schedules
+        .values()
+        .filter(|schedule| {
+            schedule.purpose == purpose
+                && schedule.plan_version == plan_version
+                && schedule.step_id.as_ref() == step_id
+        })
+        .count();
+    let cumulative_wait = task.participant_retry_wait_ms(purpose, plan_version, step_id);
+    if retry_count >= MAX_TASK_PARTICIPANT_AUTO_RETRIES
+        || cumulative_wait.saturating_add(retry.retry_after_ms())
+            > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS
+    {
+        return Ok(None);
+    }
+    let retry_ordinal = attempt.ordinal.saturating_add(1);
+    let retry_attempt_id = task_participant_attempt_id(
+        &request.task_id,
+        purpose,
+        plan_version,
+        step_id,
+        retry_ordinal,
+    )?;
+    let scheduled_at_unix_ms = unix_time_ms();
+    let schedule = TaskParticipantRetryScheduledEntry {
+        task_id: request.task_id.clone(),
+        failed_attempt_id: attempt.attempt_id.clone(),
+        retry_attempt_id,
+        purpose,
+        retry_ordinal,
+        plan_version,
+        step_id: step_id.cloned(),
+        route_fingerprint: retry.route_fingerprint().to_owned(),
+        input_hash: retry.input_hash().to_owned(),
+        scheduled_at_unix_ms,
+        not_before_unix_ms: scheduled_at_unix_ms.saturating_add(retry.retry_after_ms()),
+        retry_after_ms: retry.retry_after_ms(),
+        proof: retry.proof().clone(),
+    };
+    schedule.validate_shape()?;
+    Ok(Some((schedule, retry_count)))
 }
 
 fn begin_participant_attempt<H>(

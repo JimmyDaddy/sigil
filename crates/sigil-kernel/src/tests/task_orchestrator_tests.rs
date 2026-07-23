@@ -176,6 +176,17 @@ struct RetryingReadChildRunner {
 struct AlwaysRateLimitedReadChildRunner {
     calls: Arc<AtomicUsize>,
 }
+#[derive(Clone)]
+struct RetryingPlannerSynthesisChildRunner {
+    planner_calls: Arc<AtomicUsize>,
+    synthesis_calls: Arc<AtomicUsize>,
+}
+#[derive(Clone)]
+struct AlwaysRateLimitedControlChildRunner {
+    planner_calls: Arc<AtomicUsize>,
+    synthesis_calls: Arc<AtomicUsize>,
+    planner_succeeds: bool,
+}
 #[derive(Debug, Default)]
 struct FakeTaskExecutionBackend;
 #[derive(Default)]
@@ -545,6 +556,192 @@ impl TaskChildSessionRunner for AlwaysRateLimitedReadChildRunner {
     }
 }
 
+#[async_trait]
+impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
+    async fn run_planner_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskPlannerSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskPlannerSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        if self.planner_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(TaskParticipantRetryError::new(
+                1,
+                format!("sha256:{}", "6".repeat(64)),
+                task_participant_input_hash(&request.child_input)?,
+                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                },
+                anyhow::anyhow!("fixture planner rate limited"),
+            )?
+            .into());
+        }
+        Ok(crate::TaskPlannerSessionRunOutput {
+            attempt_id: request.attempt_id,
+            accepted_plan: TaskPlanEntry {
+                task_id: request.task.task_id,
+                plan_version: 1,
+                status: TaskPlanStatus::Accepted,
+                steps: vec![read_executor_step(
+                    "inspect",
+                    "Inspect provider retry",
+                    Vec::new(),
+                )?],
+                reason: None,
+            },
+            child_session_ref: request.child_session_ref,
+        })
+    }
+
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(successful_read_child_output(request))
+    }
+
+    async fn run_synthesis_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskSynthesisSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskSynthesisSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        if self.synthesis_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(TaskParticipantRetryError::new(
+                1,
+                format!("sha256:{}", "7".repeat(64)),
+                task_participant_input_hash(&request.child_input)?,
+                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                },
+                anyhow::anyhow!("fixture synthesis rate limited"),
+            )?
+            .into());
+        }
+        let final_text = "task completed after planner and synthesis retries".to_owned();
+        Ok(crate::TaskSynthesisSessionRunOutput {
+            attempt_id: request.attempt_id,
+            outcome: crate::AgentRunOutcome::default(),
+            child_session_ref: request.child_session_ref.clone(),
+            final_answer_ref: AgentFinalAnswerRef {
+                session_ref: request.child_session_ref,
+                message_id: "retry-control-synthesis-final".to_owned(),
+                content_hash: super::hash_text(&final_text),
+                char_count: final_text.chars().count(),
+            },
+            artifact_refs: Vec::new(),
+            final_text,
+        })
+    }
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
+    async fn run_planner_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskPlannerSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskPlannerSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.planner_calls.fetch_add(1, Ordering::SeqCst);
+        if !self.planner_succeeds {
+            return Err(TaskParticipantRetryError::new(
+                1,
+                format!("sha256:{}", "8".repeat(64)),
+                task_participant_input_hash(&request.child_input)?,
+                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                },
+                anyhow::anyhow!("fixture planner remains rate limited"),
+            )?
+            .into());
+        }
+        Ok(crate::TaskPlannerSessionRunOutput {
+            attempt_id: request.attempt_id,
+            accepted_plan: TaskPlanEntry {
+                task_id: request.task.task_id,
+                plan_version: 1,
+                status: TaskPlanStatus::Accepted,
+                steps: vec![read_executor_step(
+                    "inspect",
+                    "Inspect provider retry",
+                    Vec::new(),
+                )?],
+                reason: None,
+            },
+            child_session_ref: request.child_session_ref,
+        })
+    }
+
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(successful_read_child_output(request))
+    }
+
+    async fn run_synthesis_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskSynthesisSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskSynthesisSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.synthesis_calls.fetch_add(1, Ordering::SeqCst);
+        Err(TaskParticipantRetryError::new(
+            1,
+            format!("sha256:{}", "9".repeat(64)),
+            task_participant_input_hash(&request.child_input)?,
+            TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+            anyhow::anyhow!("fixture synthesis remains rate limited"),
+        )?
+        .into())
+    }
+}
+
 struct MixedReadBatchChildRunner;
 
 #[async_trait]
@@ -838,6 +1035,180 @@ async fn read_step_rate_limit_schedules_new_attempt_and_completes() -> Result<()
     assert!(
         task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
             .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_and_synthesis_rate_limits_use_new_attempts_and_complete() -> Result<()> {
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let synthesis_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(RetryingPlannerSynthesisChildRunner {
+            planner_calls: Arc::clone(&planner_calls),
+            synthesis_calls: Arc::clone(&synthesis_calls),
+        });
+    let task_id = TaskId::new("task_control_retry")?;
+    let mut session = Session::new("fixture", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "retry planner and synthesis safely".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(synthesis_calls.load(Ordering::SeqCst), 2);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    let planner_attempts =
+        task.participant_attempts_for(TaskParticipantPurpose::Planner, None, None);
+    let synthesis_attempts =
+        task.participant_attempts_for(TaskParticipantPurpose::Synthesis, Some(1), None);
+    assert_eq!(planner_attempts.len(), 2);
+    assert_eq!(synthesis_attempts.len(), 2);
+    assert_eq!(
+        planner_attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            TaskParticipantAttemptStatus::Failed,
+            TaskParticipantAttemptStatus::Completed
+        ]
+    );
+    assert_eq!(
+        synthesis_attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            TaskParticipantAttemptStatus::Failed,
+            TaskParticipantAttemptStatus::Completed
+        ]
+    );
+    assert_eq!(
+        task.participant_retry_schedules
+            .values()
+            .map(|schedule| schedule.purpose)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            TaskParticipantPurpose::Planner,
+            TaskParticipantPurpose::Synthesis,
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedControlChildRunner {
+            planner_calls: Arc::clone(&planner_calls),
+            synthesis_calls: Arc::new(AtomicUsize::new(0)),
+            planner_succeeds: false,
+        });
+    let task_id = TaskId::new("task_planner_retry_bounded")?;
+    let mut session = Session::new("fixture", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "bound planner provider retries".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval,
+        )
+        .await
+        .expect_err("planner must stop after the retry budget");
+
+    assert!(format!("{error:#}").contains("remains rate limited"));
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 3);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(task.status, TaskRunStatus::Failed);
+    assert_eq!(
+        task.participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+            .len(),
+        3
+    );
+    assert_eq!(task.participant_retry_schedules.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn synthesis_rate_limit_pauses_after_bounded_retry_budget() -> Result<()> {
+    let synthesis_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedControlChildRunner {
+            planner_calls: Arc::new(AtomicUsize::new(0)),
+            synthesis_calls: Arc::clone(&synthesis_calls),
+            planner_succeeds: true,
+        });
+    let task_id = TaskId::new("task_synthesis_retry_bounded")?;
+    let mut session = Session::new("fixture", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "bound synthesis provider retries".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(synthesis_calls.load(Ordering::SeqCst), 3);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(
+        task.participant_attempts_for(TaskParticipantPurpose::Synthesis, Some(1), None)
+            .len(),
+        3
+    );
+    assert_eq!(
+        task.participant_retry_schedules
+            .values()
+            .filter(|schedule| schedule.purpose == TaskParticipantPurpose::Synthesis)
+            .count(),
+        2
     );
     Ok(())
 }

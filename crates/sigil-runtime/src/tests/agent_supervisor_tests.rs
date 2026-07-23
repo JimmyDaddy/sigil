@@ -27,10 +27,11 @@ use sigil_kernel::{
     TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantPurpose,
     TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanUpdateContext,
     TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
-    TaskSubagentApprovalRouteEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig, child_session_ref,
-    task_participant_attempt_id, task_participant_logical_run_id, task_participant_session_ref,
+    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall,
+    ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig,
+    child_session_ref, task_participant_attempt_id, task_participant_logical_run_id,
+    task_participant_session_ref,
 };
 
 use super::{
@@ -790,6 +791,38 @@ fn supervisor_with_budget(budget: AgentBudgetPolicy) -> Result<AgentSupervisor> 
         budget,
         provider_capabilities(),
     ))
+}
+
+fn task_role_runner_with_rate_limited_participant(
+    supervisor: AgentSupervisor,
+    purpose: TaskParticipantPurpose,
+    starts: Arc<AtomicUsize>,
+) -> AgentSupervisorTaskChildRunner {
+    let rate_limited = || {
+        Box::new(RateLimitedTaskChildProvider {
+            starts: Arc::clone(&starts),
+            rate_limits_remaining: Arc::new(AtomicUsize::new(1)),
+        }) as Box<dyn Provider>
+    };
+    let text = |text| Box::new(TextProvider { text }) as Box<dyn Provider>;
+    let planner = if purpose == TaskParticipantPurpose::Planner {
+        rate_limited()
+    } else {
+        text("planner done")
+    };
+    let synthesis = if purpose == TaskParticipantPurpose::Synthesis {
+        rate_limited()
+    } else {
+        text("synthesis done")
+    };
+    AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor,
+        Agent::new(planner, ToolRegistry::new()),
+        Agent::new(text("executor done"), ToolRegistry::new()),
+        Agent::new(text("reader done"), ToolRegistry::new()),
+        Agent::new(text("writer done"), ToolRegistry::new()),
+        Agent::new(synthesis, ToolRegistry::new()),
+    )
 }
 
 #[test]
@@ -2940,6 +2973,129 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(session.agent_thread_state_projection().threads.is_empty());
     assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_rate_limit_preserves_zero_consumption_retry_proof() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = task_role_runner_with_rate_limited_participant(
+        supervisor,
+        TaskParticipantPurpose::Planner,
+        Arc::clone(&starts),
+    );
+    let task_id = TaskId::new("task_planner_rate_limit")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "plan after provider pressure".to_owned(),
+                },
+                attempt_id: attempt_id.clone(),
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("plan the task"),
+                ])
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await
+        .expect_err("planner 429 should remain retryable");
+
+    assert!(
+        error
+            .downcast_ref::<TaskParticipantRetryError>()
+            .is_some_and(|retry| matches!(
+                retry.proof(),
+                TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                    ..
+                }
+            ))
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn synthesis_rate_limit_preserves_zero_consumption_retry_proof() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = task_role_runner_with_rate_limited_participant(
+        supervisor,
+        TaskParticipantPurpose::Synthesis,
+        Arc::clone(&starts),
+    );
+    let task_id = TaskId::new("task_synthesis_rate_limit")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_synthesis_session(
+            &mut session,
+            TaskSynthesisSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "synthesize after provider pressure".to_owned(),
+                },
+                attempt_id: attempt_id.clone(),
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                plan_version: 1,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("synthesize the task"),
+                ])
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+                options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await
+        .expect_err("synthesis 429 should remain retryable");
+
+    assert!(
+        error
+            .downcast_ref::<TaskParticipantRetryError>()
+            .is_some_and(|retry| matches!(
+                retry.proof(),
+                TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                    ..
+                }
+            ))
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
