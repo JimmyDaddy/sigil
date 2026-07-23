@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 
 import { desktopBridge, type DesktopBridge } from "./bridge";
+import { AppearanceToggle } from "./appearance/AppearanceToggle";
 import { ThemeProvider, useAppearance } from "./appearance/ThemeProvider";
 import { ConversationPanel } from "./ConversationPanel";
 import { LocaleProvider, useLocale } from "./i18n";
@@ -793,6 +794,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               />
             </Tooltip>
           )}
+          <AppearanceToggle />
           <Tooltip label={t("openSettings")}>
             <IconButton
               aria-label={t("openSettings")}

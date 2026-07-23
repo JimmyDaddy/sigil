@@ -42,6 +42,21 @@ function markerBlock(source, name) {
   return source.slice(startIndex + start.length, endIndex);
 }
 
+function selectorBlock(source, selector) {
+  const marker = `${selector} {`;
+  const startIndex = source.indexOf(marker);
+  if (startIndex < 0) fail(`missing theme selector ${selector}`);
+  const openingBrace = source.indexOf("{", startIndex);
+  let depth = 0;
+  for (let index = openingBrace; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] !== "}") continue;
+    depth -= 1;
+    if (depth === 0) return source.slice(openingBrace + 1, index);
+  }
+  fail(`unterminated theme selector ${selector}`);
+}
+
 function resolveVariable(name, theme, refs, seen = new Set()) {
   if (seen.has(name)) fail(`cyclic token reference at ${name}`);
   seen.add(name);
@@ -128,13 +143,22 @@ for (const path of walk(srcRoot).filter((candidate) => extname(candidate) === ".
 const references = declarations(readFileSync(referencePath, "utf8"));
 const themeSource = readFileSync(themesPath, "utf8");
 const themes = {
-  dark: declarations(markerBlock(themeSource, "dark")),
-  light: declarations(markerBlock(themeSource, "light")),
+  sigil_dark: declarations(markerBlock(themeSource, "dark")),
+  sigil_light: declarations(markerBlock(themeSource, "light")),
+  solarized_light: declarations(selectorBlock(themeSource, ':root[data-theme="solarized_light"]')),
+  solarized_dark: declarations(selectorBlock(themeSource, ':root[data-theme="solarized_dark"]')),
+  gruvbox_dark: declarations(selectorBlock(themeSource, ':root[data-theme="gruvbox_dark"]')),
+  nord: declarations(selectorBlock(themeSource, ':root[data-theme="nord"]')),
+  high_contrast_dark: declarations(selectorBlock(themeSource, ':root[data-theme="high_contrast_dark"]')),
 };
 const rolePrefix = /^(--sg-sys-color-|--sg-domain-color-|--sg-sys-shadow-)/;
-const darkRoles = [...themes.dark.keys()].filter((name) => rolePrefix.test(name)).sort();
-const lightRoles = [...themes.light.keys()].filter((name) => rolePrefix.test(name)).sort();
-if (JSON.stringify(darkRoles) !== JSON.stringify(lightRoles)) fail("light/dark semantic role parity differs");
+const darkRoles = [...themes.sigil_dark.keys()].filter((name) => rolePrefix.test(name)).sort();
+for (const [themeName, theme] of Object.entries(themes)) {
+  const roles = [...theme.keys()].filter((name) => rolePrefix.test(name)).sort();
+  if (JSON.stringify(darkRoles) !== JSON.stringify(roles)) {
+    fail(`${themeName} semantic role parity differs from sigil_dark`);
+  }
+}
 
 const contrastPairs = [
   ["--sg-sys-color-on-surface", "--sg-sys-color-surface"],
@@ -187,8 +211,19 @@ const appearanceBootstrap = readFileSync(appearanceBootstrapPath, "utf8");
 for (const forbidden of ["localStorage", "sessionStorage", "fetch(", "invoke(", "token", "bearer"]) {
   if (appearanceBootstrap.includes(forbidden)) fail(`appearance bootstrap contains forbidden capability: ${forbidden}`);
 }
-if (!themeSource.includes(':root[data-theme="light"]')) {
+if (!themeSource.includes(':root[data-theme="sigil_light"]')) {
   fail("light theme must be selected by the pre-paint data-theme contract");
+}
+for (const themeId of Object.keys(themes)) {
+  if (!appearanceBootstrap.includes(`"${themeId}"`)) {
+    fail(`pre-paint appearance bootstrap is missing ${themeId}`);
+  }
+  if (!themeSource.includes(`[data-theme-preview="${themeId}"]`)) {
+    fail(`settings preview palette is missing ${themeId}`);
+  }
+}
+if (!appearanceBootstrap.includes("dataset.colorScheme")) {
+  fail("pre-paint appearance bootstrap does not publish the native color scheme");
 }
 
 const bridgeSource = readFileSync(desktopBridgePath, "utf8");
@@ -301,4 +336,4 @@ for (const path of rawAllowedFiles.keys()) {
   if (!rawInteractiveFiles.includes(path)) fail(`stale raw interactive allowlist entry: ${path}`);
 }
 
-console.log(`desktop UI system checks passed (${darkRoles.length} paired theme roles, ${contrastPairs.length * 2} contrast checks)`);
+console.log(`desktop UI system checks passed (${darkRoles.length} roles across ${Object.keys(themes).length} themes, ${contrastPairs.length * Object.keys(themes).length} contrast checks)`);

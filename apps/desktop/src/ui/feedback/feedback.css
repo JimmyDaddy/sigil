@@ -64,8 +64,8 @@
   .sg-brand-loader-mark img { width: 100%; height: 100%; }
   .sg-brand-loader-mark-dark { display: block; }
   .sg-brand-loader-mark-light { display: none; }
-  :root[data-theme="light"] .sg-brand-loader-mark-dark { display: none; }
-  :root[data-theme="light"] .sg-brand-loader-mark-light { display: block; }
+  :root[data-color-scheme="light"] .sg-brand-loader-mark-dark { display: none; }
+  :root[data-color-scheme="light"] .sg-brand-loader-mark-light { display: block; }
   .sg-loading-state-copy { display: grid; justify-items: center; gap: var(--sg-sys-space-1); }
   .sg-loading-state-copy strong { font-size: 15px; line-height: 1.4; }
   .sg-loading-state-copy > span { max-width: 440px; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; line-height: 1.55; }
@@ -96,8 +96,8 @@
   .sg-pagination-loader-mark { position: relative; z-index: 1; width: 12px; height: 12px; }
   .sg-pagination-loader-mark-dark { display: block; }
   .sg-pagination-loader-mark-light { display: none; }
-  :root[data-theme="light"] .sg-pagination-loader-mark-dark { display: none; }
-  :root[data-theme="light"] .sg-pagination-loader-mark-light { display: block; }
+  :root[data-color-scheme="light"] .sg-pagination-loader-mark-dark { display: none; }
+  :root[data-color-scheme="light"] .sg-pagination-loader-mark-light { display: block; }
 
   .sg-status-indicator { display: inline-flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-2); color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
   .sg-status-indicator > span:first-child { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid currentColor; border-radius: 50%; background: currentColor; }
@@ -152,8 +152,8 @@
   .sg-toast-brand img { width: 30px; height: 30px; filter: drop-shadow(0 4px 10px color-mix(in srgb, var(--sg-toast-tone) 26%, transparent)); }
   .sg-toast-mark-dark { display: block; }
   .sg-toast-mark-light { display: none; }
-  :root[data-theme="light"] .sg-toast-mark-dark { display: none; }
-  :root[data-theme="light"] .sg-toast-mark-light { display: block; }
+  :root[data-color-scheme="light"] .sg-toast-mark-dark { display: none; }
+  :root[data-color-scheme="light"] .sg-toast-mark-light { display: block; }
   .sg-toast-signal {
     position: absolute;
     inset: 1px;

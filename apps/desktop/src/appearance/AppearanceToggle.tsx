@@ -8,15 +8,25 @@ import { useNotifications } from "../ui/feedback";
 import { IconButton, Tooltip } from "../ui/primitives";
 
 const nextPreference: Record<ThemePreference, ThemePreference> = {
-  system: "light",
-  light: "dark",
-  dark: "system",
+  system: "sigil_light",
+  sigil_light: "sigil_dark",
+  sigil_dark: "system",
+  solarized_light: "sigil_dark",
+  solarized_dark: "system",
+  gruvbox_dark: "system",
+  nord: "system",
+  high_contrast_dark: "system",
 };
 
 const preferenceIcon: Record<ThemePreference, IconName> = {
   system: "appearance-auto",
-  light: "sun",
-  dark: "moon",
+  sigil_light: "sun",
+  sigil_dark: "moon",
+  solarized_light: "sun",
+  solarized_dark: "moon",
+  gruvbox_dark: "moon",
+  nord: "moon",
+  high_contrast_dark: "moon",
 };
 
 export function AppearanceToggle() {
@@ -69,7 +79,12 @@ export function AppearanceToggle() {
 function themeLabel(preference: ThemePreference, t: ReturnType<typeof useLocale>["t"]): string {
   switch (preference) {
     case "system": return t("systemTheme");
-    case "light": return t("lightTheme");
-    case "dark": return t("darkTheme");
+    case "sigil_light": return t("sigilLightTheme");
+    case "sigil_dark": return t("sigilDarkTheme");
+    case "solarized_light": return t("solarizedLightTheme");
+    case "solarized_dark": return t("solarizedDarkTheme");
+    case "gruvbox_dark": return t("gruvboxDarkTheme");
+    case "nord": return t("nordTheme");
+    case "high_contrast_dark": return t("highContrastDarkTheme");
   }
 }

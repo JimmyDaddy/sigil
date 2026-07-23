@@ -1,12 +1,15 @@
 import {
   DEFAULT_APPEARANCE,
+  RESOLVED_THEMES,
+  THEME_PREFERENCES,
   type AppearanceSnapshot,
   type ResolvedTheme,
+  type ThemeColorScheme,
   type ThemePreference,
 } from "./contract";
 
-const preferences = new Set<ThemePreference>(["system", "light", "dark"]);
-const resolvedThemes = new Set<ResolvedTheme>(["light", "dark"]);
+const preferences = new Set<ThemePreference>(THEME_PREFERENCES);
+const resolvedThemes = new Set<ResolvedTheme>(RESOLVED_THEMES);
 
 export function appearanceFromDocument(): AppearanceSnapshot {
   const preference = document.documentElement.dataset.themePreference;
@@ -22,14 +25,22 @@ export function appearanceFromDocument(): AppearanceSnapshot {
 }
 
 export function resolveSystemTheme(): ResolvedTheme {
-  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches
+    ? "sigil_light"
+    : "sigil_dark";
+}
+
+export function themeColorScheme(theme: ResolvedTheme): ThemeColorScheme {
+  return theme === "sigil_light" || theme === "solarized_light" ? "light" : "dark";
 }
 
 export function applyAppearance(snapshot: AppearanceSnapshot): void {
   const root = document.documentElement;
+  const colorScheme = themeColorScheme(snapshot.resolvedTheme);
   root.dataset.themePreference = snapshot.preference;
   root.dataset.theme = snapshot.resolvedTheme;
-  root.style.colorScheme = snapshot.resolvedTheme;
+  root.dataset.colorScheme = colorScheme;
+  root.style.colorScheme = colorScheme;
   const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (themeColor !== null) {
     const canvas = getComputedStyle(root).getPropertyValue("--sg-sys-color-canvas").trim();

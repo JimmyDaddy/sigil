@@ -1,19 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 import type { ThemePreference } from "../../appearance/contract";
 import { useAppearance } from "../../appearance/ThemeProvider";
 import { type Locale, useLocale } from "../../i18n";
 import { readReopenLastWorkspace, writeDefaultModel, writeReopenLastWorkspace } from "../../preferences";
 import type { RunContext } from "../../types";
-import { Icon, type IconName } from "../../ui/icons";
+import { Icon } from "../../ui/icons";
 import { useNotifications } from "../../ui/feedback";
 import { Button, Checkbox, Select } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 
-const themeOptions: ReadonlyArray<{ value: ThemePreference; icon: IconName }> = [
-  { value: "system", icon: "appearance-auto" },
-  { value: "light", icon: "sun" },
-  { value: "dark", icon: "moon" },
+const themeOptions: readonly ThemePreference[] = [
+  "system",
+  "sigil_light",
+  "sigil_dark",
+  "solarized_light",
+  "solarized_dark",
+  "gruvbox_dark",
+  "nord",
+  "high_contrast_dark",
 ];
 
 export function SettingsPage({
@@ -35,22 +40,8 @@ export function SettingsPage({
 }) {
   const appearance = useAppearance();
   const { locale, setLocale, t } = useLocale();
-  const { dismiss, notify } = useNotifications();
+  const { notify } = useNotifications();
   const [reopenLastWorkspace, setReopenLastWorkspace] = useState(readReopenLastWorkspace);
-  const notifiedAppearanceError = useRef<string | undefined>(undefined);
-  const appearanceNotificationId = useRef<number | undefined>(undefined);
-
-  useEffect(() => {
-    if (appearance.error === undefined) {
-      if (appearanceNotificationId.current !== undefined) dismiss(appearanceNotificationId.current);
-      appearanceNotificationId.current = undefined;
-      notifiedAppearanceError.current = undefined;
-      return;
-    }
-    if (notifiedAppearanceError.current === appearance.error) return;
-    notifiedAppearanceError.current = appearance.error;
-    appearanceNotificationId.current = notify({ tone: "error", message: appearance.error });
-  }, [appearance.error, dismiss, notify]);
 
   const updateStartup = (enabled: boolean) => {
     if (!writeReopenLastWorkspace(enabled)) {
@@ -112,18 +103,30 @@ export function SettingsPage({
               <p>{t("appearanceDetail")}</p>
             </div>
           </div>
-          <div className="settings-choice-group" role="group" aria-label={t("appearance")}>
+          <div className="theme-option-grid" role="group" aria-label={t("appearance")}>
             {themeOptions.map((option) => (
               <Button
-                key={option.value}
+                key={option}
                 type="button"
-                variant={appearance.preference === option.value ? "primary" : "secondary"}
-                leadingIcon={<Icon name={option.icon} />}
-                aria-pressed={appearance.preference === option.value}
+                variant="secondary"
+                className="theme-option"
+                data-theme-option={option}
+                aria-label={themeName(option, t)}
+                aria-pressed={appearance.preference === option}
                 disabled={appearance.status === "saving"}
-                onClick={() => void appearance.setPreference(option.value)}
+                onClick={() => void appearance.setPreference(option)}
               >
-                {themeName(option.value, t)}
+                <span className="theme-option-content">
+                  <span className="theme-option-preview" data-theme-preview={option} aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                  <span className="theme-option-copy">
+                    <strong>{themeName(option, t)}</strong>
+                    <small>{themeDescription(option, t)}</small>
+                  </span>
+                </span>
               </Button>
             ))}
           </div>
@@ -202,7 +205,28 @@ export function SettingsPage({
 function themeName(preference: ThemePreference, t: ReturnType<typeof useLocale>["t"]): string {
   switch (preference) {
     case "system": return t("systemTheme");
-    case "light": return t("lightTheme");
-    case "dark": return t("darkTheme");
+    case "sigil_light": return t("sigilLightTheme");
+    case "sigil_dark": return t("sigilDarkTheme");
+    case "solarized_light": return t("solarizedLightTheme");
+    case "solarized_dark": return t("solarizedDarkTheme");
+    case "gruvbox_dark": return t("gruvboxDarkTheme");
+    case "nord": return t("nordTheme");
+    case "high_contrast_dark": return t("highContrastDarkTheme");
+  }
+}
+
+function themeDescription(
+  preference: ThemePreference,
+  t: ReturnType<typeof useLocale>["t"],
+): string {
+  switch (preference) {
+    case "system": return t("systemThemeDetail");
+    case "sigil_light": return t("sigilLightThemeDetail");
+    case "sigil_dark": return t("sigilDarkThemeDetail");
+    case "solarized_light":
+    case "solarized_dark": return t("solarizedThemeDetail");
+    case "gruvbox_dark": return t("gruvboxThemeDetail");
+    case "nord": return t("nordThemeDetail");
+    case "high_contrast_dark": return t("highContrastThemeDetail");
   }
 }

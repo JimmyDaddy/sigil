@@ -52,7 +52,7 @@ const emptyCatalog: CatalogPage = {
 
 const defaultAppearance: AppearanceSnapshot = {
   preference: "system",
-  resolvedTheme: "dark",
+  resolvedTheme: "sigil_dark",
 };
 
 const defaultRunContext: RunContext = {
@@ -110,7 +110,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     }),
     setAppearance: async (preference) => ({
       preference,
-      resolvedTheme: preference === "light" ? "light" : "dark",
+      resolvedTheme: preference === "system" ? "sigil_dark" : preference,
     }),
     openExternalUrl: async () => undefined,
     supportDoctor: async () => ({
@@ -487,8 +487,8 @@ describe("desktop workspace and history shell", () => {
   it("persists a theme switch and preserves the active conversation draft", async () => {
     const user = userEvent.setup();
     const setAppearance = vi.fn(async () => ({
-      preference: "light" as const,
-      resolvedTheme: "light" as const,
+      preference: "solarized_light" as const,
+      resolvedTheme: "solarized_light" as const,
     }));
     const bridge = bridgeWith({
       bootstrap: async () => ({
@@ -505,10 +505,11 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.type(composer, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
-    await user.click(screen.getByRole("button", { name: "Light theme" }));
+    await user.click(screen.getByRole("button", { name: "Solarized Light" }));
 
-    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
-    expect(setAppearance).toHaveBeenCalledWith("light");
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("solarized_light"));
+    expect(document.documentElement.dataset.colorScheme).toBe("light");
+    expect(setAppearance).toHaveBeenCalledWith("solarized_light");
     await user.click(screen.getByLabelText("Sigil desktop home"));
     expect((screen.getByLabelText("Message Sigil") as HTMLTextAreaElement).value).toBe("Keep this draft");
   });
@@ -520,19 +521,19 @@ describe("desktop workspace and history shell", () => {
       setAppearance: async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("store unavailable");
-        return { preference: "light", resolvedTheme: "light" };
+        return { preference: "solarized_light", resolvedTheme: "solarized_light" };
       },
     });
     render(<App bridge={bridge} />);
 
     await screen.findByRole("heading", { name: "Open a workspace" });
     await user.click(screen.getByRole("button", { name: "Open settings" }));
-    await user.click(screen.getByRole("button", { name: "Light theme" }));
+    await user.click(screen.getByRole("button", { name: "Solarized Light" }));
     expect((await screen.findByRole("alert")).textContent).toContain("previous appearance is still active");
-    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("sigil_dark");
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("solarized_light"));
     expect(attempts).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -551,10 +552,32 @@ describe("desktop workspace and history shell", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Open settings" }));
     const systemTheme = screen.getByRole("button", { name: "System theme" });
     expect(systemTheme.getAttribute("aria-pressed")).toBe("true");
-    act(() => listener?.({ preference: "system", resolvedTheme: "light" }));
+    act(() => listener?.({ preference: "system", resolvedTheme: "sigil_light" }));
     expect(document.documentElement.dataset.themePreference).toBe("system");
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("sigil_light");
+    expect(document.documentElement.dataset.colorScheme).toBe("light");
     expect(screen.getByRole("button", { name: "System theme" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("uses the topbar theme control as a bounded shortcut for named palettes", async () => {
+    const user = userEvent.setup();
+    const setAppearance = vi.fn(async () => ({
+      preference: "system" as const,
+      resolvedTheme: "sigil_dark" as const,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [],
+        recentWorkspaces: [],
+        appearance: { preference: "nord", resolvedTheme: "nord" },
+      }),
+      setAppearance,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    await user.click(screen.getByRole("button", { name: "Nord. Switch to system theme" }));
+    await waitFor(() => expect(setAppearance).toHaveBeenCalledWith("system"));
   });
 
   it("opens redacted support diagnostics from settings and saves through the native bridge", async () => {

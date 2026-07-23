@@ -8,6 +8,7 @@ import { App } from "../../App";
 import { ToolCard } from "../../ToolCard";
 import { isUnifiedDiff } from "../../DiffViewer";
 import { CatalogApp } from "./CatalogApp";
+import { THEME_PREFERENCES } from "../../appearance/contract";
 import { catalogFixtures, UI_CATALOG_MARKER } from "./fixtures";
 import { createCatalogWorkbenchBridge } from "./workbenchBridge";
 
@@ -33,7 +34,7 @@ describe("desktop UI catalog contract", () => {
     ]);
 
     for (const fixture of catalogFixtures) {
-      expect(fixture.themes).toEqual(["system", "light", "dark"]);
+      expect(fixture.themes).toEqual(THEME_PREFERENCES);
       expect(fixture.viewports).toEqual([1280, 1024, 900, 899, 760, 320]);
       expect(fixture.contrastModes).toEqual(["normal", "forced-colors"]);
       expect(fixture.motionModes).toEqual(["full", "reduced"]);
@@ -154,16 +155,17 @@ describe("desktop UI catalog contract", () => {
   it("provides a runnable catalog surface for theme and viewport inspection", () => {
     render(createElement(CatalogApp));
     expect(screen.getByRole("heading", { name: "Sigil UI catalog" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "solarized_light" } });
     fireEvent.change(screen.getByLabelText("Viewport"), { target: { value: "320" } });
     fireEvent.change(screen.getByLabelText("Zoom"), { target: { value: "2" } });
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("solarized_light");
+    expect(document.documentElement.dataset.colorScheme).toBe("light");
     expect(screen.getByText(/320px viewport · 200% zoom/)).toBeTruthy();
   });
 
   it("renders the real application workbench from a capability-free fixture bridge", async () => {
     const user = userEvent.setup();
-    render(createElement(App, { bridge: createCatalogWorkbenchBridge("dark") }));
+    render(createElement(App, { bridge: createCatalogWorkbenchBridge("nord") }));
 
     expect(await screen.findByRole("button", { name: /^Review parser recovery and verification/ })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /^Review parser recovery and verification/ }));
@@ -184,10 +186,10 @@ describe("desktop UI catalog contract", () => {
     fireEvent.change(screen.getByLabelText("Fixture"), {
       target: { value: "workbench-complete" },
     });
-    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "solarized_light" } });
 
     const frame = screen.getByTitle("Complete Sigil workbench fixture") as HTMLIFrameElement;
-    expect(frame.src).toContain("/catalog-workbench.html?theme=light");
+    expect(frame.src).toContain("/catalog-workbench.html?theme=solarized_light");
     expect(frame.closest("[data-fixture]")?.getAttribute("data-fixture")).toBe("workbench-complete");
   });
 });

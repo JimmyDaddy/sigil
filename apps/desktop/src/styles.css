@@ -63,8 +63,8 @@
 .brand-mark img, .welcome-mark img { width: 100%; height: 100%; }
 .brand-mark img.brand-mark-dark, .welcome-mark img.brand-mark-dark { display: block; }
 .brand-mark img.brand-mark-light, .welcome-mark img.brand-mark-light { display: none; }
-:root[data-theme="light"] .brand-mark img.brand-mark-dark, :root[data-theme="light"] .welcome-mark img.brand-mark-dark { display: none; }
-:root[data-theme="light"] .brand-mark img.brand-mark-light, :root[data-theme="light"] .welcome-mark img.brand-mark-light { display: block; }
+:root[data-color-scheme="light"] .brand-mark img.brand-mark-dark, :root[data-color-scheme="light"] .welcome-mark img.brand-mark-dark { display: none; }
+:root[data-color-scheme="light"] .brand-mark img.brand-mark-light, :root[data-color-scheme="light"] .welcome-mark img.brand-mark-light { display: block; }
 .topbar .sg-tooltip { top: calc(100% + var(--sg-sys-space-2)); bottom: auto; }
 .topbar-actions .sg-icon-button[aria-current="page"] { border-color: var(--sg-sys-color-primary); color: var(--sg-sys-color-primary); background: var(--sg-sys-color-primary-container); }
 

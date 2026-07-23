@@ -157,7 +157,7 @@
 - SQLite/JSONL 只由 server/runtime 读取；desktop 不得把 projection 当 durable truth，也不得直接查询本地 session 数据文件
 - Desktop 样式按 `reset → tokens → base → primitives → patterns → features → utilities` 的 CSS layer 顺序组装；feature 只消费 `--sg-sys-*` / `--sg-domain-*` 语义角色，原始颜色只能留在 reference 和 forced-colors foundation
 - 业务 surface 的 button、field、dialog/drawer、menu/popover、tooltip、collapsible 和 icon 只能通过 `apps/desktop/src/ui` 内部 API 使用；不得直接 import 第三方 primitive/icon 或绕过 raw-interactive ledger
-- Desktop 主题是 application-scope presentation preference；native store 只持久化 bounded `system | light | dark` 枚举，DOM `data-theme` 只是渲染真相，两者都不得进入 workspace/session/OpenAPI/SQLite/runtime truth
+- Desktop 主题是 application-scope presentation preference；native store 只持久化 bounded `system` 或冻结的命名 palette ID，旧 `light | dark` 仅作为 `sigil_light | sigil_dark` 的读取迁移别名；DOM `data-theme` 是具体 palette，`data-color-scheme` 是派生的 native 明暗模式，两者都不得进入 workspace/session/OpenAPI/SQLite/runtime truth
 - 主题、navigation 和 review surface 变化不得 remount active conversation、丢失 draft/IME/scroll/focus 或重复 follower attachment；320px、200% zoom、forced-colors、reduced-motion 和 keyboard/focus 回归必须继续由 UI gate 和 interaction tests 覆盖
 
 ## 4. 数据与状态规则

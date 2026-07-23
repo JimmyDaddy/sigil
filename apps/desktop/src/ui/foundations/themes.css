@@ -43,7 +43,7 @@
 /* @theme dark-end */
 
 /* @theme light-start */
-:root[data-theme="light"] {
+:root[data-theme="sigil_light"] {
     color-scheme: light;
     --sg-sys-color-canvas: var(--sg-ref-color-light-canvas);
     --sg-sys-color-canvas-glow: var(--sg-ref-color-light-canvas-glow);
@@ -85,3 +85,261 @@
     --sg-sys-shadow-modal: var(--sg-ref-shadow-light-modal);
 }
 /* @theme light-end */
+
+:root[data-theme="solarized_dark"] {
+  color-scheme: dark;
+  --sg-sys-color-canvas: var(--sg-ref-color-solarized-dark-canvas);
+  --sg-sys-color-canvas-glow: color-mix(in srgb, var(--sg-ref-color-solarized-dark-primary) 10%, transparent);
+  --sg-sys-color-surface: var(--sg-ref-color-solarized-dark-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-solarized-dark-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-solarized-dark-surface);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-solarized-dark-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-solarized-dark-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-solarized-dark-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-solarized-dark-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-solarized-dark-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-solarized-dark-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-solarized-dark-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-solarized-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-solarized-dark-outline);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-solarized-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-solarized-dark-primary);
+  --sg-sys-color-primary: var(--sg-ref-color-solarized-dark-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-solarized-dark-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-solarized-dark-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-solarized-dark-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-solarized-dark-on-surface);
+  --sg-sys-color-error: var(--sg-ref-color-solarized-dark-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-solarized-dark-on-primary);
+  --sg-sys-color-error-container: var(--sg-ref-color-solarized-dark-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-solarized-dark-error);
+  --sg-domain-color-success: var(--sg-ref-color-solarized-dark-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-solarized-dark-success);
+  --sg-domain-color-warning: var(--sg-ref-color-solarized-dark-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-solarized-dark-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-solarized-dark-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-solarized-dark-error);
+  --sg-domain-color-info: var(--sg-ref-color-solarized-dark-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-solarized-dark-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-dark-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-dark-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-solarized-dark-primary);
+  --sg-sys-shadow-dock: var(--sg-ref-shadow-dark-dock);
+  --sg-sys-shadow-modal: var(--sg-ref-shadow-dark-modal);
+}
+
+:root[data-theme="solarized_light"] {
+  color-scheme: light;
+  --sg-sys-color-canvas: var(--sg-ref-color-solarized-light-canvas);
+  --sg-sys-color-canvas-glow: color-mix(in srgb, var(--sg-ref-color-solarized-light-primary) 8%, transparent);
+  --sg-sys-color-surface: var(--sg-ref-color-solarized-light-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-solarized-light-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-solarized-light-surface-low);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-solarized-light-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-solarized-light-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-solarized-light-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-solarized-light-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-solarized-light-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-solarized-light-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-solarized-light-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-solarized-light-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-solarized-light-outline-strong);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-solarized-light-on-surface-subtle);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-solarized-light-primary);
+  --sg-sys-color-primary: var(--sg-ref-color-solarized-light-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-solarized-light-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-solarized-light-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-solarized-light-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-light-on-primary-container);
+  --sg-sys-color-error: var(--sg-ref-color-light-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-light-on-primary);
+  --sg-sys-color-error-container: var(--sg-ref-color-light-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-light-error);
+  --sg-domain-color-success: var(--sg-ref-color-light-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-light-success);
+  --sg-domain-color-warning: var(--sg-ref-color-light-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-light-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-light-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-light-error);
+  --sg-domain-color-info: var(--sg-ref-color-light-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-light-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-light-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-light-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-solarized-light-primary);
+  --sg-sys-shadow-dock: var(--sg-ref-shadow-light-dock);
+  --sg-sys-shadow-modal: var(--sg-ref-shadow-light-modal);
+}
+
+:root[data-theme="gruvbox_dark"] {
+  color-scheme: dark;
+  --sg-sys-color-canvas: var(--sg-ref-color-gruvbox-dark-canvas);
+  --sg-sys-color-canvas-glow: color-mix(in srgb, var(--sg-ref-color-gruvbox-dark-primary) 9%, transparent);
+  --sg-sys-color-surface: var(--sg-ref-color-gruvbox-dark-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-gruvbox-dark-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-gruvbox-dark-surface);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-gruvbox-dark-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-gruvbox-dark-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-gruvbox-dark-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-gruvbox-dark-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-gruvbox-dark-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-gruvbox-dark-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-gruvbox-dark-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-gruvbox-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-gruvbox-dark-outline);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-gruvbox-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-gruvbox-dark-primary);
+  --sg-sys-color-primary: var(--sg-ref-color-gruvbox-dark-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-gruvbox-dark-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-gruvbox-dark-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-gruvbox-dark-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-gruvbox-dark-on-surface);
+  --sg-sys-color-error: var(--sg-ref-color-gruvbox-dark-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-gruvbox-dark-on-primary);
+  --sg-sys-color-error-container: var(--sg-ref-color-gruvbox-dark-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-gruvbox-dark-error);
+  --sg-domain-color-success: var(--sg-ref-color-gruvbox-dark-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-gruvbox-dark-success);
+  --sg-domain-color-warning: var(--sg-ref-color-gruvbox-dark-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-gruvbox-dark-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-gruvbox-dark-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-gruvbox-dark-error);
+  --sg-domain-color-info: var(--sg-ref-color-gruvbox-dark-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-gruvbox-dark-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-dark-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-dark-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-gruvbox-dark-primary);
+  --sg-sys-shadow-dock: var(--sg-ref-shadow-dark-dock);
+  --sg-sys-shadow-modal: var(--sg-ref-shadow-dark-modal);
+}
+
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --sg-sys-color-canvas: var(--sg-ref-color-nord-canvas);
+  --sg-sys-color-canvas-glow: color-mix(in srgb, var(--sg-ref-color-nord-primary) 10%, transparent);
+  --sg-sys-color-surface: var(--sg-ref-color-nord-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-nord-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-nord-surface);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-nord-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-nord-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-nord-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-nord-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-nord-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-nord-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-nord-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-nord-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-nord-outline);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-nord-outline-strong);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-nord-primary);
+  --sg-sys-color-primary: var(--sg-ref-color-nord-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-nord-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-nord-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-nord-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-nord-on-surface);
+  --sg-sys-color-error: var(--sg-ref-color-nord-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-nord-on-primary);
+  --sg-sys-color-error-container: var(--sg-ref-color-nord-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-nord-error);
+  --sg-domain-color-success: var(--sg-ref-color-nord-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-nord-success);
+  --sg-domain-color-warning: var(--sg-ref-color-nord-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-nord-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-nord-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-nord-error);
+  --sg-domain-color-info: var(--sg-ref-color-nord-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-nord-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-dark-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-dark-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-nord-primary);
+  --sg-sys-shadow-dock: var(--sg-ref-shadow-dark-dock);
+  --sg-sys-shadow-modal: var(--sg-ref-shadow-dark-modal);
+}
+
+:root[data-theme="high_contrast_dark"] {
+  color-scheme: dark;
+  --sg-sys-color-canvas: var(--sg-ref-color-high-contrast-canvas);
+  --sg-sys-color-canvas-glow: color-mix(in srgb, var(--sg-ref-color-high-contrast-primary) 12%, transparent);
+  --sg-sys-color-surface: var(--sg-ref-color-high-contrast-surface);
+  --sg-sys-color-surface-container-low: var(--sg-ref-color-high-contrast-surface-low);
+  --sg-sys-color-surface-container: var(--sg-ref-color-high-contrast-surface);
+  --sg-sys-color-surface-container-high: var(--sg-ref-color-high-contrast-surface-high);
+  --sg-sys-color-surface-input: var(--sg-ref-color-high-contrast-input);
+  --sg-sys-color-surface-hover: var(--sg-ref-color-high-contrast-hover);
+  --sg-sys-color-on-surface: var(--sg-ref-color-high-contrast-on-surface);
+  --sg-sys-color-on-surface-variant: var(--sg-ref-color-high-contrast-on-surface-variant);
+  --sg-sys-color-on-surface-subtle: var(--sg-ref-color-high-contrast-on-surface-subtle);
+  --sg-sys-color-outline: var(--sg-ref-color-high-contrast-outline);
+  --sg-sys-color-outline-variant: var(--sg-ref-color-high-contrast-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-high-contrast-outline);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-high-contrast-outline-strong);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-high-contrast-primary);
+  --sg-sys-color-primary: var(--sg-ref-color-high-contrast-primary);
+  --sg-sys-color-primary-strong: var(--sg-ref-color-high-contrast-primary-strong);
+  --sg-sys-color-on-primary: var(--sg-ref-color-high-contrast-on-primary);
+  --sg-sys-color-primary-container: var(--sg-ref-color-high-contrast-primary-container);
+  --sg-sys-color-on-primary-container: var(--sg-ref-color-high-contrast-on-surface);
+  --sg-sys-color-error: var(--sg-ref-color-high-contrast-error);
+  --sg-sys-color-on-error: var(--sg-ref-color-high-contrast-on-primary);
+  --sg-sys-color-error-container: var(--sg-ref-color-high-contrast-error-container);
+  --sg-sys-color-on-error-container: var(--sg-ref-color-high-contrast-error);
+  --sg-domain-color-success: var(--sg-ref-color-high-contrast-success-container);
+  --sg-domain-color-on-success: var(--sg-ref-color-high-contrast-success);
+  --sg-domain-color-warning: var(--sg-ref-color-high-contrast-warning-container);
+  --sg-domain-color-on-warning: var(--sg-ref-color-high-contrast-warning);
+  --sg-domain-color-danger: var(--sg-ref-color-high-contrast-error-container);
+  --sg-domain-color-on-danger: var(--sg-ref-color-high-contrast-error);
+  --sg-domain-color-info: var(--sg-ref-color-high-contrast-info-container);
+  --sg-domain-color-on-info: var(--sg-ref-color-high-contrast-info);
+  --sg-sys-color-overlay: var(--sg-ref-color-dark-overlay);
+  --sg-sys-color-backdrop: var(--sg-ref-color-dark-backdrop);
+  --sg-sys-color-focus: var(--sg-ref-color-high-contrast-primary);
+  --sg-sys-shadow-dock: 0 0 0 1px var(--sg-ref-color-high-contrast-outline);
+  --sg-sys-shadow-modal: 0 0 0 2px var(--sg-ref-color-high-contrast-outline-strong);
+}
+
+[data-theme-preview="system"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-light-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-dark-canvas);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-dark-primary);
+}
+
+[data-theme-preview="sigil_light"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-light-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-light-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-light-primary);
+}
+
+[data-theme-preview="sigil_dark"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-dark-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-dark-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-dark-primary);
+}
+
+[data-theme-preview="solarized_light"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-solarized-light-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-solarized-light-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-solarized-light-primary);
+}
+
+[data-theme-preview="solarized_dark"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-solarized-dark-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-solarized-dark-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-solarized-dark-primary);
+}
+
+[data-theme-preview="gruvbox_dark"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-gruvbox-dark-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-gruvbox-dark-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-gruvbox-dark-primary);
+}
+
+[data-theme-preview="nord"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-nord-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-nord-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-nord-primary);
+}
+
+[data-theme-preview="high_contrast_dark"] {
+  --sg-sys-theme-preview-canvas: var(--sg-ref-color-high-contrast-canvas);
+  --sg-sys-theme-preview-surface: var(--sg-ref-color-high-contrast-surface);
+  --sg-sys-theme-preview-accent: var(--sg-ref-color-high-contrast-primary);
+}

@@ -28,7 +28,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
-    appearance::{AppearanceSnapshot, AppearanceStoreError, ResolvedTheme, ThemePreference},
+    appearance::{AppearanceSnapshot, AppearanceStoreError, ThemePreference},
     ipc::{
         DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
@@ -344,14 +344,8 @@ pub(crate) fn desktop_set_appearance(
 }
 
 fn appearance_snapshot(window: &WebviewWindow, preference: ThemePreference) -> AppearanceSnapshot {
-    let resolved_theme = match preference {
-        ThemePreference::Light => ResolvedTheme::Light,
-        ThemePreference::Dark => ResolvedTheme::Dark,
-        ThemePreference::System => window
-            .theme()
-            .map(ResolvedTheme::from)
-            .unwrap_or(ResolvedTheme::Dark),
-    };
+    let system_theme = window.theme().unwrap_or(tauri::Theme::Dark);
+    let resolved_theme = preference.resolve(system_theme);
     AppearanceSnapshot {
         preference,
         resolved_theme,

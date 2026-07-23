@@ -16,24 +16,53 @@ pub(crate) const DESKTOP_APPEARANCE_EVENT_NAME: &str = "sigil-appearance-changed
 pub(crate) enum ThemePreference {
     #[default]
     System,
-    Light,
-    Dark,
+    #[serde(alias = "light")]
+    SigilLight,
+    #[serde(alias = "dark")]
+    SigilDark,
+    SolarizedLight,
+    SolarizedDark,
+    GruvboxDark,
+    Nord,
+    HighContrastDark,
 }
 
 impl ThemePreference {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
+            Self::SigilLight => "sigil_light",
+            Self::SigilDark => "sigil_dark",
+            Self::SolarizedLight => "solarized_light",
+            Self::SolarizedDark => "solarized_dark",
+            Self::GruvboxDark => "gruvbox_dark",
+            Self::Nord => "nord",
+            Self::HighContrastDark => "high_contrast_dark",
         }
     }
 
     pub(crate) const fn native_theme(self) -> Option<Theme> {
         match self {
             Self::System => None,
-            Self::Light => Some(Theme::Light),
-            Self::Dark => Some(Theme::Dark),
+            Self::SigilLight | Self::SolarizedLight => Some(Theme::Light),
+            Self::SigilDark
+            | Self::SolarizedDark
+            | Self::GruvboxDark
+            | Self::Nord
+            | Self::HighContrastDark => Some(Theme::Dark),
+        }
+    }
+
+    pub(crate) fn resolve(self, system_theme: Theme) -> ResolvedTheme {
+        match self {
+            Self::System => ResolvedTheme::from(system_theme),
+            Self::SigilLight => ResolvedTheme::SigilLight,
+            Self::SigilDark => ResolvedTheme::SigilDark,
+            Self::SolarizedLight => ResolvedTheme::SolarizedLight,
+            Self::SolarizedDark => ResolvedTheme::SolarizedDark,
+            Self::GruvboxDark => ResolvedTheme::GruvboxDark,
+            Self::Nord => ResolvedTheme::Nord,
+            Self::HighContrastDark => ResolvedTheme::HighContrastDark,
         }
     }
 }
@@ -41,16 +70,21 @@ impl ThemePreference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResolvedTheme {
-    Light,
-    Dark,
+    SigilLight,
+    SigilDark,
+    SolarizedLight,
+    SolarizedDark,
+    GruvboxDark,
+    Nord,
+    HighContrastDark,
 }
 
 impl From<Theme> for ResolvedTheme {
     fn from(theme: Theme) -> Self {
         match theme {
-            Theme::Light => Self::Light,
-            Theme::Dark => Self::Dark,
-            _ => Self::Dark,
+            Theme::Light => Self::SigilLight,
+            Theme::Dark => Self::SigilDark,
+            _ => Self::SigilDark,
         }
     }
 }

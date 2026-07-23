@@ -18,6 +18,11 @@ import {
 } from "./fixtures";
 import { UiCatalog } from "./UiCatalog";
 import { Select } from "../primitives";
+import {
+  resolveSystemTheme,
+  themeColorScheme,
+} from "../../appearance/resolveTheme";
+import type { ResolvedTheme } from "../../appearance/contract";
 
 export function CatalogApp() {
   const [fixtureId, setFixtureId] = useState(catalogFixtures[0]?.id ?? "no-workspace");
@@ -33,14 +38,16 @@ export function CatalogApp() {
 
   useEffect(() => {
     const root = document.documentElement;
-    const resolved = theme === "system"
-      ? (window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark")
+    const resolved: ResolvedTheme = theme === "system"
+      ? resolveSystemTheme()
       : theme;
+    const colorScheme = themeColorScheme(resolved);
     root.dataset.theme = resolved;
     root.dataset.themePreference = theme;
+    root.dataset.colorScheme = colorScheme;
     root.dataset.catalogContrast = contrast;
     root.dataset.catalogMotion = motion;
-    root.style.colorScheme = resolved;
+    root.style.colorScheme = colorScheme;
   }, [contrast, motion, theme]);
 
   if (fixture === undefined) return null;

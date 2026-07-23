@@ -1,4 +1,5 @@
 import type { AppearanceSnapshot, ThemePreference } from "../../appearance/contract";
+import { resolveSystemTheme } from "../../appearance/resolveTheme";
 import type { DesktopBridge } from "../../bridge";
 import type {
   CatalogPage,
@@ -202,21 +203,27 @@ const verification: VerificationSummary = {
 };
 
 function appearance(preference: ThemePreference): AppearanceSnapshot {
-  const resolvedTheme = preference === "light" ? "light" : "dark";
+  const resolvedTheme = preference === "system"
+    ? resolveSystemTheme()
+    : preference;
   return { preference, resolvedTheme };
 }
 
 export function createCatalogWorkbenchBridge(
   preference: ThemePreference,
 ): DesktopBridge {
+  let currentPreference = preference;
   return {
     bootstrap: async () => ({
       protocolVersion: 2,
       workspaces: [workspace],
       recentWorkspaces: [],
-      appearance: appearance(preference),
+      appearance: appearance(currentPreference),
     }),
-    setAppearance: async (next) => appearance(next),
+    setAppearance: async (next) => {
+      currentPreference = next;
+      return appearance(currentPreference);
+    },
     openExternalUrl: async () => undefined,
     supportDoctor: async () => ({
       generatedAtUnixMs: 1_784_419_200_000,

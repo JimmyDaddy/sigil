@@ -1,4 +1,8 @@
 import type { ToolView } from "../../ToolCard";
+import {
+  THEME_PREFERENCES,
+  type ThemePreference,
+} from "../../appearance/contract";
 import type {
   CatalogEntry,
   RunContext,
@@ -9,7 +13,7 @@ import type {
 
 export const UI_CATALOG_MARKER = "sigil-desktop-dev-ui-catalog";
 
-export type CatalogTheme = "system" | "light" | "dark";
+export type CatalogTheme = ThemePreference;
 export type CatalogViewport = 1280 | 1024 | 900 | 899 | 760 | 320;
 export type CatalogContrast = "normal" | "forced-colors";
 export type CatalogMotion = "full" | "reduced";
@@ -43,7 +47,7 @@ export interface CatalogFixture {
   readonly zoomFactors: readonly (1 | 2)[];
 }
 
-const allThemes = ["system", "light", "dark"] as const;
+const allThemes = THEME_PREFERENCES;
 const allViewports = [1280, 1024, 900, 899, 760, 320] as const;
 const allContrastModes = ["normal", "forced-colors"] as const;
 const allMotionModes = ["full", "reduced"] as const;
