@@ -14,6 +14,9 @@
   --sg-sys-color-on-surface-subtle: var(--sg-ref-color-dark-on-surface-subtle);
   --sg-sys-color-outline: var(--sg-ref-color-dark-outline);
   --sg-sys-color-outline-variant: var(--sg-ref-color-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-dark-outline-strong);
+  --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-dark-on-surface-subtle);
+  --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-dark-primary);
   --sg-sys-color-primary: var(--sg-ref-color-dark-primary);
   --sg-sys-color-primary-strong: var(--sg-ref-color-dark-primary-strong);
   --sg-sys-color-on-primary: var(--sg-ref-color-dark-on-primary);
@@ -55,6 +58,9 @@
     --sg-sys-color-on-surface-subtle: var(--sg-ref-color-light-on-surface-subtle);
     --sg-sys-color-outline: var(--sg-ref-color-light-outline);
     --sg-sys-color-outline-variant: var(--sg-ref-color-light-outline-strong);
+    --sg-sys-color-scrollbar-thumb: var(--sg-ref-color-light-outline-strong);
+    --sg-sys-color-scrollbar-thumb-hover: var(--sg-ref-color-light-on-surface-subtle);
+    --sg-sys-color-scrollbar-thumb-active: var(--sg-ref-color-light-primary);
     --sg-sys-color-primary: var(--sg-ref-color-light-primary);
     --sg-sys-color-primary-strong: var(--sg-ref-color-light-primary-strong);
     --sg-sys-color-on-primary: var(--sg-ref-color-light-on-primary);

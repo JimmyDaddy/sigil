@@ -109,7 +109,7 @@ const styles = readFileSync(stylesPath, "utf8");
 const expectedLayers = "@layer reset, tokens, base, primitives, patterns, features, utilities;";
 if (!styles.includes(expectedLayers)) fail("CSS layer order is not frozen");
 
-for (const file of ["reference.css", "themes.css", "density.css", "elevation.css", "motion.css", "reset.css", "typography.css", "forced-colors.css"]) {
+for (const file of ["reference.css", "themes.css", "density.css", "elevation.css", "motion.css", "reset.css", "typography.css", "scrollbars.css", "forced-colors.css"]) {
   if (!styles.includes(`./ui/foundations/${file}`)) fail(`styles.css does not import ${file}`);
 }
 
@@ -229,6 +229,10 @@ if (!readFileSync(motionPath, "utf8").includes("@media (prefers-reduced-motion: 
 const forcedColorsSource = readFileSync(forcedColorsPath, "utf8");
 for (const marker of ["@media (forced-colors: active)", "--sg-sys-color-primary-container", "--sg-sys-color-error-container", "--sg-sys-shadow-modal: none"]) {
   if (!forcedColorsSource.includes(marker)) fail(`forced-colors role coverage is missing: ${marker}`);
+}
+const scrollbarSource = readFileSync(join(foundations, "scrollbars.css"), "utf8");
+for (const marker of ["scrollbar-width: thin", "::-webkit-scrollbar-thumb:hover", "::-webkit-scrollbar-thumb:active", "@media (forced-colors: active)"]) {
+  if (!scrollbarSource.includes(marker)) fail(`application scrollbar contract is missing: ${marker}`);
 }
 const resetSource = readFileSync(resetPath, "utf8");
 if (!/body\s*\{[^}]*min-width:\s*320px[^}]*overflow:\s*hidden/.test(resetSource)) {

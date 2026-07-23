@@ -1,0 +1,61 @@
+:root {
+  scrollbar-color: var(--sg-sys-color-scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  min-height: 36px;
+  border: 2px solid transparent;
+  border-radius: var(--sg-sys-radius-full);
+  background-color: var(--sg-sys-color-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  border-width: 1px;
+  background-color: var(--sg-sys-color-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  border-width: 1px;
+  background-color: var(--sg-sys-color-scrollbar-thumb-active);
+}
+
+*::-webkit-scrollbar-button {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+@media (forced-colors: active) {
+  :root {
+    scrollbar-color: auto;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: Canvas;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    border-color: Canvas;
+    background-color: ButtonText;
+    forced-color-adjust: none;
+  }
+
+  *::-webkit-scrollbar-thumb:hover,
+  *::-webkit-scrollbar-thumb:active {
+    background-color: Highlight;
+  }
+}

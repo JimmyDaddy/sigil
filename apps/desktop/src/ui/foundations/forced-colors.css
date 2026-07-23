@@ -2,6 +2,9 @@
   :root {
     --sg-sys-color-outline: currentColor;
     --sg-sys-color-outline-variant: currentColor;
+    --sg-sys-color-scrollbar-thumb: currentColor;
+    --sg-sys-color-scrollbar-thumb-hover: currentColor;
+    --sg-sys-color-scrollbar-thumb-active: currentColor;
     --sg-sys-color-focus: #ffbf47;
   }
 }
@@ -18,6 +21,9 @@
     --sg-sys-color-surface-hover: Highlight;
     --sg-sys-color-outline: CanvasText;
     --sg-sys-color-outline-variant: CanvasText;
+    --sg-sys-color-scrollbar-thumb: ButtonText;
+    --sg-sys-color-scrollbar-thumb-hover: Highlight;
+    --sg-sys-color-scrollbar-thumb-active: Highlight;
     --sg-sys-color-on-surface: CanvasText;
     --sg-sys-color-on-surface-variant: CanvasText;
     --sg-sys-color-on-surface-subtle: GrayText;

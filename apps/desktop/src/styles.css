@@ -7,6 +7,7 @@
 @import "./ui/foundations/motion.css" layer(tokens);
 @import "./ui/foundations/reset.css" layer(reset);
 @import "./ui/foundations/typography.css" layer(base);
+@import "./ui/foundations/scrollbars.css" layer(base);
 @import "./ui/foundations/forced-colors.css" layer(utilities);
 @import "./ui/primitives/primitives.css" layer(primitives);
 @import "./ui/feedback/feedback.css" layer(patterns);
