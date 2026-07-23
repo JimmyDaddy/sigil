@@ -969,6 +969,102 @@ fn supervisor_enforces_max_subagents() -> Result<()> {
 }
 
 #[test]
+fn chat_batch_reservation_is_atomic_and_claimed_by_child_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut first = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    first.call_id = "call_batch_first".to_owned();
+    rebind_chat_delegation_admission(&mut first)?;
+    let mut second = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    second.call_id = "call_batch_second".to_owned();
+    rebind_chat_delegation_admission(&mut second)?;
+    let starts = vec![first, second];
+
+    let reservation = supervisor.reserve_chat_child_batch(&starts)?;
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let threads = starts
+        .into_iter()
+        .map(|start| supervisor.begin_chat_child_thread(&mut session, &mut handler, start))
+        .collect::<Result<Vec<_>>>()?;
+    reservation.commit();
+
+    assert_eq!(threads.len(), 2);
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    for thread in threads {
+        supervisor.record_chat_child_failure(
+            &mut session,
+            &mut handler,
+            &thread,
+            "test cleanup".to_owned(),
+        )?;
+    }
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
+fn dropped_chat_batch_reservation_releases_every_slot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut first = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    first.call_id = "call_batch_drop_first".to_owned();
+    rebind_chat_delegation_admission(&mut first)?;
+    let mut second = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    second.call_id = "call_batch_drop_second".to_owned();
+    rebind_chat_delegation_admission(&mut second)?;
+
+    let reservation = supervisor.reserve_chat_child_batch(&[first, second])?;
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    drop(reservation);
+
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
+fn chat_batch_reservation_rejects_capacity_without_partial_slots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut first = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    first.call_id = "call_batch_first".to_owned();
+    rebind_chat_delegation_admission(&mut first)?;
+    let mut second = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    second.call_id = "call_batch_second".to_owned();
+    rebind_chat_delegation_admission(&mut second)?;
+
+    let error = supervisor
+        .reserve_chat_child_batch(&[first, second])
+        .err()
+        .expect("oversized batch should be rejected");
+
+    assert!(error.to_string().contains("requested=2"));
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
+fn chat_batch_reservation_rejects_duplicate_identity_without_partial_slots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+
+    let error = supervisor
+        .reserve_chat_child_batch(&[start.clone(), start])
+        .err()
+        .expect("duplicate batch identity should be rejected");
+
+    assert!(error.to_string().contains("duplicate thread"));
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
 fn release_allows_next_spawn_after_max_subagents_slot_opens() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());

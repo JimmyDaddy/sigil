@@ -359,6 +359,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                 self.spawn_agent(session, call, &args, options, handler, approval_handler)
                     .await
             }
+            AgentToolKind::SpawnBatch => self.spawn_agents(session, call, &args, options, handler),
             AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
             AgentToolKind::ReadResult => self.read_agent_result(session, call, &args, handler),
             AgentToolKind::List => self.list_agents(session, call),

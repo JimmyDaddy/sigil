@@ -35,9 +35,10 @@ use super::{
     AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundRuns,
     AgentToolProviderFactory, AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
     LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
-    register_agent_tools, register_agent_tools_with_registry_and_mode,
-    register_agent_tools_with_workspace_and_entries, tool_batch_allows_host_join,
+    SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
+    chat_agent_thread_id_for_call, register_agent_tools,
+    register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
+    tool_batch_allows_host_join,
 };
 
 /// Existing runtime tests directly exercise user-directed spawn calls. Keep that authority
@@ -889,6 +890,10 @@ struct ParallelParentProvider {
     observed_join_context: Arc<Mutex<Option<String>>>,
 }
 
+struct BatchParallelParentProvider {
+    observed_join_context: Arc<Mutex<Option<String>>>,
+}
+
 type ProviderChunkStream = Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>;
 
 fn request_contains_user_text(request: &CompletionRequest, needle: &str) -> bool {
@@ -1127,6 +1132,65 @@ impl Provider for ParallelParentProvider {
         Ok(boxed_provider_chunks(vec![
             ProviderChunk::ToolCallComplete(spawn("call-parallel-a", "inspect kernel")),
             ProviderChunk::ToolCallComplete(spawn("call-parallel-b", "inspect runtime")),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
+#[async_trait]
+impl Provider for BatchParallelParentProvider {
+    fn name(&self) -> &str {
+        "batch-parallel-parent"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(context) = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::User))
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("agent_batch_results"))
+        {
+            *self
+                .observed_join_context
+                .lock()
+                .expect("join context observation lock should not be poisoned") =
+                Some(context.to_owned());
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::TextDelta("batch parallel parent final".to_owned()),
+                ProviderChunk::Done,
+            ]));
+        }
+
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-batch-parallel".to_owned(),
+                name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "members": [
+                        {
+                            "request_key": "runtime",
+                            "profile_id": "explore",
+                            "objective": "inspect runtime",
+                            "prompt": "inspect runtime"
+                        },
+                        {
+                            "request_key": "kernel",
+                            "profile_id": "explore",
+                            "objective": "inspect kernel",
+                            "prompt": "inspect kernel"
+                        }
+                    ]
+                })
+                .to_string(),
+            }),
             ProviderChunk::Done,
         ]))
     }
@@ -1533,6 +1597,26 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
             .is_some_and(|required| required.iter().any(|value| value == "thread_id"))
     );
     assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
+    let batch_spec = registry
+        .spec_for(SPAWN_AGENTS_TOOL_NAME)
+        .expect("spawn_agents registered");
+    assert!(
+        batch_spec
+            .description
+            .contains("preflights the whole batch")
+    );
+    assert_eq!(
+        batch_spec.input_schema["properties"]["members"]["minItems"],
+        2
+    );
+    assert_eq!(
+        batch_spec.input_schema["properties"]["members"]["maxItems"],
+        4
+    );
+    assert_eq!(
+        batch_spec.input_schema["properties"]["completion_mode"]["enum"],
+        json!(["join_before_final"])
+    );
     Ok(())
 }
 
@@ -1559,6 +1643,49 @@ fn host_join_batch_accepts_only_owned_join_before_final_spawn_calls() {
         name: SPAWN_AGENT_TOOL_NAME.to_owned(),
         args_json: "{}".to_owned(),
     };
+    let batch_spawn = ToolCall {
+        id: "batch".to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "members": [
+                {
+                    "request_key": "a",
+                    "profile_id": "explore",
+                    "objective": "inspect a",
+                    "prompt": "inspect a"
+                },
+                {
+                    "request_key": "b",
+                    "profile_id": "explore",
+                    "objective": "inspect b",
+                    "prompt": "inspect b"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    let background_batch_spawn = ToolCall {
+        id: "background-batch".to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "completion_mode": "background",
+            "members": [
+                {
+                    "request_key": "a",
+                    "profile_id": "explore",
+                    "objective": "inspect a",
+                    "prompt": "inspect a"
+                },
+                {
+                    "request_key": "b",
+                    "profile_id": "explore",
+                    "objective": "inspect b",
+                    "prompt": "inspect b"
+                }
+            ]
+        })
+        .to_string(),
+    };
 
     assert!(tool_batch_allows_host_join(&[
         spawn("a", "join_before_final"),
@@ -1573,6 +1700,8 @@ fn host_join_batch_accepts_only_owned_join_before_final_spawn_calls() {
         spawn("b", "background"),
     ]));
     assert!(!tool_batch_allows_host_join(&[invalid_spawn]));
+    assert!(tool_batch_allows_host_join(&[batch_spawn]));
+    assert!(!tool_batch_allows_host_join(&[background_batch_spawn]));
     assert!(!tool_batch_allows_host_join(&[]));
 }
 
@@ -2358,6 +2487,228 @@ async fn root_run_join_barrier_overlaps_children_and_resumes_without_model_polli
         })
     }));
     assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agents_preflights_then_overlaps_members_without_model_polling() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let observed_join_context = Arc::new(Mutex::new(None));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        BatchParallelParentProvider {
+            observed_join_context: Arc::clone(&observed_join_context),
+        },
+        registry,
+    );
+    let mut session = Session::new("batch-parallel-parent", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(4);
+                options
+            },
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        ),
+    )
+    .await
+    .expect("spawn_agents should complete without deadlock")?;
+
+    assert_eq!(output.result.final_text, "batch parallel parent final");
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(output.outcome.tool_call_ids, vec!["call-batch-parallel"]);
+    let join_context = observed_join_context
+        .lock()
+        .expect("join context observation lock should not be poisoned")
+        .clone()
+        .expect("parent provider should receive batch results");
+    let join_context_json: serde_json::Value = serde_json::from_str(&join_context)?;
+    assert_eq!(join_context_json["type"], "agent_batch_results");
+    assert!(
+        join_context_json["batch_id"]
+            .as_str()
+            .is_some_and(|batch_id| batch_id.starts_with("batch_"))
+    );
+    assert_eq!(
+        join_context_json["members"][0]["request_key"],
+        json!("kernel")
+    );
+    assert_eq!(
+        join_context_json["members"][1]["request_key"],
+        json!("runtime")
+    );
+    let batch_id = join_context_json["batch_id"]
+        .as_str()
+        .expect("batch id should be a string");
+    assert_eq!(join_context_json["members"][0]["batch_id"], json!(batch_id));
+    assert_eq!(join_context_json["members"][1]["batch_id"], json!(batch_id));
+    assert!(
+        join_context_json["members"][0]["call_id"]
+            .as_str()
+            .is_some_and(|call_id| call_id == format!("{batch_id}-member-kernel"))
+    );
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .filter(|thread| thread.status == AgentThreadStatus::Completed)
+            .count(),
+        2
+    );
+    assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agents_capacity_failure_starts_no_member() -> Result<()> {
+    let mut config = root_config();
+    config.task.max_subagents = 1;
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let supervisor_probe = supervisor.clone();
+    let started = Arc::new(AtomicBool::new(false));
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(SlowTextProviderFactory {
+            delay: Duration::from_millis(1),
+            started: Arc::clone(&started),
+        }),
+    );
+    let call = ToolCall {
+        id: "call-batch-capacity".to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "members": [
+                {
+                    "request_key": "a",
+                    "profile_id": "explore",
+                    "objective": "inspect a",
+                    "prompt": "inspect a"
+                },
+                {
+                    "request_key": "b",
+                    "profile_id": "explore",
+                    "objective": "inspect b",
+                    "prompt": "inspect b"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    runtime.set_join_batch_eligibility(std::slice::from_ref(&call));
+    let cancellation_owner = RunCancellationOwner::new();
+    runtime.set_run_cancellation(Some(cancellation_owner.handle()));
+    let mut session = Session::new("batch-capacity", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &call,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn_agents handled");
+
+    assert!(result.is_error());
+    assert!(result.content.contains("requested=2"));
+    assert!(!started.load(Ordering::SeqCst));
+    assert!(supervisor_probe.active_profile_ids().is_empty());
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[test]
+fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let supervisor_probe = supervisor.clone();
+    let started = Arc::new(AtomicBool::new(false));
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(SlowTextProviderFactory {
+            delay: Duration::from_millis(1),
+            started: Arc::clone(&started),
+        }),
+    );
+    let call = ToolCall {
+        id: "call-batch-invalid-profile".to_owned(),
+        name: SPAWN_AGENTS_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "members": [
+                {
+                    "request_key": "a",
+                    "profile_id": "explore",
+                    "objective": "inspect a",
+                    "prompt": "inspect a"
+                },
+                {
+                    "request_key": "b",
+                    "profile_id": "missing-profile",
+                    "objective": "inspect b",
+                    "prompt": "inspect b"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    runtime.set_join_batch_eligibility(std::slice::from_ref(&call));
+    let cancellation_owner = RunCancellationOwner::new();
+    runtime.set_run_cancellation(Some(cancellation_owner.handle()));
+    let args: serde_json::Value = serde_json::from_str(&call.args_json)?;
+    let mut session = Session::new("batch-preflight", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = runtime.spawn_agents(
+        &mut session,
+        &call,
+        &args,
+        &run_options(std::env::temp_dir()),
+        &mut handler,
+    );
+
+    assert!(result.is_error());
+    assert!(result.content.contains("missing-profile"));
+    assert!(!started.load(Ordering::SeqCst));
+    assert!(supervisor_probe.active_profile_ids().is_empty());
+    assert!(session.agent_thread_state_projection().threads.is_empty());
     Ok(())
 }
 

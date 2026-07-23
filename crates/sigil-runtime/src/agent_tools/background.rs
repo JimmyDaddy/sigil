@@ -35,9 +35,16 @@ pub(super) struct BackgroundChatAgentHandle {
 pub(super) struct JoinedChatAgentHandle {
     pub(super) sequence: u64,
     pub(super) call_id: String,
+    pub(super) batch_member: Option<AgentBatchMemberContext>,
     pub(super) thread: BackgroundChatAgentThreadRecord,
     pub(super) future: JoinedChatAgentFuture,
     pub(super) release_guard: ChatChildThreadGuard,
+}
+
+#[derive(Clone)]
+pub(super) struct AgentBatchMemberContext {
+    pub(super) batch_id: String,
+    pub(super) request_key: String,
 }
 
 pub(super) struct BackgroundCancellationOutcome {

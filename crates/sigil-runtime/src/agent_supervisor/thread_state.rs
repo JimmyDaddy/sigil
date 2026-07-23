@@ -31,6 +31,7 @@ pub(super) struct ActiveAgentThread {
     pub(super) attempt_id: AgentRunAttemptId,
     pub(super) background: bool,
     pub(super) mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
+    pub(super) batch_reserved: bool,
 }
 
 #[derive(Debug, Clone)]

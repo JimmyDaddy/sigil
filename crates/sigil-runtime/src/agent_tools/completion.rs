@@ -5,6 +5,7 @@ use crate::agent_completion::{AgentCompletionHub, AgentCompletionRegistration};
 
 struct JoinedAgentCompletionContext {
     call_id: String,
+    batch_member: Option<AgentBatchMemberContext>,
     thread: BackgroundChatAgentThreadRecord,
     _release_guard: ChatChildThreadGuard,
 }
@@ -26,6 +27,7 @@ impl AgentToolRuntime {
                 let JoinedChatAgentHandle {
                     sequence,
                     call_id,
+                    batch_member,
                     thread,
                     future,
                     release_guard,
@@ -36,6 +38,7 @@ impl AgentToolRuntime {
                     sequence,
                     JoinedAgentCompletionContext {
                         call_id,
+                        batch_member,
                         thread,
                         _release_guard: release_guard,
                     },
@@ -88,6 +91,8 @@ impl AgentToolRuntime {
 
         let mut members = Vec::new();
         let mut delivered_threads = Vec::new();
+        let mut all_members_batched = true;
+        let mut delivered_batch_ids = BTreeSet::new();
         let mut first_commit_error = None;
         let cancellation_requested = self
             .run_cancellation
@@ -98,6 +103,7 @@ impl AgentToolRuntime {
             let sequence = completion.sequence;
             let JoinedAgentCompletionContext {
                 call_id,
+                batch_member,
                 thread: thread_record,
                 _release_guard,
             } = completion.context;
@@ -242,10 +248,17 @@ impl AgentToolRuntime {
                 continue;
             };
             let result = projected.result.as_ref();
+            if let Some(batch_member) = &batch_member {
+                delivered_batch_ids.insert(batch_member.batch_id.clone());
+            } else {
+                all_members_batched = false;
+            }
             members.push((
                 sequence,
                 json!({
                     "call_id": call_id,
+                    "batch_id": batch_member.as_ref().map(|member| member.batch_id.as_str()),
+                    "request_key": batch_member.as_ref().map(|member| member.request_key.as_str()),
                     "thread_id": thread_id.as_str(),
                     "display_name": projected.display_name.as_deref(),
                     "status": thread_status_label(projected.status),
@@ -288,11 +301,22 @@ impl AgentToolRuntime {
             .into_iter()
             .map(|(_, thread_id)| thread_id)
             .collect::<Vec<_>>();
-        let prompt = json!({
-            "type": "agent_join_results",
-            "message": "All host-joined child agents from this tool batch are terminal. Use these bounded results now; do not call wait_agent merely to collect them. Use read_agent_result only when the bounded summary is insufficient for a concrete decision.",
-            "members": members,
-        })
+        let batch_id = (all_members_batched && delivered_batch_ids.len() == 1)
+            .then(|| delivered_batch_ids.into_iter().next())
+            .flatten();
+        let prompt = match batch_id {
+            Some(batch_id) => json!({
+                "type": "agent_batch_results",
+                "batch_id": batch_id,
+                "message": "Every member of this host-owned agent batch is terminal. Continue from these bounded results now; do not poll with wait_agent. Use read_agent_result only when a bounded summary is insufficient for a concrete decision.",
+                "members": members,
+            }),
+            None => json!({
+                "type": "agent_join_results",
+                "message": "All host-joined child agents from this tool batch are terminal. Use these bounded results now; do not call wait_agent merely to collect them. Use read_agent_result only when the bounded summary is insufficient for a concrete decision.",
+                "members": members,
+            }),
+        }
         .to_string();
         let key = format!("agent-join:{}", hash_text(&prompt));
         self.pending_join_contexts.insert(key.clone(), thread_ids);

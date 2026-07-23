@@ -128,8 +128,8 @@ pub use agent_tools::{
     AgentToolBackgroundEventSink, AgentToolBackgroundRuns, AgentToolProviderFactory,
     AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME, LIST_AGENTS_TOOL_NAME,
     MESSAGE_AGENT_TOOL_NAME, ManualAgentInvocationResult, READ_AGENT_RESULT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread, register_agent_tools,
-    register_agent_tools_with_registry, register_agent_tools_with_workspace,
+    SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread,
+    register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
 pub use application_catalog::{

@@ -5,6 +5,7 @@ use sigil_kernel::{Agent, AgentUsageSummary, Provider, ProviderCapabilities, Tas
 
 use crate::AgentProfileRegistry;
 
+mod batch;
 mod begin;
 mod budget;
 mod control;

@@ -1203,7 +1203,7 @@ pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperatio
         "delete_file" => ToolOperation::DeleteFile,
         "apply_changeset" => ToolOperation::ApplyChangeSet,
         "terminal_input" => ToolOperation::SendTerminalInput,
-        "spawn_agent" => ToolOperation::SpawnAgent,
+        "spawn_agent" | "spawn_agents" => ToolOperation::SpawnAgent,
         "message_agent" => ToolOperation::MessageAgent,
         "close_agent" => ToolOperation::CloseAgent,
         "load_skill" => ToolOperation::LoadSkill,

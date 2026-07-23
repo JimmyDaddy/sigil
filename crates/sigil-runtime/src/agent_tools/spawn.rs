@@ -310,6 +310,7 @@ impl AgentToolRuntime {
                 child_input,
                 child_options,
                 handler,
+                None,
             );
         }
 
@@ -510,7 +511,7 @@ impl AgentToolRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn start_joined_chat_child(
+    pub(super) fn start_joined_chat_child(
         &mut self,
         session: &mut Session,
         call: &ToolCall,
@@ -520,6 +521,7 @@ impl AgentToolRuntime {
         child_input: sigil_kernel::AgentRunInput,
         child_options: sigil_kernel::AgentRunOptions,
         handler: &mut (dyn EventHandler + Send),
+        batch_member: Option<AgentBatchMemberContext>,
     ) -> ToolResult {
         let Some(root_cancellation) = self.run_cancellation.clone() else {
             return ToolResult::error(
@@ -593,6 +595,7 @@ impl AgentToolRuntime {
         self.join_dependencies.push(JoinedChatAgentHandle {
             sequence,
             call_id: call.id.clone(),
+            batch_member,
             thread: thread_record,
             future,
             release_guard: ChatChildThreadGuard {
@@ -951,12 +954,15 @@ impl AgentToolRuntime {
     }
 }
 
-fn profile_uses_changeset_only_write(role: AgentRole, profile: &ResolvedAgentProfile) -> bool {
+pub(super) fn profile_uses_changeset_only_write(
+    role: AgentRole,
+    profile: &ResolvedAgentProfile,
+) -> bool {
     role == AgentRole::SubagentWrite
         && profile.profile.result_policy == sigil_kernel::AgentResultPolicy::ForegroundMergeRequired
 }
 
-fn child_tool_registry_for_profile(
+pub(super) fn child_tool_registry_for_profile(
     base_registry: &ToolRegistry,
     root_config: &RootConfig,
     role: AgentRole,
@@ -1136,7 +1142,10 @@ fn changeset_touched_subjects(change_set: &ChangeSet) -> Vec<MutationSubject> {
         .collect()
 }
 
-fn spawn_scope_overlap_warning(session: &Session, parsed: &SpawnAgentArgs) -> Option<String> {
+pub(super) fn spawn_scope_overlap_warning(
+    session: &Session,
+    parsed: &SpawnAgentArgs,
+) -> Option<String> {
     let parent_prompt = session.entries().iter().rev().find_map(|entry| {
         let SessionLogEntry::User(message) = entry else {
             return None;

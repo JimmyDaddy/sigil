@@ -123,6 +123,7 @@ struct AgentToolSurface {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum AgentToolKind {
     Spawn,
+    SpawnBatch,
     Wait,
     ReadResult,
     List,
@@ -132,8 +133,9 @@ pub(super) enum AgentToolKind {
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Spawn,
+        Self::SpawnBatch,
         Self::Wait,
         Self::ReadResult,
         Self::List,
@@ -145,6 +147,7 @@ impl AgentToolKind {
     pub(super) fn from_name(name: &str) -> Option<Self> {
         match name {
             SPAWN_AGENT_TOOL_NAME => Some(Self::Spawn),
+            SPAWN_AGENTS_TOOL_NAME => Some(Self::SpawnBatch),
             WAIT_AGENT_TOOL_NAME => Some(Self::Wait),
             READ_AGENT_RESULT_TOOL_NAME => Some(Self::ReadResult),
             LIST_AGENTS_TOOL_NAME => Some(Self::List),
@@ -158,6 +161,7 @@ impl AgentToolKind {
     fn name(self) -> &'static str {
         match self {
             Self::Spawn => SPAWN_AGENT_TOOL_NAME,
+            Self::SpawnBatch => SPAWN_AGENTS_TOOL_NAME,
             Self::Wait => WAIT_AGENT_TOOL_NAME,
             Self::ReadResult => READ_AGENT_RESULT_TOOL_NAME,
             Self::List => LIST_AGENTS_TOOL_NAME,
@@ -186,13 +190,14 @@ impl Tool for AgentTool {
                     ToolAccess::Read
                 }
                 AgentToolKind::Spawn
+                | AgentToolKind::SpawnBatch
                 | AgentToolKind::Cancel
                 | AgentToolKind::Message
                 | AgentToolKind::Close => ToolAccess::Execute,
             },
             network_effect: None,
             preview: match self.kind {
-                AgentToolKind::Spawn => ToolPreviewCapability::Required,
+                AgentToolKind::Spawn | AgentToolKind::SpawnBatch => ToolPreviewCapability::Required,
                 AgentToolKind::Wait
                 | AgentToolKind::ReadResult
                 | AgentToolKind::List
@@ -206,6 +211,13 @@ impl Tool for AgentTool {
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let subject = match self.kind {
             AgentToolKind::Spawn => ToolSubject::agent(required_string(args, "profile_id")?),
+            AgentToolKind::SpawnBatch => {
+                return Ok(SpawnAgentsArgs::parse(args)?
+                    .members
+                    .into_iter()
+                    .map(|member| ToolSubject::agent(member.spawn.profile_id.as_str().to_owned()))
+                    .collect());
+            }
             AgentToolKind::List => ToolSubject::agent("all".to_owned()),
             AgentToolKind::Wait
             | AgentToolKind::ReadResult
@@ -222,13 +234,20 @@ impl Tool for AgentTool {
         args: &Value,
     ) -> Result<Option<sigil_kernel::ApprovalMode>> {
         Ok(match self.kind {
-            AgentToolKind::Spawn if self.surface.multi_agent_mode == MultiAgentMode::None => {
+            AgentToolKind::Spawn | AgentToolKind::SpawnBatch
+                if self.surface.multi_agent_mode == MultiAgentMode::None =>
+            {
                 Some(sigil_kernel::ApprovalMode::Deny)
             }
             AgentToolKind::Spawn if self.safe_model_spawn(args)? => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
-            AgentToolKind::Spawn => Some(sigil_kernel::ApprovalMode::Ask),
+            AgentToolKind::SpawnBatch if self.safe_model_batch_spawn(args)? => {
+                Some(sigil_kernel::ApprovalMode::Allow)
+            }
+            AgentToolKind::Spawn | AgentToolKind::SpawnBatch => {
+                Some(sigil_kernel::ApprovalMode::Ask)
+            }
             AgentToolKind::Wait | AgentToolKind::ReadResult | AgentToolKind::List => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
@@ -240,6 +259,7 @@ impl Tool for AgentTool {
     async fn preview(&self, _ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
         Ok(match self.kind {
             AgentToolKind::Spawn => Some(self.spawn_preview(&args)?),
+            AgentToolKind::SpawnBatch => Some(self.spawn_batch_preview(&args)?),
             AgentToolKind::Wait => Some(simple_agent_preview(
                 "Wait for agent",
                 &format!("thread {}", required_string(&args, "thread_id")?),
@@ -298,11 +318,24 @@ impl AgentTool {
             && tool_contracts_are_safe_readonly_for_auto_spawn(&resolved_contracts))
     }
 
+    fn safe_model_batch_spawn(&self, args: &Value) -> Result<bool> {
+        for member in &SpawnAgentsArgs::parse(args)?.members {
+            if !self.safe_model_spawn(&member.raw_args)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn description(&self) -> String {
         match self.kind {
             AgentToolKind::Spawn => format!(
                 "{}\n{}",
                 spawn_agent_mode_description(self.surface.multi_agent_mode),
+                self.surface.profile_index_description
+            ),
+            AgentToolKind::SpawnBatch => format!(
+                "Spawn 2-4 independent read-only child agents as one host-joined batch. The host preflights the whole batch, reserves every runtime slot atomically, runs accepted members concurrently, and resumes with bounded results without wait_agent polling. Every member must use a trusted model-visible profile whose effective tool contracts are proven read-only. Use this only for non-overlapping delegated scopes.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
@@ -350,6 +383,42 @@ impl AgentTool {
                     "display_name_hint": { "type": "string" }
                 },
                 "required": ["profile_id", "objective", "prompt"],
+                "additionalProperties": false
+            }),
+            AgentToolKind::SpawnBatch => json!({
+                "type": "object",
+                "properties": {
+                    "members": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "request_key": {
+                                    "type": "string",
+                                    "description": "Stable unique id for this member within the batch."
+                                },
+                                "profile_id": {
+                                    "type": "string",
+                                    "description": "Stable agent profile id from the model-visible agent index."
+                                },
+                                "objective": { "type": "string" },
+                                "prompt": { "type": "string" },
+                                "display_name_hint": { "type": "string" }
+                            },
+                            "required": ["request_key", "profile_id", "objective", "prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "completion_mode": {
+                        "type": "string",
+                        "enum": ["join_before_final"],
+                        "default": "join_before_final",
+                        "description": "This compatibility slice supports host-owned join. Detached background batches remain deferred."
+                    }
+                },
+                "required": ["members"],
                 "additionalProperties": false
             }),
             AgentToolKind::Wait => json!({
@@ -462,6 +531,33 @@ impl AgentTool {
             file_diffs: Vec::new(),
         })
     }
+
+    fn spawn_batch_preview(&self, args: &Value) -> Result<ToolPreview> {
+        let parsed = SpawnAgentsArgs::parse(args)?;
+        let body = parsed
+            .members
+            .iter()
+            .map(|member| {
+                format!(
+                    "{}: profile_id={} · objective={}",
+                    member.request_key.as_str(),
+                    member.spawn.profile_id.as_str(),
+                    member.spawn.objective
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolPreview {
+            title: format!("Spawn {} agents", parsed.members.len()),
+            summary: format!(
+                "{} read-only agents · join before final",
+                parsed.members.len()
+            ),
+            body,
+            changed_files: Vec::new(),
+            file_diffs: Vec::new(),
+        })
+    }
 }
 
 fn spawn_agent_mode_description(mode: MultiAgentMode) -> &'static str {
@@ -513,6 +609,16 @@ pub(super) struct SpawnAgentArgs {
     pub(super) display_name_hint: Option<String>,
 }
 
+pub(super) struct SpawnAgentsArgs {
+    pub(super) members: Vec<SpawnAgentsMemberArgs>,
+}
+
+pub(super) struct SpawnAgentsMemberArgs {
+    pub(super) request_key: AgentRouteId,
+    pub(super) spawn: SpawnAgentArgs,
+    pub(super) raw_args: Value,
+}
+
 pub(super) struct ChatAgentRunRequest {
     pub(super) profile_id: AgentProfileId,
     pub(super) objective: String,
@@ -536,5 +642,50 @@ impl SpawnAgentArgs {
                 .unwrap_or(AgentInvocationMode::JoinBeforeFinal),
             display_name_hint: optional_string(args, "display_name_hint"),
         })
+    }
+}
+
+impl SpawnAgentsArgs {
+    pub(super) fn parse(args: &Value) -> Result<Self> {
+        let completion_mode = optional_string(args, "completion_mode")
+            .as_deref()
+            .map(parse_invocation_mode)
+            .transpose()?
+            .unwrap_or(AgentInvocationMode::JoinBeforeFinal);
+        if completion_mode != AgentInvocationMode::JoinBeforeFinal {
+            bail!("spawn_agents currently supports only completion_mode=join_before_final");
+        }
+        let members = args
+            .get("members")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("members must be an array"))?;
+        if !(2..=4).contains(&members.len()) {
+            bail!("spawn_agents requires between 2 and 4 members");
+        }
+        let mut request_keys = BTreeSet::new();
+        let mut parsed = Vec::with_capacity(members.len());
+        for member in members {
+            let request_key = AgentRouteId::new(required_string(member, "request_key")?)?;
+            if !request_keys.insert(request_key.clone()) {
+                bail!(
+                    "spawn_agents contains duplicate request_key {}",
+                    request_key.as_str()
+                );
+            }
+            let spawn = SpawnAgentArgs {
+                profile_id: AgentProfileId::new(required_string(member, "profile_id")?)?,
+                objective: required_string(member, "objective")?,
+                prompt: required_string(member, "prompt")?,
+                mode: AgentInvocationMode::JoinBeforeFinal,
+                display_name_hint: optional_string(member, "display_name_hint"),
+            };
+            parsed.push(SpawnAgentsMemberArgs {
+                request_key,
+                spawn,
+                raw_args: member.clone(),
+            });
+        }
+        parsed.sort_by(|left, right| left.request_key.cmp(&right.request_key));
+        Ok(Self { members: parsed })
     }
 }

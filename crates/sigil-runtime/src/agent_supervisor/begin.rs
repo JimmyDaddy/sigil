@@ -325,7 +325,7 @@ impl AgentSupervisor {
     }
 }
 
-fn begin_attempt_id(thread_id: &AgentThreadId) -> Result<AgentRunAttemptId> {
+pub(super) fn begin_attempt_id(thread_id: &AgentThreadId) -> Result<AgentRunAttemptId> {
     AgentRunAttemptId::new(format!(
         "attempt_{}",
         short_digest(&hash_text(thread_id.as_str()))

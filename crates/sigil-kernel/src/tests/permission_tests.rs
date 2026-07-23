@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::{
     NetworkEffect, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
-    ToolSubjectKind, ToolSubjectScope,
+    ToolSubjectKind, ToolSubjectScope, infer_tool_operation,
 };
 
 use super::{
@@ -1526,4 +1526,11 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
     .expect_err("missing literal prefixes should be rejected");
     assert!(missing_prefix.to_string().contains("literal prefix"));
     Ok(())
+}
+#[test]
+fn batch_agent_spawn_uses_spawn_operation_classification() {
+    assert_eq!(
+        infer_tool_operation("spawn_agents", ToolAccess::Execute),
+        ToolOperation::SpawnAgent
+    );
 }

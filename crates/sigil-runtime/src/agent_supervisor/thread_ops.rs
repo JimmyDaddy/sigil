@@ -112,6 +112,21 @@ impl AgentSupervisor {
             .state
             .lock()
             .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
+        if let Some(active) = state.active_threads.get_mut(thread_id) {
+            if active.batch_reserved
+                && active.profile_id == *profile_id
+                && active.attempt_id == *attempt_id
+                && !matches!(invocation_mode, AgentInvocationMode::Background)
+                && mailbox_tx.is_none()
+            {
+                active.batch_reserved = false;
+                return Ok(());
+            }
+            return Err(format!(
+                "agent thread {} is already active",
+                thread_id.as_str()
+            ));
+        }
         if state.active_threads.len() >= self.budget.max_subagents {
             return Err(format!(
                 "agent thread budget exceeded: [task].max_subagents={}",
@@ -131,6 +146,7 @@ impl AgentSupervisor {
                 attempt_id: attempt_id.clone(),
                 background: matches!(invocation_mode, AgentInvocationMode::Background),
                 mailbox_tx,
+                batch_reserved: false,
             },
         );
         Ok(())

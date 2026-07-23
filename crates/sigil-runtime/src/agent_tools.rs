@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -44,6 +44,7 @@ use crate::{
 };
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
+pub const SPAWN_AGENTS_TOOL_NAME: &str = "spawn_agents";
 pub const WAIT_AGENT_TOOL_NAME: &str = "wait_agent";
 pub const READ_AGENT_RESULT_TOOL_NAME: &str = "read_agent_result";
 pub const LIST_AGENTS_TOOL_NAME: &str = "list_agents";
@@ -64,18 +65,21 @@ const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIME
 
 fn tool_batch_allows_host_join(calls: &[ToolCall]) -> bool {
     !calls.is_empty()
-        && calls.iter().all(|call| {
-            if call.name != SPAWN_AGENT_TOOL_NAME {
-                return false;
-            }
-            serde_json::from_str::<Value>(&call.args_json)
+        && calls.iter().all(|call| match call.name.as_str() {
+            SPAWN_AGENT_TOOL_NAME => serde_json::from_str::<Value>(&call.args_json)
                 .ok()
                 .and_then(|args| SpawnAgentArgs::parse(&args).ok())
-                .is_some_and(|args| matches!(args.mode, AgentInvocationMode::JoinBeforeFinal))
+                .is_some_and(|args| matches!(args.mode, AgentInvocationMode::JoinBeforeFinal)),
+            SPAWN_AGENTS_TOOL_NAME => serde_json::from_str::<Value>(&call.args_json)
+                .ok()
+                .and_then(|args| SpawnAgentsArgs::parse(&args).ok())
+                .is_some(),
+            _ => false,
         })
 }
 
 mod background;
+mod batch_spawn;
 mod chat;
 mod completion;
 mod handlers;
@@ -98,8 +102,8 @@ type JoinedChatAgentFuture =
     Pin<Box<dyn Future<Output = Result<background::BackgroundChatAgentResult>> + Send>>;
 
 use background::{
-    BackgroundChatAgentHandle, BackgroundChatAgentThreadRecord, JoinedChatAgentHandle,
-    run_background_chat_agent,
+    AgentBatchMemberContext, BackgroundChatAgentHandle, BackgroundChatAgentThreadRecord,
+    JoinedChatAgentHandle, run_background_chat_agent,
 };
 use chat::close_agent_from_args;
 #[cfg(test)]
@@ -124,10 +128,10 @@ use shared::{
     build_agent_child_session, chat_budget_scope_id, child_status_from_outcome, hash_text,
     invocation_mode_label, manual_agent_call_id, optional_string, parent_session_ref,
     parse_invocation_mode, parse_tool_args, profile_index_description, required_string,
-    simple_agent_preview, terminal_status_label, thread_id_arg, thread_status_label, unix_time_ms,
-    usage_summary_from_stats,
+    short_digest, simple_agent_preview, terminal_status_label, thread_id_arg, thread_status_label,
+    unix_time_ms, usage_summary_from_stats,
 };
-use surface::{AgentToolKind, ChatAgentRunRequest, SpawnAgentArgs};
+use surface::{AgentToolKind, ChatAgentRunRequest, SpawnAgentArgs, SpawnAgentsArgs};
 
 #[cfg(test)]
 #[path = "tests/agent_tools_tests.rs"]
