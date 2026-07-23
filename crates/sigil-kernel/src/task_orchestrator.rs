@@ -32,14 +32,15 @@ use crate::{
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
     task::{
-        AgentRole, SessionRef, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId,
-        TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
-        TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-        TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskReadyDeferredReason,
-        TaskReadyQueueOptions, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
-        TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, bounded_task_participant_summary,
-        task_final_message_id, task_participant_attempt_id, task_participant_logical_run_id,
-        task_participant_session_ref,
+        AgentRole, MAX_TASK_PARTICIPANT_AUTO_RETRIES, MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS,
+        SessionRef, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId, TaskIsolationMode,
+        TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
+        TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
+        TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+        TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRunEntry, TaskRunProjection,
+        TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+        bounded_task_participant_summary, task_final_message_id, task_participant_attempt_id,
+        task_participant_logical_run_id, task_participant_session_ref,
     },
     verification::PolicyHash,
     verification::{
@@ -83,9 +84,9 @@ pub use runner::{SequentialTaskOrchestrator, reconcile_task_final_answer_prefix}
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, TaskVerificationRerunOutput,
-    TaskVerificationRerunRequest,
+    TaskChildSessionRunRequest, TaskParticipantRetryError, TaskPlannerSessionRunOutput,
+    TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
+    TaskVerificationRerunOutput, TaskVerificationRerunRequest, task_participant_input_hash,
 };
 
 use changeset_only::{
@@ -121,7 +122,8 @@ use scheduler::{
     step_terminal_reason, task_status_from_step_status,
 };
 use shared::{
-    append_task_control, append_task_control_with_event, append_task_run, append_task_step,
+    append_task_control, append_task_control_with_event, append_task_controls, append_task_run,
+    append_task_step,
 };
 #[cfg(test)]
 use shared::{hash_text, route_id_for_call};

@@ -10,14 +10,17 @@ use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
     ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, MultiAgentMode,
-    ProviderCapabilities, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
+    ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
+    ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
     SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskParticipantAttemptId, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
-    TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
-    ToolApproval, ToolCall, ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
+    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
+    ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
     decode_changeset_only_child_output, task_participant_child_task_id,
+    task_participant_input_hash, task_participant_logical_run_id,
 };
 
 use crate::provider_pressure::{TaskProviderPressure, wrap_task_agent_provider};
@@ -197,8 +200,12 @@ impl AgentSupervisorTaskChildRunner {
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
         let child_session = build_child_session(parent_session, &child_session_ref)?;
-        self.provider_pressure
-            .check(agent.provider().name(), child_session.model_name())?;
+        if let Err(error) = self
+            .provider_pressure
+            .check(agent.provider().name(), child_session.model_name())
+        {
+            return Err(self.retryable_admission_error(&request, &agent, &child_session, error));
+        }
         let start = AgentTaskChildStart {
             task_id: request.task.task_id.clone(),
             parent_thread_id: main_thread_id()?,
@@ -327,13 +334,125 @@ impl AgentSupervisorTaskChildRunner {
                     Err(error) => Err(error),
                 }
             }
-            Err(error) => Err(error),
+            Err(error) => Err(self.retryable_child_error(
+                &prepared.request,
+                &prepared.agent,
+                &prepared.child_session,
+                error,
+            )),
         };
         ExecutedParallelTaskChild {
             prepared,
             controls,
             result,
         }
+    }
+
+    fn retryable_admission_error(
+        &self,
+        request: &TaskChildSessionRunRequest,
+        agent: &BoxedAgent,
+        child_session: &Session,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if !retry_safe_step(&request.step)
+            || error.downcast_ref::<ProviderRouteCooldownError>().is_none()
+        {
+            return error;
+        }
+        self.wrap_retryable_error(
+            request,
+            agent,
+            child_session,
+            TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+            error,
+        )
+    }
+
+    fn retryable_child_error(
+        &self,
+        request: &TaskChildSessionRunRequest,
+        agent: &BoxedAgent,
+        child_session: &Session,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if !retry_safe_step(&request.step) {
+            return error;
+        }
+        let Ok(projection) = child_session.provider_physical_attempt_projection() else {
+            return error;
+        };
+        let logical_run_id = task_participant_logical_run_id(&request.attempt_id);
+        let attempts = projection.attempts_for_logical_run_id(&logical_run_id);
+        let [attempt] = attempts.as_slice() else {
+            return error;
+        };
+        let Some(terminal) = attempt.terminal.as_ref() else {
+            return error;
+        };
+        if terminal.outcome != ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+            || terminal.rejection != Some(ProviderRequestRejection::RateLimited)
+            || !terminal.durable_output_event_ids.is_empty()
+            || !terminal.durable_side_effect_event_ids.is_empty()
+            || child_session.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResult(_)
+                ) || matches!(
+                    entry,
+                    SessionLogEntry::Control(
+                        ControlEntry::ToolExecution(_)
+                            | ControlEntry::ToolEgress(_)
+                            | ControlEntry::ChangeSetProposed(_)
+                            | ControlEntry::ChangeSetApplied(_)
+                    )
+                )
+            })
+        {
+            return error;
+        }
+        self.wrap_retryable_error(
+            request,
+            agent,
+            child_session,
+            TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+                physical_attempt_id: attempt.entry.physical_attempt_id.clone(),
+                request_material_fingerprint: attempt.entry.request_material_fingerprint.clone(),
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+            error,
+        )
+    }
+
+    fn wrap_retryable_error(
+        &self,
+        request: &TaskChildSessionRunRequest,
+        agent: &BoxedAgent,
+        child_session: &Session,
+        proof: TaskParticipantRetryProof,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let Some((retry_after_ms, route_fingerprint)) =
+            self.provider_pressure.retry_schedule_delay(
+                agent.provider().name(),
+                child_session.model_name(),
+                &request.attempt_id,
+            )
+        else {
+            return error;
+        };
+        let Ok(input_hash) = task_participant_input_hash(&request.child_input) else {
+            return error;
+        };
+        TaskParticipantRetryError::new(retry_after_ms, route_fingerprint, input_hash, proof, error)
+            .map(anyhow::Error::new)
+            .unwrap_or_else(|construction_error| construction_error)
     }
 
     fn commit_parallel_read_child<H>(
@@ -730,6 +849,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let output = match child_run {
             Ok(output) => output,
             Err(error) => {
+                let error = self.retryable_child_error(&request, agent, &child_session, error);
                 append_task_child_session(
                     route_handler.parent_session,
                     handler,
@@ -864,11 +984,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         }
         let member_count = requests.len();
         let mut preflight = Vec::with_capacity(member_count);
-        for request in requests {
+        for request in requests.iter().cloned() {
             match self.preflight_parallel_read_child(parent_session, request) {
                 Ok(member) => preflight.push(member),
                 Err(error) => {
-                    return Ok(rejected_parallel_read_batch(member_count, error));
+                    return Ok(rejected_parallel_read_batch(&requests, error));
                 }
             }
         }
@@ -879,7 +999,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let reservation = match self.supervisor.reserve_task_child_batch(&starts) {
             Ok(reservation) => reservation,
             Err(error) => {
-                return Ok(rejected_parallel_read_batch(member_count, error));
+                return Ok(rejected_parallel_read_batch(&requests, error));
             }
         };
         let mut prepared = Vec::with_capacity(member_count);
@@ -906,7 +1026,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                             reason.to_owned(),
                         );
                     }
-                    return Ok(rejected_parallel_read_batch(member_count, error));
+                    return Ok(rejected_parallel_read_batch(&requests, error));
                 }
             }
         }
@@ -1045,11 +1165,34 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
 }
 
 fn rejected_parallel_read_batch(
-    member_count: usize,
+    requests: &[TaskChildSessionRunRequest],
     error: anyhow::Error,
 ) -> Vec<Result<TaskChildSessionRunOutput>> {
+    if let Some(retry) = error.downcast_ref::<TaskParticipantRetryError>() {
+        return requests
+            .iter()
+            .map(|request| {
+                let input_hash = task_participant_input_hash(&request.child_input)?;
+                Err(anyhow::Error::new(TaskParticipantRetryError::new(
+                    retry.retry_after_ms(),
+                    retry.route_fingerprint(),
+                    input_hash,
+                    TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                        zero_output: true,
+                        zero_tool: true,
+                        zero_effect: true,
+                    },
+                    anyhow::Error::new(ProviderRouteCooldownError::new(
+                        retry.retry_after_ms(),
+                        retry.route_fingerprint(),
+                    ))
+                    .context("parallel task child batch rejected before provider dispatch"),
+                )?))
+            })
+            .collect();
+    }
     if let Some(cooldown) = error.downcast_ref::<ProviderRouteCooldownError>().cloned() {
-        return (0..member_count)
+        return (0..requests.len())
             .map(|_| {
                 Err(anyhow::Error::new(cooldown.clone())
                     .context("parallel task child batch rejected before provider dispatch"))
@@ -1057,9 +1200,16 @@ fn rejected_parallel_read_batch(
             .collect();
     }
     let reason = format!("parallel task child batch rejected before provider dispatch: {error:#}");
-    (0..member_count)
+    (0..requests.len())
         .map(|_| Err(anyhow::anyhow!(reason.clone())))
         .collect()
+}
+
+fn retry_safe_step(step: &TaskStepSpec) -> bool {
+    matches!(
+        step.effective_mode(),
+        TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+    ) && step.effective_isolation() == sigil_kernel::TaskIsolationMode::SharedReadOnly
 }
 
 struct TaskParticipantEventHandler<'a, H> {

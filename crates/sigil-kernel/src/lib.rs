@@ -445,7 +445,8 @@ pub use skill::{
 };
 pub use sse::SseFrameBuffer;
 pub use task::{
-    AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+    AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, MAX_TASK_PARTICIPANT_AUTO_RETRIES,
+    MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
     TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS, TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS,
     TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
     TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS, TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS,
@@ -453,11 +454,12 @@ pub use task::{
     TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
     TaskGraphStepProjection, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue,
-    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepAttemptId,
-    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus,
+    TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
+    TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
+    TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
+    TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepAttemptId, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus,
     TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
     bounded_task_participant_summary, child_session_ref, normalize_task_agent_display_name,
     task_final_message_id, task_participant_attempt_id, task_participant_child_task_id,
@@ -481,12 +483,12 @@ pub use task_memory::{
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
-    TaskVerificationRerunOutput, TaskVerificationRerunRequest,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskParticipantRetryError,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput,
+    TaskSynthesisSessionRunRequest, TaskVerificationRerunOutput, TaskVerificationRerunRequest,
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
     changeset_only_child_tool_scope, decode_changeset_only_child_output,
-    reconcile_task_final_answer_prefix, rerun_task_verification_check,
+    reconcile_task_final_answer_prefix, rerun_task_verification_check, task_participant_input_hash,
     validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{

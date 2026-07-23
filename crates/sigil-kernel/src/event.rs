@@ -686,6 +686,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskPlan(_)
                 | ControlEntry::TaskStep(_)
                 | ControlEntry::TaskParticipantAttempt(_)
+                | ControlEntry::TaskParticipantRetryScheduled(_)
                 | ControlEntry::TaskParticipantResult(_)
                 | ControlEntry::TaskFinalAnswerCommitted(_) => {
                     TypedDomainEvent::TaskStatusChanged(control)
@@ -1364,6 +1365,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
+        ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",
         ControlEntry::TaskParticipantResult(_) => "task_participant_result",
         ControlEntry::TaskFinalAnswerCommitted(_) => "task_final_answer_committed",
         ControlEntry::TaskChildSession(_) => "task_child_session",

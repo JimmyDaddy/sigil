@@ -207,6 +207,7 @@ pub enum ControlEntry {
     TaskPlan(TaskPlanEntry),
     TaskStep(TaskStepEntry),
     TaskParticipantAttempt(TaskParticipantAttemptEntry),
+    TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),
     TaskParticipantResult(TaskParticipantResultEntry),
     TaskFinalAnswerCommitted(TaskFinalAnswerCommittedEntry),
     TaskChildSession(TaskChildSessionEntry),

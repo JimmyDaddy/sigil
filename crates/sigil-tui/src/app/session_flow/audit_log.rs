@@ -345,6 +345,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             attempt.ordinal,
             attempt.status
         ),
+        ControlEntry::TaskParticipantRetryScheduled(retry) => format!(
+            "[ctl] participant retry {} ordinal={} after={}ms failed={}",
+            retry.task_id.as_str(),
+            retry.retry_ordinal,
+            retry.retry_after_ms,
+            truncate_session_view_text(retry.failed_attempt_id.as_str(), 32)
+        ),
         ControlEntry::TaskParticipantResult(result) => format!(
             "[ctl] participant result {} terminal={} summary={} changed={}",
             result.task_id.as_str(),

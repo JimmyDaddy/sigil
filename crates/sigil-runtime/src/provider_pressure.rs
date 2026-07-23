@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, CompletionRequest, FrozenProviderRequestMaterial, HostedWebSearchCapability,
     ImageInputCapability, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderRequestRejection, ProviderRouteCooldownError, ToolRegistry,
-    provider_rate_limit_from_error,
+    ProviderChunk, ProviderRequestRejection, ProviderRouteCooldownError, TaskParticipantAttemptId,
+    ToolRegistry, provider_rate_limit_from_error,
 };
 
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(1);
@@ -83,6 +83,25 @@ impl ProviderPressureClock for SystemProviderPressureClock {
 impl TaskProviderPressure {
     pub(crate) fn check(&self, provider_name: &str, model_name: &str) -> Result<()> {
         self.admit(provider_name, model_name).map(|_| ())
+    }
+
+    pub(crate) fn retry_schedule_delay(
+        &self,
+        provider_name: &str,
+        model_name: &str,
+        attempt_id: &TaskParticipantAttemptId,
+    ) -> Option<(u64, String)> {
+        let fingerprint = provider_route_fingerprint(provider_name, model_name);
+        let now = self.clock.now();
+        let state = self.state.lock().ok()?;
+        let route = state.routes.get(&fingerprint)?;
+        if route.cooldown_until <= now {
+            return None;
+        }
+        let remaining = duration_millis_ceil(route.cooldown_until.duration_since(now));
+        let jitter = retry_attempt_jitter_ms(&fingerprint, attempt_id.as_str());
+        let maximum = u64::try_from(MAX_RATE_LIMIT_COOLDOWN.as_millis()).unwrap_or(u64::MAX);
+        Some((remaining.saturating_add(jitter).min(maximum), fingerprint))
     }
 
     fn admit(&self, provider_name: &str, model_name: &str) -> Result<ProviderRouteAdmission> {
@@ -187,6 +206,11 @@ impl Provider for PressureAwareTaskProvider {
         &self,
         error: &anyhow::Error,
     ) -> Option<ProviderRequestRejection> {
+        if provider_rate_limit_from_error(error).is_some()
+            || error.downcast_ref::<ProviderRouteCooldownError>().is_some()
+        {
+            return Some(ProviderRequestRejection::RateLimited);
+        }
         self.inner.classify_pre_generation_rejection(error)
     }
 
@@ -232,13 +256,25 @@ impl Provider for PressureAwareTaskProvider {
     }
 }
 
-fn provider_route_fingerprint(provider_name: &str, model_name: &str) -> String {
+pub(crate) fn provider_route_fingerprint(provider_name: &str, model_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"sigil-provider-route-v1\0");
     hasher.update(provider_name.trim().as_bytes());
     hasher.update(b"\0");
     hasher.update(model_name.trim().as_bytes());
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn retry_attempt_jitter_ms(route_fingerprint: &str, attempt_id: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sigil-provider-retry-attempt-jitter-v1\0");
+    hasher.update(route_fingerprint.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(attempt_id.as_bytes());
+    let digest = hasher.finalize();
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]) % (MAX_DETERMINISTIC_JITTER_MS + 1)
 }
 
 fn bounded_cooldown(

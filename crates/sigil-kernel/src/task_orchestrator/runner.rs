@@ -234,8 +234,12 @@ where
         )?;
 
         let mut step_outputs = Vec::new();
-        let max_scheduler_batches = steps.len().saturating_add(1).max(1);
-        for _ in 0..max_scheduler_batches {
+        let max_scheduler_batches = steps
+            .len()
+            .saturating_mul(MAX_TASK_PARTICIPANT_AUTO_RETRIES.saturating_add(1))
+            .saturating_add(1)
+            .max(1);
+        'scheduler: for _ in 0..max_scheduler_batches {
             let projection = session.task_state_projection();
             let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
                 anyhow!(
@@ -281,6 +285,28 @@ where
                     plan_version,
                     steps: step_outputs,
                     status,
+                });
+            }
+            if !await_pending_step_retries(
+                task,
+                plan_version,
+                &runnable.steps,
+                self.cancellation.as_ref(),
+            )
+            .await
+            {
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    TaskRunStatus::Cancelled,
+                    Some("task cancelled during provider retry backoff".to_owned()),
+                )?;
+                return Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version,
+                    steps: step_outputs,
+                    status: TaskRunStatus::Cancelled,
                 });
             }
 
@@ -349,6 +375,7 @@ where
                         ))
                         .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
                     );
+                    validate_scheduled_retry_input(session, &attempt, &child_input)?;
                     child_effects.push(
                         self.cancellation
                             .as_ref()
@@ -385,6 +412,7 @@ where
                 }
 
                 let mut first_problem = None;
+                let mut retry_scheduled = false;
                 for ((step, attempt, step_options), child_result) in
                     batch_contexts.into_iter().zip(batch_results)
                 {
@@ -418,7 +446,7 @@ where
                             .await?
                         }
                         Err(error) => {
-                            let step_output = self
+                            let Some(step_output) = self
                                 .commit_step_failure(
                                     session,
                                     handler,
@@ -431,7 +459,11 @@ where
                                     None,
                                     &error,
                                 )
-                                .await?;
+                                .await?
+                            else {
+                                retry_scheduled = true;
+                                continue;
+                            };
                             if first_problem.is_none() {
                                 first_problem = Some((
                                     TaskRunStatus::Failed,
@@ -457,6 +489,9 @@ where
                         steps: step_outputs,
                         status,
                     });
+                }
+                if retry_scheduled {
+                    continue 'scheduler;
                 }
                 continue;
             }
@@ -510,7 +545,7 @@ where
                 let output = match step_run_result {
                     Ok(output) => output,
                     Err(error) => {
-                        let step_output = self
+                        let Some(step_output) = self
                             .commit_step_failure(
                                 session,
                                 handler,
@@ -523,7 +558,10 @@ where
                                 write_lease_id,
                                 &error,
                             )
-                            .await?;
+                            .await?
+                        else {
+                            continue 'scheduler;
+                        };
                         step_outputs.push(step_output);
                         append_task_run(
                             session,
@@ -595,10 +633,21 @@ where
         step_options: &AgentRunOptions,
         write_lease_id: Option<WriteLeaseId>,
         error: &anyhow::Error,
-    ) -> Result<SequentialTaskStepOutput>
+    ) -> Result<Option<SequentialTaskStepOutput>>
     where
         H: EventHandler + Send,
     {
+        if schedule_participant_retry(
+            session,
+            handler,
+            request,
+            plan_version,
+            step,
+            attempt,
+            error,
+        )? {
+            return Ok(None);
+        }
         release_task_write_lease(
             session,
             handler,
@@ -634,13 +683,13 @@ where
             TaskStepStatus::Failed,
         )?;
         append_task_readiness(session, handler, readiness.clone())?;
-        Ok(SequentialTaskStepOutput {
+        Ok(Some(SequentialTaskStepOutput {
             step_id: step.step_id.clone(),
             status: TaskStepStatus::Failed,
             verification_verdict: readiness.evaluation.verification_verdict,
             visible_state: readiness.evaluation.visible_state,
             outcome: AgentRunOutcome::default(),
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1131,6 +1180,7 @@ where
             child_input
         };
         let child_input = self.bind_cancellation(child_input);
+        validate_scheduled_retry_input(parent_session, attempt, &child_input)?;
         let _child_effect = self
             .cancellation
             .as_ref()
@@ -1407,6 +1457,169 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
     Ok(true)
 }
 
+async fn await_pending_step_retries(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    steps: &[TaskStepSpec],
+    cancellation: Option<&RunCancellationHandle>,
+) -> bool {
+    let not_before = steps
+        .iter()
+        .filter_map(|step| {
+            task.pending_participant_retry(
+                TaskParticipantPurpose::Step,
+                Some(plan_version),
+                Some(&step.step_id),
+            )
+        })
+        .map(|schedule| schedule.not_before_unix_ms)
+        .max();
+    let Some(not_before) = not_before else {
+        return true;
+    };
+    let now = unix_time_ms();
+    if not_before > now {
+        let sleep = tokio::time::sleep(std::time::Duration::from_millis(not_before - now));
+        if let Some(cancellation) = cancellation {
+            tokio::select! {
+                _ = cancellation.cancelled() => return false,
+                () = sleep => {}
+            }
+        } else {
+            sleep.await;
+        }
+    }
+    true
+}
+
+fn validate_scheduled_retry_input(
+    session: &Session,
+    attempt: &TaskParticipantAttemptEntry,
+    input: &AgentRunInput,
+) -> Result<()> {
+    let projection = session.task_state_projection();
+    let Some(task) = projection.tasks.get(&attempt.task_id) else {
+        if attempt.ordinal == 1 {
+            return Ok(());
+        }
+        bail!("task disappeared while validating scheduled retry input");
+    };
+    let Some(schedule) = task.participant_retry_schedules.get(&attempt.attempt_id) else {
+        return Ok(());
+    };
+    let input_hash = task_participant_input_hash(input)?;
+    if input_hash != schedule.input_hash {
+        bail!("scheduled task participant retry input drifted before provider dispatch");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_participant_retry<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    attempt: &TaskParticipantAttemptEntry,
+    error: &anyhow::Error,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
+    if !matches!(
+        step.effective_mode(),
+        TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+    ) || step.effective_isolation() != TaskIsolationMode::SharedReadOnly
+    {
+        return Ok(false);
+    }
+    let Some(retry) = error.downcast_ref::<TaskParticipantRetryError>() else {
+        return Ok(false);
+    };
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&request.task_id)
+        .ok_or_else(|| anyhow!("task disappeared before retry scheduling"))?;
+    let retry_count = task
+        .participant_retry_schedules
+        .values()
+        .filter(|schedule| {
+            schedule.purpose == TaskParticipantPurpose::Step
+                && schedule.plan_version == Some(plan_version)
+                && schedule.step_id.as_ref() == Some(&step.step_id)
+        })
+        .count();
+    let cumulative_wait = task.participant_retry_wait_ms(
+        TaskParticipantPurpose::Step,
+        Some(plan_version),
+        Some(&step.step_id),
+    );
+    if retry_count >= MAX_TASK_PARTICIPANT_AUTO_RETRIES
+        || cumulative_wait.saturating_add(retry.retry_after_ms())
+            > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS
+    {
+        return Ok(false);
+    }
+    let retry_ordinal = attempt.ordinal.saturating_add(1);
+    let retry_attempt_id = task_participant_attempt_id(
+        &request.task_id,
+        TaskParticipantPurpose::Step,
+        Some(plan_version),
+        Some(&step.step_id),
+        retry_ordinal,
+    )?;
+    let scheduled_at_unix_ms = unix_time_ms();
+    let schedule = TaskParticipantRetryScheduledEntry {
+        task_id: request.task_id.clone(),
+        failed_attempt_id: attempt.attempt_id.clone(),
+        retry_attempt_id,
+        purpose: TaskParticipantPurpose::Step,
+        retry_ordinal,
+        plan_version: Some(plan_version),
+        step_id: Some(step.step_id.clone()),
+        route_fingerprint: retry.route_fingerprint().to_owned(),
+        input_hash: retry.input_hash().to_owned(),
+        scheduled_at_unix_ms,
+        not_before_unix_ms: scheduled_at_unix_ms.saturating_add(retry.retry_after_ms()),
+        retry_after_ms: retry.retry_after_ms(),
+        proof: retry.proof().clone(),
+    };
+    schedule.validate_shape()?;
+
+    let mut terminal = attempt.clone();
+    terminal.status = TaskParticipantAttemptStatus::Failed;
+    terminal.reason = Some(crate::safe_persistence_text(&format!(
+        "provider pressure retry scheduled after {} ms",
+        retry.retry_after_ms()
+    )));
+    let pending = TaskStepEntry {
+        task_id: request.task_id.clone(),
+        plan_version,
+        step_id: step.step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Pending,
+        title: Some(crate::safe_persistence_text(&step.title)),
+        summary: None,
+        reason: Some(format!(
+            "provider pressure retry {} scheduled after {} ms",
+            retry_count.saturating_add(1),
+            retry.retry_after_ms()
+        )),
+    };
+    append_task_controls(
+        session,
+        handler,
+        vec![
+            ControlEntry::TaskParticipantAttempt(terminal),
+            ControlEntry::TaskParticipantRetryScheduled(schedule),
+            ControlEntry::TaskStep(pending),
+        ],
+    )?;
+    Ok(true)
+}
+
 fn begin_participant_attempt<H>(
     session: &mut Session,
     handler: &mut H,
@@ -1438,6 +1651,11 @@ where
     let ordinal = task.next_participant_ordinal(purpose, plan_version, step_id);
     let attempt_id =
         task_participant_attempt_id(&request.task_id, purpose, plan_version, step_id, ordinal)?;
+    if let Some(schedule) = task.pending_participant_retry(purpose, plan_version, step_id)
+        && (schedule.retry_ordinal != ordinal || schedule.retry_attempt_id != attempt_id)
+    {
+        bail!("pending task participant retry identity conflicts with next attempt admission");
+    }
     let entry = TaskParticipantAttemptEntry {
         child_session_ref: task_participant_session_ref(&request.task_id, &attempt_id)?,
         attempt_id,
@@ -1457,6 +1675,14 @@ where
         ControlEntry::TaskParticipantAttempt(entry.clone()),
     )?;
     Ok(entry)
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(1)
+        .max(1)
 }
 
 fn append_participant_terminal<H>(

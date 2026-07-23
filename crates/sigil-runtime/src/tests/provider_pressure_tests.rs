@@ -103,3 +103,33 @@ fn fallback_cooldown_is_deterministic_bounded_and_increases() {
         MAX_RATE_LIMIT_COOLDOWN
     );
 }
+
+#[test]
+fn retry_schedule_delay_uses_attempt_derived_bounded_jitter() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    let admission = pressure.admit("deepseek", "deepseek-v4-flash")?;
+    pressure.record_rate_limit(&admission, Some(1_000));
+    let first_attempt = TaskParticipantAttemptId::new("attempt-first")?;
+    let second_attempt = TaskParticipantAttemptId::new("attempt-second")?;
+
+    let first = pressure
+        .retry_schedule_delay("deepseek", "deepseek-v4-flash", &first_attempt)
+        .expect("cooling route has retry delay");
+    let repeated = pressure
+        .retry_schedule_delay("deepseek", "deepseek-v4-flash", &first_attempt)
+        .expect("same attempt has retry delay");
+    let second = pressure
+        .retry_schedule_delay("deepseek", "deepseek-v4-flash", &second_attempt)
+        .expect("second attempt has retry delay");
+
+    assert_eq!(first, repeated);
+    assert_eq!(first.1, admission.fingerprint);
+    assert_ne!(
+        retry_attempt_jitter_ms(&first.1, first_attempt.as_str()),
+        retry_attempt_jitter_ms(&first.1, second_attempt.as_str())
+    );
+    assert!((1_000..=1_250).contains(&first.0));
+    assert!((1_000..=1_250).contains(&second.0));
+    Ok(())
+}

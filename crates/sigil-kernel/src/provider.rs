@@ -832,6 +832,9 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum ProviderRequestRejection {
     ContextWindowExceeded,
+    /// Provider-owned HTTP 429 or an already-active route cooldown rejected the request before
+    /// model generation.
+    RateLimited,
 }
 
 impl ModelMessage {

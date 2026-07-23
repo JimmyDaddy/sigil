@@ -1,7 +1,10 @@
 use std::{
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -22,16 +25,18 @@ use crate::{
     SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
     TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess,
-    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    TrustedCheckSpec, VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState,
-    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
-    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id,
-    task_participant_attempt_id, task_participant_session_ref, write_file_with_mutation,
+    TaskParticipantResultEntry, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    TaskVerificationRerunRequest, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
+    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
+    stable_workspace_id, task_participant_attempt_id, task_participant_input_hash,
+    task_participant_session_ref, write_file_with_mutation,
 };
 
 use super::{
@@ -41,8 +46,9 @@ use super::{
     participant_result_entry, planner_prompt, reconcile_task_final_answer_prefix,
     relevant_verification_receipts, rerun_task_verification_check, route_id_for_call,
     run_status_from_step_status, run_task_step_verification_checks, step_status_after_readiness,
-    step_status_from_outcome, step_terminal_reason, task_status_from_step_status,
-    task_step_auto_run_policy, task_step_default_policy, task_step_readiness,
+    step_status_from_outcome, step_terminal_reason, subagent_step_prompt,
+    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -162,6 +168,14 @@ struct StaticChangesetChildRunner {
 }
 
 struct WrongIdentityChildRunner;
+#[derive(Clone)]
+struct RetryingReadChildRunner {
+    calls: Arc<AtomicUsize>,
+}
+#[derive(Clone)]
+struct AlwaysRateLimitedReadChildRunner {
+    calls: Arc<AtomicUsize>,
+}
 #[derive(Debug, Default)]
 struct FakeTaskExecutionBackend;
 #[derive(Default)]
@@ -435,6 +449,102 @@ impl TaskChildSessionRunner for WrongIdentityChildRunner {
     }
 }
 
+#[async_trait]
+impl TaskChildSessionRunner for RetryingReadChildRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(TaskParticipantRetryError::new(
+                1,
+                format!("sha256:{}", "1".repeat(64)),
+                task_participant_input_hash(&request.child_input)?,
+                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                },
+                anyhow::anyhow!("fixture provider rate limited"),
+            )?
+            .into());
+        }
+        Ok(TaskChildSessionRunOutput {
+            attempt_id: request.attempt_id,
+            final_text: "retry completed".to_owned(),
+            outcome: crate::AgentRunOutcome::default(),
+            child_session_ref: request.child_session_ref,
+            final_answer_ref: None,
+            artifact_refs: Vec::new(),
+            changeset_proposal: None,
+            changeset_only_after_snapshot_id: None,
+        })
+    }
+
+    async fn run_synthesis_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskSynthesisSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskSynthesisSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        let final_text = "task completed after retry".to_owned();
+        Ok(crate::TaskSynthesisSessionRunOutput {
+            attempt_id: request.attempt_id,
+            outcome: crate::AgentRunOutcome::default(),
+            child_session_ref: request.child_session_ref.clone(),
+            final_answer_ref: AgentFinalAnswerRef {
+                session_ref: request.child_session_ref,
+                message_id: "retry-synthesis-final".to_owned(),
+                content_hash: super::hash_text(&final_text),
+                char_count: final_text.chars().count(),
+            },
+            artifact_refs: Vec::new(),
+            final_text,
+        })
+    }
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for AlwaysRateLimitedReadChildRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(TaskParticipantRetryError::new(
+            1,
+            format!("sha256:{}", "5".repeat(64)),
+            task_participant_input_hash(&request.child_input)?,
+            TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+            anyhow::anyhow!("fixture provider remains rate limited"),
+        )?
+        .into())
+    }
+}
+
 struct MixedReadBatchChildRunner;
 
 #[async_trait]
@@ -560,6 +670,31 @@ fn participant_result_constructor_bounds_parent_reference_lists() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn task_participant_input_hash_ignores_local_message_identity_but_detects_content_drift()
+-> Result<()> {
+    let first =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("same prompt")]);
+    let second =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("same prompt")]);
+    let changed =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("changed prompt")]);
+
+    assert_ne!(
+        first.transient_context[0].id,
+        second.transient_context[0].id
+    );
+    assert_eq!(
+        task_participant_input_hash(&first)?,
+        task_participant_input_hash(&second)?
+    );
+    assert_ne!(
+        task_participant_input_hash(&first)?,
+        task_participant_input_hash(&changed)?
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn task_child_output_must_match_the_admitted_attempt_identity() -> Result<()> {
     let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(WrongIdentityChildRunner);
@@ -616,6 +751,290 @@ async fn task_child_output_must_match_the_admitted_attempt_identity() -> Result<
                     })
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_step_rate_limit_schedules_new_attempt_and_completes() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(RetryingReadChildRunner {
+        calls: Arc::clone(&calls),
+    });
+    let task_id = TaskId::new("task_retry")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("inspect")?,
+        title: "Inspect retry path".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let mut session = Session::new("fixture", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "finish after provider pressure".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Pending,
+        title: Some(step.title.clone()),
+        summary: None,
+        reason: None,
+    }))?;
+    let request = SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref,
+        objective: "finish after provider pressure".to_owned(),
+    };
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            request,
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(
+        output.status,
+        TaskRunStatus::Completed,
+        "task controls: {:#?}",
+        session.entries()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    let attempts =
+        task.participant_attempts_for(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id));
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].status, TaskParticipantAttemptStatus::Failed);
+    assert_eq!(attempts[1].status, TaskParticipantAttemptStatus::Completed);
+    assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
+    assert_ne!(attempts[0].child_session_ref, attempts[1].child_session_ref);
+    assert_eq!(task.participant_retry_schedules.len(), 1);
+    assert!(
+        task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedReadChildRunner {
+            calls: Arc::clone(&calls),
+        });
+    let task_id = TaskId::new("task_retry_bounded")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("inspect")?,
+        title: "Inspect bounded retry".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let mut session = Session::new("fixture", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "stop retry storm".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref,
+                objective: "stop retry storm".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(
+        task.participant_attempts_for(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
+            .len(),
+        3
+    );
+    assert_eq!(task.participant_retry_schedules.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn continue_consumes_one_durable_retry_schedule_after_restart() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(1));
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(RetryingReadChildRunner {
+        calls: Arc::clone(&calls),
+    });
+    let task_id = TaskId::new("task_retry_restart")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let objective = "resume a scheduled provider retry";
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("inspect")?,
+        title: "Inspect retry path".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let failed_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        1,
+    )?;
+    let retry_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        2,
+    )?;
+    let expected_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        subagent_step_prompt(objective, 1, &step, None),
+    )]);
+    let mut session = Session::new("fixture", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: objective.to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: failed_attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Step,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: Some(step.step_id.clone()),
+            role: step.role,
+            child_session_ref: task_participant_session_ref(&task_id, &failed_attempt_id)?,
+            status: TaskParticipantAttemptStatus::Failed,
+            reason: Some("rate limited before restart".to_owned()),
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskParticipantRetryScheduled(
+        TaskParticipantRetryScheduledEntry {
+            task_id: task_id.clone(),
+            failed_attempt_id,
+            retry_attempt_id,
+            purpose: TaskParticipantPurpose::Step,
+            retry_ordinal: 2,
+            plan_version: Some(1),
+            step_id: Some(step.step_id.clone()),
+            route_fingerprint: format!("sha256:{}", "4".repeat(64)),
+            input_hash: task_participant_input_hash(&expected_input)?,
+            scheduled_at_unix_ms: 1,
+            not_before_unix_ms: 2,
+            retry_after_ms: 1,
+            proof: TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Pending,
+        title: Some(step.title.clone()),
+        summary: None,
+        reason: Some("retry scheduled".to_owned()),
+    }))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref,
+                objective: objective.to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(
+        task.participant_attempts_for(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
+            .len(),
+        2
+    );
+    assert_eq!(task.participant_retry_schedules.len(), 1);
     Ok(())
 }
 

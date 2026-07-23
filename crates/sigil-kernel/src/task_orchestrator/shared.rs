@@ -12,6 +12,21 @@ where
     handler.handle(RunEvent::Control(control))
 }
 
+pub(super) fn append_task_controls<H>(
+    session: &mut Session,
+    handler: &mut H,
+    controls: Vec<ControlEntry>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    session.append_durable_events_with_controls(Vec::new(), controls.clone())?;
+    for control in controls {
+        handler.handle(RunEvent::Control(control))?;
+    }
+    Ok(())
+}
+
 pub(super) fn append_task_control_with_event<H>(
     session: &mut Session,
     handler: &mut H,

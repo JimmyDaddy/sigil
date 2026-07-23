@@ -91,6 +91,53 @@ fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> 
 }
 
 #[test]
+fn participant_retry_audit_line_shows_bounded_schedule() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_audit_retry")?;
+    let step_id = sigil_kernel::TaskStepId::new("inspect")?;
+    let failed_attempt_id = sigil_kernel::task_participant_attempt_id(
+        &task_id,
+        sigil_kernel::TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let retry_attempt_id = sigil_kernel::task_participant_attempt_id(
+        &task_id,
+        sigil_kernel::TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        2,
+    )?;
+    let line = render_control_entry_line(&ControlEntry::TaskParticipantRetryScheduled(
+        sigil_kernel::TaskParticipantRetryScheduledEntry {
+            task_id,
+            failed_attempt_id,
+            retry_attempt_id,
+            purpose: sigil_kernel::TaskParticipantPurpose::Step,
+            retry_ordinal: 2,
+            plan_version: Some(1),
+            step_id: Some(step_id),
+            route_fingerprint: format!("sha256:{}", "1".repeat(64)),
+            input_hash: "2".repeat(64),
+            scheduled_at_unix_ms: 1_000,
+            not_before_unix_ms: 2_500,
+            retry_after_ms: 1_500,
+            proof: sigil_kernel::TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+        },
+    ));
+
+    assert!(line.contains("participant retry task_audit_retry"));
+    assert!(line.contains("ordinal=2"));
+    assert!(line.contains("after=1500ms"));
+    assert!(line.contains("failed=attempt-"));
+    Ok(())
+}
+
+#[test]
 fn session_history_marks_legacy_raw_logs_as_unsupported() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session-legacy.jsonl");

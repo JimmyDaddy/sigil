@@ -1,6 +1,123 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+/// Typed runtime-to-orchestrator failure that carries the complete proof needed to schedule one
+/// bounded provider-pressure retry.
+#[derive(Debug, thiserror::Error)]
+#[error("task participant was rate limited before output or effect: {source}")]
+pub struct TaskParticipantRetryError {
+    retry_after_ms: u64,
+    route_fingerprint: String,
+    input_hash: String,
+    proof: TaskParticipantRetryProof,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl TaskParticipantRetryError {
+    /// Builds one retryable failure after runtime has proven that dispatch produced no observable
+    /// model output, tool work, or external effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scheduling metadata or proof is malformed.
+    pub fn new(
+        retry_after_ms: u64,
+        route_fingerprint: impl Into<String>,
+        input_hash: impl Into<String>,
+        proof: TaskParticipantRetryProof,
+        source: anyhow::Error,
+    ) -> Result<Self> {
+        let route_fingerprint = route_fingerprint.into();
+        let input_hash = input_hash.into();
+        if retry_after_ms == 0 || retry_after_ms > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS {
+            bail!("task participant retry delay is outside the bounded automatic retry budget");
+        }
+        if route_fingerprint.len() != 71
+            || !route_fingerprint.starts_with("sha256:")
+            || !route_fingerprint[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("task participant retry route fingerprint is invalid");
+        }
+        if input_hash.len() != 64 || !input_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("task participant retry input hash is invalid");
+        }
+        proof.validate_shape()?;
+        Ok(Self {
+            retry_after_ms,
+            route_fingerprint,
+            input_hash,
+            proof,
+            source,
+        })
+    }
+
+    #[must_use]
+    pub fn retry_after_ms(&self) -> u64 {
+        self.retry_after_ms
+    }
+
+    #[must_use]
+    pub fn route_fingerprint(&self) -> &str {
+        &self.route_fingerprint
+    }
+
+    #[must_use]
+    pub fn input_hash(&self) -> &str {
+        &self.input_hash
+    }
+
+    #[must_use]
+    pub fn proof(&self) -> &TaskParticipantRetryProof {
+        &self.proof
+    }
+}
+
+/// Computes the retry-stable hash of task input material.
+///
+/// Attempt identity, cancellation handles, and logical-run ids are intentionally excluded so a
+/// replacement physical attempt can prove that its user-visible request is unchanged.
+///
+/// # Errors
+///
+/// Returns an error when transient message persistence projection fails.
+pub fn task_participant_input_hash(input: &AgentRunInput) -> Result<String> {
+    let transient_context = input
+        .transient_context
+        .iter()
+        .cloned()
+        .map(crate::project_message_for_persistence)
+        .map(|projection| {
+            projection.map(|(mut durable, _overlay)| {
+                // Message ids are local persistence identities, not provider-visible input.
+                // Reconstructing the same task prompt for a new physical attempt creates a fresh
+                // id, so retaining it here would make every safe retry look like input drift.
+                durable.id.clear();
+                durable
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let value = serde_json::json!({
+        "persisted_user_message": input
+            .persisted_user_message
+            .as_deref()
+            .map(crate::safe_persistence_text),
+        "transient_context": transient_context,
+        "task_plan_update": input.task_plan_update.as_ref().map(|context| {
+            serde_json::json!({
+                "task_id": context.task_id.as_str(),
+                "max_plan_steps": context.max_plan_steps,
+            })
+        }),
+    });
+    let bytes = serde_json::to_vec(&value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Request for one sequential planner/executor task run.
 #[derive(Debug, Clone)]
 pub struct SequentialTaskRequest {

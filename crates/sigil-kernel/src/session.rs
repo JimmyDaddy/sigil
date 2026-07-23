@@ -70,9 +70,10 @@ use crate::{
     skill::{SkillIndexSnapshot, SkillLoadEntry, SkillStateProjection},
     task::{
         TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskFinalAnswerCommittedEntry,
-        TaskParticipantAttemptEntry, TaskParticipantResultEntry, TaskPlanEntry,
-        TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskStateProjection, TaskStepEntry,
-        TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+        TaskParticipantAttemptEntry, TaskParticipantResultEntry,
+        TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskRunCancellationScopeBoundEntry,
+        TaskRunEntry, TaskStateProjection, TaskStepEntry, TaskSubagentApprovalRouteEntry,
+        TaskSubagentElicitationRouteEntry,
     },
     task_handoff::{TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry},
     task_memory::{TaskMemoryV1, task_memory_context_items},

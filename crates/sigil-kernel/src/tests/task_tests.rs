@@ -9,10 +9,11 @@ use crate::{
     TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId,
     TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
+    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
+    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
+    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
     normalize_task_agent_display_name, task_final_message_id, task_participant_attempt_id,
     task_participant_session_ref, task_plan_update_entry, task_plan_update_result_content,
@@ -1537,6 +1538,130 @@ fn task_projection_rejects_orphan_participant_results() -> Result<()> {
 
     assert!(task.participant_results.is_empty());
     assert_eq!(task.participant_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn task_projection_tracks_pending_retry_from_terminal_zero_effect_attempt() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let step_id = step_id("inspect")?;
+    let failed_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let retry_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        2,
+    )?;
+    let failed = TaskParticipantAttemptEntry {
+        attempt_id: failed_attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step_id.clone()),
+        role: AgentRole::SubagentRead,
+        child_session_ref: task_participant_session_ref(&task_id, &failed_attempt_id)?,
+        status: TaskParticipantAttemptStatus::Failed,
+        reason: Some("rate limited".to_owned()),
+    };
+    let schedule = TaskParticipantRetryScheduledEntry {
+        task_id: task_id.clone(),
+        failed_attempt_id,
+        retry_attempt_id: retry_attempt_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        retry_ordinal: 2,
+        plan_version: Some(1),
+        step_id: Some(step_id.clone()),
+        route_fingerprint: format!("sha256:{}", "1".repeat(64)),
+        input_hash: "2".repeat(64),
+        scheduled_at_unix_ms: 10,
+        not_before_unix_ms: 15,
+        retry_after_ms: 5,
+        proof: TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+            physical_attempt_id: "physical-attempt-1".to_owned(),
+            request_material_fingerprint: format!("hmac-sha256:{}", "3".repeat(64)),
+            zero_output: true,
+            zero_tool: true,
+            zero_effect: true,
+        },
+    };
+    schedule.validate_shape()?;
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Running)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(failed)),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantRetryScheduled(
+            schedule.clone(),
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert_eq!(
+        task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step_id)),
+        Some(&schedule)
+    );
+    assert_eq!(
+        task.participant_retry_wait_ms(TaskParticipantPurpose::Step, Some(1), Some(&step_id)),
+        5
+    );
+    assert_eq!(task.participant_conflicts, 0);
+
+    let mut started_retry = TaskParticipantAttemptEntry {
+        attempt_id: retry_attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 2,
+        plan_version: Some(1),
+        step_id: Some(step_id.clone()),
+        role: AgentRole::SubagentRead,
+        child_session_ref: task_participant_session_ref(&task_id, &retry_attempt_id)?,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    let mut entries = vec![
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Running)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
+            TaskParticipantAttemptEntry {
+                attempt_id: schedule.failed_attempt_id.clone(),
+                task_id: task_id.clone(),
+                purpose: TaskParticipantPurpose::Step,
+                ordinal: 1,
+                plan_version: Some(1),
+                step_id: Some(step_id.clone()),
+                role: AgentRole::SubagentRead,
+                child_session_ref: task_participant_session_ref(
+                    &task_id,
+                    &schedule.failed_attempt_id,
+                )?,
+                status: TaskParticipantAttemptStatus::Failed,
+                reason: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantRetryScheduled(schedule)),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(started_retry.clone())),
+    ];
+    started_retry.status = TaskParticipantAttemptStatus::Completed;
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskParticipantAttempt(started_retry),
+    ));
+    let projection = TaskStateProjection::from_entries(&entries);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+    assert!(
+        task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step_id))
+            .is_none()
+    );
     Ok(())
 }
 

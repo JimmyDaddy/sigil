@@ -28,6 +28,10 @@ pub const TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS: usize = 32;
 pub const TASK_PARTICIPANT_RESULT_REF_MAX_CHARS: usize = 1_024;
 /// Maximum characters retained for the short kind of an artifact reference.
 pub const TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS: usize = 128;
+/// Maximum automatic provider-pressure retries for one task participant identity.
+pub const MAX_TASK_PARTICIPANT_AUTO_RETRIES: usize = 2;
+/// Maximum cumulative delay admitted for automatic retries of one participant identity.
+pub const MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS: u64 = 120_000;
 
 const TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN: &str = "sigil-task-participant-attempt-v1";
 const TASK_PARTICIPANT_CHILD_ID_DOMAIN: &str = "sigil-task-participant-child-v1";
@@ -1023,6 +1027,123 @@ impl TaskParticipantAttemptEntry {
     }
 }
 
+/// Durable proof that a provider-pressure retry cannot duplicate model output, tool work, or an
+/// external effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum TaskParticipantRetryProof {
+    /// A child-session physical attempt reached a synced no-consumption terminal.
+    ProviderConfirmedNoConsumption {
+        physical_attempt_id: String,
+        request_material_fingerprint: String,
+        zero_output: bool,
+        zero_tool: bool,
+        zero_effect: bool,
+    },
+    /// Runtime admission rejected the child before any provider dispatch or child start.
+    AdmissionRejectedBeforeDispatch {
+        zero_output: bool,
+        zero_tool: bool,
+        zero_effect: bool,
+    },
+}
+
+impl TaskParticipantRetryProof {
+    /// Validates that all three safety facts are explicit and that referenced provider evidence is
+    /// structurally safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any zero-effect fact is false or an evidence fingerprint is invalid.
+    pub fn validate_shape(&self) -> Result<()> {
+        let (zero_output, zero_tool, zero_effect) = match self {
+            Self::ProviderConfirmedNoConsumption {
+                physical_attempt_id,
+                request_material_fingerprint,
+                zero_output,
+                zero_tool,
+                zero_effect,
+            } => {
+                validate_stable_id("provider physical attempt id", physical_attempt_id)?;
+                validate_prefixed_sha256(
+                    "provider request material fingerprint",
+                    request_material_fingerprint,
+                    "hmac-sha256:",
+                )?;
+                (*zero_output, *zero_tool, *zero_effect)
+            }
+            Self::AdmissionRejectedBeforeDispatch {
+                zero_output,
+                zero_tool,
+                zero_effect,
+            } => (*zero_output, *zero_tool, *zero_effect),
+        };
+        if !zero_output || !zero_tool || !zero_effect {
+            bail!("task participant retry proof must establish zero output, tool, and effect");
+        }
+        Ok(())
+    }
+}
+
+/// Durable retry admission written after one failed attempt and before its replacement starts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskParticipantRetryScheduledEntry {
+    pub task_id: TaskId,
+    pub failed_attempt_id: TaskParticipantAttemptId,
+    pub retry_attempt_id: TaskParticipantAttemptId,
+    pub purpose: TaskParticipantPurpose,
+    pub retry_ordinal: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<TaskStepId>,
+    pub route_fingerprint: String,
+    pub input_hash: String,
+    pub scheduled_at_unix_ms: u64,
+    pub not_before_unix_ms: u64,
+    pub retry_after_ms: u64,
+    pub proof: TaskParticipantRetryProof,
+}
+
+impl TaskParticipantRetryScheduledEntry {
+    /// Validates deterministic retry identity, bounded timing, and zero-effect evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identity, timing, route, input, or proof facts are inconsistent.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.retry_ordinal < 2 {
+            bail!("task participant retry ordinal must be greater than one");
+        }
+        let expected = task_participant_attempt_id(
+            &self.task_id,
+            self.purpose,
+            self.plan_version,
+            self.step_id.as_ref(),
+            self.retry_ordinal,
+        )?;
+        if self.retry_attempt_id != expected {
+            bail!("task participant retry id conflicts with its durable identity facts");
+        }
+        if self.retry_after_ms == 0 || self.retry_after_ms > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS
+        {
+            bail!("task participant retry delay is outside the bounded automatic retry budget");
+        }
+        if self.scheduled_at_unix_ms == 0
+            || self.not_before_unix_ms
+                != self
+                    .scheduled_at_unix_ms
+                    .saturating_add(self.retry_after_ms)
+        {
+            bail!("task participant retry timing is inconsistent");
+        }
+        validate_sha256_fingerprint("provider route fingerprint", &self.route_fingerprint)?;
+        validate_hex_sha256("task participant input hash", &self.input_hash)?;
+        self.proof.validate_shape()
+    }
+}
+
 /// Bounded result committed from a participant-owned transcript into the parent task log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1245,6 +1366,9 @@ impl TaskStateProjection {
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
             ControlEntry::TaskParticipantAttempt(entry) => self.apply_participant_attempt(entry),
+            ControlEntry::TaskParticipantRetryScheduled(entry) => {
+                self.apply_participant_retry_scheduled(entry)
+            }
             ControlEntry::TaskParticipantResult(entry) => self.apply_participant_result(entry),
             ControlEntry::TaskFinalAnswerCommitted(entry) => self.apply_final_answer(entry),
             ControlEntry::TaskChildSession(entry) => self.apply_child_session(entry),
@@ -1378,6 +1502,42 @@ impl TaskStateProjection {
             return;
         }
         *attempt = entry.clone();
+    }
+
+    fn apply_participant_retry_scheduled(&mut self, entry: &TaskParticipantRetryScheduledEntry) {
+        self.record_task_replay(&entry.task_id);
+        let task = self.ensure_task(&entry.task_id);
+        let failed = task.participant_attempts.get(&entry.failed_attempt_id);
+        if entry.validate_shape().is_err()
+            || failed.is_none_or(|attempt| {
+                attempt.task_id != entry.task_id
+                    || attempt.purpose != entry.purpose
+                    || attempt.plan_version != entry.plan_version
+                    || attempt.step_id != entry.step_id
+                    || attempt.ordinal.saturating_add(1) != entry.retry_ordinal
+                    || attempt.status != TaskParticipantAttemptStatus::Failed
+            })
+            || task
+                .participant_attempts
+                .get(&entry.retry_attempt_id)
+                .is_some_and(|attempt| attempt.ordinal != entry.retry_ordinal)
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match task
+            .participant_retry_schedules
+            .get(&entry.retry_attempt_id)
+        {
+            Some(existing) if existing != entry => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            Some(_) => {}
+            None => {
+                task.participant_retry_schedules
+                    .insert(entry.retry_attempt_id.clone(), entry.clone());
+            }
+        }
     }
 
     fn apply_participant_result(&mut self, entry: &TaskParticipantResultEntry) {
@@ -1531,6 +1691,8 @@ pub struct TaskRunProjection {
     /// Compatibility view populated only when exactly one task step is active.
     pub current_step: Option<(u32, TaskStepId)>,
     pub participant_attempts: BTreeMap<TaskParticipantAttemptId, TaskParticipantAttemptEntry>,
+    pub participant_retry_schedules:
+        BTreeMap<TaskParticipantAttemptId, TaskParticipantRetryScheduledEntry>,
     pub participant_results: BTreeMap<TaskParticipantAttemptId, TaskParticipantResultEntry>,
     pub final_answer: Option<TaskFinalAnswerCommittedEntry>,
     pub child_sessions: BTreeMap<(u32, TaskStepId, TaskId), TaskChildSessionEntry>,
@@ -1558,6 +1720,7 @@ impl TaskRunProjection {
             active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
+            participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
             final_answer: None,
             child_sessions: BTreeMap::new(),
@@ -1587,6 +1750,7 @@ impl TaskRunProjection {
             active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
+            participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
             final_answer: None,
             child_sessions: BTreeMap::new(),
@@ -1635,6 +1799,45 @@ impl TaskRunProjection {
             .max()
             .unwrap_or(0)
             .saturating_add(1)
+    }
+
+    /// Returns the durable schedule that authorizes the next not-yet-started retry.
+    pub fn pending_participant_retry(
+        &self,
+        purpose: TaskParticipantPurpose,
+        plan_version: Option<u32>,
+        step_id: Option<&TaskStepId>,
+    ) -> Option<&TaskParticipantRetryScheduledEntry> {
+        self.participant_retry_schedules
+            .values()
+            .filter(|schedule| {
+                schedule.purpose == purpose
+                    && schedule.plan_version == plan_version
+                    && schedule.step_id.as_ref() == step_id
+                    && !self
+                        .participant_attempts
+                        .contains_key(&schedule.retry_attempt_id)
+            })
+            .max_by_key(|schedule| schedule.retry_ordinal)
+    }
+
+    /// Returns the cumulative durable retry delay for one participant identity.
+    pub fn participant_retry_wait_ms(
+        &self,
+        purpose: TaskParticipantPurpose,
+        plan_version: Option<u32>,
+        step_id: Option<&TaskStepId>,
+    ) -> u64 {
+        self.participant_retry_schedules
+            .values()
+            .filter(|schedule| {
+                schedule.purpose == purpose
+                    && schedule.plan_version == plan_version
+                    && schedule.step_id.as_ref() == step_id
+            })
+            .fold(0_u64, |total, schedule| {
+                total.saturating_add(schedule.retry_after_ms)
+            })
     }
 
     /// Returns the latest persisted display name for a child session, if one was recorded.
@@ -1977,6 +2180,24 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         bail!("{label} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_sha256_fingerprint(label: &str, value: &str) -> Result<()> {
+    validate_prefixed_sha256(label, value, "sha256:")
+}
+
+fn validate_prefixed_sha256(label: &str, value: &str, prefix: &str) -> Result<()> {
+    let Some(digest) = value.strip_prefix(prefix) else {
+        bail!("{label} must use a {prefix} fingerprint");
+    };
+    validate_hex_sha256(label, digest)
+}
+
+fn validate_hex_sha256(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must contain a 64-character hexadecimal sha256 digest");
     }
     Ok(())
 }

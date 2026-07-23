@@ -21,15 +21,16 @@ use sigil_kernel::{
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
     DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
     MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderRateLimitError, ProviderRouteCooldownError, ReasoningStreamSupport,
+    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport,
     RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry,
     SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantPurpose,
-    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanUpdateContext,
+    TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
     TaskSubagentApprovalRouteEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
     ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig, child_session_ref,
-    task_participant_attempt_id, task_participant_session_ref,
+    task_participant_attempt_id, task_participant_logical_run_id, task_participant_session_ref,
 };
 
 use super::{
@@ -105,6 +106,8 @@ struct RateLimitedTaskChildProvider {
     starts: Arc<AtomicUsize>,
     rate_limits_remaining: Arc<AtomicUsize>,
 }
+
+struct OutputThenRateLimitedTaskChildProvider;
 
 #[async_trait]
 impl Provider for TextProvider {
@@ -201,6 +204,29 @@ impl Provider for RateLimitedTaskChildProvider {
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("provider recovered".to_owned())),
             Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for OutputThenRateLimitedTaskChildProvider {
+    fn name(&self) -> &str {
+        "output-then-rate-limited-task-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("partial output".to_owned())),
+            Err(
+                ProviderRateLimitError::new(anyhow!("rate limited after output"), Some("1")).into(),
+            ),
         ])))
     }
 }
@@ -2944,20 +2970,23 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
         objective: "inspect with provider backpressure".to_owned(),
     };
     let request_for = |step_id: &str| -> Result<TaskChildSessionRunRequest> {
+        let attempt_id = participant_attempt_id_for(step_id)?;
         Ok(TaskChildSessionRunRequest {
             task: task.clone(),
             plan_version: 1,
             step: step(step_id)?,
-            attempt_id: participant_attempt_id_for(step_id)?,
+            attempt_id: attempt_id.clone(),
             child_session_ref: participant_session_ref_for(step_id)?,
             child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
                 format!("inspect {step_id}"),
-            )]),
+            )])
+            .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
             options: run_options(temp.path().to_path_buf()),
             changeset_only_base_snapshot_id: None,
         })
     };
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", parent_store)?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -2971,10 +3000,25 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
         .await?;
     assert_eq!(first.len(), 1);
     assert!(
-        first[0]
-            .as_ref()
-            .err()
-            .is_some_and(|error| format!("{error:#}").contains("test provider rate limited"))
+        first[0].as_ref().err().is_some_and(|error| {
+            error
+                .downcast_ref::<TaskParticipantRetryError>()
+                .is_some_and(|retry| {
+                    retry.retry_after_ms() > 0
+                        && matches!(
+                            retry.proof(),
+                            TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+                                zero_output: true,
+                                zero_tool: true,
+                                zero_effect: true,
+                                ..
+                            }
+                        )
+                })
+                && format!("{error:#}").contains("test provider rate limited")
+        }),
+        "first error: {:#}",
+        first[0].as_ref().expect_err("first request should fail")
     );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
 
@@ -3004,16 +3048,29 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
         .await?;
 
     assert_eq!(blocked.len(), 2);
-    assert!(blocked.iter().all(|output| {
-        output.as_ref().err().is_some_and(|error| {
-            let message = format!("{error:#}");
-            error
-                .downcast_ref::<ProviderRouteCooldownError>()
-                .is_some_and(|cooldown| cooldown.retry_after_ms() > 0)
-                && message.contains("provider route is cooling down")
-                && message.contains("rejected before provider dispatch")
-        })
-    }));
+    assert!(
+        blocked.iter().all(|output| {
+            output.as_ref().err().is_some_and(|error| {
+                let message = format!("{error:#}");
+                error
+                    .downcast_ref::<TaskParticipantRetryError>()
+                    .is_some_and(|retry| {
+                        retry.retry_after_ms() > 0
+                            && matches!(
+                                retry.proof(),
+                                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                                    zero_output: true,
+                                    zero_tool: true,
+                                    zero_effect: true,
+                                }
+                            )
+                    })
+                    && message.contains("provider route is cooling down")
+                    && message.contains("rejected before provider dispatch")
+            })
+        }),
+        "blocked errors: {blocked:#?}"
+    );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     assert_eq!(session.agent_thread_state_projection().threads.len(), 1);
     assert_eq!(
@@ -3031,6 +3088,70 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
         1
     );
     assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(OutputThenRateLimitedTaskChildProvider),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let attempt_id = participant_attempt_id_for("read_after_output")?;
+    let child_session_ref = participant_session_ref_for("read_after_output")?;
+    let request = TaskChildSessionRunRequest {
+        task: sigil_kernel::SequentialTaskRequest {
+            task_id: TaskId::new("task_after_output")?,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "do not duplicate provider output".to_owned(),
+        },
+        plan_version: 1,
+        step: step("read_after_output")?,
+        attempt_id: attempt_id.clone(),
+        child_session_ref: child_session_ref.clone(),
+        child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+            "inspect after output",
+        )])
+        .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+        options: run_options(temp.path().to_path_buf()),
+        changeset_only_base_snapshot_id: None,
+    };
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", parent_store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_child_session(&mut session, request, &mut handler, &mut approval)
+        .await
+        .expect_err("provider fails after emitting output");
+
+    assert!(error.downcast_ref::<TaskParticipantRetryError>().is_none());
+    assert!(format!("{error:#}").contains("rate limited after output"));
+    let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
+    let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
+    let projection = child.provider_physical_attempt_projection()?;
+    let attempts =
+        projection.attempts_for_logical_run_id(&task_participant_logical_run_id(&attempt_id));
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0]
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.outcome),
+        Some(ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput)
+    );
     Ok(())
 }
 
