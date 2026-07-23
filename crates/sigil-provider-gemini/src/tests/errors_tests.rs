@@ -28,3 +28,23 @@ fn classify_status_truncates_large_error_bodies() {
     assert!(error.contains("..."));
     assert!(error.len() < 340);
 }
+
+#[test]
+fn rate_limit_status_preserves_provider_neutral_retry_after() {
+    let error = sigil_kernel::provider_status_error(
+        429,
+        Some("3"),
+        classify_status(429, "slow down").into(),
+    );
+
+    assert_eq!(
+        sigil_kernel::provider_rate_limit_from_error(&error)
+            .and_then(|rate_limit| rate_limit.retry_after_ms()),
+        Some(3_000)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("Gemini request was rate limited")
+    );
+}

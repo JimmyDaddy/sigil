@@ -8,6 +8,7 @@ use futures::StreamExt;
 use sigil_kernel::{
     ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderChunk,
     ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+    provider_rate_limit_from_error,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -739,10 +740,11 @@ async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()
 #[tokio::test]
 async fn provider_surfaces_rate_limited_status_without_a_second_send() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
-        http_response(
+        http_response_with_headers(
             429,
             "application/json",
             r#"{"error":{"message":"slow down"}}"#,
+            "Retry-After: 60\r\n",
         ),
         http_response(
             200,
@@ -770,6 +772,10 @@ async fn provider_surfaces_rate_limited_status_without_a_second_send() -> Result
         Err(error) => error,
     };
     assert!(error.to_string().contains("deepseek rate limited"));
+    assert_eq!(
+        provider_rate_limit_from_error(&error).and_then(|error| error.retry_after_ms()),
+        Some(60_000)
+    );
     assert_eq!(responses.lock().expect("responses lock").len(), 1);
     Ok(())
 }
@@ -1576,6 +1582,15 @@ async fn spawn_unterminated_sse_streaming_server(body: &'static str) -> Result<S
 }
 
 fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
+    http_response_with_headers(status, content_type, body, "")
+}
+
+fn http_response_with_headers(
+    status: u16,
+    content_type: &str,
+    body: &str,
+    extra_headers: &str,
+) -> Vec<u8> {
     let status_line = match status {
         200 => "HTTP/1.1 200 OK",
         400 => "HTTP/1.1 400 Bad Request",
@@ -1583,7 +1598,7 @@ fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
         _ => "HTTP/1.1 500 Internal Server Error",
     };
     format!(
-        "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{status_line}\r\nContent-Type: {content_type}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )

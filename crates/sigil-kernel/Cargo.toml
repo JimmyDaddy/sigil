@@ -15,6 +15,7 @@ futures.workspace = true
 fs2.workspace = true
 globset.workspace = true
 hmac.workspace = true
+httpdate.workspace = true
 keyring.workspace = true
 ring.workspace = true
 serde.workspace = true

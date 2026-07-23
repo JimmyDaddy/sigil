@@ -65,6 +65,7 @@ mod conversation_display_tests;
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
+mod provider_pressure; // task-role provider route cooldown and shared backpressure.
 mod reasoning_effort; // exact provider+model effort admission and stale bindings.
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod run_options; // shared run options and scoped tool registry views.

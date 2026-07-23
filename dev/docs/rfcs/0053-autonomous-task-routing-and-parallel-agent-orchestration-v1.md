@@ -734,6 +734,19 @@ flowchart LR
 - transport uncertain、已有模型输出、已有 tool/effect 或 write worker 不自动 retry。
 - `RetryScheduled` 持久化 `not_before`；恢复后至多继续一次，不形成 retry storm。
 
+O5b2b 已落地其中的 pressure detection/cooldown 子集：canonical provider 在 HTTP 429 时使用
+kernel `ProviderRateLimitError` 保留 provider-owned source error，并把 `Retry-After` 的
+delta-seconds 或 HTTP-date 解析为 `retry_after_ms`。Task role provider 由同一
+`AgentSupervisor` 生命周期共享的 provider+model route-pressure registry 包装；重建 task
+runner 不会丢失 cooldown。每个 model turn 在发请求前检查 cooldown，429
+使用 `Retry-After` 或有界指数退避+确定性 jitter，单次 cooldown 上限 120 秒。同一路由后续
+read batch 会用 kernel `ProviderRouteCooldownError` 在 whole-batch preflight 阶段零 provider
+dispatch、零 child Started 地拒绝，并为所有 member 保留 typed retry-after/route metadata；
+不同 model route 不互相阻塞，429 前已在途请求不被取消，较早在途成功也不能清除较新的
+cooldown。当前子集不自动 retry，也不把 process-local cooldown 当成恢复授权；
+当前 fallback jitter 由 route+连续 429 次数稳定派生；`RetryScheduled`、新 physical attempt、
+attempt-id-derived retry jitter、zero-effect proof 和 restart continuation 仍未实现。
+
 ### 15.2 Failure policy
 
 - required child failure 阻断其 transitive dependents，但不取消独立 siblings。
@@ -942,8 +955,9 @@ allow_write_subagents = true
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b3a、O4b3b、O5a 和 O5b1 已完成；provider-aware backpressure
-与完整诊断通道仍属于 O5b2-O8。
+本 checkpoint 表示 O4b3a、O4b3b、O5a、O5b1、O5b2a whole-batch admission 和 O5b2b
+process-local provider route cooldown 已完成；durable bounded retry、adaptive route 并发窗、
+completion-arrival 进度与完整诊断通道仍属于 O5b2-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1106,9 +1120,24 @@ O5b2a 已完成：
 - 全部 child 成功领取 reservation 且 append-only Started 已提交后才放行并发 execute；启动提交
   中途失败会为已 Started member 写失败终态、释放未领取 reservation，并保持零 provider dispatch。
 
+O5b2b 已完成：
+
+- 五个 canonical provider 的 HTTP 429 保留 provider-neutral `retry_after_ms`，支持
+  `Retry-After` delta-seconds / HTTP-date；provider 自有错误继续作为 source。
+- 同一 `AgentSupervisor` 生命周期的 Planner、Executor、Subagent、Synthesis provider 共享
+  provider+model route cooldown；重建 task runner 不清空 cooldown。每个 model turn 在
+  dispatch 前检查；read batch 同时在
+  whole-batch preflight 检查，因此 cooling route 不创建 child Started，也不触发 provider。
+- 缺失 `Retry-After` 时使用有界指数退避和 route+strike-derived deterministic jitter；provider 指定与 fallback
+  cooldown 都限制在 1ms..120s。不同 route 保持独立，已在途 sibling 不被取消，stale success
+  不能清除更新的 429。
+- 本阶段不自动 retry、不把 process-local cooldown 持久化为恢复授权；首个真实 429 和被
+  cooldown 拒绝的 attempt 都按现有明确失败语义收口。
+
 O5b2 剩余：
 
-- provider route cooldown/backpressure，避免容量或限流压力演化成 fan-out retry storm。
+- durable `RetryScheduled`、zero-output/zero-tool/zero-effect proof、新 physical attempt 和
+  restart 后至多一次的 bounded retry；以及可配置/自适应 provider route 并发窗口。
 - completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 

@@ -3,15 +3,15 @@ use std::{collections::VecDeque, pin::Pin, time::Duration};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, stream};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use tracing::debug;
 
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
     ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
-    timeout_provider_stream_next,
+    ProviderTimeoutPhase, SecretRedactor, provider_status_error, read_provider_error_body,
+    timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -192,6 +192,11 @@ impl DeepSeekProvider {
             ));
         }
         let status_code = status.as_u16();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let error_body = read_error_response_body(
             response,
             self.timeouts.request_timeout,
@@ -201,7 +206,11 @@ impl DeepSeekProvider {
             status_code,
         )
         .await?;
-        Err(classify_status(status_code, error_body.text()).into())
+        Err(provider_status_error(
+            status_code,
+            retry_after.as_deref(),
+            classify_status(status_code, error_body.text()).into(),
+        ))
     }
 
     async fn stream_completion_chunks<T: Serialize>(
@@ -218,16 +227,26 @@ impl DeepSeekProvider {
             .context("deepseek completion request failed")?;
         let status = response.status();
         if !status.is_success() {
+            let status_code = status.as_u16();
+            let retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
                 &SecretRedactor::from_values([self.api_key()?]),
                 self.name(),
                 model_name,
-                status.as_u16(),
+                status_code,
             )
             .await?;
-            return Err(classify_status(status.as_u16(), error_body.text()).into());
+            return Err(provider_status_error(
+                status_code,
+                retry_after.as_deref(),
+                classify_status(status_code, error_body.text()).into(),
+            ));
         }
         Ok(completion_response_stream(
             response,

@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, bail};
+use reqwest::header::RETRY_AFTER;
 use serde_json::{Value, json, value::RawValue};
 use sigil_kernel::{
     CompactionCursor, CompletionRequest, ContextSensitivity, FrozenProviderRequestMaterial,
     NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
     NativeProviderCompactionMetadata, NativeProviderCompactionRequest, Provider,
     ProviderPhysicalAttemptOutcome, ProviderStreamTimeoutState, Session, VersionedProfileIdentity,
-    provider_continuation_route_fingerprint, timeout_provider_request,
+    provider_continuation_route_fingerprint, provider_status_error, timeout_provider_request,
     timeout_provider_stream_next,
 };
 
@@ -108,16 +109,26 @@ impl AnthropicProvider {
         .context("Anthropic native compaction request failed")?;
         let status = response.status();
         if !status.is_success() {
+            let status_code = status.as_u16();
+            let retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
                 &sigil_kernel::SecretRedactor::from_values([self.api_key()?]),
                 "anthropic",
                 &request.model_name,
-                status.as_u16(),
+                status_code,
             )
             .await?;
-            return Err(crate::errors::classify_status(status.as_u16(), error_body.text()).into());
+            return Err(provider_status_error(
+                status_code,
+                retry_after.as_deref(),
+                crate::errors::classify_status(status_code, error_body.text()).into(),
+            ));
         }
         let payload =
             read_paused_compaction_response_body(response, self.timeouts, &request.model_name)

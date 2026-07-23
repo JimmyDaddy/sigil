@@ -21,11 +21,11 @@ use sigil_kernel::{
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
     DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
     MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session,
-    SessionConfig, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskParticipantAttemptId, TaskParticipantPurpose, TaskPlanUpdateContext,
-    TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
+    ProviderChunk, ProviderRateLimitError, ProviderRouteCooldownError, ReasoningStreamSupport,
+    RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry,
+    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantPurpose,
+    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
     TaskSubagentApprovalRouteEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
     ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig, child_session_ref,
@@ -101,6 +101,11 @@ struct ParallelTaskChildProvider {
     completion_order: Arc<Mutex<Vec<String>>>,
 }
 
+struct RateLimitedTaskChildProvider {
+    starts: Arc<AtomicUsize>,
+    rate_limits_remaining: Arc<AtomicUsize>,
+}
+
 #[async_trait]
 impl Provider for TextProvider {
     fn name(&self) -> &str {
@@ -160,6 +165,41 @@ impl Provider for ParallelTaskChildProvider {
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("parallel read done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for RateLimitedTaskChildProvider {
+    fn name(&self) -> &str {
+        "rate-limited-task-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .rate_limits_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ProviderRateLimitError::new(
+                anyhow!("test provider rate limited"),
+                Some("60"),
+            )
+            .into());
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("provider recovered".to_owned())),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -2873,6 +2913,123 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
     }));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(RateLimitedTaskChildProvider {
+                starts: Arc::clone(&starts),
+                rate_limits_remaining: Arc::new(AtomicUsize::new(1)),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect with provider backpressure".to_owned(),
+    };
+    let request_for = |step_id: &str| -> Result<TaskChildSessionRunRequest> {
+        Ok(TaskChildSessionRunRequest {
+            task: task.clone(),
+            plan_version: 1,
+            step: step(step_id)?,
+            attempt_id: participant_attempt_id_for(step_id)?,
+            child_session_ref: participant_session_ref_for(step_id)?,
+            child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                format!("inspect {step_id}"),
+            )]),
+            options: run_options(temp.path().to_path_buf()),
+            changeset_only_base_snapshot_id: None,
+        })
+    };
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let first = runner
+        .run_child_session_batch(
+            &mut session,
+            vec![request_for("read_a")?],
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    assert_eq!(first.len(), 1);
+    assert!(
+        first[0]
+            .as_ref()
+            .err()
+            .is_some_and(|error| format!("{error:#}").contains("test provider rate limited"))
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+    let resumed_runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(RateLimitedTaskChildProvider {
+                starts: Arc::clone(&starts),
+                rate_limits_remaining: Arc::new(AtomicUsize::new(0)),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let blocked = resumed_runner
+        .run_child_session_batch(
+            &mut session,
+            vec![request_for("read_b")?, request_for("read_c")?],
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(blocked.len(), 2);
+    assert!(blocked.iter().all(|output| {
+        output.as_ref().err().is_some_and(|error| {
+            let message = format!("{error:#}");
+            error
+                .downcast_ref::<ProviderRouteCooldownError>()
+                .is_some_and(|cooldown| cooldown.retry_after_ms() > 0)
+                && message.contains("provider route is cooling down")
+                && message.contains("rejected before provider dispatch")
+        })
+    }));
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(session.agent_thread_state_projection().threads.len(), 1);
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskChildSession(child))
+                        if child.status == TaskChildSessionStatus::Started
+                )
+            })
+            .count(),
+        1
+    );
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }

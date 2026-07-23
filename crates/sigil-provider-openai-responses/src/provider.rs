@@ -3,7 +3,7 @@ use std::{collections::VecDeque, pin::Pin, time::Duration};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, stream};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, value::RawValue};
 use sigil_kernel::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionCursor, CompletionRequest, ContextSensitivity,
@@ -14,8 +14,8 @@ use sigil_kernel::{
     ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, RequestFitProof,
     SecretRedactor, Session, TokenMeasurementBinding, TokenMeasurementScope,
-    VersionedProfileIdentity, provider_continuation_route_fingerprint, read_provider_error_body,
-    timeout_provider_request, timeout_provider_stream_next,
+    VersionedProfileIdentity, provider_continuation_route_fingerprint, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -119,16 +119,26 @@ impl OpenAiResponsesProvider {
                 .context("OpenAI Responses compact request failed")?;
         let status = response.status();
         if !status.is_success() {
+            let status_code = status.as_u16();
+            let retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
                 &SecretRedactor::from_values([self.api_key()?]),
                 self.name(),
                 &request.model_name,
-                status.as_u16(),
+                status_code,
             )
             .await;
-            return Err(classify_status(status.as_u16(), error_body?.text()).into());
+            return Err(provider_status_error(
+                status_code,
+                retry_after.as_deref(),
+                classify_status(status_code, error_body?.text()).into(),
+            ));
         }
 
         let payload =
@@ -259,16 +269,26 @@ impl OpenAiResponsesProvider {
         .context("OpenAI Responses input-token request failed")?;
         let status = response.status();
         if !status.is_success() {
+            let status_code = status.as_u16();
+            let retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
                 &SecretRedactor::from_values([self.api_key()?]),
                 self.name(),
                 &request.model_name,
-                status.as_u16(),
+                status_code,
             )
             .await;
-            return Err(classify_status(status.as_u16(), error_body?.text()).into());
+            return Err(provider_status_error(
+                status_code,
+                retry_after.as_deref(),
+                classify_status(status_code, error_body?.text()).into(),
+            ));
         }
         let payload =
             read_input_token_count_response_body(response, self.timeouts, &request.model_name)
@@ -393,6 +413,11 @@ impl Provider for OpenAiResponsesProvider {
             ));
         }
         let status_code = status.as_u16();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let error_body = read_error_response_body(
             response,
             self.timeouts.request_timeout,
@@ -402,7 +427,11 @@ impl Provider for OpenAiResponsesProvider {
             status_code,
         )
         .await?;
-        Err(classify_status(status_code, error_body.text()).into())
+        Err(provider_status_error(
+            status_code,
+            retry_after.as_deref(),
+            classify_status(status_code, error_body.text()).into(),
+        ))
     }
 }
 

@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use sigil_kernel::{Agent, AgentUsageSummary, Provider, ProviderCapabilities, TaskId};
 
 use crate::AgentProfileRegistry;
+use crate::provider_pressure::TaskProviderPressure;
 
 mod batch;
 mod begin;
@@ -45,6 +46,7 @@ pub struct AgentSupervisor {
     budget: AgentBudgetPolicy,
     provider_capabilities: ProviderCapabilities,
     state: Arc<Mutex<AgentSupervisorState>>,
+    provider_pressure: TaskProviderPressure,
 }
 
 impl AgentSupervisor {
@@ -59,6 +61,7 @@ impl AgentSupervisor {
             budget,
             provider_capabilities,
             state: Arc::new(Mutex::new(AgentSupervisorState::default())),
+            provider_pressure: TaskProviderPressure::default(),
         }
     }
 
@@ -70,6 +73,10 @@ impl AgentSupervisor {
     #[must_use]
     pub fn budget(&self) -> &AgentBudgetPolicy {
         &self.budget
+    }
+
+    pub(crate) fn provider_pressure(&self) -> &TaskProviderPressure {
+        &self.provider_pressure
     }
 
     #[must_use]

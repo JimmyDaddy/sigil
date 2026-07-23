@@ -10,15 +10,17 @@ use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
     ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, MultiAgentMode,
-    ProviderCapabilities, RunEvent, SequentialTaskRequest, Session, SessionRef, SessionStats,
-    TaskChildSessionEntry, TaskChildSessionRunOutput, TaskChildSessionRunRequest,
-    TaskChildSessionRunner, TaskChildSessionStatus, TaskId, TaskParticipantAttemptId,
-    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
-    ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
+    ProviderCapabilities, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
+    SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskParticipantAttemptId, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
+    TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
+    ToolApproval, ToolCall, ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
     decode_changeset_only_child_output, task_participant_child_task_id,
 };
+
+use crate::provider_pressure::{TaskProviderPressure, wrap_task_agent_provider};
 
 use super::{
     AgentSupervisor, AgentTaskChildStart, AgentTaskChildThread, BoxedAgent, append_control,
@@ -39,6 +41,7 @@ pub struct AgentSupervisorTaskChildRunner {
     subagent_write: Arc<BoxedAgent>,
     synthesis: Option<Arc<BoxedAgent>>,
     planner_discovery_max_probes: usize,
+    provider_pressure: TaskProviderPressure,
 }
 
 impl AgentSupervisorTaskChildRunner {
@@ -47,14 +50,22 @@ impl AgentSupervisorTaskChildRunner {
         subagent_read: BoxedAgent,
         subagent_write: BoxedAgent,
     ) -> Self {
+        let provider_pressure = supervisor.provider_pressure().clone();
         Self {
             supervisor,
             planner: None,
             executor: None,
-            subagent_read: Arc::new(subagent_read),
-            subagent_write: Arc::new(subagent_write),
+            subagent_read: Arc::new(wrap_task_agent_provider(
+                subagent_read,
+                provider_pressure.clone(),
+            )),
+            subagent_write: Arc::new(wrap_task_agent_provider(
+                subagent_write,
+                provider_pressure.clone(),
+            )),
             synthesis: None,
             planner_discovery_max_probes: 0,
+            provider_pressure,
         }
     }
 
@@ -66,14 +77,31 @@ impl AgentSupervisorTaskChildRunner {
         subagent_write: BoxedAgent,
         synthesis: BoxedAgent,
     ) -> Self {
+        let provider_pressure = supervisor.provider_pressure().clone();
         Self {
             supervisor,
-            planner: Some(Arc::new(planner)),
-            executor: Some(Arc::new(executor)),
-            subagent_read: Arc::new(subagent_read),
-            subagent_write: Arc::new(subagent_write),
-            synthesis: Some(Arc::new(synthesis)),
+            planner: Some(Arc::new(wrap_task_agent_provider(
+                planner,
+                provider_pressure.clone(),
+            ))),
+            executor: Some(Arc::new(wrap_task_agent_provider(
+                executor,
+                provider_pressure.clone(),
+            ))),
+            subagent_read: Arc::new(wrap_task_agent_provider(
+                subagent_read,
+                provider_pressure.clone(),
+            )),
+            subagent_write: Arc::new(wrap_task_agent_provider(
+                subagent_write,
+                provider_pressure.clone(),
+            )),
+            synthesis: Some(Arc::new(wrap_task_agent_provider(
+                synthesis,
+                provider_pressure.clone(),
+            ))),
             planner_discovery_max_probes: 0,
+            provider_pressure,
         }
     }
 
@@ -169,6 +197,8 @@ impl AgentSupervisorTaskChildRunner {
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
         let child_session = build_child_session(parent_session, &child_session_ref)?;
+        self.provider_pressure
+            .check(agent.provider().name(), child_session.model_name())?;
         let start = AgentTaskChildStart {
             task_id: request.task.task_id.clone(),
             parent_thread_id: main_thread_id()?,
@@ -1018,6 +1048,14 @@ fn rejected_parallel_read_batch(
     member_count: usize,
     error: anyhow::Error,
 ) -> Vec<Result<TaskChildSessionRunOutput>> {
+    if let Some(cooldown) = error.downcast_ref::<ProviderRouteCooldownError>().cloned() {
+        return (0..member_count)
+            .map(|_| {
+                Err(anyhow::Error::new(cooldown.clone())
+                    .context("parallel task child batch rejected before provider dispatch"))
+            })
+            .collect();
+    }
     let reason = format!("parallel task child batch rejected before provider dispatch: {error:#}");
     (0..member_count)
         .map(|_| Err(anyhow::anyhow!(reason.clone())))

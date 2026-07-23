@@ -7896,6 +7896,18 @@ fn agent_exposes_provider_capabilities_and_mutable_tool_registry() {
 }
 
 #[test]
+fn agent_into_parts_preserves_provider_and_tool_registry() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = Agent::new(MockProvider, tools);
+
+    let (provider, tools) = agent.into_parts();
+
+    assert_eq!(provider.name(), "mock");
+    assert!(tools.spec_for("echo").is_some());
+}
+
+#[test]
 fn agent_context_helpers_attach_and_truncate_metadata() {
     let call = ToolCall {
         id: "call-ctx".to_owned(),

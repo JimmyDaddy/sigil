@@ -37,3 +37,23 @@ fn status_classification_accepts_only_exact_structured_context_rejection() {
         OpenAiResponsesProviderError::RetryableStatus(500)
     ));
 }
+
+#[test]
+fn rate_limit_status_preserves_provider_neutral_retry_after() {
+    let error = sigil_kernel::provider_status_error(
+        429,
+        Some("3"),
+        classify_status(429, "slow down").into(),
+    );
+
+    assert_eq!(
+        sigil_kernel::provider_rate_limit_from_error(&error)
+            .and_then(|rate_limit| rate_limit.retry_after_ms()),
+        Some(3_000)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("OpenAI Responses request was rate limited")
+    );
+}

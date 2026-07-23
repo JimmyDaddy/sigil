@@ -1,7 +1,8 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use futures::{Stream, StreamExt};
+use thiserror::Error;
 
 use crate::SecretRedactor;
 
@@ -34,6 +35,89 @@ impl ProviderErrorBody {
     pub fn truncated(&self) -> bool {
         self.truncated
     }
+}
+
+/// Provider-neutral metadata for one HTTP 429 response.
+///
+/// The source error retains the provider-owned diagnostic while this envelope carries only the
+/// bounded scheduling signal that runtime admission is allowed to inspect.
+#[derive(Debug, Error)]
+#[error("{source}")]
+pub struct ProviderRateLimitError {
+    retry_after_ms: Option<u64>,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl ProviderRateLimitError {
+    /// Wraps one provider-owned 429 error and parses an optional HTTP `Retry-After` header.
+    #[must_use]
+    pub fn new(source: anyhow::Error, retry_after_header: Option<&str>) -> Self {
+        Self {
+            retry_after_ms: retry_after_header
+                .and_then(|value| parse_retry_after_ms(value, SystemTime::now())),
+            source,
+        }
+    }
+
+    /// Returns the provider-requested cooldown duration when the header was valid.
+    #[must_use]
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_after_ms
+    }
+}
+
+/// Provider-neutral admission error for a route that is already cooling down.
+#[derive(Debug, Clone, Error)]
+#[error(
+    "provider route is cooling down; retry after {retry_after_ms} ms (route {route_fingerprint})"
+)]
+pub struct ProviderRouteCooldownError {
+    retry_after_ms: u64,
+    route_fingerprint: String,
+}
+
+impl ProviderRouteCooldownError {
+    /// Builds a typed cooldown rejection from a safe route fingerprint and bounded delay.
+    #[must_use]
+    pub fn new(retry_after_ms: u64, route_fingerprint: impl Into<String>) -> Self {
+        Self {
+            retry_after_ms,
+            route_fingerprint: route_fingerprint.into(),
+        }
+    }
+
+    /// Returns the remaining cooldown delay at the time admission was rejected.
+    #[must_use]
+    pub fn retry_after_ms(&self) -> u64 {
+        self.retry_after_ms
+    }
+
+    /// Returns the safe provider-route fingerprint used to share cooldown state.
+    #[must_use]
+    pub fn route_fingerprint(&self) -> &str {
+        &self.route_fingerprint
+    }
+}
+
+/// Wraps a provider-owned status error with provider-neutral rate-limit metadata for HTTP 429.
+#[must_use]
+pub fn provider_status_error(
+    status: u16,
+    retry_after_header: Option<&str>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if status == 429 {
+        ProviderRateLimitError::new(error, retry_after_header).into()
+    } else {
+        error
+    }
+}
+
+/// Finds provider-neutral rate-limit metadata through an anyhow context chain.
+#[must_use]
+pub fn provider_rate_limit_from_error(error: &anyhow::Error) -> Option<&ProviderRateLimitError> {
+    error.downcast_ref::<ProviderRateLimitError>()
 }
 
 /// Reads a transport-neutral byte stream into a bounded, timed, and redacted error body.
@@ -110,6 +194,16 @@ fn truncate_utf8_bytes(mut text: String, max_bytes: usize) -> String {
 
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn parse_retry_after_ms(value: &str, now: SystemTime) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+    let not_before = httpdate::parse_http_date(value).ok()?;
+    let duration = not_before.duration_since(now).unwrap_or(Duration::ZERO);
+    Some(duration_millis_u64(duration))
 }
 
 #[cfg(test)]

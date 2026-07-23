@@ -40,3 +40,23 @@ fn classify_status_truncates_large_error_body() {
         } if body.len() == 243 && body.ends_with("...")
     ));
 }
+
+#[test]
+fn rate_limit_status_preserves_provider_neutral_retry_after() {
+    let error = sigil_kernel::provider_status_error(
+        429,
+        Some("3"),
+        classify_status(429, "slow down").into(),
+    );
+
+    assert_eq!(
+        sigil_kernel::provider_rate_limit_from_error(&error)
+            .and_then(|rate_limit| rate_limit.retry_after_ms()),
+        Some(3_000)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("OpenAI-compatible request was rate limited")
+    );
+}

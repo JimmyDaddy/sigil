@@ -79,3 +79,47 @@ async fn error_body_reader_preserves_stream_failure_context() {
     );
     assert!(format!("{error:#}").contains("socket reset"));
 }
+
+#[test]
+fn provider_rate_limit_envelope_parses_delta_seconds_and_preserves_source() {
+    let error = provider_status_error(
+        429,
+        Some("7"),
+        anyhow::anyhow!("provider-specific rate limit"),
+    );
+    let rate_limit = provider_rate_limit_from_error(&error).expect("typed rate limit");
+
+    assert_eq!(rate_limit.retry_after_ms(), Some(7_000));
+    assert_eq!(error.to_string(), "provider-specific rate limit");
+}
+
+#[test]
+fn retry_after_parser_accepts_http_date_and_clamps_past_dates_to_zero() {
+    let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let future = httpdate::fmt_http_date(now + Duration::from_millis(2_500));
+    let past = httpdate::fmt_http_date(now - Duration::from_secs(1));
+
+    assert_eq!(parse_retry_after_ms(&future, now), Some(2_000));
+    assert_eq!(parse_retry_after_ms(&past, now), Some(0));
+    assert_eq!(parse_retry_after_ms("not-a-date", now), None);
+}
+
+#[test]
+fn provider_status_error_does_not_wrap_non_rate_limit_status() {
+    let error = provider_status_error(503, Some("5"), anyhow::anyhow!("retryable backend"));
+
+    assert!(provider_rate_limit_from_error(&error).is_none());
+    assert_eq!(error.to_string(), "retryable backend");
+}
+
+#[test]
+fn provider_route_cooldown_error_exposes_only_bounded_scheduling_metadata() {
+    let error = ProviderRouteCooldownError::new(1_250, "sha256:test-route");
+
+    assert_eq!(error.retry_after_ms(), 1_250);
+    assert_eq!(error.route_fingerprint(), "sha256:test-route");
+    assert_eq!(
+        error.to_string(),
+        "provider route is cooling down; retry after 1250 ms (route sha256:test-route)"
+    );
+}

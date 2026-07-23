@@ -333,7 +333,9 @@ pub use provider::{
     ToolCallStreamAccumulator, UsageStats,
 };
 pub use provider_error::{
-    PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, read_provider_error_body,
+    PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, ProviderRateLimitError,
+    ProviderRouteCooldownError, provider_rate_limit_from_error, provider_status_error,
+    read_provider_error_body,
 };
 pub use provider_request_material::{
     FrozenProviderRequestMaterial, PROVIDER_REQUEST_MATERIAL_SCHEMA_VERSION,

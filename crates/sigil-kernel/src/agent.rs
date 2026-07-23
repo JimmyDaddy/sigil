@@ -867,6 +867,16 @@ where
         &self.provider
     }
 
+    /// Consumes the agent and returns its provider and tool registry.
+    ///
+    /// Runtime composition layers may use this to add a provider-neutral admission wrapper while
+    /// preserving the exact tool surface. Conversation generation must still re-enter through an
+    /// [`Agent`] run method.
+    #[must_use]
+    pub fn into_parts(self) -> (P, ToolRegistry) {
+        (self.provider, self.tools)
+    }
+
     /// Returns the provider capability flags for this agent.
     pub fn provider_capabilities(&self) -> crate::provider::ProviderCapabilities {
         self.provider.capabilities()
