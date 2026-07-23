@@ -3,12 +3,13 @@ use std::{
     fmt,
     pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, CompletionRequest, FrozenProviderRequestMaterial, HostedWebSearchCapability,
@@ -16,16 +17,19 @@ use sigil_kernel::{
     ProviderChunk, ProviderRequestRejection, ProviderRouteCooldownError, TaskParticipantAttemptId,
     ToolRegistry, provider_rate_limit_from_error,
 };
+use tokio::sync::Notify;
 
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(1);
 const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 const MAX_FALLBACK_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_DETERMINISTIC_JITTER_MS: u64 = 250;
+const DEFAULT_PROVIDER_ROUTE_CONCURRENCY_LIMIT: usize = 4;
 
 #[derive(Clone)]
 pub(crate) struct TaskProviderPressure {
     state: Arc<Mutex<ProviderPressureState>>,
     clock: Arc<dyn ProviderPressureClock>,
+    notify: Arc<Notify>,
 }
 
 impl Default for TaskProviderPressure {
@@ -33,6 +37,7 @@ impl Default for TaskProviderPressure {
         Self {
             state: Arc::new(Mutex::new(ProviderPressureState::default())),
             clock: Arc::new(SystemProviderPressureClock),
+            notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -51,21 +56,44 @@ impl fmt::Debug for TaskProviderPressure {
     }
 }
 
-#[derive(Default)]
 struct ProviderPressureState {
     routes: BTreeMap<String, ProviderRoutePressureState>,
+    max_concurrency: usize,
+}
+
+impl Default for ProviderPressureState {
+    fn default() -> Self {
+        Self {
+            routes: BTreeMap::new(),
+            max_concurrency: DEFAULT_PROVIDER_ROUTE_CONCURRENCY_LIMIT,
+        }
+    }
 }
 
 struct ProviderRoutePressureState {
     cooldown_until: Instant,
     consecutive_rate_limits: u32,
     epoch: u64,
+    concurrency_window: usize,
+    in_flight: usize,
+    successful_completions: usize,
 }
 
 #[derive(Clone)]
 struct ProviderRouteAdmission {
     fingerprint: String,
     epoch: u64,
+}
+
+struct ProviderRouteLease {
+    pressure: TaskProviderPressure,
+    fingerprint: String,
+}
+
+impl Drop for ProviderRouteLease {
+    fn drop(&mut self) {
+        self.pressure.release(&self.fingerprint);
+    }
 }
 
 trait ProviderPressureClock: Send + Sync {
@@ -81,6 +109,22 @@ impl ProviderPressureClock for SystemProviderPressureClock {
 }
 
 impl TaskProviderPressure {
+    pub(crate) fn set_max_concurrency(&self, max_concurrency: usize) {
+        let max_concurrency = max_concurrency.max(1);
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.max_concurrency = max_concurrency;
+        for route in state.routes.values_mut() {
+            route.concurrency_window = route.concurrency_window.clamp(1, max_concurrency);
+            route.successful_completions = route
+                .successful_completions
+                .min(route.concurrency_window.saturating_sub(1));
+        }
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
     pub(crate) fn check(&self, provider_name: &str, model_name: &str) -> Result<()> {
         self.admit(provider_name, model_name).map(|_| ())
     }
@@ -102,6 +146,64 @@ impl TaskProviderPressure {
         let jitter = retry_attempt_jitter_ms(&fingerprint, attempt_id.as_str());
         let maximum = u64::try_from(MAX_RATE_LIMIT_COOLDOWN.as_millis()).unwrap_or(u64::MAX);
         Some((remaining.saturating_add(jitter).min(maximum), fingerprint))
+    }
+
+    async fn acquire(
+        &self,
+        provider_name: &str,
+        model_name: &str,
+    ) -> Result<(ProviderRouteAdmission, ProviderRouteLease)> {
+        let fingerprint = provider_route_fingerprint(provider_name, model_name);
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(admission) = self.try_acquire(&fingerprint)? {
+                let lease = ProviderRouteLease {
+                    pressure: self.clone(),
+                    fingerprint,
+                };
+                return Ok((admission, lease));
+            }
+            notified.await;
+        }
+    }
+
+    fn try_acquire(&self, fingerprint: &str) -> Result<Option<ProviderRouteAdmission>> {
+        let now = self.clock.now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("provider pressure state lock poisoned"))?;
+        let max_concurrency = state.max_concurrency;
+        let route =
+            state
+                .routes
+                .entry(fingerprint.to_owned())
+                .or_insert(ProviderRoutePressureState {
+                    cooldown_until: now,
+                    consecutive_rate_limits: 0,
+                    epoch: 0,
+                    concurrency_window: max_concurrency,
+                    in_flight: 0,
+                    successful_completions: 0,
+                });
+        if route.cooldown_until > now {
+            let remaining = route.cooldown_until.duration_since(now);
+            return Err(ProviderRouteCooldownError::new(
+                duration_millis_ceil(remaining),
+                fingerprint.to_owned(),
+            )
+            .into());
+        }
+        if route.in_flight >= route.concurrency_window {
+            return Ok(None);
+        }
+        route.in_flight = route.in_flight.saturating_add(1);
+        Ok(Some(ProviderRouteAdmission {
+            fingerprint: fingerprint.to_owned(),
+            epoch: route.epoch,
+        }))
     }
 
     fn admit(&self, provider_name: &str, model_name: &str) -> Result<ProviderRouteAdmission> {
@@ -133,15 +235,21 @@ impl TaskProviderPressure {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let max_concurrency = state.max_concurrency;
         let route = state.routes.entry(admission.fingerprint.clone()).or_insert(
             ProviderRoutePressureState {
                 cooldown_until: now,
                 consecutive_rate_limits: 0,
                 epoch: admission.epoch,
+                concurrency_window: max_concurrency,
+                in_flight: 0,
+                successful_completions: 0,
             },
         );
         route.consecutive_rate_limits = route.consecutive_rate_limits.saturating_add(1);
         route.epoch = route.epoch.saturating_add(1);
+        route.concurrency_window = (route.concurrency_window / 2).max(1);
+        route.successful_completions = 0;
         let delay = bounded_cooldown(
             retry_after_ms,
             &admission.fingerprint,
@@ -152,16 +260,35 @@ impl TaskProviderPressure {
     }
 
     fn record_success(&self, admission: &ProviderRouteAdmission) {
+        let now = self.clock.now();
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state
-            .routes
-            .get(&admission.fingerprint)
-            .is_some_and(|route| route.epoch == admission.epoch)
+        let max_concurrency = state.max_concurrency;
+        if let Some(route) = state.routes.get_mut(&admission.fingerprint)
+            && route.epoch == admission.epoch
         {
-            state.routes.remove(&admission.fingerprint);
+            route.cooldown_until = now;
+            route.consecutive_rate_limits = 0;
+            route.successful_completions = route.successful_completions.saturating_add(1);
+            if route.concurrency_window < max_concurrency
+                && route.successful_completions >= route.concurrency_window
+            {
+                route.concurrency_window = route.concurrency_window.saturating_add(1);
+                route.successful_completions = 0;
+            }
         }
+    }
+
+    fn release(&self, fingerprint: &str) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(route) = state.routes.get_mut(fingerprint) {
+            route.in_flight = route.in_flight.saturating_sub(1);
+        }
+        drop(state);
+        self.notify.notify_one();
     }
 }
 
@@ -227,9 +354,10 @@ impl Provider for PressureAwareTaskProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let admission = self
+        let (admission, lease) = self
             .pressure
-            .admit(self.inner.name(), &request.model_name)?;
+            .acquire(self.inner.name(), &request.model_name)
+            .await?;
         let stream = match self.inner.stream(request).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -240,19 +368,59 @@ impl Provider for PressureAwareTaskProvider {
                 return Err(error);
             }
         };
-        let pressure = self.pressure.clone();
-        Ok(Box::pin(stream.map(move |item| {
-            match &item {
-                Ok(ProviderChunk::Done) => pressure.record_success(&admission),
-                Err(error) => {
-                    if let Some(rate_limit) = provider_rate_limit_from_error(error) {
-                        pressure.record_rate_limit(&admission, rate_limit.retry_after_ms());
-                    }
-                }
-                _ => {}
-            }
-            item
-        })))
+        Ok(Box::pin(PressureAwareTaskStream {
+            inner: stream,
+            pressure: self.pressure.clone(),
+            admission: Some(admission),
+            lease: Some(lease),
+        }))
+    }
+}
+
+struct PressureAwareTaskStream {
+    inner: Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>,
+    pressure: TaskProviderPressure,
+    admission: Option<ProviderRouteAdmission>,
+    lease: Option<ProviderRouteLease>,
+}
+
+impl PressureAwareTaskStream {
+    fn record_success(&mut self) {
+        if let Some(admission) = self.admission.take() {
+            self.pressure.record_success(&admission);
+        }
+        self.lease.take();
+    }
+
+    fn record_error(&mut self, error: &anyhow::Error) {
+        if let Some(admission) = self.admission.take()
+            && let Some(rate_limit) = provider_rate_limit_from_error(error)
+        {
+            self.pressure
+                .record_rate_limit(&admission, rate_limit.retry_after_ms());
+        }
+        self.lease.take();
+    }
+
+    fn record_end(&mut self) {
+        self.admission.take();
+        self.lease.take();
+    }
+}
+
+impl Stream for PressureAwareTaskStream {
+    type Item = Result<ProviderChunk>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let poll = this.inner.as_mut().poll_next(context);
+        match &poll {
+            Poll::Ready(Some(Ok(ProviderChunk::Done))) => this.record_success(),
+            Poll::Ready(Some(Err(error))) => this.record_error(error),
+            Poll::Ready(None) => this.record_end(),
+            Poll::Pending | Poll::Ready(Some(Ok(_))) => {}
+        }
+        poll
     }
 }
 

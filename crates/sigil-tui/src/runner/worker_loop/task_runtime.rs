@@ -1088,6 +1088,9 @@ pub(in crate::runner) fn build_task_role_runtime(
         Agent::new(subagent_write_provider, subagent_write_registry),
         Agent::new(synthesis_provider, ToolRegistry::new()),
     )
+    .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
+        &root_config.task,
+    ))
     .with_planner_discovery_policy(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
@@ -1183,6 +1186,9 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
         Agent::new(subagent_write_provider, subagent_write_registry),
         Agent::new(synthesis_provider, ToolRegistry::new()),
     )
+    .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
+        &root_config.task,
+    ))
     .with_planner_discovery_policy(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
@@ -1224,6 +1230,12 @@ pub(in crate::runner) fn configured_max_parallel_read_steps(
     config: &sigil_kernel::TaskConfig,
 ) -> usize {
     config.max_parallel_read_steps.max(1)
+}
+
+pub(in crate::runner) fn configured_provider_route_concurrency_limit(
+    config: &sigil_kernel::TaskConfig,
+) -> usize {
+    configured_max_parallel_read_steps(config)
 }
 
 pub(in crate::runner) fn skill_child_agent_role(skill: &SkillDescriptor) -> AgentRole {

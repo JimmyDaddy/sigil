@@ -1,4 +1,5 @@
 use super::*;
+use futures::StreamExt as _;
 
 struct ManualProviderPressureClock {
     now: Mutex<Instant>,
@@ -27,6 +28,7 @@ fn pressure_with_clock(clock: Arc<ManualProviderPressureClock>) -> TaskProviderP
     TaskProviderPressure {
         state: Arc::new(Mutex::new(ProviderPressureState::default())),
         clock,
+        notify: Arc::new(Notify::new()),
     }
 }
 
@@ -131,5 +133,131 @@ fn retry_schedule_delay_uses_attempt_derived_bounded_jitter() -> Result<()> {
     );
     assert!((1_000..=1_250).contains(&first.0));
     assert!((1_000..=1_250).contains(&second.0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn route_window_gates_excess_requests_until_a_lease_is_released() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(2);
+    let (_, first) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (_, second) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+
+    let blocked = tokio::time::timeout(
+        Duration::from_millis(20),
+        pressure.acquire("deepseek", "deepseek-v4-flash"),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "third request must wait for route capacity"
+    );
+
+    drop(first);
+    let (_, third) = tokio::time::timeout(
+        Duration::from_secs(1),
+        pressure.acquire("deepseek", "deepseek-v4-flash"),
+    )
+    .await
+    .expect("released route capacity should wake a waiter")?;
+    drop(second);
+    drop(third);
+    Ok(())
+}
+
+#[tokio::test]
+async fn route_windows_are_independent() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(1);
+    let (_, flash) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (_, pro) = tokio::time::timeout(
+        Duration::from_millis(50),
+        pressure.acquire("deepseek", "deepseek-v4-pro"),
+    )
+    .await
+    .expect("a saturated flash route must not block pro")?;
+
+    drop(flash);
+    drop(pro);
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_stream_chunk_records_success_and_releases_route_capacity() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(1);
+    let route = provider_route_fingerprint("deepseek", "deepseek-v4-flash");
+    let (admission, lease) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let mut stream = PressureAwareTaskStream {
+        inner: Box::pin(futures::stream::iter(vec![Ok(ProviderChunk::Done)])),
+        pressure: pressure.clone(),
+        admission: Some(admission),
+        lease: Some(lease),
+    };
+
+    assert!(matches!(stream.next().await, Some(Ok(ProviderChunk::Done))));
+    let state = pressure.state.lock().expect("pressure state");
+    let route = state.routes.get(&route).expect("route state");
+    assert_eq!(route.in_flight, 0);
+    assert_eq!(route.consecutive_rate_limits, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rate_limited_stream_error_reduces_window_and_releases_route_capacity() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(4);
+    let route = provider_route_fingerprint("deepseek", "deepseek-v4-flash");
+    let (admission, lease) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let error =
+        sigil_kernel::ProviderRateLimitError::new(anyhow!("provider 429"), Some("1")).into();
+    let mut stream = PressureAwareTaskStream {
+        inner: Box::pin(futures::stream::iter(vec![Err(error)])),
+        pressure: pressure.clone(),
+        admission: Some(admission),
+        lease: Some(lease),
+    };
+
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    let state = pressure.state.lock().expect("pressure state");
+    let route = state.routes.get(&route).expect("route state");
+    assert_eq!(route.in_flight, 0);
+    assert_eq!(route.concurrency_window, 2);
+    assert_eq!(route.consecutive_rate_limits, 1);
+    Ok(())
+}
+
+#[test]
+fn rate_limit_halves_the_window_and_success_recovers_additively() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(Arc::clone(&clock));
+    pressure.set_max_concurrency(4);
+    let route = provider_route_fingerprint("deepseek", "deepseek-v4-flash");
+    let rate_limited = pressure.admit("deepseek", "deepseek-v4-flash")?;
+
+    pressure.record_rate_limit(&rate_limited, Some(1));
+    {
+        let state = pressure.state.lock().expect("pressure state");
+        let route = state.routes.get(&route).expect("route state");
+        assert_eq!(route.concurrency_window, 2);
+        assert_eq!(route.consecutive_rate_limits, 1);
+    }
+
+    clock.advance(Duration::from_millis(1));
+    let first_success = pressure.admit("deepseek", "deepseek-v4-flash")?;
+    let second_success = pressure.admit("deepseek", "deepseek-v4-flash")?;
+    pressure.record_success(&first_success);
+    pressure.record_success(&second_success);
+    {
+        let state = pressure.state.lock().expect("pressure state");
+        let route = state.routes.get(&route).expect("route state");
+        assert_eq!(route.concurrency_window, 3);
+        assert_eq!(route.consecutive_rate_limits, 0);
+        assert_eq!(route.successful_completions, 0);
+    }
     Ok(())
 }

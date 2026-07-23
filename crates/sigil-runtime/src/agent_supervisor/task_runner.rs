@@ -122,6 +122,15 @@ impl AgentSupervisorTaskChildRunner {
         self
     }
 
+    /// Sets the process-local upper bound for each provider/model route's adaptive concurrency
+    /// window.
+    #[must_use]
+    pub fn with_provider_route_concurrency_limit(self, max_concurrency: usize) -> Self {
+        self.provider_pressure
+            .set_max_concurrency(max_concurrency.max(1));
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn begin_isolated_participant<H>(
         &self,
