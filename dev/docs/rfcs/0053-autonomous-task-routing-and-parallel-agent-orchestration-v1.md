@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O5b2、O6a implemented；O6b-O8 deferred
+状态：accepted / O0-O5b2、O6a、O6b1 implemented；O6b2-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1269,8 +1269,15 @@ O5b2 coordinator boundary 已完成：
   - parent 在稳定 request order 提交前重新校验 workspace snapshot；drift 会 fail closed。
     通过校验的成员才追加 `ChangeSetProposed`、`IsolatedChangeSetProduced` 和
     `MergeReviewRequested`。shared-workspace direct write 继续 exclusive。
-- O6b（未完成）：worktree snapshot materialization、path confinement、artifact isolation 和
-  cleanup ownership。
+- O6b1（已完成）：runtime-private Git worktree materializer。
+  - 只接受 clean repository root、无 submodule、exact parent snapshot；destination 由 canonical
+    Git common directory 与 path-safe opaque id 唯一派生，调用侧不能注入路径。
+  - checkout 后比较 parent/child snapshot manifest 内容，但保留独立 child snapshot id，不能把
+    child verification 误当成 parent verification。
+  - materialization receipt 不可 clone；cleanup 按值消费，只删除 exact owned Git worktree，
+    不使用任意路径递归删除。
+- O6b2（未完成）：append-only workspace ownership、restart inventory、Task child workspace
+  binding、changeset artifact isolation/extraction 和 cleanup outcome durability。
 - conflict graph、multi-lane integration refs、scoped verification。
 - final promotion CAS、parent verification、stale/conflict UX。
 - shared-workspace direct write 保持 exclusive；path-lease parallel direct write 作为后续 gated slice。

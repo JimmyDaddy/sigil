@@ -90,6 +90,7 @@ mod exa_text_v1;
 pub mod hosted_finalizer;
 mod hosted_web_search;
 pub mod image_attachment;
+pub mod isolated_workspace;
 pub mod machine_protocol;
 pub mod mcp_declaration;
 pub mod mcp_oauth;
@@ -352,3 +353,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/model_eval_tests.rs"]
 mod model_eval_tests;
+
+#[cfg(test)]
+#[path = "tests/isolated_workspace_tests.rs"]
+mod isolated_workspace_tests;

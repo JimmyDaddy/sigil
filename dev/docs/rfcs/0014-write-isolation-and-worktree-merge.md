@@ -1,6 +1,6 @@
 # RFC-0014 Write Isolation and Worktree Merge
 
-状态：draft / E14.1-E14.3 and E14.5-E14.7 implemented / E14.4 and E14.8 gated
+状态：draft / E14.1-E14.3、E14.4a、E14.5-E14.7 implemented / E14.4b and E14.8 gated
 
 创建日期：2026-06-29
 
@@ -34,7 +34,16 @@
 - E14.5 已实现 merge review parent mutation handoff：accepted review 使用 review-time unified diff artifact 通过 RFC-0002 mutation batch 应用 parent workspace，记录 `MergeReviewResolved`、`ChangeSetApplied`、per-file mutation evidence、batch finished status 和 `ChildChangesetMerged`；rejected/conflict/cancelled review 不产生 parent mutation；partial apply 记录 explicit `PartiallyApplied` result。
 - E14.6 已实现 task DAG write isolation integration：`/task` continue 使用 DAG ready queue，active write lease 会暂停候选步骤，read-only ready steps 可同轮运行，shared-workspace write step 串行获取/释放 durable write lease，dependency-blocked 状态保持 paused，failed write 会取消依赖它的下游 steps。
 - E14.7 已实现 TUI merge/recheck product surface：task sidebar 和 task strip 从 `WriteIsolationProjection` 展示 pending/accepted/conflict/rejected/cancelled merge review 状态，并把主路径收敛为每个状态最多一个推荐动作；existing child verification stale trace 继续指向 parent recheck。
-- E14.1-E14.7 不启用并行写、不创建 physical worktree；这些仍由后续切片按 gate 顺序推进。
+- E14.4a 已实现 runtime-private 的 physical Git worktree materializer：只接受 clean、无
+  submodule 且 workspace root 等于 repository root 的 Git workspace；创建前校验 exact parent
+  snapshot，destination 只能由 canonical Git common directory 与 path-safe opaque id 派生，
+  checkout 后比较 parent/child manifest 内容并生成独立 child snapshot id。Materialization
+  receipt 不可 clone，cleanup 按值消费且只通过 `git worktree remove --force` 删除 exact owned
+  worktree，不递归删除任意路径。
+- E14.4a 仍未接入 Task admission/session durable ownership，因此不会由产品路径自动创建
+  physical worktree；E14.4b 将补齐 append-only lifecycle、restart inventory、child runtime
+  workspace binding 和 changeset artifact 提取。并行 `ChangesetOnly` proposal 已由 RFC-0053
+  O6a 解锁，但 physical worktree 写入仍 gated。
 
 ## 2. Goals
 
