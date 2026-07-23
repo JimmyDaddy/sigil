@@ -81,6 +81,7 @@ pub struct TaskPlannerSessionRunRequest {
     pub child_session_ref: SessionRef,
     pub child_input: AgentRunInput,
     pub options: AgentRunOptions,
+    pub discovery_options: AgentRunOptions,
 }
 
 /// Parent-committable output from an isolated planner transcript.

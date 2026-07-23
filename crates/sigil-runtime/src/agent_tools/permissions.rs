@@ -32,7 +32,7 @@ pub(super) fn tool_contracts_are_safe_readonly_for_auto_spawn(
         })
 }
 
-pub(super) fn tool_registry_is_safe_readonly_for_auto_spawn(registry: &ToolRegistry) -> bool {
+pub(crate) fn tool_registry_is_safe_readonly_for_auto_spawn(registry: &ToolRegistry) -> bool {
     tool_contracts_are_safe_readonly_for_auto_spawn(&registry.contracts())
 }
 

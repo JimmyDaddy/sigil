@@ -3,7 +3,10 @@ use std::{
     fs,
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
@@ -17,21 +20,23 @@ use sigil_kernel::{
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
     DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
-    ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry,
-    SessionRef, TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskParticipantAttemptId, TaskParticipantPurpose, TaskPlannerSessionRunRequest,
-    TaskRouteStatus, TaskStepId, TaskStepSpec, TaskSubagentApprovalRouteEntry, Tool, ToolAccess,
-    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    WorkspaceConfig, child_session_ref, task_participant_attempt_id, task_participant_session_ref,
+    MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities,
+    ProviderChunk, ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session,
+    SessionConfig, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskParticipantAttemptId, TaskParticipantPurpose, TaskPlanUpdateContext,
+    TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
+    TaskSubagentApprovalRouteEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig, child_session_ref,
+    task_participant_attempt_id, task_participant_session_ref,
 };
 
 use super::{
     AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
     AgentResultMaterialization, AgentSupervisor, AgentSupervisorTaskChildRunner,
-    AgentTaskChildStart, agent_terminal_status_from_task_child, task_child_status_from_outcome,
-    tool_scope_is_write_capable,
+    AgentTaskChildStart, REQUEST_TASK_DISCOVERY_TOOL_NAME, agent_terminal_status_from_task_child,
+    task_child_status_from_outcome, tool_scope_is_write_capable,
 };
 use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
 
@@ -67,6 +72,28 @@ struct TextProvider {
     text: &'static str,
 }
 
+struct PlannerDiscoveryProvider {
+    observed_results: Arc<Mutex<Option<String>>>,
+}
+
+struct ParallelDiscoveryProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+struct RejectedDiscoveryPlannerProvider {
+    observed_error: Arc<Mutex<Option<String>>>,
+}
+
+struct RepeatedDiscoveryPlannerProvider {
+    observed_rejection: Arc<Mutex<Option<String>>>,
+}
+
+struct CountingDiscoveryProvider {
+    starts: Arc<AtomicUsize>,
+}
+
 #[async_trait]
 impl Provider for TextProvider {
     fn name(&self) -> &str {
@@ -83,6 +110,288 @@ impl Provider for TextProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta(self.text.to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for PlannerDiscoveryProvider {
+    fn name(&self) -> &str {
+        "planner-discovery"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(results) = request
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains(r#""type":"task_discovery_results""#))
+        {
+            *self
+                .observed_results
+                .lock()
+                .expect("planner discovery observation lock should not be poisoned") =
+                Some(results.to_owned());
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-plan-after-discovery".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "plan_version": 1,
+                        "status": "accepted",
+                        "steps": [{
+                            "step_id": "implement",
+                            "title": "Implement the verified change",
+                            "role": "executor"
+                        }]
+                    })
+                    .to_string(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|message| matches!(message.role, MessageRole::Tool)),
+            "planner should not receive a polling turn before discovery results"
+        );
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-task-discovery".to_owned(),
+                name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "probes": [
+                        {
+                            "probe_id": "runtime",
+                            "title": "Inspect runtime",
+                            "objective": "Inspect runtime orchestration boundaries",
+                            "path_hints": ["crates/sigil-runtime"]
+                        },
+                        {
+                            "probe_id": "kernel",
+                            "title": "Inspect kernel",
+                            "objective": "Inspect kernel task contracts",
+                            "path_hints": ["crates/sigil-kernel"]
+                        }
+                    ]
+                })
+                .to_string(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelDiscoveryProvider {
+    fn name(&self) -> &str {
+        "parallel-discovery"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.barrier.wait().await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let scope = request
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("Assigned objective"))
+            .unwrap_or("unknown discovery scope");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(format!(
+                "discovery complete: {scope}"
+            ))),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for RejectedDiscoveryPlannerProvider {
+    fn name(&self) -> &str {
+        "rejected-discovery-planner"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(error) = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::Tool))
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("overlapping path hints"))
+        {
+            *self
+                .observed_error
+                .lock()
+                .expect("planner discovery error observation lock should not be poisoned") =
+                Some(error.to_owned());
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-plan-after-rejection".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "plan_version": 1,
+                        "status": "accepted",
+                        "steps": [{
+                            "step_id": "implement",
+                            "title": "Implement without duplicated research",
+                            "role": "executor"
+                        }]
+                    })
+                    .to_string(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-overlapping-discovery".to_owned(),
+                name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "probes": [
+                        {
+                            "probe_id": "runtime",
+                            "title": "Inspect runtime",
+                            "objective": "Inspect all runtime orchestration",
+                            "path_hints": ["crates/sigil-runtime"]
+                        },
+                        {
+                            "probe_id": "runtime-src",
+                            "title": "Inspect runtime source",
+                            "objective": "Inspect runtime source details",
+                            "path_hints": ["crates/sigil-runtime/src"]
+                        }
+                    ]
+                })
+                .to_string(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for RepeatedDiscoveryPlannerProvider {
+    fn name(&self) -> &str {
+        "repeated-discovery-planner"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(rejection) = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::Tool))
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("at most once per planning attempt"))
+        {
+            *self
+                .observed_rejection
+                .lock()
+                .expect("planner discovery rejection lock should not be poisoned") =
+                Some(rejection.to_owned());
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-plan-after-repeat".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "plan_version": 1,
+                        "status": "accepted",
+                        "steps": [{
+                            "step_id": "implement",
+                            "title": "Implement after one research round",
+                            "role": "executor"
+                        }]
+                    })
+                    .to_string(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+
+        let has_discovery_results = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::Tool))
+            .filter_map(|message| message.content.as_deref())
+            .any(|content| content.contains(r#""type":"task_discovery_results""#));
+        let call_id = if has_discovery_results {
+            "call-repeat-discovery"
+        } else {
+            "call-initial-discovery"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: call_id.to_owned(),
+                name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "probes": [{
+                        "probe_id": "runtime",
+                        "title": "Inspect runtime",
+                        "objective": "Inspect runtime orchestration",
+                        "path_hints": ["crates/sigil-runtime"]
+                    }]
+                })
+                .to_string(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for CountingDiscoveryProvider {
+    fn name(&self) -> &str {
+        "counting-discovery"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "unexpected discovery start".to_owned(),
+            )),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -365,6 +674,13 @@ fn supervisor_with_budget(budget: AgentBudgetPolicy) -> Result<AgentSupervisor> 
         budget,
         provider_capabilities(),
     ))
+}
+
+#[test]
+fn root_budget_allows_one_planner_owned_discovery_level() {
+    let budget = AgentBudgetPolicy::from_root_config(&root_config());
+
+    assert_eq!(budget.max_depth, 2);
 }
 
 fn agent_route_statuses(session: &Session) -> Vec<sigil_kernel::AgentRouteStatus> {
@@ -1684,6 +2000,7 @@ async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> 
                     ModelMessage::user("plan the task"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
             },
             &mut handler,
             &mut approval,
@@ -1715,6 +2032,323 @@ async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> 
         child_start(step("slot-reused")?, temp.path().to_path_buf())?,
     )?;
     assert_eq!(supervisor.active_profile_ids().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_polling()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 4;
+    let supervisor = supervisor_with_budget(budget)?;
+    let observed_results = Arc::new(Mutex::new(None));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut explore_tools = ToolRegistry::new();
+    explore_tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(PlannerDiscoveryProvider {
+                observed_results: Arc::clone(&observed_results),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(ParallelDiscoveryProvider {
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+            }),
+            explore_tools,
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    )
+    .with_planner_discovery_policy(MultiAgentMode::ExplicitRequestOnly, 3);
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_planner_discovery")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let cancellation = RunCancellationOwner::new();
+    let planner_input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])
+            .with_task_plan_update(TaskPlanUpdateContext {
+                task_id: task_id.clone(),
+                max_plan_steps: 12,
+                max_plan_versions: 3,
+            })
+            .with_cancellation(cancellation.handle());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runner.run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "inspect kernel and runtime before implementation".to_owned(),
+                },
+                attempt_id,
+                child_session_ref,
+                child_input: planner_input,
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        ),
+    )
+    .await
+    .expect("planner discovery should complete without polling")?;
+
+    assert_eq!(output.accepted_plan.plan_version, 1);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    let results = observed_results
+        .lock()
+        .expect("planner discovery observation lock should not be poisoned")
+        .clone()
+        .expect("planner should receive discovery results");
+    let result_envelope: Value = serde_json::from_str(&results)?;
+    let results: Value = serde_json::from_str(
+        result_envelope["content"]
+            .as_str()
+            .expect("planner discovery result content should be a string"),
+    )?;
+    assert_eq!(results["type"], "task_discovery_results");
+    assert_eq!(results["members"][0]["probe_id"], "kernel");
+    assert_eq!(results["members"][1]["probe_id"], "runtime");
+    assert!(
+        results["members"]
+            .as_array()
+            .is_some_and(|members| members.iter().all(|member| member["status"] == "completed"))
+    );
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(projection.threads.len(), 3);
+    assert!(projection.threads.values().all(|thread| {
+        thread.status == sigil_kernel::AgentThreadStatus::Completed
+            && thread.result.as_ref().is_some_and(|result| {
+                result.status == sigil_kernel::AgentThreadTerminalStatus::Completed
+            })
+    }));
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_discovery_rejects_overlapping_batch_before_any_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 4;
+    let supervisor = supervisor_with_budget(budget)?;
+    let observed_error = Arc::new(Mutex::new(None));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut explore_tools = ToolRegistry::new();
+    explore_tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(RejectedDiscoveryPlannerProvider {
+                observed_error: Arc::clone(&observed_error),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            explore_tools,
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    )
+    .with_planner_discovery_policy(MultiAgentMode::ExplicitRequestOnly, 3);
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_rejected_planner_discovery")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let cancellation = RunCancellationOwner::new();
+    let planner_input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])
+            .with_task_plan_update(TaskPlanUpdateContext {
+                task_id: task_id.clone(),
+                max_plan_steps: 12,
+                max_plan_versions: 3,
+            })
+            .with_cancellation(cancellation.handle());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id,
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "inspect runtime before implementation".to_owned(),
+                },
+                attempt_id,
+                child_session_ref,
+                child_input: planner_input,
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.accepted_plan.plan_version, 1);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(
+        observed_error
+            .lock()
+            .expect("planner discovery error observation lock should not be poisoned")
+            .as_deref()
+            .is_some_and(|error| error.contains("whole_batch_rejected"))
+    );
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(projection.threads.len(), 1);
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_discovery_allows_only_one_batch_per_planning_attempt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 4;
+    let supervisor = supervisor_with_budget(budget)?;
+    let observed_rejection = Arc::new(Mutex::new(None));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut explore_tools = ToolRegistry::new();
+    explore_tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(RepeatedDiscoveryPlannerProvider {
+                observed_rejection: Arc::clone(&observed_rejection),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            explore_tools,
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    )
+    .with_planner_discovery_policy(MultiAgentMode::ExplicitRequestOnly, 3);
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_repeated_planner_discovery")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let cancellation = RunCancellationOwner::new();
+    let planner_input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])
+            .with_task_plan_update(TaskPlanUpdateContext {
+                task_id: task_id.clone(),
+                max_plan_steps: 12,
+                max_plan_versions: 3,
+            })
+            .with_cancellation(cancellation.handle());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id,
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "inspect runtime before implementation".to_owned(),
+                },
+                attempt_id,
+                child_session_ref,
+                child_input: planner_input,
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.accepted_plan.plan_version, 1);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(
+        observed_rejection
+            .lock()
+            .expect("planner discovery rejection lock should not be poisoned")
+            .as_deref()
+            .is_some_and(|rejection| rejection.contains("whole_batch_rejected"))
+    );
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(projection.threads.len(), 2);
+    assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }
 

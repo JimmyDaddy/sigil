@@ -97,6 +97,7 @@ where
                         child_session_ref: attempt.child_session_ref.clone(),
                         child_input: planner_input,
                         options: planner_options,
+                        discovery_options: subagent_read_options.clone(),
                     },
                     handler,
                     approval_handler,

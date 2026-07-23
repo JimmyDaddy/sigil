@@ -4,24 +4,27 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{AgentInvocationMode, AgentThreadId};
 
 use super::{
-    AgentChatChildStart, AgentSupervisor, begin::begin_attempt_id, chat_agent_thread_id_for_call,
+    AgentChatChildStart, AgentSupervisor, AgentTaskChildStart,
+    begin::begin_attempt_id,
+    chat_agent_thread_id_for_call,
+    ids::{agent_thread_id_for_task_child, profile_id_for_role},
     thread_state::ActiveAgentThread,
 };
 
-/// Atomic runtime-slot reservation for one joined chat-agent batch.
-pub(crate) struct AgentChatChildBatchReservation {
+/// Atomic runtime-slot reservation for one joined child-agent batch.
+pub(crate) struct AgentChildBatchReservation {
     supervisor: AgentSupervisor,
     thread_ids: BTreeSet<AgentThreadId>,
     committed: bool,
 }
 
-impl AgentChatChildBatchReservation {
+impl AgentChildBatchReservation {
     pub(crate) fn commit(mut self) {
         self.committed = true;
     }
 }
 
-impl Drop for AgentChatChildBatchReservation {
+impl Drop for AgentChildBatchReservation {
     fn drop(&mut self) {
         if self.committed {
             return;
@@ -39,7 +42,7 @@ impl AgentSupervisor {
     pub(crate) fn reserve_chat_child_batch(
         &self,
         starts: &[AgentChatChildStart],
-    ) -> Result<AgentChatChildBatchReservation> {
+    ) -> Result<AgentChildBatchReservation> {
         if starts.is_empty() {
             bail!("agent child batch cannot be empty");
         }
@@ -74,6 +77,61 @@ impl AgentSupervisor {
             ));
         }
 
+        self.reserve_child_batch_candidates(candidates, thread_ids)
+    }
+
+    /// Reserves every runtime slot for one task-owned discovery batch or reserves none.
+    pub(crate) fn reserve_task_child_batch(
+        &self,
+        starts: &[AgentTaskChildStart],
+    ) -> Result<AgentChildBatchReservation> {
+        if starts.is_empty() {
+            bail!("agent task child batch cannot be empty");
+        }
+        let mut candidates = Vec::with_capacity(starts.len());
+        let mut thread_ids = BTreeSet::new();
+        for start in starts {
+            if start.invocation_mode != AgentInvocationMode::JoinBeforeFinal {
+                bail!("agent task child batch only supports join-before-final participants");
+            }
+            if start.parent_depth >= self.budget.max_depth {
+                bail!(
+                    "agent depth budget exceeded: max_depth={}",
+                    self.budget.max_depth
+                );
+            }
+            let thread_id = agent_thread_id_for_task_child(
+                &start.task_id,
+                start.plan_version,
+                &start.step,
+                &start.child_task_id,
+            )?;
+            if !thread_ids.insert(thread_id.clone()) {
+                bail!(
+                    "agent task child batch contains duplicate thread {}",
+                    thread_id.as_str()
+                );
+            }
+            candidates.push((
+                thread_id.clone(),
+                ActiveAgentThread {
+                    profile_id: profile_id_for_role(start.role)?,
+                    attempt_id: begin_attempt_id(&thread_id)?,
+                    background: false,
+                    mailbox_tx: None,
+                    batch_reserved: true,
+                },
+            ));
+        }
+
+        self.reserve_child_batch_candidates(candidates, thread_ids)
+    }
+
+    fn reserve_child_batch_candidates(
+        &self,
+        candidates: Vec<(AgentThreadId, ActiveAgentThread)>,
+        thread_ids: BTreeSet<AgentThreadId>,
+    ) -> Result<AgentChildBatchReservation> {
         let mut state = self
             .state
             .lock()
@@ -102,7 +160,7 @@ impl AgentSupervisor {
         }
         drop(state);
 
-        Ok(AgentChatChildBatchReservation {
+        Ok(AgentChildBatchReservation {
             supervisor: self.clone(),
             thread_ids,
             committed: false,

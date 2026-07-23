@@ -85,6 +85,7 @@
 | `[task].max_plan_steps` | `12` | 单个计划最多包含多少步。 |
 | `[task].max_replans` | `2` | 最多允许重新规划多少次。 |
 | `[task].max_subagents` | `8` | 最多同时运行多少个子智能体。 |
+| `[task].max_planning_research_agents` | `3` | 每次 Planner attempt 最多使用多少个只读 Explore probe；`0` 表示关闭，超过硬上限 `4` 的值会被截断。 |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`、`explicit_request_only` 或 `proactive`。 |
 | `[task].allow_write_subagents` | `true` | 符合条件的子智能体能否请求修改文件。 |
 | `[task.<role>].provider` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择模型服务、模型和推理强度。 |

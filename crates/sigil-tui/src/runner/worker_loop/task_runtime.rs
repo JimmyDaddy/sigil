@@ -1087,6 +1087,10 @@ pub(in crate::runner) fn build_task_role_runtime(
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
         Agent::new(synthesis_provider, ToolRegistry::new()),
+    )
+    .with_planner_discovery_policy(
+        root_config.task.multi_agent_mode,
+        root_config.task.max_planning_research_agents,
     );
     let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
         .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
@@ -1177,6 +1181,10 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
         Agent::new(synthesis_provider, ToolRegistry::new()),
+    )
+    .with_planner_discovery_policy(
+        root_config.task.multi_agent_mode,
+        root_config.task.max_planning_research_agents,
     );
     let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
         .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;

@@ -439,7 +439,8 @@ impl TaskChildSessionRunner for WrongIdentityChildRunner {
 fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     let prompt = planner_prompt("review implementation");
 
-    assert!(prompt.contains("Do not call a task or subagent tool"));
+    assert!(prompt.contains("request_task_discovery exactly once"));
+    assert!(prompt.contains("spawn_agents, or wait_agent"));
     assert!(prompt.contains("role executor for ordinary task-participant reads and edits"));
     assert!(prompt.contains("role subagent_read"));
     assert!(prompt.contains("role subagent_write only for delegated changeset-only"));

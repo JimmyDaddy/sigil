@@ -1,12 +1,15 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use sigil_kernel::{
     Agent, AgentRole, AgentRunInput, AgentRunPurpose, ControlEntry, JsonlSessionStore,
-    ModelMessage, PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk,
-    ReasoningEffort, Session, SessionLogEntry, SessionRef, TaskAdmissionReason,
+    ModelMessage, MultiAgentMode, PlanArtifactProjection, PlanDecision, PlanTaskStartMode,
+    ProviderChunk, ReasoningEffort, Session, SessionLogEntry, SessionRef, TaskAdmissionReason,
     TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskIsolationMode, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunStatus, TaskStepMode, TaskStepStatus, ToolCall, ToolRegistry,
+    TaskRoutingPolicy, TaskRunStatus, TaskStepMode, TaskStepStatus, Tool, ToolAccess, ToolCall,
+    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSpec,
 };
 use tempfile::tempdir;
 
@@ -17,6 +20,43 @@ use super::{
         spawn_test_worker_with_role_provider_builder, test_root_config,
     },
 };
+
+struct PlannerDiscoveryReadTool;
+
+#[async_trait]
+impl Tool for PlannerDiscoveryReadTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "read_file".to_owned(),
+            description: "Read one workspace file during planner discovery tests.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "read_file",
+            "read contents",
+            ToolResultMeta::default(),
+        ))
+    }
+}
 
 #[test]
 fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> Result<()> {
@@ -431,6 +471,145 @@ fn explicit_task_command_uses_typed_handoff_admission_before_planning() -> Resul
             .count(),
         1
     );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-planner-discovery-e2e.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    root_config.task.max_planning_research_agents = 2;
+    root_config.task.max_subagents = 4;
+    let discovery_args = r#"{
+        "probes": [
+            {
+                "probe_id": "kernel",
+                "title": "Inspect kernel",
+                "objective": "Inspect task contracts",
+                "path_hints": ["crates/sigil-kernel"]
+            },
+            {
+                "probe_id": "runtime",
+                "title": "Inspect runtime",
+                "objective": "Inspect orchestration wiring",
+                "path_hints": ["crates/sigil-runtime"]
+            }
+        ]
+    }"#;
+    let task_plan_args = r#"{
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [{
+            "step_id": "execute_after_discovery",
+            "title": "Execute after discovery",
+            "role": "executor"
+        }]
+    }"#;
+    let role_provider_builder = planned_role_provider_builder(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "planner-discovery-call".to_owned(),
+                name: sigil_runtime::REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+                args_json: discovery_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("kernel discovery complete".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("runtime discovery complete".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "task-plan-after-discovery".to_owned(),
+                name: "task_plan_update".to_owned(),
+                args_json: task_plan_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("discovery-backed task completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("discovery-backed synthesis completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PlannerDiscoveryReadTool));
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path,
+        Agent::new(PlannedProvider::new(Vec::new()), registry),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    worker.send(WorkerCommand::SubmitTask {
+        prompt: "inspect kernel and runtime before implementing".to_owned(),
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    let _ = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(
+                    event.as_ref(),
+                    sigil_kernel::RunEvent::ToolApprovalRequested { call, .. }
+                        if call.id == "planner-discovery-call"
+                )
+        )
+    })?;
+    worker.send(WorkerCommand::ApprovalDecision {
+        call_id: "planner-discovery-call".to_owned(),
+        approved: true,
+    })?;
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::TaskRunFinished { .. })
+    })?;
+    let WorkerMessage::TaskRunFinished {
+        status, entries, ..
+    } = finished
+    else {
+        unreachable!("recv_until only returns TaskRunFinished");
+    };
+
+    assert_eq!(status, TaskRunStatus::Completed);
+    let explore_threads = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started))
+                if started.profile_id.as_str() == sigil_runtime::EXPLORE_PROFILE_ID =>
+            {
+                Some(started.thread_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(explore_threads.len(), 2);
+    let completed_explore_threads = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::AgentThreadResultRecorded(result))
+                if result.result.status == sigil_kernel::AgentThreadTerminalStatus::Completed
+                    && explore_threads.contains(&result.result.thread_id) =>
+            {
+                Some(result.result.thread_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(completed_explore_threads, explore_threads);
     worker.shutdown()?;
     Ok(())
 }

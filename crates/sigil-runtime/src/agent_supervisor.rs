@@ -14,6 +14,7 @@ mod hash;
 mod ids;
 mod projection;
 mod record;
+mod task_discovery;
 mod task_runner;
 mod thread_ops;
 mod thread_state;
@@ -25,6 +26,7 @@ use hash::{hash_json, hash_text, short_digest};
 pub use ids::chat_agent_thread_id_for_call;
 use projection::build_agent_thread_result;
 pub(crate) use projection::{AgentResultMaterialization, materialize_child_agent_final_answer};
+pub use task_discovery::{MAX_TASK_DISCOVERY_PROBES, REQUEST_TASK_DISCOVERY_TOOL_NAME};
 pub use task_runner::AgentSupervisorTaskChildRunner;
 #[cfg(test)]
 pub(crate) use task_runner::task_child_status_from_outcome;

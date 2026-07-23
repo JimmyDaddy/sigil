@@ -1529,8 +1529,10 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
 }
 #[test]
 fn batch_agent_spawn_uses_spawn_operation_classification() {
-    assert_eq!(
-        infer_tool_operation("spawn_agents", ToolAccess::Execute),
-        ToolOperation::SpawnAgent
-    );
+    for tool_name in ["spawn_agents", "request_task_discovery"] {
+        assert_eq!(
+            infer_tool_operation(tool_name, ToolAccess::Execute),
+            ToolOperation::SpawnAgent
+        );
+    }
 }

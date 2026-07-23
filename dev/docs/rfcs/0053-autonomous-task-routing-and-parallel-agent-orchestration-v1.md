@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O3 and O4a-O4b2 implemented; O4b3-O8 deferred
+状态：accepted / O0-O3 and O4a-O4b3a implemented; O4b3b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -28,7 +28,8 @@ agent harness 有明显差距：
 - `multi_agent_mode = "explicit_request_only"` 是默认值，`spawn_agent` 描述明确禁止因任务复杂而主动委派。
 - O1 之前 `multi_agent_mode` 只停留在模型提示层；当前 runtime spawn admission 已在 provider、budget 和 thread 创建前执行硬检查。
 - ordinary chat 的显式 delegation hard gate 在 kernel 有类型和测试，但 TUI 生产输入没有稳定绑定。
-- planner 不能先声明一组受控 Explore probes，再利用并行调研结果形成计划。
+- O4b3a 之前 planner 不能先声明一组受控 Explore probes，再利用并行调研结果形成计划；当前
+  TUI Task planner 已接入一次性的 host-owned read-only discovery batch。
 - task scheduler 能选出 `read_only_batch`，runner 却仍对 batch 中的步骤逐项 `.await`。
 - `TaskChildSessionRunner` 持有 parent `Session`、handler 和 approval handler 的可变借用，接口本身阻止并发。
 - 同一模型轮次的 tool calls 顺序执行；`join_before_final` agent call 会在第一个 child 上阻塞后续 fan-out。
@@ -552,7 +553,7 @@ V1 不新增模型可见的 polling `await_agents`。Host-owned join 由 complet
 `request_key` 在批内唯一并稳定排序，host 对 2-4 个只读 participant 做完整预检和原子 slot
 reservation，完成后注入 `agent_batch_results` 并自动恢复 parent。当前 `batch_id` 由 parent
 session ref 与外层 tool call id 稳定派生；把 parent logical run id 纳入公开协议、detached
-`background` batch 和 restart reconciliation 留在 O4b3。
+`background` batch 和 restart reconciliation 留在 O4b3b。
 
 ## 12. Completion-driven continuation
 
@@ -901,13 +902,19 @@ allow_write_subagents = true
 - direct chat 与 queued follow-up 的 task handoff 会在 `TaskHandoffRequested` / `Resolved` / `TaskRun::Started` 之前追加 `TaskRunCancellationScopeBound`，把 task 绑定到继承的 root run scope，避免 admission→binding 崩溃窗口。恢复只认可最新绑定 scope 上的 `Run` 或同 task `Task` cancellation；后续显式 continue 使用新 scope，因此旧取消不会永久污染 task。
 - O3 已落地 participant isolation：Planner、Executor、Subagent 和 Synthesis 都写入 retry-stable child session，parent 只保存 bounded summary、result ref、attempt/result lifecycle 与 task control state。child 的 assistant/text delta 不再进入 root TUI stream。
 - O4b1 已落地 runtime-owned `AgentCompletionHub` 和 single-delivery terminal envelope：完整 batch 在任何 participant future 被 poll 前拒绝重复 attempt identity；accepted registration 由 consuming hub 每项只产出一个 terminal envelope，同时保留真实 completion order 和稳定 request sequence。现有 O4a join barrier 已复用该 hub，完成顺序可以实时收集，parent durable commit 继续单写，注入模型前继续按原 tool-call sequence 稳定排序。
-- O4b2 已落地普通 chat 的 `spawn_agents` join compatibility surface：schema 接受 2-4 个带稳定 `request_key` 的 participant，整批完成 profile、delegation、permission/tool-safety、provider/session materialization 和 budget 预检后才原子预留全部 active slots。容量或任一成员预检/注册失败时不 poll 任何 provider future；成功批次并发执行，经 completion hub 收口后按 `request_key` 稳定顺序注入 typed `agent_batch_results`，parent 不产生 `wait_agent` polling turn。当前只支持 `join_before_final`；planner discovery、background batch、公开 logical-run identity 和 TUI batch projection 属于 O4b3。
+- O4b2 已落地普通 chat 的 `spawn_agents` join compatibility surface：schema 接受 2-4 个带稳定 `request_key` 的 participant，整批完成 profile、delegation、permission/tool-safety、provider/session materialization 和 budget 预检后才原子预留全部 active slots。容量或任一成员预检/注册失败时不 poll 任何 provider future；成功批次并发执行，经 completion hub 收口后按 `request_key` 稳定顺序注入 typed `agent_batch_results`，parent 不产生 `wait_agent` polling turn。当前只支持 `join_before_final`；background batch、公开 logical-run identity 和 TUI batch projection 属于 O4b3b。
+- O4b3a 已为隔离 Task planner 注册 planner-only `request_task_discovery`。每次 planning
+  attempt 最多调用一次，默认最多 3 个 probe、硬上限 4；所有 probe 固定使用 trusted built-in
+  Explore、`SubagentRead` 和 `SharedReadOnly`。Runtime 在 provider dispatch 前完成重复 id/objective、
+  workspace-relative path、结构重叠、profile/tool-safety、容量与 session materialization 检查，再
+  原子预留整个 batch。成功批次经 completion hub 真实并发，全部 terminal 后按 `probe_id`
+  稳定排序注入 typed `task_discovery_results` 并自动恢复 planner，模型 polling turn 为 0。
 - approved `/plan` 的 `sigil-plan-v2` executable schema 只有在 base/current workspace snapshot 均存在且完全相等时，才直接 promotion 为同一份 `TaskPlan v1 Accepted`，保留 step mapping，不再调用第二个 Planner；snapshot 缺失、旧 `sigil-plan-v1` 或字段不完整的 draft 继续走隔离 planner 兼容路径。draft 会持久化解析出的 schema version；task id 由 plan id 与 plan hash 稳定派生，`TaskCreatedFromPlan` 记录 durable link，`PlanDecisionRecorded(Accepted)` 是最终提交标记。提交前 crash 会继续显示 pending 并幂等补齐同一 task；若期间 workspace drift，则 supersede 已提升 plan、取消未完成 task并要求重新规划。
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b2 已完成；Task DAG 并发、planner discovery、完整诊断通道和
-background/restart batch 协议仍属于 O4b3-O8。
+本 checkpoint 表示 O4b3a 已完成；Task DAG 并发、完整诊断通道、
+background/restart batch 协议和 TUI batch projection 仍属于 O4b3b-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -957,7 +964,7 @@ background/restart batch 协议仍属于 O4b3-O8。
 
 ### O4: Completion hub and batch Explore
 
-实施状态：O4a、O4b1、O4b2 完成（2026-07-23），O4b3 deferred。
+实施状态：O4a、O4b1、O4b2、O4b3a 完成（2026-07-23），O4b3b deferred。
 
 - O4a 已为 ordinary chat 的兼容 `spawn_agent(mode=join_before_final)` 接入 root-run
   host join barrier：只有同一 provider turn 的整批调用均为 runtime 明确认识的
@@ -1001,10 +1008,21 @@ background/restart batch 协议仍属于 O4b3-O8。
   `batch_id` / `request_key` 的 bounded `agent_batch_results`，直接触发下一 parent provider
   turn，不调用 `wait_agent`。barrier 回归证明 2 个 Explore 同时 active，模型只有 spawn/results
   两个 turn；容量失败回归证明无 provider dispatch、无 active slot、无 child thread projection。
+- O4b3a 新增只在隔离 Task planner 临时 registry 可见的 `request_task_discovery`。Planner 不能
+  使用通用 `spawn_agent` / `spawn_agents` / `wait_agent`，每个 planning attempt 最多提交一个
+  probe batch。默认 3、硬上限 4；`multi_agent_mode=none` 或
+  `max_planning_research_agents=0` 会隐藏该能力。
+- 每个 probe 的 id、objective 和 workspace-relative path hints 必须唯一且结构不重叠；整批固定
+  绑定 trusted built-in Explore、read-only effective registry 和继承的 root cancellation/web
+  budget。Runtime 先完成全量 preflight 和 supervisor 原子 slot reservation，再写 child Started
+  并并发 poll provider；任一语义或容量拒绝返回 typed whole-batch error，provider 启动数为 0。
+- 完成结果经 O4b1 hub 收口，由 parent 单写者逐项提交 terminal/result projection，再按
+  `probe_id` 稳定顺序注入 bounded `task_discovery_results`。Planner 自动进入下一 provider turn
+  并直接提交 `task_plan_update`，不产生 `wait_agent` polling turn。并发 barrier、overlap
+  zero-start 和 second-discovery rejection 均有 fake-provider 回归。
 
-O4b3 仍包括：
+O4b3b 仍包括：
 
-- planner `request_task_discovery` 和 discovery 结果驱动的自动续跑。
 - detached `background` batch、公开 parent logical-run identity 与 restart reconciliation。
 - TUI batch/member projection。
 

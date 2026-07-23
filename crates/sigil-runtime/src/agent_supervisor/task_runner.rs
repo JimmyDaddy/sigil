@@ -1,19 +1,19 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, ProviderCapabilities, RunEvent,
-    SequentialTaskRequest, Session, SessionRef, SessionStats, TaskChildSessionEntry,
-    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
-    TaskSynthesisSessionRunRequest, ToolApproval, ToolCall, ToolErrorKind, ToolSpec,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output,
-    task_participant_child_task_id,
+    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, MultiAgentMode,
+    ProviderCapabilities, RunEvent, SequentialTaskRequest, Session, SessionRef, SessionStats,
+    TaskChildSessionEntry, TaskChildSessionRunOutput, TaskChildSessionRunRequest,
+    TaskChildSessionRunner, TaskChildSessionStatus, TaskId, TaskParticipantAttemptId,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
+    ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
+    decode_changeset_only_child_output, task_participant_child_task_id,
 };
 
 use super::{
@@ -21,16 +21,20 @@ use super::{
     hash_text,
     ids::{agent_route_id_for_call, task_route_id_for_call},
     materialize_child_agent_final_answer,
+    task_discovery::{
+        MAX_TASK_DISCOVERY_PROBES, TaskDiscoveryDelegate, planner_tools_with_discovery,
+    },
 };
 
 /// Runtime child runner that connects kernel task orchestration to the supervisor.
 pub struct AgentSupervisorTaskChildRunner {
     supervisor: AgentSupervisor,
-    planner: Option<BoxedAgent>,
-    executor: Option<BoxedAgent>,
-    subagent_read: BoxedAgent,
-    subagent_write: BoxedAgent,
-    synthesis: Option<BoxedAgent>,
+    planner: Option<Arc<BoxedAgent>>,
+    executor: Option<Arc<BoxedAgent>>,
+    subagent_read: Arc<BoxedAgent>,
+    subagent_write: Arc<BoxedAgent>,
+    synthesis: Option<Arc<BoxedAgent>>,
+    planner_discovery_max_probes: usize,
 }
 
 impl AgentSupervisorTaskChildRunner {
@@ -43,9 +47,10 @@ impl AgentSupervisorTaskChildRunner {
             supervisor,
             planner: None,
             executor: None,
-            subagent_read,
-            subagent_write,
+            subagent_read: Arc::new(subagent_read),
+            subagent_write: Arc::new(subagent_write),
             synthesis: None,
+            planner_discovery_max_probes: 0,
         }
     }
 
@@ -59,12 +64,27 @@ impl AgentSupervisorTaskChildRunner {
     ) -> Self {
         Self {
             supervisor,
-            planner: Some(planner),
-            executor: Some(executor),
-            subagent_read,
-            subagent_write,
-            synthesis: Some(synthesis),
+            planner: Some(Arc::new(planner)),
+            executor: Some(Arc::new(executor)),
+            subagent_read: Arc::new(subagent_read),
+            subagent_write: Arc::new(subagent_write),
+            synthesis: Some(Arc::new(synthesis)),
+            planner_discovery_max_probes: 0,
         }
+    }
+
+    #[must_use]
+    pub fn with_planner_discovery_policy(
+        mut self,
+        multi_agent_mode: MultiAgentMode,
+        max_probes: usize,
+    ) -> Self {
+        self.planner_discovery_max_probes = if multi_agent_mode == MultiAgentMode::None {
+            0
+        } else {
+            max_probes.min(MAX_TASK_DISCOVERY_PROBES)
+        };
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -177,15 +197,43 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let planner_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
-            planner
-                .run_with_approval_input(
-                    &mut child_session,
-                    request.child_input,
-                    request.options,
-                    &mut participant_handler,
-                    approval_handler,
-                )
-                .await
+            if self.planner_discovery_max_probes == 0 {
+                planner
+                    .run_with_approval_input(
+                        &mut child_session,
+                        request.child_input.clone(),
+                        request.options.clone(),
+                        &mut participant_handler,
+                        approval_handler,
+                    )
+                    .await
+            } else {
+                let tools = planner_tools_with_discovery(
+                    planner.tool_registry(),
+                    self.planner_discovery_max_probes,
+                );
+                let mut discovery_delegate = TaskDiscoveryDelegate::new(
+                    self.supervisor.clone(),
+                    parent_session,
+                    request.task.clone(),
+                    request.attempt_id.clone(),
+                    child_thread.thread_id.clone(),
+                    Arc::clone(&self.subagent_read),
+                    request.discovery_options.clone(),
+                    self.planner_discovery_max_probes,
+                );
+                planner
+                    .run_with_approval_input_tool_registry_and_agent_delegate(
+                        &mut child_session,
+                        request.child_input.clone(),
+                        request.options.clone(),
+                        tools,
+                        &mut participant_handler,
+                        approval_handler,
+                        &mut discovery_delegate,
+                    )
+                    .await
+            }
         };
         let output = match planner_run {
             Ok(output) => output,
@@ -765,7 +813,7 @@ fn append_task_approval_route(
     ))
 }
 
-fn build_child_session(
+pub(super) fn build_child_session(
     parent_session: &Session,
     child_session_ref: &SessionRef,
 ) -> Result<Session> {
@@ -816,7 +864,7 @@ fn child_provider_capabilities(agent: &BoxedAgent) -> ProviderCapabilities {
     agent.provider_capabilities()
 }
 
-fn usage_summary_from_stats(stats: &SessionStats) -> AgentUsageSummary {
+pub(super) fn usage_summary_from_stats(stats: &SessionStats) -> AgentUsageSummary {
     let input_tokens = stats.prompt_tokens;
     let output_tokens = stats.completion_tokens;
     AgentUsageSummary {

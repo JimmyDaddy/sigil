@@ -26,7 +26,7 @@ impl AgentSupervisor {
         start: AgentTaskChildStart,
     ) -> Result<AgentTaskChildThread>
     where
-        H: EventHandler + Send,
+        H: EventHandler + Send + ?Sized,
     {
         let profile_id = profile_id_for_role(start.role)?;
         let resolved_profile = self

@@ -23,7 +23,7 @@ impl AgentSupervisor {
         usage: Option<AgentUsageSummary>,
     ) -> Result<()>
     where
-        H: EventHandler + Send,
+        H: EventHandler + Send + ?Sized,
     {
         let terminal_status = agent_terminal_status_from_task_child(status);
         let result = build_agent_thread_result(
@@ -129,7 +129,7 @@ impl AgentSupervisor {
         reason: String,
     ) -> Result<()>
     where
-        H: EventHandler + Send,
+        H: EventHandler + Send + ?Sized,
     {
         append_control(
             session,

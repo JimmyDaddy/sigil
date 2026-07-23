@@ -3,6 +3,8 @@ use serde_json::json;
 
 use super::hash_json;
 
+const MAX_AGENT_DEPTH_WITH_PLANNER_DISCOVERY: usize = 2;
+
 /// Runtime-enforced limits for agent/thread fan-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentBudgetPolicy {
@@ -16,7 +18,7 @@ impl AgentBudgetPolicy {
         let task = &root_config.task;
         Self {
             max_subagents: task.max_subagents,
-            max_depth: 1,
+            max_depth: MAX_AGENT_DEPTH_WITH_PLANNER_DISCOVERY,
         }
     }
 

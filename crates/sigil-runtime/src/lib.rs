@@ -122,7 +122,8 @@ pub use agent_profile_registry::{
 pub use agent_supervisor::{
     AgentBudgetPolicy, AgentChatChildStart, AgentChatChildThread, AgentInterruptedThread,
     AgentMailboxMessage, AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
-    AgentTaskChildThread, ForegroundCancelImpact, chat_agent_thread_id_for_call,
+    AgentTaskChildThread, ForegroundCancelImpact, MAX_TASK_DISCOVERY_PROBES,
+    REQUEST_TASK_DISCOVERY_TOOL_NAME, chat_agent_thread_id_for_call,
 };
 pub use agent_tools::{
     AgentToolBackgroundEventSink, AgentToolBackgroundRuns, AgentToolProviderFactory,
