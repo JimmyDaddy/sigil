@@ -614,6 +614,7 @@ impl AppState {
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
+                task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),
@@ -719,6 +720,7 @@ impl AppState {
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
+                task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),

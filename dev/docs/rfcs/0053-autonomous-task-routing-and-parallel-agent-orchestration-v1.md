@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d3a implemented；O5b2d3b-O8 deferred
+状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d3b implemented；O5b2 remainder-O8 deferred
 
 创建日期：2026-07-22
 
@@ -989,8 +989,9 @@ allow_write_subagents = true
 本 checkpoint 表示 O4b3a、O4b3b、O5a、O5b1、O5b2a whole-batch admission、O5b2b
 process-local provider route cooldown、O5b2c shared-read-only durable bounded retry、
 O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis retry
-以及 O5b2d3a 实时 route attribution/diagnostics 已完成；completion-arrival 进度与
-request-order durable commit 的双序视图仍属于 O5b2d3b-O8。
+以及 O5b2d3a 实时 route attribution/diagnostics、O5b2d3b completion-arrival 与
+request-order durable commit 双序视图已完成；显式 action/envelope API 等后续项仍属于
+O5b2 remainder-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1214,9 +1215,23 @@ O5b2d3a 已完成：
 - diagnostics 不追加 session entry、不参与 restart/retry authority；task 结束、取消、切换或新
   task 开始时清空，避免运行态归因污染 durable timeline。
 
+O5b2d3b 已完成：
+
+- shared-read-only Task batch 复用 runtime-owned `AgentCompletionHub`，hub 支持受 parent
+  调用边界约束的 borrowed participant future；每个 terminal envelope 保留真实
+  `completion_index` 与稳定 request sequence。所有 sibling 仍会收口，完成到达不会提前改写
+  parent session。
+- `AgentSupervisor` 保存 latest-batch process-local completion snapshot。每个 member 同时暴露
+  one-based arrival order、one-based request/commit order 与 terminal outcome；snapshot 只用于
+  当前 task 的实时观测，worker 会按 task identity 过滤旧 generation，并继续只在 50ms tick
+  发现变化时推送。
+- parent single writer 在所有 terminal envelope 到达后按 stable request sequence 排序并提交，
+  逆序完成不会改变 durable `TaskChildSession` / result 顺序。TUI task strip 用
+  `arrival #N → commit #M` 展示双序进度，info rail 保留完整批次明细；task boundary 会清空
+  live snapshot，session log 和恢复投影不记录 arrival order。
+
 O5b2 剩余：
 
-- completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 
 退出条件：barrier 测试证明 overlap；无 parent mutable borrow 跨 child await；429 不产生 fan-out storm。

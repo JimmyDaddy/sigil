@@ -123,8 +123,43 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
             }],
         },
     })?;
+    app.handle_worker_message(WorkerMessage::TaskCompletionProgressUpdated {
+        snapshot: sigil_runtime::TaskCompletionProgressSnapshot {
+            batch: Some(sigil_runtime::TaskCompletionProgress {
+                generation: 1,
+                task_id: "task_1".to_owned(),
+                plan_version: 1,
+                arrived: 1,
+                total: 2,
+                members: vec![
+                    sigil_runtime::TaskCompletionProgressMember {
+                        step_id: "read_a".to_owned(),
+                        title: "Read A".to_owned(),
+                        request_order: 1,
+                        arrival_order: None,
+                        outcome: None,
+                    },
+                    sigil_runtime::TaskCompletionProgressMember {
+                        step_id: "read_b".to_owned(),
+                        title: "Read B".to_owned(),
+                        request_order: 2,
+                        arrival_order: Some(1),
+                        outcome: Some(sigil_runtime::TaskCompletionOutcome::Succeeded),
+                    },
+                ],
+            }),
+        },
+    })?;
 
     assert_eq!(app.runtime.task_provider_route_diagnostics.routes.len(), 1);
+    assert_eq!(
+        app.runtime
+            .task_completion_progress
+            .batch
+            .as_ref()
+            .map(|batch| batch.arrived),
+        Some(1)
+    );
     let strip = app
         .task_strip_view()
         .expect("live task should render before durable projection arrives");
@@ -135,6 +170,11 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
         app.task_sidebar_lines()
             .iter()
             .any(|line| line.contains("planner → deepseek/deepseek-v4-flash"))
+    );
+    assert!(
+        app.task_sidebar_lines()
+            .iter()
+            .any(|line| line.contains("arrival #1 → commit #2"))
     );
 
     app.handle_worker_message(WorkerMessage::TaskRunStarted {
@@ -147,6 +187,10 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
             .routes
             .is_empty(),
         "a new task must not inherit stale live route attribution"
+    );
+    assert!(
+        app.runtime.task_completion_progress.batch.is_none(),
+        "a new task must not inherit stale live completion order"
     );
     Ok(())
 }

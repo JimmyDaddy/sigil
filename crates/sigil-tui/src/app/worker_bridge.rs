@@ -253,6 +253,8 @@ impl AppState {
                 });
                 self.runtime.task_provider_route_diagnostics =
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
+                self.runtime.task_completion_progress =
+                    sigil_runtime::TaskCompletionProgressSnapshot::default();
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
                     format!("planning task {task_id}"),
@@ -268,6 +270,9 @@ impl AppState {
             }
             WorkerMessage::TaskProviderRouteDiagnosticsUpdated { snapshot } => {
                 self.runtime.task_provider_route_diagnostics = snapshot;
+            }
+            WorkerMessage::TaskCompletionProgressUpdated { snapshot } => {
+                self.runtime.task_completion_progress = snapshot;
             }
             WorkerMessage::RunFinished { result, entries } => {
                 self.clear_worker_run_state();

@@ -89,10 +89,13 @@ pub(in crate::runner) use active_run::{
     ActiveRun, RunTaskPayload, RunTaskResult, bind_task_run_cancellation_scope, cancel_active_run,
     prepare_run_cancellation, prepare_task_run_cancellation,
 };
-#[cfg(test)]
-pub(in crate::runner) use advancement::changed_task_provider_route_diagnostics;
 pub(in crate::runner) use advancement::{
     WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
+};
+#[cfg(test)]
+pub(in crate::runner) use advancement::{
+    changed_task_completion_progress, changed_task_provider_route_diagnostics,
+    task_completion_progress_for_active_task,
 };
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::agent_result_continuation_run_result;

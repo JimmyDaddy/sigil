@@ -114,6 +114,7 @@ pub(crate) struct RuntimeStatusState {
     pub(in crate::app) active_model_picker_refresh: Option<PendingModelPickerRefresh>,
     pub(crate) active_task: Option<ActiveTaskRuntimeStatus>,
     pub(crate) task_provider_route_diagnostics: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+    pub(crate) task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot,
 }
 
 #[derive(Debug, Clone)]

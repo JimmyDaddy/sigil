@@ -2834,6 +2834,18 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
         vec!["read_a", "read_b"],
         "parent terminal commits should remain in stable request order"
     );
+    let progress = supervisor.task_completion_progress();
+    let batch = progress.batch.expect("task completion progress");
+    assert_eq!(batch.task_id, "task_1");
+    assert_eq!(batch.plan_version, 1);
+    assert_eq!(batch.arrived, 2);
+    assert_eq!(batch.total, 2);
+    assert_eq!(batch.members[0].step_id, "read_a");
+    assert_eq!(batch.members[0].request_order, 1);
+    assert_eq!(batch.members[0].arrival_order, Some(2));
+    assert_eq!(batch.members[1].step_id, "read_b");
+    assert_eq!(batch.members[1].request_order, 2);
+    assert_eq!(batch.members[1].arrival_order, Some(1));
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }

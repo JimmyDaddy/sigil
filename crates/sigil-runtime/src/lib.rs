@@ -69,6 +69,7 @@ mod provider_pressure; // task-role provider route cooldown and shared backpress
 mod reasoning_effort; // exact provider+model effort admission and stale bindings.
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod run_options; // shared run options and scoped tool registry views.
+mod task_completion_progress; // process-local task completion arrival diagnostics.
 
 mod agent_completion;
 pub mod agent_profile_registry;
@@ -268,6 +269,10 @@ pub use streamable_http::{
     QueuedRuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpAttempt,
     RuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpDestinationAuthorizer,
     RuntimeMcpTransportAttemptFactory,
+};
+pub use task_completion_progress::{
+    TaskCompletionOutcome, TaskCompletionProgress, TaskCompletionProgressMember,
+    TaskCompletionProgressSnapshot,
 };
 pub use url_capability::{
     DEFAULT_URL_CAPABILITY_CAPACITY, DEFAULT_URL_CAPABILITY_TTL, UrlCapabilityLookupError,

@@ -30,6 +30,7 @@ const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROUTE_LIMIT: usize = 3;
+const LIVE_TASK_COMPLETION_LIMIT: usize = 5;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
 #[cfg(test)]
@@ -131,6 +132,10 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
             live_task_strip_rows(
                 view.rows.len(),
                 app.runtime.task_provider_route_diagnostics.routes.len(),
+                crate::app::task_sidebar::task_completion_progress_live_lines(
+                    &app.runtime.task_completion_progress,
+                )
+                .len(),
                 verification_card_rows(view.verification.as_ref(), app.verification_inspect_open()),
             )
         })
@@ -162,6 +167,7 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
             live_task_strip_rows(
                 view.rows.len(),
                 view.route_diagnostics.len(),
+                view.completion_progress.len(),
                 verification_card_view_rows(view.verification.as_ref()),
             )
         })
@@ -195,6 +201,10 @@ pub(crate) fn verification_card_area_for_app(live_area: Rect, app: &AppState) ->
     let task_rows = live_task_strip_rows(
         task_strip.rows.len(),
         app.runtime.task_provider_route_diagnostics.routes.len(),
+        crate::app::task_sidebar::task_completion_progress_live_lines(
+            &app.runtime.task_completion_progress,
+        )
+        .len(),
         verification_rows,
     );
     let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
@@ -222,11 +232,17 @@ fn live_status_rows_with_separator(content_rows: u16) -> u16 {
     content_rows.saturating_add(1)
 }
 
-fn live_task_strip_rows(row_count: usize, route_count: usize, verification_rows: u16) -> u16 {
+fn live_task_strip_rows(
+    row_count: usize,
+    route_count: usize,
+    completion_count: usize,
+    verification_rows: u16,
+) -> u16 {
     if row_count == 0 {
         return 0;
     }
     1 + route_count.min(LIVE_TASK_ROUTE_LIMIT) as u16
+        + completion_count.min(LIVE_TASK_COMPLETION_LIMIT) as u16
         + verification_rows
         + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
 }
@@ -697,7 +713,9 @@ fn render_task_strip_lines(
         return Vec::new();
     }
     let mut lines = Vec::with_capacity(
-        1 + task_strip.route_diagnostics.len() + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT),
+        1 + task_strip.route_diagnostics.len()
+            + task_strip.completion_progress.len()
+            + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT),
     );
     lines.push(render_task_strip_header(task_strip, width, theme));
     lines.extend(
@@ -716,6 +734,31 @@ fn render_task_strip_lines(
                     ),
                     Span::styled(
                         truncate_display_width(diagnostic, width.saturating_sub(8)),
+                        Style::default()
+                            .fg(theme.palette.text_secondary)
+                            .bg(theme.palette.surface_panel_alt),
+                    ),
+                ])
+            }),
+    );
+    lines.extend(
+        task_strip
+            .completion_progress
+            .iter()
+            .take(LIVE_TASK_COMPLETION_LIMIT)
+            .enumerate()
+            .map(|(index, progress)| {
+                let label = if index == 0 { "  Batch " } else { "    ↳ " };
+                Line::from(vec![
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(theme.palette.accent_warning)
+                            .bg(theme.palette.surface_panel_alt)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_display_width(progress, width.saturating_sub(8)),
                         Style::default()
                             .fg(theme.palette.text_secondary)
                             .bg(theme.palette.surface_panel_alt),

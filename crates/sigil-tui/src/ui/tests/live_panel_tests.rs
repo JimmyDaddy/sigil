@@ -182,6 +182,10 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
             route_diagnostics: vec![
                 "subagent-read×2 → deepseek/deepseek-v4-pro · active 2/4".to_owned(),
             ],
+            completion_progress: vec![
+                "read batch v1 · 1/2 arrived · commits follow request order".to_owned(),
+                "arrival #1 → commit #2 · inspect layout · ok".to_owned(),
+            ],
             rows: vec![
                 TaskStripRowViewModel {
                     kind: crate::ui::StatusKind::Success,
@@ -215,6 +219,9 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
     assert!(rendered.contains("running · v1 · 1/2 done"));
     assert!(rendered.contains("Route subagent-read×2"));
     assert!(rendered.contains("active 2/4"));
+    assert!(rendered.contains("Batch read batch v1"));
+    assert!(rendered.contains("arrival #1"));
+    assert!(rendered.contains("commit #2"));
     assert!(rendered.contains("✓ 1. inspect layout"));
     assert!(rendered.contains("◇ 2. update status band"));
     assert!(rendered.contains("▌"));
@@ -236,6 +243,7 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
             title: "Task task_1".to_owned(),
             detail: "paused · check failed".to_owned(),
             route_diagnostics: Vec::new(),
+            completion_progress: Vec::new(),
             verification: Some(VerificationCardViewModel {
                 status: "check failed".to_owned(),
                 recommended: Some("cargo-test".to_owned()),
@@ -460,6 +468,7 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),
             route_diagnostics: Vec::new(),
+            completion_progress: Vec::new(),
             rows: vec![TaskStripRowViewModel {
                 kind: crate::ui::StatusKind::Running,
                 label: "1. 输出一个冷笑话2、解释一下这个冷笑话为什么好笑".to_owned(),

@@ -404,6 +404,7 @@ pub(crate) struct TaskStripViewModel {
     pub title: String,
     pub detail: String,
     pub route_diagnostics: Vec<String>,
+    pub completion_progress: Vec<String>,
     pub verification: Option<VerificationCardViewModel>,
     pub rows: Vec<TaskStripRowViewModel>,
 }
@@ -423,6 +424,7 @@ impl TaskStripViewModel {
             title: view.title,
             detail: view.detail,
             route_diagnostics: Vec::new(),
+            completion_progress: Vec::new(),
             verification: view.verification.map(|verification| {
                 let action_label = verification.action.as_ref().map(|action| match action {
                     crate::app::task_sidebar::VerificationCardAction::Rerun(_) => "run check",
@@ -1033,6 +1035,10 @@ impl LivePanelViewModel {
                 task_strip.route_diagnostics =
                     crate::app::task_sidebar::task_provider_route_live_lines(
                         &app.runtime.task_provider_route_diagnostics,
+                    );
+                task_strip.completion_progress =
+                    crate::app::task_sidebar::task_completion_progress_live_lines(
+                        &app.runtime.task_completion_progress,
                     );
                 task_strip
             }),

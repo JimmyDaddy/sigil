@@ -5,6 +5,9 @@ use sigil_kernel::{Agent, AgentUsageSummary, Provider, ProviderCapabilities, Tas
 
 use crate::AgentProfileRegistry;
 use crate::provider_pressure::{TaskProviderPressure, TaskProviderRouteDiagnosticsSnapshot};
+use crate::task_completion_progress::{
+    TaskCompletionProgressRegistry, TaskCompletionProgressSnapshot,
+};
 
 mod batch;
 mod begin;
@@ -47,6 +50,7 @@ pub struct AgentSupervisor {
     provider_capabilities: ProviderCapabilities,
     state: Arc<Mutex<AgentSupervisorState>>,
     provider_pressure: TaskProviderPressure,
+    task_completion_progress: TaskCompletionProgressRegistry,
 }
 
 impl AgentSupervisor {
@@ -62,6 +66,7 @@ impl AgentSupervisor {
             provider_capabilities,
             state: Arc::new(Mutex::new(AgentSupervisorState::default())),
             provider_pressure: TaskProviderPressure::default(),
+            task_completion_progress: TaskCompletionProgressRegistry::default(),
         }
     }
 
@@ -79,6 +84,10 @@ impl AgentSupervisor {
         &self.provider_pressure
     }
 
+    pub(crate) fn completion_progress(&self) -> &TaskCompletionProgressRegistry {
+        &self.task_completion_progress
+    }
+
     /// Returns live task provider-route pressure for user-facing diagnostics.
     ///
     /// This process-local snapshot is observational only and must not be persisted or used as
@@ -86,6 +95,15 @@ impl AgentSupervisor {
     #[must_use]
     pub fn task_provider_route_diagnostics(&self) -> TaskProviderRouteDiagnosticsSnapshot {
         self.provider_pressure.diagnostics()
+    }
+
+    /// Returns live completion-arrival order for the latest shared-read-only task batch.
+    ///
+    /// This process-local snapshot is observational only. Durable parent commits remain ordered by
+    /// stable request sequence and this snapshot must not be used as restart authority.
+    #[must_use]
+    pub fn task_completion_progress(&self) -> TaskCompletionProgressSnapshot {
+        self.task_completion_progress.snapshot()
     }
 
     #[must_use]

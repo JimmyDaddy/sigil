@@ -107,3 +107,35 @@ async fn participant_failure_is_a_single_terminal_envelope() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn terminal_callback_observes_each_arrival_before_collection_finishes() -> Result<()> {
+    let (first_tx, first_rx) = oneshot::channel();
+    let (second_tx, second_rx) = oneshot::channel();
+    let registrations = vec![
+        AgentCompletionRegistration::new("first", 0, (), async move { Ok(first_rx.await?) }),
+        AgentCompletionRegistration::new("second", 1, (), async move { Ok(second_rx.await?) }),
+    ];
+    second_tx
+        .send("second-result")
+        .map_err(|_| anyhow!("second receiver closed"))?;
+    let first_sender = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        first_tx
+            .send("first-result")
+            .map_err(|_| anyhow!("first receiver closed"))
+    });
+    let mut observed = Vec::new();
+
+    let envelopes = AgentCompletionHub::from_batch(registrations)
+        .map_err(|rejection| rejection.into_error())?
+        .collect_with(|envelope| {
+            observed.push((envelope.key, envelope.sequence, envelope.completion_index));
+        })
+        .await;
+    first_sender.await??;
+
+    assert_eq!(envelopes.len(), 2);
+    assert_eq!(observed, vec![("second", 1, 0), ("first", 0, 1)]);
+    Ok(())
+}

@@ -56,9 +56,12 @@ where
     let oauth_advanced = advance_mcp_oauth_results(context.message_tx, context.state);
     let task_route_diagnostics_advanced =
         advance_task_provider_route_diagnostics(context.message_tx, context.state);
+    let task_completion_progress_advanced =
+        advance_task_completion_progress(context.message_tx, context.state);
     if refresh_advanced
         || oauth_advanced
         || task_route_diagnostics_advanced
+        || task_completion_progress_advanced
         || matches!(
             advance_compaction_results(context.reborrow()),
             WorkerAdvancementControl::SkipCommandPoll
@@ -94,16 +97,23 @@ where
     }
 }
 
+fn active_task_id(state: &WorkerLoopState) -> Option<&str> {
+    match state
+        .run
+        .active
+        .as_ref()
+        .map(|active| &active.cancellation_target)
+    {
+        Some(RunCancellationTarget::Task { task_id }) => Some(task_id),
+        Some(RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. }) | None => None,
+    }
+}
+
 fn advance_task_provider_route_diagnostics(
     message_tx: &mpsc::Sender<WorkerMessage>,
     state: &mut WorkerLoopState,
 ) -> bool {
-    let task_run_active = state.run.active.as_ref().is_some_and(|active| {
-        matches!(
-            &active.cancellation_target,
-            RunCancellationTarget::Task { .. }
-        )
-    });
+    let task_run_active = active_task_id(state).is_some();
     let active_snapshot = if task_run_active {
         state.agent.supervisor.task_provider_route_diagnostics()
     } else {
@@ -121,6 +131,43 @@ fn advance_task_provider_route_diagnostics(
     true
 }
 
+fn advance_task_completion_progress(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    state: &mut WorkerLoopState,
+) -> bool {
+    let active_task_id = active_task_id(state);
+    let active_snapshot = task_completion_progress_for_active_task(
+        active_task_id,
+        state.agent.supervisor.task_completion_progress(),
+    );
+    let Some(snapshot) = changed_task_completion_progress(
+        active_task_id.is_some(),
+        active_snapshot,
+        &state.agent.last_task_completion_progress,
+    ) else {
+        return false;
+    };
+    state.agent.last_task_completion_progress = snapshot.clone();
+    let _ = message_tx.send(WorkerMessage::TaskCompletionProgressUpdated { snapshot });
+    true
+}
+
+pub(in crate::runner) fn task_completion_progress_for_active_task(
+    active_task_id: Option<&str>,
+    snapshot: sigil_runtime::TaskCompletionProgressSnapshot,
+) -> sigil_runtime::TaskCompletionProgressSnapshot {
+    if active_task_id.is_some_and(|active_task_id| {
+        snapshot
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.task_id == active_task_id)
+    }) {
+        snapshot
+    } else {
+        sigil_runtime::TaskCompletionProgressSnapshot::default()
+    }
+}
+
 pub(in crate::runner) fn changed_task_provider_route_diagnostics(
     task_run_active: bool,
     active_snapshot: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
@@ -130,6 +177,19 @@ pub(in crate::runner) fn changed_task_provider_route_diagnostics(
         active_snapshot
     } else {
         sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default()
+    };
+    (snapshot != *previous).then_some(snapshot)
+}
+
+pub(in crate::runner) fn changed_task_completion_progress(
+    task_run_active: bool,
+    active_snapshot: sigil_runtime::TaskCompletionProgressSnapshot,
+    previous: &sigil_runtime::TaskCompletionProgressSnapshot,
+) -> Option<sigil_runtime::TaskCompletionProgressSnapshot> {
+    let snapshot = if task_run_active {
+        active_snapshot
+    } else {
+        sigil_runtime::TaskCompletionProgressSnapshot::default()
     };
     (snapshot != *previous).then_some(snapshot)
 }

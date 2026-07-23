@@ -136,6 +136,58 @@ pub(crate) fn task_provider_route_sidebar_lines(
         .collect()
 }
 
+pub(crate) fn task_completion_progress_live_lines(
+    snapshot: &sigil_runtime::TaskCompletionProgressSnapshot,
+) -> Vec<String> {
+    let Some(batch) = snapshot.batch.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "read batch v{} · {}/{} arrived · commits follow request order",
+        batch.plan_version, batch.arrived, batch.total
+    )];
+    let mut arrived = batch
+        .members
+        .iter()
+        .filter_map(|member| {
+            Some((
+                member.arrival_order?,
+                member.request_order,
+                member.title.as_str(),
+                member.outcome?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    arrived.sort_by_key(|(arrival_order, _, _, _)| *arrival_order);
+    lines.extend(
+        arrived
+            .into_iter()
+            .map(|(arrival_order, request_order, title, outcome)| {
+                format!(
+                    "arrival #{arrival_order} → commit #{request_order} · {title} · {}",
+                    outcome.as_str()
+                )
+            }),
+    );
+    lines
+}
+
+pub(crate) fn task_completion_progress_sidebar_lines(
+    snapshot: &sigil_runtime::TaskCompletionProgressSnapshot,
+) -> Vec<String> {
+    task_completion_progress_live_lines(snapshot)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("parallel progress: {line}")
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect()
+}
+
 fn format_provider_route_duration(milliseconds: u64) -> String {
     if milliseconds < 1_000 {
         format!("{milliseconds}ms")

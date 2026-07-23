@@ -14,7 +14,7 @@ use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
     McpListChangedNotification, McpProgressNotification, ProviderStatusConfig, SessionDeleteOutput,
     SessionDeletePreview, SessionExportOutput, SessionRetentionOutput, SessionRetentionPolicy,
-    SessionRetentionPreview, TaskProviderRouteDiagnosticsSnapshot,
+    SessionRetentionPreview, TaskCompletionProgressSnapshot, TaskProviderRouteDiagnosticsSnapshot,
 };
 use tokio::sync::oneshot;
 
@@ -379,6 +379,9 @@ pub enum WorkerMessage {
     },
     TaskProviderRouteDiagnosticsUpdated {
         snapshot: TaskProviderRouteDiagnosticsSnapshot,
+    },
+    TaskCompletionProgressUpdated {
+        snapshot: TaskCompletionProgressSnapshot,
     },
     RunFinished {
         result: AgentRunResult,

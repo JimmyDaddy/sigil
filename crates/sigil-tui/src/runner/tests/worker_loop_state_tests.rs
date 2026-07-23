@@ -11,7 +11,8 @@ use super::{
         WorkerCommand,
         worker_loop::{
             SessionTransitionKind, WorkerCommandDomain, WorkerLoopState,
-            changed_task_provider_route_diagnostics, classify_worker_command, transition_session,
+            changed_task_completion_progress, changed_task_provider_route_diagnostics,
+            classify_worker_command, task_completion_progress_for_active_task, transition_session,
         },
     },
     common::{PlannedProvider, test_root_config},
@@ -83,6 +84,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
             .routes
             .is_empty()
     );
+    assert!(state.agent.last_task_completion_progress.batch.is_none());
     assert!(state.processed_worker_command_ids.is_empty());
     Ok(())
 }
@@ -112,6 +114,69 @@ fn task_route_diagnostics_emit_only_on_change_and_clear_when_task_stops() {
         ),
         Some(empty)
     );
+}
+
+#[test]
+fn task_completion_progress_emits_only_on_change_and_clears_when_task_stops() {
+    let empty = sigil_runtime::TaskCompletionProgressSnapshot::default();
+    let active = task_completion_progress_fixture();
+
+    assert_eq!(
+        changed_task_completion_progress(true, active.clone(), &empty),
+        Some(active.clone())
+    );
+    assert_eq!(
+        changed_task_completion_progress(true, active.clone(), &active),
+        None
+    );
+    assert_eq!(
+        changed_task_completion_progress(false, active, &empty),
+        None
+    );
+    assert_eq!(
+        changed_task_completion_progress(false, empty.clone(), &task_completion_progress_fixture(),),
+        Some(empty)
+    );
+}
+
+#[test]
+fn task_completion_progress_does_not_cross_task_identity() {
+    let current = task_completion_progress_fixture();
+
+    assert_eq!(
+        task_completion_progress_for_active_task(Some("task_1"), current.clone()),
+        current
+    );
+    assert_eq!(
+        task_completion_progress_for_active_task(
+            Some("task_2"),
+            task_completion_progress_fixture(),
+        ),
+        sigil_runtime::TaskCompletionProgressSnapshot::default()
+    );
+    assert_eq!(
+        task_completion_progress_for_active_task(None, task_completion_progress_fixture()),
+        sigil_runtime::TaskCompletionProgressSnapshot::default()
+    );
+}
+
+fn task_completion_progress_fixture() -> sigil_runtime::TaskCompletionProgressSnapshot {
+    sigil_runtime::TaskCompletionProgressSnapshot {
+        batch: Some(sigil_runtime::TaskCompletionProgress {
+            generation: 1,
+            task_id: "task_1".to_owned(),
+            plan_version: 1,
+            arrived: 1,
+            total: 1,
+            members: vec![sigil_runtime::TaskCompletionProgressMember {
+                step_id: "read".to_owned(),
+                title: "Read".to_owned(),
+                request_order: 1,
+                arrival_order: Some(1),
+                outcome: Some(sigil_runtime::TaskCompletionOutcome::Succeeded),
+            }],
+        }),
+    }
 }
 
 fn task_route_diagnostics_fixture(

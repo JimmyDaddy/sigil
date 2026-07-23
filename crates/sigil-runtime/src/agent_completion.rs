@@ -4,22 +4,22 @@ use anyhow::Result;
 use futures::{StreamExt, stream::FuturesUnordered};
 use thiserror::Error;
 
-type BoxedAgentCompletionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
-type BoxedAgentTerminalFuture<K, C, T> =
-    Pin<Box<dyn Future<Output = AgentTerminalEnvelope<K, C, T>> + Send>>;
+type BoxedAgentCompletionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+type BoxedAgentTerminalFuture<'a, K, C, T> =
+    Pin<Box<dyn Future<Output = AgentTerminalEnvelope<K, C, T>> + Send + 'a>>;
 
 /// One preflighted participant registered with the runtime completion hub.
-pub(crate) struct AgentCompletionRegistration<K, C, T> {
+pub(crate) struct AgentCompletionRegistration<'a, K, C, T> {
     key: K,
     sequence: u64,
     context: C,
-    future: BoxedAgentCompletionFuture<T>,
+    future: BoxedAgentCompletionFuture<'a, T>,
 }
 
-impl<K, C, T> AgentCompletionRegistration<K, C, T> {
+impl<'a, K, C, T> AgentCompletionRegistration<'a, K, C, T> {
     pub(crate) fn new<F>(key: K, sequence: u64, context: C, future: F) -> Self
     where
-        F: Future<Output = Result<T>> + Send + 'static,
+        F: Future<Output = Result<T>> + Send + 'a,
     {
         Self {
             key,
@@ -29,7 +29,7 @@ impl<K, C, T> AgentCompletionRegistration<K, C, T> {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (K, u64, C, BoxedAgentCompletionFuture<T>) {
+    pub(crate) fn into_parts(self) -> (K, u64, C, BoxedAgentCompletionFuture<'a, T>) {
         (self.key, self.sequence, self.context, self.future)
     }
 }
@@ -54,12 +54,12 @@ pub(crate) enum AgentCompletionHubError {
 }
 
 /// Owns every unpolled registration when whole-batch completion preflight fails.
-pub(crate) struct AgentCompletionBatchRejection<K, C, T> {
+pub(crate) struct AgentCompletionBatchRejection<'a, K, C, T> {
     error: AgentCompletionHubError,
-    registrations: Vec<AgentCompletionRegistration<K, C, T>>,
+    registrations: Vec<AgentCompletionRegistration<'a, K, C, T>>,
 }
 
-impl<K, C, T> AgentCompletionBatchRejection<K, C, T> {
+impl<'a, K, C, T> AgentCompletionBatchRejection<'a, K, C, T> {
     #[cfg(test)]
     pub(crate) fn error(&self) -> &AgentCompletionHubError {
         &self.error
@@ -69,7 +69,7 @@ impl<K, C, T> AgentCompletionBatchRejection<K, C, T> {
         self,
     ) -> (
         AgentCompletionHubError,
-        Vec<AgentCompletionRegistration<K, C, T>>,
+        Vec<AgentCompletionRegistration<'a, K, C, T>>,
     ) {
         (self.error, self.registrations)
     }
@@ -85,19 +85,19 @@ impl<K, C, T> AgentCompletionBatchRejection<K, C, T> {
 /// Construction validates the complete batch before moving any future into the active stream.
 /// `collect` consumes the hub, so every accepted registration can yield at most one terminal
 /// envelope and the same batch cannot be delivered twice.
-pub(crate) struct AgentCompletionHub<K, C, T> {
-    pending: FuturesUnordered<BoxedAgentTerminalFuture<K, C, T>>,
+pub(crate) struct AgentCompletionHub<'a, K, C, T> {
+    pending: FuturesUnordered<BoxedAgentTerminalFuture<'a, K, C, T>>,
 }
 
-impl<K, C, T> AgentCompletionHub<K, C, T>
+impl<'a, K, C, T> AgentCompletionHub<'a, K, C, T>
 where
-    K: Clone + Debug + Ord + Send + 'static,
-    C: Send + 'static,
-    T: Send + 'static,
+    K: Clone + Debug + Ord + Send + 'a,
+    C: Send + 'a,
+    T: Send + 'a,
 {
     pub(crate) fn from_batch(
-        registrations: Vec<AgentCompletionRegistration<K, C, T>>,
-    ) -> std::result::Result<Self, AgentCompletionBatchRejection<K, C, T>> {
+        registrations: Vec<AgentCompletionRegistration<'a, K, C, T>>,
+    ) -> std::result::Result<Self, AgentCompletionBatchRejection<'a, K, C, T>> {
         let mut registered = BTreeSet::new();
         for registration in &registrations {
             if !registered.insert(registration.key.clone()) {
@@ -120,17 +120,28 @@ where
                     context: registration.context,
                     result: registration.future.await,
                 }
-            }) as BoxedAgentTerminalFuture<K, C, T>);
+            }) as BoxedAgentTerminalFuture<'a, K, C, T>);
         }
         Ok(Self { pending })
     }
 
-    pub(crate) async fn collect(mut self) -> Vec<AgentTerminalEnvelope<K, C, T>> {
+    pub(crate) async fn collect(self) -> Vec<AgentTerminalEnvelope<K, C, T>> {
+        self.collect_with(|_| {}).await
+    }
+
+    pub(crate) async fn collect_with<F>(
+        mut self,
+        mut on_terminal: F,
+    ) -> Vec<AgentTerminalEnvelope<K, C, T>>
+    where
+        F: FnMut(&AgentTerminalEnvelope<K, C, T>),
+    {
         let mut completion_index = 0_u64;
         let mut completed = Vec::with_capacity(self.pending.len());
         while let Some(mut envelope) = self.pending.next().await {
             envelope.completion_index = completion_index;
             completion_index = completion_index.saturating_add(1);
+            on_terminal(&envelope);
             completed.push(envelope);
         }
         completed

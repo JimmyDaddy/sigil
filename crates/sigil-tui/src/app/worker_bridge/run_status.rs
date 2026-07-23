@@ -21,6 +21,8 @@ impl AppState {
         self.runtime.active_task = None;
         self.runtime.task_provider_route_diagnostics =
             sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
+        self.runtime.task_completion_progress =
+            sigil_runtime::TaskCompletionProgressSnapshot::default();
         self.approval.pending = None;
         self.modal_state = None;
         self.runtime.last_phase_marker = None;
