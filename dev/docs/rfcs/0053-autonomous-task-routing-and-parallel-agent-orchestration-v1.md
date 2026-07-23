@@ -1097,10 +1097,18 @@ O5b1 已完成：
   `current_step`。无 source identity 的 legacy MCP elicitation 在多个 active child 间 fail closed，
   不猜测 latest child。
 
+O5b2a 已完成：
+
+- runtime 在任何 provider dispatch 前完成整批 member 的 shared-read-only、agent/session identity
+  preflight，并把并发 task child 标记为 `join_before_final`。
+- supervisor 通过 `reserve_task_child_batch` 原子预留全部 active-child slot；容量不足、重复
+  identity 或任一 member preflight 失败时整批拒绝，provider 启动数为零，不出现部分 admission。
+- 全部 child 成功领取 reservation 且 append-only Started 已提交后才放行并发 execute；启动提交
+  中途失败会为已 Started member 写失败终态、释放未领取 reservation，并保持零 provider dispatch。
+
 O5b2 剩余：
 
-- provider route cooldown/backpressure，以及 whole-batch capacity/preflight，避免容量压力下
-  出现部分 admission 或 fan-out retry storm。
+- provider route cooldown/backpressure，避免容量或限流压力演化成 fan-out retry storm。
 - completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 

@@ -151,15 +151,11 @@ impl AgentSupervisorTaskChildRunner {
         }
     }
 
-    fn prepare_parallel_read_child<H>(
+    fn preflight_parallel_read_child(
         &self,
-        parent_session: &mut Session,
+        parent_session: &Session,
         request: TaskChildSessionRunRequest,
-        handler: &mut H,
-    ) -> Result<PreparedParallelTaskChild>
-    where
-        H: EventHandler + Send,
-    {
+    ) -> Result<PreflightParallelTaskChild> {
         if !matches!(
             request.step.effective_mode(),
             TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
@@ -172,31 +168,58 @@ impl AgentSupervisorTaskChildRunner {
         let child_task_id =
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
-        let child_thread = self.supervisor.begin_task_child_thread(
-            parent_session,
-            handler,
-            AgentTaskChildStart {
-                task_id: request.task.task_id.clone(),
-                parent_thread_id: main_thread_id()?,
-                parent_depth: 0,
-                batch_id: None,
-                batch_member_key: None,
-                parent_session_ref: request.task.parent_session_ref.clone(),
-                plan_version: request.plan_version,
-                step: request.step.clone(),
-                child_task_id: child_task_id.clone(),
-                child_session_ref: child_session_ref.clone(),
-                child_input: request.child_input.clone(),
-                objective: request.task.objective.clone(),
-                workspace_root: request.options.workspace_root.clone(),
-                provider_capabilities: child_provider_capabilities(&agent),
-                role: request.step.role,
-                invocation_mode: AgentInvocationMode::Foreground,
-                invocation_source: AgentInvocationSource::Task,
-            },
-        )?;
+        let child_session = build_child_session(parent_session, &child_session_ref)?;
+        let start = AgentTaskChildStart {
+            task_id: request.task.task_id.clone(),
+            parent_thread_id: main_thread_id()?,
+            parent_depth: 0,
+            batch_id: None,
+            batch_member_key: None,
+            parent_session_ref: request.task.parent_session_ref.clone(),
+            plan_version: request.plan_version,
+            step: request.step.clone(),
+            child_task_id: child_task_id.clone(),
+            child_session_ref: child_session_ref.clone(),
+            child_input: request.child_input.clone(),
+            objective: request.task.objective.clone(),
+            workspace_root: request.options.workspace_root.clone(),
+            provider_capabilities: child_provider_capabilities(&agent),
+            role: request.step.role,
+            invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+            invocation_source: AgentInvocationSource::Task,
+        };
+        Ok(PreflightParallelTaskChild {
+            request,
+            child_task_id,
+            child_session_ref,
+            agent,
+            start,
+            child_session,
+        })
+    }
+
+    fn start_parallel_read_child<H>(
+        &self,
+        parent_session: &mut Session,
+        preflight: PreflightParallelTaskChild,
+        handler: &mut H,
+    ) -> Result<PreparedParallelTaskChild>
+    where
+        H: EventHandler + Send,
+    {
+        let PreflightParallelTaskChild {
+            request,
+            child_task_id,
+            child_session_ref,
+            agent,
+            start,
+            child_session,
+        } = preflight;
+        let child_thread =
+            self.supervisor
+                .begin_task_child_thread(parent_session, handler, start)?;
         let thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
-        append_task_child_session(
+        if let Err(error) = append_task_child_session(
             parent_session,
             handler,
             &request,
@@ -204,28 +227,15 @@ impl AgentSupervisorTaskChildRunner {
             &child_session_ref,
             TaskChildSessionStatus::Started,
             None,
-        )?;
-        let child_session = match build_child_session(parent_session, &child_session_ref) {
-            Ok(session) => session,
-            Err(error) => {
-                append_task_child_session(
-                    parent_session,
-                    handler,
-                    &request,
-                    &child_task_id,
-                    &child_session_ref,
-                    TaskChildSessionStatus::Failed,
-                    None,
-                )?;
-                self.supervisor.record_task_child_failure(
-                    parent_session,
-                    handler,
-                    &child_thread,
-                    format!("{error:#}"),
-                )?;
-                return Err(error);
-            }
-        };
+        ) {
+            let _ = self.supervisor.record_task_child_failure(
+                parent_session,
+                handler,
+                &child_thread,
+                format!("failed to persist task child start: {error:#}"),
+            );
+            return Err(error);
+        }
         Ok(PreparedParallelTaskChild {
             request,
             child_task_id,
@@ -376,6 +386,15 @@ impl AgentSupervisorTaskChildRunner {
             changeset_only_after_snapshot_id: None,
         })
     }
+}
+
+struct PreflightParallelTaskChild {
+    request: TaskChildSessionRunRequest,
+    child_task_id: TaskId,
+    child_session_ref: SessionRef,
+    agent: Arc<BoxedAgent>,
+    start: AgentTaskChildStart,
+    child_session: Session,
 }
 
 struct PreparedParallelTaskChild {
@@ -810,10 +829,58 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        let prepared = requests
-            .into_iter()
-            .map(|request| self.prepare_parallel_read_child(parent_session, request, handler))
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let member_count = requests.len();
+        let mut preflight = Vec::with_capacity(member_count);
+        for request in requests {
+            match self.preflight_parallel_read_child(parent_session, request) {
+                Ok(member) => preflight.push(member),
+                Err(error) => {
+                    return Ok(rejected_parallel_read_batch(member_count, error));
+                }
+            }
+        }
+        let starts = preflight
+            .iter()
+            .map(|member| member.start.clone())
             .collect::<Vec<_>>();
+        let reservation = match self.supervisor.reserve_task_child_batch(&starts) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return Ok(rejected_parallel_read_batch(member_count, error));
+            }
+        };
+        let mut prepared = Vec::with_capacity(member_count);
+        for member in preflight {
+            match self.start_parallel_read_child(parent_session, member, handler) {
+                Ok(member) => prepared.push(member),
+                Err(error) => {
+                    let reason =
+                        "parallel task child batch start rolled back before provider dispatch";
+                    for started in &prepared {
+                        let _ = append_task_child_session(
+                            parent_session,
+                            handler,
+                            &started.request,
+                            &started.child_task_id,
+                            &started.child_session_ref,
+                            TaskChildSessionStatus::Failed,
+                            None,
+                        );
+                        let _ = self.supervisor.record_task_child_failure(
+                            parent_session,
+                            handler,
+                            &started.child_thread,
+                            reason.to_owned(),
+                        );
+                    }
+                    return Ok(rejected_parallel_read_batch(member_count, error));
+                }
+            }
+        }
+        reservation.commit();
         let executed = {
             let shared_handler = SharedTaskEventHandler {
                 inner: Arc::new(Mutex::new(handler)),
@@ -825,16 +892,12 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 let mut member_handler = shared_handler.clone();
                 let mut member_approval = shared_approval.clone();
                 async move {
-                    match member {
-                        Ok(prepared) => Ok(self
-                            .execute_parallel_read_child(
-                                prepared,
-                                &mut member_handler,
-                                &mut member_approval,
-                            )
-                            .await),
-                        Err(error) => Err(error),
-                    }
+                    self.execute_parallel_read_child(
+                        member,
+                        &mut member_handler,
+                        &mut member_approval,
+                    )
+                    .await
                 }
             }))
             .await
@@ -842,11 +905,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
 
         Ok(executed
             .into_iter()
-            .map(|member| {
-                member.and_then(|executed| {
-                    self.commit_parallel_read_child(parent_session, handler, executed)
-                })
-            })
+            .map(|executed| self.commit_parallel_read_child(parent_session, handler, executed))
             .collect())
     }
 
@@ -953,6 +1012,16 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             }
         }
     }
+}
+
+fn rejected_parallel_read_batch(
+    member_count: usize,
+    error: anyhow::Error,
+) -> Vec<Result<TaskChildSessionRunOutput>> {
+    let reason = format!("parallel task child batch rejected before provider dispatch: {error:#}");
+    (0..member_count)
+        .map(|_| Err(anyhow::anyhow!(reason.clone())))
+        .collect()
 }
 
 struct TaskParticipantEventHandler<'a, H> {

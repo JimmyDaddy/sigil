@@ -1362,6 +1362,59 @@ fn supervisor_enforces_max_subagents() -> Result<()> {
 }
 
 #[test]
+fn task_batch_reservation_is_atomic_and_claimed_by_child_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut first = child_start(step("task_batch_first")?, temp.path().to_path_buf())?;
+    first.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    let mut second = child_start(step("task_batch_second")?, temp.path().to_path_buf())?;
+    second.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    let starts = vec![first, second];
+
+    let reservation = supervisor.reserve_task_child_batch(&starts)?;
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let threads = starts
+        .into_iter()
+        .map(|start| supervisor.begin_task_child_thread(&mut session, &mut handler, start))
+        .collect::<Result<Vec<_>>>()?;
+    reservation.commit();
+
+    assert_eq!(threads.len(), 2);
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    for thread in threads {
+        supervisor.record_task_child_failure(
+            &mut session,
+            &mut handler,
+            &thread,
+            "test cleanup".to_owned(),
+        )?;
+    }
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
+fn dropped_task_batch_reservation_releases_every_slot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut first = child_start(step("task_batch_drop_first")?, temp.path().to_path_buf())?;
+    first.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    let mut second = child_start(step("task_batch_drop_second")?, temp.path().to_path_buf())?;
+    second.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+
+    let reservation = supervisor.reserve_task_child_batch(&[first, second])?;
+    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    drop(reservation);
+
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[test]
 fn chat_batch_reservation_is_atomic_and_claimed_by_child_start() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
@@ -2682,6 +2735,144 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
         vec!["read_a", "read_b"],
         "parent terminal commits should remain in stable request order"
     );
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_read_batch_rejects_capacity_before_any_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect in parallel".to_owned(),
+    };
+    let requests = ["read_a", "read_b"]
+        .into_iter()
+        .map(|step_id| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: step(step_id)?,
+                attempt_id: participant_attempt_id_for(step_id)?,
+                child_session_ref: participant_session_ref_for(step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = runner
+        .run_child_session_batch(&mut session, requests, &mut handler, &mut approval)
+        .await?;
+
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(|output| output.is_err()));
+    assert!(outputs.iter().all(|output| {
+        output.as_ref().err().is_some_and(|error| {
+            let message = format!("{error:#}");
+            message.contains("rejected before provider dispatch")
+                && message.contains("active=0 requested=2")
+                && message.contains("[task].max_subagents=1")
+        })
+    }));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskChildSession(child))
+                if child.status == TaskChildSessionStatus::Started
+        )
+    }));
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_read_batch_rejects_member_preflight_before_any_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect in parallel".to_owned(),
+    };
+    let requests = [step("read_a")?, write_step("write_b")?]
+        .into_iter()
+        .map(|step| {
+            let step_id = step.step_id.as_str().to_owned();
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step,
+                attempt_id: participant_attempt_id_for(&step_id)?,
+                child_session_ref: participant_session_ref_for(&step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = runner
+        .run_child_session_batch(&mut session, requests, &mut handler, &mut approval)
+        .await?;
+
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(|output| {
+        output.as_ref().err().is_some_and(|error| {
+            format!("{error:#}").contains("accepts only shared-read-only steps")
+        })
+    }));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(session.agent_thread_state_projection().threads.is_empty());
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }
