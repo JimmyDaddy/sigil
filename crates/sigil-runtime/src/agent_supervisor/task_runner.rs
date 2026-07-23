@@ -1,7 +1,11 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::future::join_all;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
@@ -131,6 +135,269 @@ impl AgentSupervisorTaskChildRunner {
         )?;
         Ok((child_session, child_thread, child_task_id))
     }
+
+    fn agent_for_step(&self, step: &TaskStepSpec) -> Result<Arc<BoxedAgent>> {
+        match step.role {
+            AgentRole::Planner => self
+                .planner
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("task planner role is not configured")),
+            AgentRole::Executor => self
+                .executor
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("task executor role is not configured")),
+            AgentRole::SubagentRead => Ok(Arc::clone(&self.subagent_read)),
+            AgentRole::SubagentWrite => Ok(Arc::clone(&self.subagent_write)),
+        }
+    }
+
+    fn prepare_parallel_read_child<H>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        handler: &mut H,
+    ) -> Result<PreparedParallelTaskChild>
+    where
+        H: EventHandler + Send,
+    {
+        if !matches!(
+            request.step.effective_mode(),
+            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+        ) || request.step.effective_isolation()
+            != sigil_kernel::TaskIsolationMode::SharedReadOnly
+        {
+            anyhow::bail!("parallel task child batch accepts only shared-read-only steps");
+        }
+        let agent = self.agent_for_step(&request.step)?;
+        let child_task_id =
+            task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
+        let child_session_ref = request.child_session_ref.clone();
+        let child_thread = self.supervisor.begin_task_child_thread(
+            parent_session,
+            handler,
+            AgentTaskChildStart {
+                task_id: request.task.task_id.clone(),
+                parent_thread_id: main_thread_id()?,
+                parent_depth: 0,
+                batch_id: None,
+                batch_member_key: None,
+                parent_session_ref: request.task.parent_session_ref.clone(),
+                plan_version: request.plan_version,
+                step: request.step.clone(),
+                child_task_id: child_task_id.clone(),
+                child_session_ref: child_session_ref.clone(),
+                child_input: request.child_input.clone(),
+                objective: request.task.objective.clone(),
+                workspace_root: request.options.workspace_root.clone(),
+                provider_capabilities: child_provider_capabilities(&agent),
+                role: request.step.role,
+                invocation_mode: AgentInvocationMode::Foreground,
+                invocation_source: AgentInvocationSource::Task,
+            },
+        )?;
+        let thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
+        append_task_child_session(
+            parent_session,
+            handler,
+            &request,
+            &child_task_id,
+            &child_session_ref,
+            TaskChildSessionStatus::Started,
+            None,
+        )?;
+        let child_session = match build_child_session(parent_session, &child_session_ref) {
+            Ok(session) => session,
+            Err(error) => {
+                append_task_child_session(
+                    parent_session,
+                    handler,
+                    &request,
+                    &child_task_id,
+                    &child_session_ref,
+                    TaskChildSessionStatus::Failed,
+                    None,
+                )?;
+                self.supervisor.record_task_child_failure(
+                    parent_session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
+                )?;
+                return Err(error);
+            }
+        };
+        Ok(PreparedParallelTaskChild {
+            request,
+            child_task_id,
+            child_session_ref,
+            agent,
+            child_thread,
+            child_session,
+            _thread_release: thread_release,
+        })
+    }
+
+    async fn execute_parallel_read_child<H, A>(
+        &self,
+        mut prepared: PreparedParallelTaskChild,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> ExecutedParallelTaskChild
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let mut route_handler = BufferedSupervisorTaskApprovalRouteHandler {
+            inner: approval_handler,
+            task_request: &prepared.request,
+            child_session_ref: &prepared.child_session_ref,
+            source_thread_id: &prepared.child_thread.thread_id,
+            controls: Vec::new(),
+        };
+        let child_run = {
+            let mut participant_handler = TaskParticipantEventHandler { inner: handler };
+            run_task_child_agent_for_step(
+                &prepared.agent,
+                &mut prepared.child_session,
+                prepared.request.child_input.clone(),
+                prepared.request.options.clone(),
+                &prepared.request.step,
+                &mut participant_handler,
+                &mut route_handler,
+            )
+            .await
+        };
+        let controls = route_handler.controls;
+        let result = match child_run {
+            Ok(output) => {
+                let outcome = output.outcome;
+                match materialize_child_agent_final_answer(
+                    &mut prepared.child_session,
+                    &prepared.child_session_ref,
+                    &prepared.child_thread.thread_id,
+                    &output.result,
+                )
+                .await
+                {
+                    Ok(materialized) => Ok(ParallelTaskChildSuccess {
+                        materialized,
+                        outcome,
+                        usage: usage_summary_from_stats(prepared.child_session.stats()),
+                    }),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        ExecutedParallelTaskChild {
+            prepared,
+            controls,
+            result,
+        }
+    }
+
+    fn commit_parallel_read_child<H>(
+        &self,
+        parent_session: &mut Session,
+        handler: &mut H,
+        executed: ExecutedParallelTaskChild,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: EventHandler + Send,
+    {
+        let ExecutedParallelTaskChild {
+            prepared,
+            controls,
+            result,
+        } = executed;
+        for control in controls {
+            parent_session.append_control(control)?;
+        }
+        let success = match result {
+            Ok(success) => success,
+            Err(error) => {
+                append_task_child_session(
+                    parent_session,
+                    handler,
+                    &prepared.request,
+                    &prepared.child_task_id,
+                    &prepared.child_session_ref,
+                    TaskChildSessionStatus::Failed,
+                    None,
+                )?;
+                self.supervisor.record_task_child_failure(
+                    parent_session,
+                    handler,
+                    &prepared.child_thread,
+                    format!("{error:#}"),
+                )?;
+                return Err(error);
+            }
+        };
+        let budget_warning = self
+            .supervisor
+            .validate_usage_budget(&prepared.request.task.task_id, &success.usage)
+            .err()
+            .map(|error| format!("{error:#}"));
+        let status =
+            task_child_status_from_outcome(&success.materialized.final_text, &success.outcome);
+        append_task_child_session(
+            parent_session,
+            handler,
+            &prepared.request,
+            &prepared.child_task_id,
+            &prepared.child_session_ref,
+            status,
+            Some(hash_text(&success.materialized.final_text)),
+        )?;
+        self.supervisor.record_task_child_result(
+            parent_session,
+            handler,
+            &prepared.child_thread,
+            prepared.child_session_ref.clone(),
+            status,
+            &success.materialized,
+            &success.outcome,
+            Some(success.usage),
+        )?;
+        if let Some(warning) = budget_warning {
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent budget warning after child completion: {warning}"
+            )));
+        }
+        Ok(TaskChildSessionRunOutput {
+            attempt_id: prepared.request.attempt_id,
+            final_text: success.materialized.final_text,
+            outcome: success.outcome,
+            child_session_ref: prepared.child_session_ref,
+            final_answer_ref: success.materialized.final_answer_ref,
+            artifact_refs: success.materialized.extra_artifacts,
+            changeset_proposal: None,
+            changeset_only_after_snapshot_id: None,
+        })
+    }
+}
+
+struct PreparedParallelTaskChild {
+    request: TaskChildSessionRunRequest,
+    child_task_id: TaskId,
+    child_session_ref: SessionRef,
+    agent: Arc<BoxedAgent>,
+    child_thread: AgentTaskChildThread,
+    child_session: Session,
+    _thread_release: TaskChildThreadReleaseGuard,
+}
+
+struct ParallelTaskChildSuccess {
+    materialized: super::AgentResultMaterialization,
+    outcome: sigil_kernel::AgentRunOutcome,
+    usage: AgentUsageSummary,
+}
+
+struct ExecutedParallelTaskChild {
+    prepared: PreparedParallelTaskChild,
+    controls: Vec<ControlEntry>,
+    result: Result<ParallelTaskChildSuccess>,
 }
 
 struct TaskChildThreadReleaseGuard {
@@ -532,6 +799,57 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         }
     }
 
+    async fn run_child_session_batch<H, A>(
+        &self,
+        parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let prepared = requests
+            .into_iter()
+            .map(|request| self.prepare_parallel_read_child(parent_session, request, handler))
+            .collect::<Vec<_>>();
+        let executed = {
+            let shared_handler = SharedTaskEventHandler {
+                inner: Arc::new(Mutex::new(handler)),
+            };
+            let shared_approval = SharedTaskApprovalHandler {
+                inner: Arc::new(Mutex::new(approval_handler)),
+            };
+            join_all(prepared.into_iter().map(|member| {
+                let mut member_handler = shared_handler.clone();
+                let mut member_approval = shared_approval.clone();
+                async move {
+                    match member {
+                        Ok(prepared) => Ok(self
+                            .execute_parallel_read_child(
+                                prepared,
+                                &mut member_handler,
+                                &mut member_approval,
+                            )
+                            .await),
+                        Err(error) => Err(error),
+                    }
+                }
+            }))
+            .await
+        };
+
+        Ok(executed
+            .into_iter()
+            .map(|member| {
+                member.and_then(|executed| {
+                    self.commit_parallel_read_child(parent_session, handler, executed)
+                })
+            })
+            .collect())
+    }
+
     async fn run_synthesis_session<H, A>(
         &self,
         parent_session: &mut Session,
@@ -657,6 +975,61 @@ where
     }
 }
 
+struct SharedTaskEventHandler<'a, H> {
+    inner: Arc<Mutex<&'a mut H>>,
+}
+
+impl<H> Clone for SharedTaskEventHandler<'_, H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<H> EventHandler for SharedTaskEventHandler<'_, H>
+where
+    H: EventHandler + Send,
+{
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task event handler lock poisoned"))?
+            .handle(event)
+    }
+}
+
+struct SharedTaskApprovalHandler<'a, A> {
+    inner: Arc<Mutex<&'a mut A>>,
+}
+
+impl<A> Clone for SharedTaskApprovalHandler<'_, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<A> ApprovalHandler for SharedTaskApprovalHandler<'_, A>
+where
+    A: ApprovalHandler + Send,
+{
+    fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval handler lock poisoned"))?
+            .approve_tool_call(call, spec)
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|handler| handler.approval_is_explicit_user_action())
+            .unwrap_or(false)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_task_child_agent_for_step<H, A>(
     agent: &BoxedAgent,
@@ -693,6 +1066,76 @@ where
                 approval_handler,
             )
             .await
+    }
+}
+
+struct BufferedSupervisorTaskApprovalRouteHandler<'a, A> {
+    inner: &'a mut A,
+    task_request: &'a TaskChildSessionRunRequest,
+    child_session_ref: &'a SessionRef,
+    source_thread_id: &'a AgentThreadId,
+    controls: Vec<ControlEntry>,
+}
+
+impl<A> ApprovalHandler for BufferedSupervisorTaskApprovalRouteHandler<'_, A>
+where
+    A: ApprovalHandler,
+{
+    fn approval_is_explicit_user_action(&self) -> bool {
+        self.inner.approval_is_explicit_user_action()
+    }
+
+    fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
+        let task_route_id = task_route_id_for_call(
+            &self.task_request.task.task_id,
+            &self.task_request.step.step_id,
+            &call.id,
+        )?;
+        let agent_route_id = agent_route_id_for_call(self.source_thread_id, &call.id)?;
+        self.controls.extend([
+            task_approval_route_control(
+                self.task_request,
+                self.child_session_ref,
+                task_route_id.clone(),
+                call,
+                TaskRouteStatus::Requested,
+            ),
+            ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
+                route_id: agent_route_id.clone(),
+                source_thread_id: self.source_thread_id.clone(),
+                target_thread_id: None,
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                status: AgentRouteStatus::Requested,
+            }),
+        ]);
+        let approval = self.inner.approve_tool_call(call, spec)?;
+        let (task_status, agent_status) = match approval {
+            ToolApproval::Approve
+            | ToolApproval::ApproveForSession
+            | ToolApproval::ApproveWithArgs { .. } => {
+                (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved)
+            }
+            ToolApproval::Deny { .. } => (TaskRouteStatus::Rejected, AgentRouteStatus::Rejected),
+        };
+        self.controls.extend([
+            task_approval_route_control(
+                self.task_request,
+                self.child_session_ref,
+                task_route_id,
+                call,
+                task_status,
+            ),
+            ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
+                route_id: agent_route_id,
+                source_thread_id: self.source_thread_id.clone(),
+                target_thread_id: None,
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                status: agent_status,
+            }),
+        ]);
+        Ok(approval)
     }
 }
 
@@ -802,19 +1245,33 @@ fn append_task_approval_route(
     call: &ToolCall,
     status: TaskRouteStatus,
 ) -> Result<()> {
-    session.append_control(ControlEntry::TaskSubagentApprovalRoute(
-        TaskSubagentApprovalRouteEntry {
-            route_id: route_id.clone(),
-            task_id: request.task.task_id.clone(),
-            plan_version: request.plan_version,
-            step_id: request.step.step_id.clone(),
-            role: request.step.role,
-            child_session_ref: child_session_ref.clone(),
-            call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            status,
-        },
+    session.append_control(task_approval_route_control(
+        request,
+        child_session_ref,
+        route_id.clone(),
+        call,
+        status,
     ))
+}
+
+fn task_approval_route_control(
+    request: &TaskChildSessionRunRequest,
+    child_session_ref: &SessionRef,
+    route_id: TaskRouteId,
+    call: &ToolCall,
+    status: TaskRouteStatus,
+) -> ControlEntry {
+    ControlEntry::TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry {
+        route_id,
+        task_id: request.task.task_id.clone(),
+        plan_version: request.plan_version,
+        step_id: request.step.step_id.clone(),
+        role: request.step.role,
+        child_session_ref: child_session_ref.clone(),
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        status,
+    })
 }
 
 pub(super) fn build_child_session(

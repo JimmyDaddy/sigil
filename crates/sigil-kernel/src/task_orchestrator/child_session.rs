@@ -38,6 +38,33 @@ pub trait TaskChildSessionRunner: Send + Sync {
         H: EventHandler + Send,
         A: ApprovalHandler + Send;
 
+    /// Runs one ready read-only batch and returns member outcomes in request order.
+    ///
+    /// The default preserves compatibility by executing members sequentially. Runtime
+    /// implementations that can detach child execution from the parent session should override
+    /// this method and keep parent-session mutation in prepare/commit phases around the concurrent
+    /// child futures.
+    async fn run_child_session_batch<H, A>(
+        &self,
+        parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let mut outputs = Vec::with_capacity(requests.len());
+        for request in requests {
+            outputs.push(
+                self.run_child_session(parent_session, request, handler, approval_handler)
+                    .await,
+            );
+        }
+        Ok(outputs)
+    }
+
     /// Runs final synthesis in an isolated read-only transcript.
     async fn run_synthesis_session<H, A>(
         &self,

@@ -6,6 +6,7 @@ pub struct SequentialTaskOrchestrator<R> {
     child_runner: R,
     execution_backend: Option<Arc<dyn ExecutionBackend>>,
     cancellation: Option<RunCancellationHandle>,
+    max_parallel_read_steps: usize,
 }
 
 impl<R> SequentialTaskOrchestrator<R>
@@ -17,6 +18,7 @@ where
             child_runner,
             execution_backend: None,
             cancellation: None,
+            max_parallel_read_steps: DEFAULT_TASK_READ_ONLY_CONCURRENCY,
         }
     }
 
@@ -36,6 +38,13 @@ where
     #[must_use]
     pub fn with_execution_backend(mut self, execution_backend: Arc<dyn ExecutionBackend>) -> Self {
         self.execution_backend = Some(execution_backend);
+        self
+    }
+
+    /// Sets the maximum number of independent shared-read-only steps launched together.
+    #[must_use]
+    pub fn with_max_parallel_read_steps(mut self, max_parallel_read_steps: usize) -> Self {
+        self.max_parallel_read_steps = max_parallel_read_steps.max(1);
         self
     }
 
@@ -239,6 +248,7 @@ where
                 task,
                 plan_version,
                 &steps,
+                self.max_parallel_read_steps,
                 [
                     &executor_options,
                     &subagent_read_options,
@@ -272,6 +282,183 @@ where
                     steps: step_outputs,
                     status,
                 });
+            }
+
+            let is_parallel_read_batch = runnable.steps.len() > 1
+                && runnable.steps.iter().all(|step| {
+                    matches!(
+                        step.effective_mode(),
+                        TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+                    ) && step.effective_isolation() == TaskIsolationMode::SharedReadOnly
+                });
+            if is_parallel_read_batch {
+                let mut batch_contexts = Vec::with_capacity(runnable.steps.len());
+                let mut batch_requests = Vec::with_capacity(runnable.steps.len());
+                let mut child_effects = Vec::with_capacity(runnable.steps.len());
+                for step in runnable.steps {
+                    let step_options = match step.role {
+                        AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
+                        AgentRole::SubagentRead => subagent_read_options.clone(),
+                        AgentRole::SubagentWrite => subagent_write_options.clone(),
+                    };
+                    append_task_step(
+                        session,
+                        handler,
+                        &request.task_id,
+                        plan_version,
+                        &step,
+                        TaskStepStatus::Running,
+                        None,
+                        None,
+                    )?;
+                    let attempt = begin_participant_attempt(
+                        session,
+                        handler,
+                        &request,
+                        TaskParticipantPurpose::Step,
+                        Some(plan_version),
+                        Some(&step.step_id),
+                        step.role,
+                    )?;
+                    let prompt = if step.role == AgentRole::Executor {
+                        executor_step_prompt(
+                            &request.objective,
+                            plan_version,
+                            &step,
+                            guidance.as_deref(),
+                        )
+                    } else {
+                        subagent_step_prompt(
+                            &request.objective,
+                            plan_version,
+                            &step,
+                            guidance.as_deref(),
+                        )
+                    };
+                    let child_input = self.bind_cancellation(
+                        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                            prompt,
+                        )])
+                        .with_run_purpose(AgentRunPurpose::TaskParticipant(
+                            TaskParticipantContext {
+                                task_id: request.task_id.clone(),
+                                plan_version,
+                                step_id: step.step_id.clone(),
+                                attempt_id: attempt.attempt_id.clone(),
+                            },
+                        ))
+                        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
+                    );
+                    child_effects.push(
+                        self.cancellation
+                            .as_ref()
+                            .map(|handle| {
+                                handle
+                                    .begin_effect(RunEffectClass::Forward, RunEffectKind::ChildWork)
+                            })
+                            .transpose()?,
+                    );
+                    batch_requests.push(TaskChildSessionRunRequest {
+                        task: request.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        child_session_ref: attempt.child_session_ref.clone(),
+                        plan_version,
+                        step: step.clone(),
+                        child_input,
+                        options: step_options.clone(),
+                        changeset_only_base_snapshot_id: None,
+                    });
+                    batch_contexts.push((step, attempt, step_options));
+                }
+
+                let batch_results = self
+                    .child_runner
+                    .run_child_session_batch(session, batch_requests, handler, approval_handler)
+                    .await?;
+                drop(child_effects);
+                if batch_results.len() != batch_contexts.len() {
+                    bail!(
+                        "task child batch returned {} results for {} requests",
+                        batch_results.len(),
+                        batch_contexts.len()
+                    );
+                }
+
+                let mut first_problem = None;
+                for ((step, attempt, step_options), child_result) in
+                    batch_contexts.into_iter().zip(batch_results)
+                {
+                    let step_output = match child_result {
+                        Ok(output) => {
+                            validate_participant_output_identity(
+                                &attempt,
+                                &output.attempt_id,
+                                &output.child_session_ref,
+                            )?;
+                            self.commit_step_output(
+                                session,
+                                handler,
+                                &request,
+                                plan_version,
+                                &steps,
+                                &step,
+                                &attempt,
+                                &step_options,
+                                None,
+                                StepRunOutput {
+                                    final_text: output.final_text,
+                                    outcome: output.outcome,
+                                    final_answer_ref: output.final_answer_ref,
+                                    artifact_refs: output.artifact_refs,
+                                    changeset_proposal: output.changeset_proposal,
+                                    changeset_only_after_snapshot_id: output
+                                        .changeset_only_after_snapshot_id,
+                                },
+                            )
+                            .await?
+                        }
+                        Err(error) => {
+                            let step_output = self
+                                .commit_step_failure(
+                                    session,
+                                    handler,
+                                    &request,
+                                    plan_version,
+                                    &steps,
+                                    &step,
+                                    &attempt,
+                                    &step_options,
+                                    None,
+                                    &error,
+                                )
+                                .await?;
+                            if first_problem.is_none() {
+                                first_problem = Some((
+                                    TaskRunStatus::Failed,
+                                    format!("step {} failed: {error:#}", step.step_id.as_str()),
+                                ));
+                            }
+                            step_output
+                        }
+                    };
+                    if step_output.status != TaskStepStatus::Completed && first_problem.is_none() {
+                        first_problem = Some((
+                            task_status_from_step_status(step_output.status),
+                            step_terminal_reason(&step.step_id, step_output.status),
+                        ));
+                    }
+                    step_outputs.push(step_output);
+                }
+                if let Some((status, reason)) = first_problem {
+                    append_task_run(session, handler, &request, status, Some(reason))?;
+                    return Ok(SequentialTaskRunOutput {
+                        task_id: request.task_id,
+                        plan_version,
+                        steps: step_outputs,
+                        status,
+                    });
+                }
+                continue;
             }
 
             for step in runnable.steps {
@@ -323,46 +510,21 @@ where
                 let output = match step_run_result {
                     Ok(output) => output,
                     Err(error) => {
-                        release_task_write_lease(
-                            session,
-                            handler,
-                            write_lease_id,
-                            WriteLeaseReleaseStatus::Interrupted,
-                        )?;
-                        append_participant_terminal(
-                            session,
-                            handler,
-                            &attempt,
-                            TaskParticipantAttemptStatus::Failed,
-                            Some(format!("step failed: {error:#}")),
-                        )?;
-                        let readiness = task_step_failure_readiness_nonblocking(
-                            session,
-                            &request,
-                            &step,
-                            &step_options,
-                        )
-                        .await?;
-                        append_task_step(
-                            session,
-                            handler,
-                            &request.task_id,
-                            plan_version,
-                            &step,
-                            TaskStepStatus::Failed,
-                            None,
-                            Some(format!("{error:#}")),
-                        )?;
-                        append_cancelled_dependent_steps(
-                            session,
-                            handler,
-                            &request.task_id,
-                            plan_version,
-                            &steps,
-                            &step.step_id,
-                            TaskStepStatus::Failed,
-                        )?;
-                        append_task_readiness(session, handler, readiness)?;
+                        let step_output = self
+                            .commit_step_failure(
+                                session,
+                                handler,
+                                &request,
+                                plan_version,
+                                &steps,
+                                &step,
+                                &attempt,
+                                &step_options,
+                                write_lease_id,
+                                &error,
+                            )
+                            .await?;
+                        step_outputs.push(step_output);
                         append_task_run(
                             session,
                             handler,
@@ -378,104 +540,22 @@ where
                         });
                     }
                 };
-                let initial_status = step_status_from_outcome(&output);
-                let participant_status = participant_status_from_step_status(initial_status);
-                let participant_result = participant_result_entry(
-                    &attempt,
-                    &output.final_text,
-                    output.final_answer_ref.clone(),
-                    output.artifact_refs.clone(),
-                    output.outcome.changed_files.clone(),
-                    Vec::new(),
-                )?;
-                append_participant_result_and_terminal(
-                    session,
-                    handler,
-                    &attempt,
-                    participant_result,
-                    participant_status,
-                    step_reason_from_output(initial_status, &output),
-                )?;
-                release_task_write_lease(
-                    session,
-                    handler,
-                    write_lease_id,
-                    write_lease_release_status_from_step_status(initial_status),
-                )?;
-                let mut readiness = task_step_readiness_nonblocking(
-                    session,
-                    &request,
-                    &step,
-                    initial_status,
-                    &output,
-                    &step_options,
-                )
-                .await?;
-                if initial_status == TaskStepStatus::Completed
-                    && task_step_auto_run_policy(session, &request, &step, &step_options)?
-                        == VerificationAutoRunPolicy::TrustedOnly
-                    && run_task_step_verification_checks(
+                let step_output = self
+                    .commit_step_output(
                         session,
                         handler,
-                        self.execution_backend.as_deref(),
                         &request,
-                        &step,
-                        &step_options,
-                        &readiness,
-                    )
-                    .await?
-                {
-                    readiness = task_step_readiness_nonblocking(
-                        session,
-                        &request,
-                        &step,
-                        initial_status,
-                        &output,
-                        &step_options,
-                    )
-                    .await?;
-                }
-                let status = step_status_after_readiness(initial_status, &readiness);
-                if status != initial_status {
-                    readiness = task_step_readiness_nonblocking(
-                        session,
-                        &request,
-                        &step,
-                        status,
-                        &output,
-                        &step_options,
-                    )
-                    .await?;
-                }
-                append_task_step(
-                    session,
-                    handler,
-                    &request.task_id,
-                    plan_version,
-                    &step,
-                    status,
-                    Some(bounded_task_participant_summary(&output.final_text)),
-                    step_reason_from_output(status, &output),
-                )?;
-                if cancels_dependent_steps(status) {
-                    append_cancelled_dependent_steps(
-                        session,
-                        handler,
-                        &request.task_id,
                         plan_version,
                         &steps,
-                        &step.step_id,
-                        status,
-                    )?;
-                }
-                append_task_readiness(session, handler, readiness.clone())?;
-                step_outputs.push(SequentialTaskStepOutput {
-                    step_id: step.step_id.clone(),
-                    status,
-                    verification_verdict: readiness.evaluation.verification_verdict,
-                    visible_state: readiness.evaluation.visible_state,
-                    outcome: output.outcome,
-                });
+                        &step,
+                        &attempt,
+                        &step_options,
+                        write_lease_id,
+                        output,
+                    )
+                    .await?;
+                let status = step_output.status;
+                step_outputs.push(step_output);
                 if status != TaskStepStatus::Completed {
                     let task_status = task_status_from_step_status(status);
                     append_task_run(
@@ -500,6 +580,184 @@ where
             request.task_id.as_str(),
             max_scheduler_batches
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_step_failure<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        request: &SequentialTaskRequest,
+        plan_version: u32,
+        plan_steps: &[TaskStepSpec],
+        step: &TaskStepSpec,
+        attempt: &TaskParticipantAttemptEntry,
+        step_options: &AgentRunOptions,
+        write_lease_id: Option<WriteLeaseId>,
+        error: &anyhow::Error,
+    ) -> Result<SequentialTaskStepOutput>
+    where
+        H: EventHandler + Send,
+    {
+        release_task_write_lease(
+            session,
+            handler,
+            write_lease_id,
+            WriteLeaseReleaseStatus::Interrupted,
+        )?;
+        append_participant_terminal(
+            session,
+            handler,
+            attempt,
+            TaskParticipantAttemptStatus::Failed,
+            Some(format!("step failed: {error:#}")),
+        )?;
+        let readiness =
+            task_step_failure_readiness_nonblocking(session, request, step, step_options).await?;
+        append_task_step(
+            session,
+            handler,
+            &request.task_id,
+            plan_version,
+            step,
+            TaskStepStatus::Failed,
+            None,
+            Some(format!("{error:#}")),
+        )?;
+        append_cancelled_dependent_steps(
+            session,
+            handler,
+            &request.task_id,
+            plan_version,
+            plan_steps,
+            &step.step_id,
+            TaskStepStatus::Failed,
+        )?;
+        append_task_readiness(session, handler, readiness.clone())?;
+        Ok(SequentialTaskStepOutput {
+            step_id: step.step_id.clone(),
+            status: TaskStepStatus::Failed,
+            verification_verdict: readiness.evaluation.verification_verdict,
+            visible_state: readiness.evaluation.visible_state,
+            outcome: AgentRunOutcome::default(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_step_output<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        request: &SequentialTaskRequest,
+        plan_version: u32,
+        plan_steps: &[TaskStepSpec],
+        step: &TaskStepSpec,
+        attempt: &TaskParticipantAttemptEntry,
+        step_options: &AgentRunOptions,
+        write_lease_id: Option<WriteLeaseId>,
+        output: StepRunOutput,
+    ) -> Result<SequentialTaskStepOutput>
+    where
+        H: EventHandler + Send,
+    {
+        let initial_status = step_status_from_outcome(&output);
+        let participant_status = participant_status_from_step_status(initial_status);
+        let participant_result = participant_result_entry(
+            attempt,
+            &output.final_text,
+            output.final_answer_ref.clone(),
+            output.artifact_refs.clone(),
+            output.outcome.changed_files.clone(),
+            Vec::new(),
+        )?;
+        append_participant_result_and_terminal(
+            session,
+            handler,
+            attempt,
+            participant_result,
+            participant_status,
+            step_reason_from_output(initial_status, &output),
+        )?;
+        release_task_write_lease(
+            session,
+            handler,
+            write_lease_id,
+            write_lease_release_status_from_step_status(initial_status),
+        )?;
+        let mut readiness = task_step_readiness_nonblocking(
+            session,
+            request,
+            step,
+            initial_status,
+            &output,
+            step_options,
+        )
+        .await?;
+        if initial_status == TaskStepStatus::Completed
+            && task_step_auto_run_policy(session, request, step, step_options)?
+                == VerificationAutoRunPolicy::TrustedOnly
+            && run_task_step_verification_checks(
+                session,
+                handler,
+                self.execution_backend.as_deref(),
+                request,
+                step,
+                step_options,
+                &readiness,
+            )
+            .await?
+        {
+            readiness = task_step_readiness_nonblocking(
+                session,
+                request,
+                step,
+                initial_status,
+                &output,
+                step_options,
+            )
+            .await?;
+        }
+        let status = step_status_after_readiness(initial_status, &readiness);
+        if status != initial_status {
+            readiness = task_step_readiness_nonblocking(
+                session,
+                request,
+                step,
+                status,
+                &output,
+                step_options,
+            )
+            .await?;
+        }
+        append_task_step(
+            session,
+            handler,
+            &request.task_id,
+            plan_version,
+            step,
+            status,
+            Some(bounded_task_participant_summary(&output.final_text)),
+            step_reason_from_output(status, &output),
+        )?;
+        if cancels_dependent_steps(status) {
+            append_cancelled_dependent_steps(
+                session,
+                handler,
+                &request.task_id,
+                plan_version,
+                plan_steps,
+                &step.step_id,
+                status,
+            )?;
+        }
+        append_task_readiness(session, handler, readiness.clone())?;
+        Ok(SequentialTaskStepOutput {
+            step_id: step.step_id.clone(),
+            status,
+            verification_verdict: readiness.evaluation.verification_verdict,
+            visible_state: readiness.evaluation.visible_state,
+            outcome: output.outcome,
+        })
     }
 
     /// Runs one explicit child-session task step without invoking the planner.

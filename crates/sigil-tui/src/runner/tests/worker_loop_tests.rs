@@ -15,10 +15,23 @@ use crate::runner::{
     protocol::WorkerMessage,
     worker_loop::{
         VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
-        chat_agent_run_input_with_repo_context, clean_mutation_artifacts, delete_mutation_artifact,
+        chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
+        configured_max_parallel_read_steps, delete_mutation_artifact,
         materialize_task_verification_config, promote_workspace_verification_check,
     },
 };
+
+#[test]
+fn task_read_concurrency_uses_config_and_clamps_zero() {
+    let mut config = TaskConfig::default();
+    assert_eq!(configured_max_parallel_read_steps(&config), 4);
+
+    config.max_parallel_read_steps = 2;
+    assert_eq!(configured_max_parallel_read_steps(&config), 2);
+
+    config.max_parallel_read_steps = 0;
+    assert_eq!(configured_max_parallel_read_steps(&config), 1);
+}
 
 #[tokio::test]
 async fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {

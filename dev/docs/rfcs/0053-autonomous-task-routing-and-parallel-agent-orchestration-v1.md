@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b implemented；O5-O8 deferred
+状态：accepted / O0-O4b3b、O5a implemented；O5b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -30,8 +30,8 @@ agent harness 有明显差距：
 - ordinary chat 的显式 delegation hard gate 在 kernel 有类型和测试，但 TUI 生产输入没有稳定绑定。
 - O4b3a 之前 planner 不能先声明一组受控 Explore probes，再利用并行调研结果形成计划；当前
   TUI Task planner 已接入一次性的 host-owned read-only discovery batch。
-- task scheduler 能选出 `read_only_batch`，runner 却仍对 batch 中的步骤逐项 `.await`。
-- `TaskChildSessionRunner` 持有 parent `Session`、handler 和 approval handler 的可变借用，接口本身阻止并发。
+- O5a 之前 task scheduler 虽能选出 `read_only_batch`，runner 仍对 batch 中的步骤逐项 `.await`；当前 shared-read-only participant 已进入真实并发执行。
+- `TaskChildSessionRunner` 的单成员兼容接口仍接收 parent `Session`、handler 和 approval handler；O5a batch override 已把 participant future 与 parent Session 分离，并把 parent mutation 收口到 prepare/commit。
 - 同一模型轮次的 tool calls 顺序执行；`join_before_final` agent call 会在第一个 child 上阻塞后续 fan-out。
 - agent completion 仍围绕 `wait_agent` 和轮询心智，完成后还可能要求模型再次调用 wait，浪费模型轮次。
 - child 权限组合没有被证明是 parent、role、profile 与 invocation policy 的单调收窄。
@@ -507,7 +507,7 @@ min(
 )
 ```
 
-当前 hard-coded read concurrency 应改成 config input。
+O5a 已把 read concurrency 改为 `[task].max_parallel_read_steps` config input，默认值为 `4`。
 
 ### 10.3 Projection
 
@@ -942,7 +942,8 @@ allow_write_subagents = true
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b3a 和 O4b3b 已完成；Task DAG 并发与完整诊断通道仍属于 O5-O8。
+本 checkpoint 表示 O4b3a、O4b3b 和 O5a 已完成；provider-aware backpressure、
+完整 active-step 产品投影与诊断通道仍属于 O5b-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1072,11 +1073,26 @@ continuation evidence fail closed 地收口未知运行；缺失 live handle 的
 
 ### O5: True Task read concurrency
 
-- 拆 `TaskChildSessionRunner` 为 prepare/execute/commit。
-- coordinator actions + runtime launcher；parent Session 保持单写。
-- `active_steps` projection 和 configurable concurrency。
-- 独立失败继续，依赖步骤阻断；逆序 completion 稳定合并。
-- provider cooldown/backpressure。
+O5a 已完成：
+
+- `TaskChildSessionRunner::run_child_session_batch` 提供兼容串行默认值，runtime override
+  把 shared-read-only participant 拆为 prepare/execute/commit；participant future 不接收、
+  捕获或修改 parent Session。
+- coordinator 在 provider dispatch 前按 plan order 持久化全部 Running/attempt，runtime 并发
+  execute，随后由 parent single writer 按 request order 提交 terminal/result。
+- `[task].max_parallel_read_steps` 默认 `4`，TUI task runtime 已接线；scheduler 按配置截断
+  ready read batch，并继续服从 supervisor active-child budget。
+- 独立 member failure 不取消同批 sibling；同批终态全部提交后，失败步骤的 transitive
+  dependents 被阻断。barrier 与逆序 completion 测试证明真实 overlap 和稳定 parent commit。
+- 并发 child 共用的同步 approval decision 暂时通过 mutex 串行化；child session 内的真实
+  approval/tool audit 先持久化，parent route summary 缓冲到稳定 commit。O7 再补实时并行审批归因。
+
+O5b 剩余：
+
+- 提供完整 `active_steps` 产品投影与 completion-arrival 进度。
+- provider route cooldown/backpressure，以及 whole-batch capacity/preflight，避免容量压力下
+  出现部分 admission 或 fan-out retry storm。
+- 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 
 退出条件：barrier 测试证明 overlap；无 parent mutable borrow 跨 child await；429 不产生 fan-out storm。
 

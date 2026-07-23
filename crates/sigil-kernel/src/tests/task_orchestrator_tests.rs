@@ -435,6 +435,61 @@ impl TaskChildSessionRunner for WrongIdentityChildRunner {
     }
 }
 
+struct MixedReadBatchChildRunner;
+
+#[async_trait]
+impl TaskChildSessionRunner for MixedReadBatchChildRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(successful_read_child_output(request))
+    }
+
+    async fn run_child_session_batch<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(requests
+            .into_iter()
+            .map(|request| {
+                if request.step.step_id.as_str() == "read_a" {
+                    Err(anyhow::anyhow!("intentional read_a failure"))
+                } else {
+                    Ok(successful_read_child_output(request))
+                }
+            })
+            .collect())
+    }
+}
+
+fn successful_read_child_output(request: TaskChildSessionRunRequest) -> TaskChildSessionRunOutput {
+    TaskChildSessionRunOutput {
+        attempt_id: request.attempt_id,
+        final_text: format!("{} completed", request.step.step_id.as_str()),
+        outcome: crate::AgentRunOutcome::default(),
+        child_session_ref: request.child_session_ref,
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
+    }
+}
+
 #[test]
 fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     let prompt = planner_prompt("review implementation");
@@ -1760,7 +1815,7 @@ async fn continue_run_pauses_when_active_workspace_write_lease_defers_ready_step
 }
 
 #[tokio::test]
-async fn ready_read_batch_is_currently_serial_and_defers_dependent_write() -> Result<()> {
+async fn ready_read_batch_starts_together_and_defers_dependent_write() -> Result<()> {
     let read_requests = Arc::new(Mutex::new(Vec::new()));
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let orchestrator = test_orchestrator(
@@ -1884,8 +1939,8 @@ async fn ready_read_batch_is_currently_serial_and_defers_dependent_write() -> Re
     assert!(write_lease_acquired > read_a_completed);
     assert!(write_lease_acquired > read_b_completed);
     assert!(
-        read_a_completed < read_b_running,
-        "ready read-only steps are selected as a batch but still awaited serially"
+        read_b_running < read_a_completed,
+        "all ready read-only steps should enter Running before batch execution completes"
     );
     let lease_projection = session.write_isolation_projection();
     assert_eq!(lease_projection.leases.len(), 1);
@@ -1895,6 +1950,95 @@ async fn ready_read_batch_is_currently_serial_and_defers_dependent_write() -> Re
             .values()
             .all(|lease| !lease.is_active())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_batch_commits_independent_success_before_blocking_failed_dependents() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(MixedReadBatchChildRunner);
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("read_a")?,
+                title: "read A".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("read_b")?,
+                title: "read B".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("write")?,
+                title: "write".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: vec![TaskStepId::new("read_a")?],
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            },
+        ],
+    )?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "preserve independent read results".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Failed);
+    assert_eq!(output.steps.len(), 2);
+    assert_eq!(output.steps[0].step_id.as_str(), "read_a");
+    assert_eq!(output.steps[0].status, TaskStepStatus::Failed);
+    assert_eq!(output.steps[1].step_id.as_str(), "read_b");
+    assert_eq!(output.steps[1].status, TaskStepStatus::Completed);
+    let entries = session.entries();
+    let read_a_failed = task_step_entry_index(entries, "read_a", TaskStepStatus::Failed)
+        .expect("read_a should fail");
+    let read_b_completed = task_step_entry_index(entries, "read_b", TaskStepStatus::Completed)
+        .expect("read_b should still commit");
+    assert!(
+        read_a_failed < read_b_completed,
+        "parent commits should follow stable plan order"
+    );
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.step_id.as_str() == "write"
+                    && step.status == TaskStepStatus::Cancelled
+                    && step.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("dependency read_a ended with failed")
+                    })
+        )
+    }));
     Ok(())
 }
 

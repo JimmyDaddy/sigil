@@ -94,6 +94,13 @@ struct CountingDiscoveryProvider {
     starts: Arc<AtomicUsize>,
 }
 
+struct ParallelTaskChildProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+}
+
 #[async_trait]
 impl Provider for TextProvider {
     fn name(&self) -> &str {
@@ -110,6 +117,49 @@ impl Provider for TextProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta(self.text.to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelTaskChildProvider {
+    fn name(&self) -> &str {
+        "parallel-task-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let step_id = ["read_a", "read_b"]
+            .into_iter()
+            .find(|step_id| {
+                request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(step_id))
+                })
+            })
+            .ok_or_else(|| anyhow!("parallel child request did not identify a test step"))?;
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.barrier.wait().await;
+        if step_id == "read_a" {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        self.completion_order
+            .lock()
+            .expect("completion order should not be poisoned")
+            .push(step_id.to_owned());
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("parallel read done".to_owned())),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -2525,6 +2575,114 @@ async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()
     assert!(!handler.events.iter().any(|event| {
         matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning"))
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(ParallelTaskChildProvider {
+                barrier,
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                completion_order: Arc::clone(&completion_order),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect in parallel".to_owned(),
+    };
+    let requests = ["read_a", "read_b"]
+        .into_iter()
+        .map(|step_id| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: step(step_id)?,
+                attempt_id: participant_attempt_id_for(step_id)?,
+                child_session_ref: participant_session_ref_for(step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_attempts = requests
+        .iter()
+        .map(|request| request.attempt_id.clone())
+        .collect::<Vec<_>>();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runner.run_child_session_batch(&mut session, requests, &mut handler, &mut approval),
+    )
+    .await
+    .expect("parallel provider barrier should complete")?;
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *completion_order
+            .lock()
+            .expect("completion order should not be poisoned"),
+        vec!["read_b", "read_a"]
+    );
+    assert_eq!(
+        outputs
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|output| output.attempt_id)
+            .collect::<Vec<_>>(),
+        expected_attempts
+    );
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(projection.threads.len(), 2);
+    assert!(
+        projection
+            .threads
+            .values()
+            .all(|thread| thread.status == sigil_kernel::AgentThreadStatus::Completed)
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskChildSession(child))
+                    if child.status == TaskChildSessionStatus::Completed =>
+                {
+                    Some(child.step_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["read_a", "read_b"],
+        "parent terminal commits should remain in stable request order"
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }
 

@@ -1473,6 +1473,8 @@ pub struct TaskConfig {
     pub max_replans: usize,
     #[serde(default = "default_max_subagents")]
     pub max_subagents: usize,
+    #[serde(default = "default_max_parallel_read_steps")]
+    pub max_parallel_read_steps: usize,
     #[serde(default = "default_max_planning_research_agents")]
     pub max_planning_research_agents: usize,
     #[serde(default = "default_allow_write_subagents")]
@@ -1494,6 +1496,7 @@ impl Default for TaskConfig {
             max_plan_steps: default_max_plan_steps(),
             max_replans: default_max_replans(),
             max_subagents: default_max_subagents(),
+            max_parallel_read_steps: default_max_parallel_read_steps(),
             max_planning_research_agents: default_max_planning_research_agents(),
             allow_write_subagents: default_allow_write_subagents(),
             multi_agent_mode: MultiAgentMode::default(),
@@ -2379,6 +2382,10 @@ fn default_max_replans() -> usize {
 
 fn default_max_subagents() -> usize {
     8
+}
+
+fn default_max_parallel_read_steps() -> usize {
+    4
 }
 
 fn default_max_planning_research_agents() -> usize {

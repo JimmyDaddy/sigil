@@ -37,6 +37,7 @@ pub(super) fn runnable_steps_for_continue(
     task: &TaskRunProjection,
     plan_version: u32,
     plan_steps: &[TaskStepSpec],
+    max_parallel_read_steps: usize,
     step_options: [&AgentRunOptions; 3],
 ) -> Result<TaskRunnableSelection> {
     let Some(plan) = task.plans.get(&plan_version) else {
@@ -58,7 +59,7 @@ pub(super) fn runnable_steps_for_continue(
     let active_write_lease = has_active_task_write_lease(session, step_options)?;
     let queue = graph.ready_queue_with_active_write_lease(
         &task.steps,
-        TaskReadyQueueOptions::new(DEFAULT_TASK_READ_ONLY_CONCURRENCY),
+        TaskReadyQueueOptions::new(max_parallel_read_steps.max(1)),
         active_write_lease,
     );
     let step_ids = if !queue.read_only_batch.is_empty() {
@@ -115,7 +116,7 @@ pub(super) fn runnable_steps_for_continue(
     })
 }
 
-const DEFAULT_TASK_READ_ONLY_CONCURRENCY: usize = 4;
+pub(super) const DEFAULT_TASK_READ_ONLY_CONCURRENCY: usize = 4;
 
 pub(super) fn task_ready_deferred_reason_label(reason: TaskReadyDeferredReason) -> &'static str {
     match reason {

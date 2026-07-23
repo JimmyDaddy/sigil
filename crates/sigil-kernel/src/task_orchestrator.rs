@@ -115,10 +115,10 @@ use readiness::{
 #[path = "tests/task_orchestrator_child_session_test_support.rs"]
 mod task_orchestrator_child_session_test_support;
 use scheduler::{
-    append_cancelled_dependent_steps, cancels_dependent_steps, latest_executable_plan,
-    run_status_from_step_status, runnable_steps_for_continue, step_reason_from_output,
-    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
-    task_status_from_step_status,
+    DEFAULT_TASK_READ_ONLY_CONCURRENCY, append_cancelled_dependent_steps, cancels_dependent_steps,
+    latest_executable_plan, run_status_from_step_status, runnable_steps_for_continue,
+    step_reason_from_output, step_status_after_readiness, step_status_from_outcome,
+    step_terminal_reason, task_status_from_step_status,
 };
 use shared::{
     append_task_control, append_task_control_with_event, append_task_run, append_task_step,
