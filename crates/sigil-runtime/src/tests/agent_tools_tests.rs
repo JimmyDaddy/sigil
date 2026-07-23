@@ -5,12 +5,12 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use fs2::FileExt;
 use futures::{Stream, stream};
@@ -23,11 +23,12 @@ use sigil_kernel::{
     InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode,
     PermissionConfig, PermissionEvaluationContext, PermissionMode, PermissionPolicyChain,
     PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, TaskId,
-    TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
-    ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
+    SessionLogEntry, TaskId, TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -36,7 +37,7 @@ use super::{
     LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
     SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
     register_agent_tools, register_agent_tools_with_registry_and_mode,
-    register_agent_tools_with_workspace_and_entries,
+    register_agent_tools_with_workspace_and_entries, tool_batch_allows_host_join,
 };
 
 /// Existing runtime tests directly exercise user-directed spawn calls. Keep that authority
@@ -136,6 +137,21 @@ fn registry_with_contract(
 #[derive(Default)]
 struct RecordingEventHandler {
     events: Vec<RunEvent>,
+}
+
+#[derive(Default)]
+struct FailFirstAgentResultEventHandler {
+    failed: bool,
+}
+
+#[derive(Default)]
+struct FailFirstSpawnToolResultEventHandler {
+    failed: bool,
+}
+
+struct CancelAfterJoinStartedEventHandler {
+    cancel: Arc<dyn Fn() + Send + Sync>,
+    fired: bool,
 }
 
 fn permission_test_spec(access: ToolAccess) -> ToolSpec {
@@ -554,6 +570,52 @@ impl EventHandler for RecordingEventHandler {
     }
 }
 
+impl EventHandler for FailFirstAgentResultEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if !self.failed
+            && matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadResultRecorded(_))
+            )
+        {
+            self.failed = true;
+            return Err(anyhow!("injected first joined-result event failure"));
+        }
+        Ok(())
+    }
+}
+
+impl EventHandler for FailFirstSpawnToolResultEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if !self.failed
+            && matches!(
+                event,
+                RunEvent::ToolResult(ref result) if result.call_id == "call-parallel-a"
+            )
+        {
+            self.failed = true;
+            return Err(anyhow!("injected spawn tool-result event failure"));
+        }
+        Ok(())
+    }
+}
+
+impl EventHandler for CancelAfterJoinStartedEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if !self.fired
+            && matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentResultContinuation(ref entry))
+                    if entry.status == sigil_kernel::AgentResultContinuationStatus::Started
+            )
+        {
+            self.fired = true;
+            (self.cancel)();
+        }
+        Ok(())
+    }
+}
+
 fn assert_child_transcript_events_not_forwarded(handler: &RecordingEventHandler) {
     assert!(
         handler.events.iter().all(|event| {
@@ -685,6 +747,46 @@ impl Provider for SlowTextProvider {
     }
 }
 
+struct ParallelBarrierChildProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+struct ActiveProviderGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveProviderGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelBarrierChildProvider {
+    fn name(&self) -> &str {
+        "parallel-barrier-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        let _active_guard = ActiveProviderGuard(Arc::clone(&self.active));
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.barrier.wait().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta("parallel child done".to_owned()),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
 struct DelayedFollowupProvider {
     delay: Duration,
     observed_followup: Arc<Mutex<bool>>,
@@ -783,6 +885,10 @@ impl Provider for RecordingChildProvider {
 
 struct ParentSpawnProvider;
 
+struct ParallelParentProvider {
+    observed_join_context: Arc<Mutex<Option<String>>>,
+}
+
 type ProviderChunkStream = Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>;
 
 fn request_contains_user_text(request: &CompletionRequest, needle: &str) -> bool {
@@ -824,6 +930,12 @@ fn parent_agent_contract_response(
     read_call_id: &str,
     final_text: &str,
 ) -> Result<Option<ProviderChunkStream>> {
+    if request_contains_user_text(request, "agent_join_results") {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta(final_text.to_owned()),
+            ProviderChunk::Done,
+        ])));
+    }
     if request_contains_tool_result(request, read_call_id) {
         return Ok(Some(boxed_provider_chunks(vec![
             ProviderChunk::TextDelta(final_text.to_owned()),
@@ -964,6 +1076,57 @@ impl Provider for ParentSpawnProvider {
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
                 args_json: args,
             }),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelParentProvider {
+    fn name(&self) -> &str {
+        "parallel-parent"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(context) = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::User))
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("agent_join_results"))
+        {
+            *self
+                .observed_join_context
+                .lock()
+                .expect("join context observation lock should not be poisoned") =
+                Some(context.to_owned());
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::TextDelta("parallel parent final".to_owned()),
+                ProviderChunk::Done,
+            ]));
+        }
+
+        let spawn = |call_id: &str, objective: &str| ToolCall {
+            id: call_id.to_owned(),
+            name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+            args_json: json!({
+                "profile_id": "explore",
+                "objective": objective,
+                "prompt": objective,
+                "mode": "join_before_final"
+            })
+            .to_string(),
+        };
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(spawn("call-parallel-a", "inspect kernel")),
+            ProviderChunk::ToolCallComplete(spawn("call-parallel-b", "inspect runtime")),
             ProviderChunk::Done,
         ]))
     }
@@ -1196,6 +1359,27 @@ impl AgentToolProviderFactory for SlowTextProviderFactory {
     }
 }
 
+struct ParallelBarrierProviderFactory {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+impl AgentToolProviderFactory for ParallelBarrierProviderFactory {
+    fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(ParallelBarrierChildProvider {
+            barrier: Arc::clone(&self.barrier),
+            active: Arc::clone(&self.active),
+            max_active: Arc::clone(&self.max_active),
+        }))
+    }
+}
+
 struct DelayedFollowupProviderFactory {
     observed_followup: Arc<Mutex<bool>>,
 }
@@ -1268,6 +1452,10 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     assert!(spec.description.contains("must delegate"));
     assert!(spec.description.contains("mode=background"));
     assert!(spec.description.contains("mode=join_before_final when"));
+    assert!(
+        spec.description
+            .contains("host joins safe same-batch children")
+    );
     assert!(spec.description.contains("only when the user"));
     assert!(spec.description.contains("comprehensive review"));
     assert!(spec.description.contains("worker:"));
@@ -1346,6 +1534,46 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     );
     assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
     Ok(())
+}
+
+#[test]
+fn host_join_batch_accepts_only_owned_join_before_final_spawn_calls() {
+    let spawn = |call_id: &str, mode: &str| ToolCall {
+        id: call_id.to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+            "mode": mode,
+        })
+        .to_string(),
+    };
+    let custom_agent_write = ToolCall {
+        id: "custom-write".to_owned(),
+        name: "custom_agent_write".to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let invalid_spawn = ToolCall {
+        id: "invalid".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: "{}".to_owned(),
+    };
+
+    assert!(tool_batch_allows_host_join(&[
+        spawn("a", "join_before_final"),
+        spawn("b", "join_before_final"),
+    ]));
+    assert!(!tool_batch_allows_host_join(&[
+        spawn("a", "join_before_final"),
+        custom_agent_write,
+    ]));
+    assert!(!tool_batch_allows_host_join(&[
+        spawn("a", "join_before_final"),
+        spawn("b", "background"),
+    ]));
+    assert!(!tool_batch_allows_host_join(&[invalid_spawn]));
+    assert!(!tool_batch_allows_host_join(&[]));
 }
 
 #[test]
@@ -1966,11 +2194,13 @@ async fn host_authorized_chat_subagent_prompt_spawns_child() -> Result<()> {
     let mut session = Session::new("parent-spawn", "mock-model");
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
 
     let output = agent
         .run_with_approval_input_and_agent_delegate(
             &mut session,
-            AgentRunInput::user("use a sub agent to inspect runtime"),
+            AgentRunInput::user("use a sub agent to inspect runtime")
+                .with_cancellation(cancellation_owner.handle()),
             {
                 let mut options = run_options(std::env::temp_dir());
                 options.max_turns = Some(12);
@@ -1996,34 +2226,519 @@ async fn host_authorized_chat_subagent_prompt_spawns_child() -> Result<()> {
             .as_ref()
             .is_some_and(|result| result.summary == "child summary only")
     );
-    assert!(session.messages().iter().any(|message| {
-        matches!(message.role, MessageRole::Tool)
-            && message.tool_call_id.as_deref() == Some("call-spawn-1")
-            && message.content.as_deref().is_some_and(|content| {
-                content.contains(r#""status":"running""#)
-                    && content.contains(r#""display_name":"runtime review""#)
-            })
-    }));
-    assert!(session.messages().iter().any(|message| {
-        matches!(message.role, MessageRole::Tool)
-            && message.tool_call_id.as_deref() == Some("call-read-spawn-1")
-            && message.content.as_deref().is_some_and(|content| {
-                content.contains("text_delivery")
-                    && content.contains("transient_context")
-                    && !content.contains("child summary only")
-            })
+    let spawn_content = session
+        .messages()
+        .iter()
+        .find(|message| {
+            matches!(message.role, MessageRole::Tool)
+                && message.tool_call_id.as_deref() == Some("call-spawn-1")
+        })
+        .and_then(|message| message.content.clone())
+        .expect("spawn tool result should be present");
+    let spawn_payload: serde_json::Value = serde_json::from_str(&spawn_content)?;
+    assert_eq!(spawn_payload["meta"]["details"]["status"], "running");
+    assert_eq!(
+        spawn_payload["meta"]["details"]["host_join_registered"],
+        true
+    );
+    assert_eq!(output.outcome.tool_call_ids, vec!["call-spawn-1"]);
+    assert!(session.messages().iter().all(|message| {
+        message.tool_call_id.as_deref() != Some("call-wait-spawn-1")
+            && message.tool_call_id.as_deref() != Some("call-read-spawn-1")
     }));
     let projection = session.agent_thread_state_projection();
     let thread = projection.latest_thread().expect("child agent projected");
-    assert!(thread.result_delivered);
-    assert!(thread.result_fully_delivered);
+    assert!(!thread.result_delivered);
+    assert!(!thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 0);
+    assert_eq!(thread.result_delivery_call_ids, Vec::<String>::new());
     assert_eq!(
-        thread.result_delivered_chars,
-        "child summary only".chars().count()
+        session
+            .agent_result_continuation_projection()
+            .statuses
+            .get(&thread.thread_id),
+        Some(&sigil_kernel::AgentResultContinuationStatus::Completed)
     );
+    assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_run_join_barrier_overlaps_children_and_resumes_without_model_polling() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let observed_join_context = Arc::new(Mutex::new(None));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::clone(&observed_join_context),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-parent", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(4);
+                options
+            },
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        ),
+    )
+    .await
+    .expect("parallel join barrier should complete without deadlock")?;
+
+    assert_eq!(output.result.final_text, "parallel parent final");
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(
-        thread.result_delivery_call_ids,
-        vec!["call-read-spawn-1".to_owned()]
+        output.outcome.tool_call_ids,
+        vec!["call-parallel-a", "call-parallel-b"]
+    );
+    let join_context = observed_join_context
+        .lock()
+        .expect("join context observation lock should not be poisoned")
+        .clone()
+        .expect("parent provider should receive joined child results");
+    let first = join_context
+        .find("call-parallel-a")
+        .expect("first call should appear in join context");
+    let second = join_context
+        .find("call-parallel-b")
+        .expect("second call should appear in join context");
+    assert!(
+        first < second,
+        "join context should preserve tool-call order"
+    );
+    assert!(join_context.contains("parallel child done"));
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .filter(|thread| thread.status == AgentThreadStatus::Completed)
+            .count(),
+        2
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(continuations.statuses.len(), 2);
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Completed)
+    );
+    assert!(session.messages().iter().all(|message| {
+        message.tool_call_id.as_deref().is_none_or(|call_id| {
+            !call_id.contains("wait") && !call_id.contains("read-agent-result")
+        })
+    }));
+    assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn join_context_remains_uncompleted_when_max_turns_prevents_delivery() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let observed_join_context = Arc::new(Mutex::new(None));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::clone(&observed_join_context),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-max-turns", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+    let mut options = run_options(std::env::temp_dir());
+    options.max_turns = Some(1);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            options,
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        ),
+    )
+    .await
+    .expect("join barrier should settle before the max-turn boundary")?;
+
+    assert!(output.result.final_text.is_empty());
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(
+        observed_join_context
+            .lock()
+            .expect("join context observation lock should not be poisoned")
+            .is_none()
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(continuations.statuses.len(), 2);
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Started)
+    );
+    let blocker = agent_delegate
+        .final_answer_blocker(&mut session)?
+        .expect("undelivered join results must still block a later final answer");
+    assert!(blocker.contains("join_before_final_agent_result_unread"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_cancellation_interrupts_all_joined_children_and_releases_slots() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let supervisor_probe = supervisor.clone();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::new(Mutex::new(None)),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-cancel", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+
+    let run = agent.run_with_approval_input_and_agent_delegate(
+        &mut session,
+        AgentRunInput::user("inspect kernel and runtime in parallel")
+            .with_cancellation(cancellation_owner.handle()),
+        {
+            let mut options = run_options(std::env::temp_dir());
+            options.max_turns = Some(4);
+            options
+        },
+        &mut handler,
+        &mut approval,
+        &mut agent_delegate,
+    );
+    let cancel = async {
+        while max_active.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert!(cancellation_owner.request_cancel());
+    };
+    let (run_result, ()) =
+        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(run, cancel) })
+            .await
+            .expect("root cancellation should settle joined children without deadlock");
+
+    assert!(run_result.is_err());
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(cancellation_owner.is_quiescent());
+    assert!(supervisor_probe.active_profile_ids().is_empty());
+    let threads = session.agent_thread_state_projection();
+    assert_eq!(threads.threads.len(), 2);
+    assert!(
+        threads
+            .threads
+            .values()
+            .all(|thread| thread.status == AgentThreadStatus::Interrupted)
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(continuations.statuses.len(), 2);
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Cancelled)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_after_join_settle_cancels_undelivered_context() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let observed_join_context = Arc::new(Mutex::new(None));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::clone(&observed_join_context),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-cancel-after-settle", "mock-model");
+    let cancellation_owner = RunCancellationOwner::new();
+    let mut handler = CancelAfterJoinStartedEventHandler {
+        cancel: cancellation_owner.budget_cancellation_hook(),
+        fired: false,
+    };
+    let mut approval = AutoApproveHandler;
+
+    let result = agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(4);
+                options
+            },
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(handler.fired);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(cancellation_owner.is_quiescent());
+    assert!(
+        observed_join_context
+            .lock()
+            .expect("join context observation lock should not be poisoned")
+            .is_none()
+    );
+    assert!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .all(|thread| thread.status == AgentThreadStatus::Completed)
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(continuations.statuses.len(), 2);
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Cancelled)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn joined_child_commit_error_still_reconciles_siblings_and_releases_slots() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let supervisor_probe = supervisor.clone();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::new(Mutex::new(None)),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-commit-failure", "mock-model");
+    let mut handler = FailFirstAgentResultEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(4);
+                options
+            },
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        ),
+    )
+    .await
+    .expect("commit failure path should still settle every child");
+
+    assert!(result.is_err());
+    assert!(handler.failed);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(supervisor_probe.active_profile_ids().is_empty());
+    let threads = session.agent_thread_state_projection();
+    assert_eq!(threads.threads.len(), 2);
+    assert!(
+        threads
+            .threads
+            .values()
+            .all(|thread| thread.status == AgentThreadStatus::Completed)
+    );
+    assert!(
+        threads
+            .threads
+            .values()
+            .all(|thread| thread.result.is_some())
+    );
+    let continuations = session.agent_result_continuation_projection();
+    assert_eq!(continuations.statuses.len(), 2);
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .any(|status| { *status == sigil_kernel::AgentResultContinuationStatus::Failed })
+    );
+    assert!(
+        continuations
+            .statuses
+            .values()
+            .any(|status| { *status == sigil_kernel::AgentResultContinuationStatus::Started })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_tool_result_error_aborts_unsettled_join_dependencies() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let supervisor_probe = supervisor.clone();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(ParallelBarrierProviderFactory {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        }),
+    );
+    let agent = Agent::new(
+        ParallelParentProvider {
+            observed_join_context: Arc::new(Mutex::new(None)),
+        },
+        registry,
+    );
+    let mut session = Session::new("parallel-spawn-result-failure", "mock-model");
+    let mut handler = FailFirstSpawnToolResultEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
+
+    let result = agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_cancellation(cancellation_owner.handle()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(4);
+                options
+            },
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(handler.failed);
+    assert_eq!(max_active.load(Ordering::SeqCst), 0);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(cancellation_owner.is_quiescent());
+    assert!(supervisor_probe.active_profile_ids().is_empty());
+    let threads = session.agent_thread_state_projection();
+    assert_eq!(threads.threads.len(), 1);
+    assert!(
+        threads
+            .threads
+            .values()
+            .all(|thread| thread.status == AgentThreadStatus::Failed)
+    );
+    assert!(
+        session
+            .agent_result_continuation_projection()
+            .statuses
+            .values()
+            .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Failed)
     );
     Ok(())
 }
@@ -2044,11 +2759,13 @@ async fn agent_tool_turn_does_not_persist_parent_pre_tool_text() -> Result<()> {
     let mut session = Session::new("parent-pre-tool-text-spawn", "mock-model");
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
+    let cancellation_owner = RunCancellationOwner::new();
 
     let output = agent
         .run_with_approval_input_and_agent_delegate(
             &mut session,
-            AgentRunInput::user("use a sub agent to inspect kernel"),
+            AgentRunInput::user("use a sub agent to inspect kernel")
+                .with_cancellation(cancellation_owner.handle()),
             {
                 let mut options = run_options(std::env::temp_dir());
                 options.max_turns = Some(12);

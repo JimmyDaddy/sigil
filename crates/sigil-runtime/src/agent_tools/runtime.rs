@@ -8,6 +8,10 @@ pub struct AgentToolRuntime {
     pub(super) base_registry: ToolRegistry,
     pub(super) provider_factory: Arc<dyn AgentToolProviderFactory>,
     pub(super) background_runs: AgentToolBackgroundRuns,
+    pub(super) join_dependencies: Vec<JoinedChatAgentHandle>,
+    pub(super) pending_join_contexts: BTreeMap<String, Vec<AgentThreadId>>,
+    pub(super) next_join_sequence: u64,
+    pub(super) join_batch_eligible: bool,
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
@@ -35,6 +39,10 @@ impl AgentToolRuntime {
             base_registry,
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
             background_runs: AgentToolBackgroundRuns::default(),
+            join_dependencies: Vec::new(),
+            pending_join_contexts: BTreeMap::new(),
+            next_join_sequence: 0,
+            join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             web_task_tree_budget: None,
@@ -56,6 +64,10 @@ impl AgentToolRuntime {
             base_registry,
             provider_factory,
             background_runs: AgentToolBackgroundRuns::default(),
+            join_dependencies: Vec::new(),
+            pending_join_contexts: BTreeMap::new(),
+            next_join_sequence: 0,
+            join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             web_task_tree_budget: None,
@@ -324,6 +336,10 @@ impl AgentToolDelegate for AgentToolRuntime {
         self.web_task_tree_budget = budget;
     }
 
+    fn set_join_batch_eligibility(&mut self, calls: &[ToolCall]) {
+        self.join_batch_eligible = tool_batch_allows_host_join(calls);
+    }
+
     async fn handle_agent_tool_call(
         &mut self,
         session: &mut Session,
@@ -353,8 +369,46 @@ impl AgentToolDelegate for AgentToolRuntime {
         Ok(Some(result))
     }
 
+    async fn settle_join_dependencies(
+        &mut self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Option<FinalAnswerContext>> {
+        self.settle_current_join_dependencies(session, handler)
+            .await
+    }
+
+    fn abort_join_dependencies(
+        &mut self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+        reason: &str,
+    ) -> Result<()> {
+        self.abort_current_join_dependencies(session, handler, reason)
+    }
+
+    fn confirm_join_context_delivery(
+        &mut self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+        context_key: &str,
+    ) -> Result<()> {
+        self.confirm_current_join_context(session, handler, context_key)
+    }
+
+    fn cancel_join_context_delivery(
+        &mut self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+        context_keys: &[String],
+        reason: &str,
+    ) -> Result<()> {
+        self.cancel_current_join_contexts(session, handler, context_keys, reason)
+    }
+
     fn final_answer_blocker(&mut self, session: &mut Session) -> Result<Option<String>> {
         let projection = session.agent_thread_state_projection();
+        let continuations = session.agent_result_continuation_projection();
         let pending = projection
             .threads
             .values()
@@ -396,6 +450,8 @@ impl AgentToolDelegate for AgentToolRuntime {
                     && thread.result.is_some()
                     && !thread.result_fully_delivered
                     && !agent_thread_is_backgrounded(thread)
+                    && continuations.statuses.get(&thread.thread_id)
+                        != Some(&AgentResultContinuationStatus::Completed)
             })
             .map(|thread| {
                 let offset_chars = thread.result_delivered_chars;

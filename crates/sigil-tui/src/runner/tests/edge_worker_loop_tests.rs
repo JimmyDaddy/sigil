@@ -10,20 +10,20 @@ use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
-    AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DurableEventType, ExecutionCleanupStatus, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, ModelMessage, MutationEventRecorder, PlanApprovalPermission, PlanDecision,
-    PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider,
-    ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry,
-    TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
-    ToolRegistry, ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot, plan_draft_created_entry,
-    plan_task_input_from_draft, project_user_message_for_persistence, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    AgentRunContextSnapshot, AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunResult,
+    AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
+    JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
+    MutationEventRecorder, PlanApprovalPermission, PlanDecision, PlanDecisionActor,
+    PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider, ReasoningEffort,
+    RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
+    ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope, WorkspaceMutationDetected,
+    WorkspaceRootSnapshot, plan_draft_created_entry, plan_task_input_from_draft,
+    project_user_message_for_persistence, task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -36,12 +36,12 @@ use super::{
         worker_loop::append_cancelled_task_state,
         worker_loop::{
             CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
-            WorkerLoopMcpHandlers, append_mcp_elicitation_audits, approve_plan,
-            cancel_terminal_task, close_agent_thread, create_task_from_plan, next_task_id,
-            partition_agent_result_continuations, pending_agent_result_continuations_from_session,
-            plan_handoff_workspace_snapshot_id, queued_background_ready_transient_context,
-            refresh_terminal_task_statuses, resolve_continue_task, run_worker_loop,
-            session_ref_for_log_path,
+            WorkerLoopMcpHandlers, agent_result_continuation_run_result,
+            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
+            create_task_from_plan, next_task_id, partition_agent_result_continuations,
+            pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
+            queued_background_ready_transient_context, refresh_terminal_task_statuses,
+            resolve_continue_task, run_worker_loop, session_ref_for_log_path,
         },
     },
     common::{PlannedProvider, StreamPlan, test_root_config},
@@ -479,6 +479,36 @@ fn pending_agent_result_continuations_restore_started_statuses() -> Result<()> {
 
     assert_eq!(restored, vec![pending, started]);
     Ok(())
+}
+
+#[test]
+fn agent_result_continuation_requires_final_answer_disposition() {
+    let result = AgentRunResult {
+        final_text: String::new(),
+        tool_calls: 0,
+        final_message_id: None,
+    };
+    let interrupted = AgentRunOutput {
+        result: result.clone(),
+        outcome: AgentRunOutcome::default(),
+        disposition: AgentRunDisposition::Interrupted,
+    };
+    assert!(agent_result_continuation_run_result(interrupted).is_err());
+
+    let final_answer = AgentRunOutput {
+        result: AgentRunResult {
+            final_text: "done".to_owned(),
+            ..result
+        },
+        outcome: AgentRunOutcome::default(),
+        disposition: AgentRunDisposition::FinalAnswer,
+    };
+    assert_eq!(
+        agent_result_continuation_run_result(final_answer)
+            .expect("final answer should complete the continuation")
+            .final_text,
+        "done"
+    );
 }
 
 #[test]

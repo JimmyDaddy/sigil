@@ -27,6 +27,19 @@ pub(super) struct BackgroundChatAgentHandle {
     pub(super) cancellation_owner: RunCancellationOwner,
 }
 
+/// One join-before-final child owned by the current root run.
+///
+/// The child task is registered directly against the root cancellation scope. Unlike a detached
+/// background run, it has no independent cancellation owner and must be settled before the next
+/// parent provider turn.
+pub(super) struct JoinedChatAgentHandle {
+    pub(super) sequence: u64,
+    pub(super) call_id: String,
+    pub(super) thread: BackgroundChatAgentThreadRecord,
+    pub(super) future: JoinedChatAgentFuture,
+    pub(super) release_guard: ChatChildThreadGuard,
+}
+
 pub(super) struct BackgroundCancellationOutcome {
     pub(super) thread: BackgroundChatAgentThreadRecord,
     pub(super) run_scope_id: String,

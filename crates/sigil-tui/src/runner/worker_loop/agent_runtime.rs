@@ -283,8 +283,8 @@ where
                     &mut agent_delegate,
                 )
                 .await
-                .map(|output| output.result)
                 .map_err(|error| format!("{error:#}"))
+                .and_then(agent_result_continuation_run_result)
         };
         let result =
             match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
@@ -315,6 +315,26 @@ where
         url_capability_registrar,
         image_attachment_resolver,
     })
+}
+
+pub(in crate::runner) fn agent_result_continuation_run_result(
+    output: sigil_kernel::AgentRunOutput,
+) -> std::result::Result<sigil_kernel::AgentRunResult, String> {
+    match output.disposition {
+        AgentRunDisposition::FinalAnswer => Ok(output.result),
+        AgentRunDisposition::Interrupted => {
+            Err("agent result continuation was interrupted before a final answer".to_owned())
+        }
+        AgentRunDisposition::Blocked => {
+            Err("agent result continuation was blocked before a final answer".to_owned())
+        }
+        AgentRunDisposition::StartDurableTask(_) => {
+            Err("agent result continuation cannot hand off to a durable task".to_owned())
+        }
+        AgentRunDisposition::TaskPlanAccepted => {
+            Err("agent result continuation cannot accept a task plan".to_owned())
+        }
+    }
 }
 
 pub(in crate::runner) fn agent_result_continuation_prompt(thread_ids: &[AgentThreadId]) -> String {

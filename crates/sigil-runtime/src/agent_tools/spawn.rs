@@ -295,6 +295,24 @@ impl AgentToolRuntime {
             );
         }
 
+        if self.join_batch_eligible
+            && self.run_cancellation.is_some()
+            && !changeset_only_write
+            && matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
+            && safe_detachable_registry
+        {
+            return self.start_joined_chat_child(
+                session,
+                call,
+                child_thread,
+                child_agent,
+                child_session,
+                child_input,
+                child_options,
+                handler,
+            );
+        }
+
         if self.run_cancellation.is_none()
             && !changeset_only_write
             && matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
@@ -488,6 +506,129 @@ impl AgentToolRuntime {
             display_name,
             result.as_ref(),
             DEFAULT_RESULT_SUMMARY_LIMIT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_joined_chat_child(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        child_thread: crate::AgentChatChildThread,
+        child_agent: Agent<Box<dyn Provider>>,
+        child_session: Session,
+        child_input: sigil_kernel::AgentRunInput,
+        child_options: sigil_kernel::AgentRunOptions,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> ToolResult {
+        let Some(root_cancellation) = self.run_cancellation.clone() else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                "host join requires the current root cancellation scope",
+            );
+        };
+        if root_cancellation.is_cancel_requested() {
+            let reason = "root run cancelled before child join admission".to_owned();
+            let _ = self.supervisor.record_chat_child_failure(
+                session,
+                handler,
+                &child_thread,
+                reason.clone(),
+            );
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Interrupted,
+                reason,
+            );
+        }
+        let thread_id = child_thread.thread_id.clone();
+        let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
+        if let Err(error) = append_agent_result_continuation(
+            session,
+            handler,
+            thread_id.clone(),
+            AgentResultContinuationStatus::Pending,
+            Some("registered with the current root-run join barrier".to_owned()),
+        ) {
+            let _ = self.supervisor.record_chat_child_failure(
+                session,
+                handler,
+                &child_thread,
+                format!("failed to persist join dependency: {error:#}"),
+            );
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
+        let (_mailbox_tx, mailbox_rx) = mpsc::channel();
+        let child_input = child_input.with_child_cancellation(root_cancellation.clone());
+        let run_thread_id = thread_id.clone();
+        let child_session_ref = child_thread.child_session_ref.clone();
+        let event_sink = self.background_runs.event_sink();
+        let future = Box::pin(async move {
+            let cancellation_task_guard = root_cancellation
+                .register_task()
+                .map_err(|error| anyhow!("root run cancelled before child join start: {error}"))?;
+            let _cancellation_task_guard = cancellation_task_guard;
+            run_background_chat_agent(
+                run_thread_id,
+                child_agent,
+                child_session,
+                child_session_ref,
+                child_input,
+                child_options,
+                mailbox_rx,
+                event_sink,
+            )
+            .await
+        });
+        let sequence = self.next_join_sequence;
+        self.next_join_sequence = self.next_join_sequence.saturating_add(1);
+        self.join_dependencies.push(JoinedChatAgentHandle {
+            sequence,
+            call_id: call.id.clone(),
+            thread: thread_record,
+            future,
+            release_guard: ChatChildThreadGuard {
+                supervisor: self.supervisor.clone(),
+                thread_id: thread_id.clone(),
+            },
+        });
+
+        ToolResult::ok(
+            call.id.clone(),
+            call.name.clone(),
+            serde_json::to_string(&json!({
+                "thread_id": thread_id.as_str(),
+                "status": "running",
+                "terminal": false,
+                "result_available": false,
+                "backgrounded": false,
+                "required_before_final": true,
+                "host_join_registered": true,
+                "next_action": "continue the current tool batch; the host will join this child before the next parent model turn",
+                "do_not_call_wait_agent": true,
+                "do_not_describe_as_finished": true
+            }))
+            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
+            ToolResultMeta {
+                details: json!({
+                    "thread_id": thread_id.as_str(),
+                    "status": "running",
+                    "terminal": false,
+                    "result_available": false,
+                    "backgrounded": false,
+                    "required_before_final": true,
+                    "host_join_registered": true,
+                }),
+                ..ToolResultMeta::default()
+            },
         )
     }
 

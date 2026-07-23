@@ -92,6 +92,8 @@ pub(in crate::runner) use active_run::{
 pub(in crate::runner) use advancement::{
     WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
 };
+#[cfg(test)]
+pub(in crate::runner) use agent_runtime::agent_result_continuation_run_result;
 pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
     close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,

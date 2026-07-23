@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O3 implemented; O4-O8 deferred
+状态：accepted / O0-O3 and O4a implemented; O4b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -947,6 +947,38 @@ allow_write_subagents = true
 退出条件：parent history 无 internal planner prompt；Task 完成只有一个正式 final answer。
 
 ### O4: Completion hub and batch Explore
+
+实施状态：O4a 完成（2026-07-23），O4b deferred。
+
+- O4a 已为 ordinary chat 的兼容 `spawn_agent(mode=join_before_final)` 接入 root-run
+  host join barrier：只有同一 provider turn 的整批调用均为 runtime 明确认识的
+  `spawn_agent(join_before_final)`、child tool contracts 被证明为安全只读且 child 绑定 root
+  cancellation scope 时，多个 child 才并发执行；自定义 Agent 类工具和 background spawn 均
+  fail closed，不能仅凭粗粒度 `ToolCategory::Agent` 获得 overlap 资格。
+- Kernel 在整批 tool calls 处理后调用 runtime join hook；runtime 先等待全部 sibling terminal，
+  再由 parent 单写者逐个提交 `AgentThreadResultRecorded` / terminal projection，并按原 tool-call
+  顺序注入 bounded `agent_join_results` transient context。模型不需要也不会被提示调用
+  `wait_agent`；完整正文仍只通过显式分页 `read_agent_result` 按需读取。
+- `AgentResultContinuation(Pending -> Started -> Completed)` 记录 join 注册、parent commit 与
+  bounded context delivery。`Completed` 只在携带 join context 的下一 provider turn 成功返回后
+  持久化；max-turn、发送失败或发送前取消均保持未完成并继续触发 final blocker。Completed
+  continuation 可以解除旧的“必须读完整 child 正文” final blocker，但不伪造
+  `AgentThreadResultDelivered`，因此 projection 仍诚实区分 bounded host context 与完整分页正文交付。
+- Joined child 以受 parent settle future 所有的普通 future 并发执行，不作为可脱离 parent 的 Tokio
+  task；settle 被取消时 unfinished child 随 future 一起 drop，RAII 释放全部 supervisor slot。root
+  cancellation 会为全部成员追加 Interrupted/Cancelled；单成员 parent commit 失败仍会继续收口其他
+  sibling，避免结果和 slot 因第一个错误而遗失。若 kernel 在 delegate 返回后、settle 前写 tool
+  result/event 失败，会显式 abort 尚未启动的 dependency；若 settle 后、下一 provider dispatch 前取消，
+  已提交的 Started context 会转为 Cancelled，不能在恢复时伪装成待自动续跑的交付。
+- TUI 的 legacy/background result continuation runner 只有在 typed disposition 为 `FinalAnswer` 时
+  才写 Completed；`MaxTurns -> Interrupted`、Blocked、task handoff 与 plan acceptance 都按失败收口，
+  不再因为 Rust future 返回 `Ok(AgentRunOutput)` 就错误永久关闭 continuation。
+- barrier 回归要求两个 Explore child 同时到达同步点，证明真实 overlap；父模型只发生 spawn turn
+  和 results turn，polling turn 为 0。另有 max-turn 未交付、root cancellation/quiescence、单成员
+  commit 失败继续收口 sibling、spawn result event 失败在 settle 前 abort、settle 后发送前取消 context，
+  以及自定义 Agent 写工具不得进入 join batch 的负向回归。
+
+O4b 仍包括：
 
 - 引入 `AgentCompletionHub` 和 single-delivery terminal envelope。
 - 新增 `spawn_agents` compatibility surface 和 planner `request_task_discovery`。

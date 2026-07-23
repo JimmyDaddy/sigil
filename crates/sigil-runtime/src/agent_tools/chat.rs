@@ -142,7 +142,7 @@ impl AgentToolRuntime {
     }
 
     pub(super) async fn record_finished_background_run(
-        &self,
+        &mut self,
         session: &mut Session,
         handler: &mut (dyn EventHandler + Send),
         background: BackgroundChatAgentHandle,
@@ -362,7 +362,7 @@ impl AgentToolRuntime {
     }
 
     pub(super) async fn cancel_agent(
-        &self,
+        &mut self,
         session: &mut Session,
         call: &ToolCall,
         args: &Value,

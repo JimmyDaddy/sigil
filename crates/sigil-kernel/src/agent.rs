@@ -695,6 +695,13 @@ pub trait AgentToolDelegate: Send {
     /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
     fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
 
+    /// Supplies the current provider tool batch for host-owned child-join admission.
+    ///
+    /// The delegate must fail closed and admit joining only for exact protocol calls it owns and
+    /// can prove join-safe. A coarse tool category is not sufficient evidence because custom tools
+    /// may use the Agent category while still mutating the workspace.
+    fn set_join_batch_eligibility(&mut self, _calls: &[ToolCall]) {}
+
     /// Handles one agent tool call after normal permission approval has resolved.
     ///
     /// Return `Ok(None)` when the call is not an agent-thread tool and should continue through the
@@ -712,6 +719,65 @@ pub trait AgentToolDelegate: Send {
         handler: &mut (dyn EventHandler + Send),
         approval_handler: &mut (dyn ApprovalHandler + Send),
     ) -> Result<Option<ToolResult>>;
+
+    /// Waits for host-owned join-before-final child work admitted by the current tool batch.
+    ///
+    /// Implementations return one bounded, stable context payload after every joined child has
+    /// reached a terminal state and its durable parent projection has been committed. The kernel
+    /// injects that payload before the next provider turn, so the model never needs to poll a
+    /// child with `wait_agent` merely to satisfy the join barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a joined child cannot be committed to the parent session.
+    async fn settle_join_dependencies(
+        &mut self,
+        _session: &mut Session,
+        _handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Option<FinalAnswerContext>> {
+        Ok(None)
+    }
+
+    /// Aborts join dependencies admitted by the current batch before the host reached settle.
+    ///
+    /// Kernel invokes this on post-delegate persistence or event-delivery failure so an admitted
+    /// child cannot retain cancellation-task or supervisor ownership after the parent turn exits.
+    fn abort_join_dependencies(
+        &mut self,
+        _session: &mut Session,
+        _handler: &mut (dyn EventHandler + Send),
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Confirms that one settled join context was accepted into the next-turn transient context.
+    ///
+    /// Runtime implementations use this second phase to durably close continuation delivery
+    /// without claiming that a full child transcript was copied into the parent session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable delivery confirmation cannot be recorded.
+    fn confirm_join_context_delivery(
+        &mut self,
+        _session: &mut Session,
+        _handler: &mut (dyn EventHandler + Send),
+        _context_key: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Cancels bounded join contexts that were committed but never dispatched to a provider.
+    fn cancel_join_context_delivery(
+        &mut self,
+        _session: &mut Session,
+        _handler: &mut (dyn EventHandler + Send),
+        _context_keys: &[String],
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     /// Returns a model-visible continuation prompt when a final answer must wait for delegated
     /// agent work. The default keeps non-agent runtimes unchanged.
@@ -1199,6 +1265,7 @@ where
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
+        let mut pending_join_context_keys: Vec<String> = Vec::new();
 
         let mut model_turns = 0usize;
         loop {
@@ -1206,6 +1273,17 @@ where
                 .as_ref()
                 .is_some_and(RunCancellationHandle::is_cancel_requested)
             {
+                if !pending_join_context_keys.is_empty()
+                    && let Some(delegate) = agent_delegate.as_deref_mut()
+                {
+                    delegate.cancel_join_context_delivery(
+                        session,
+                        handler,
+                        &pending_join_context_keys,
+                        "root run cancelled before joined result context dispatch",
+                    )?;
+                    pending_join_context_keys.clear();
+                }
                 return Err(anyhow!("run cancellation requested before next model turn"));
             }
             if let Some(max_turns) = options.max_turns
@@ -1311,7 +1389,26 @@ where
             };
 
             let provider_effect =
-                begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest)?;
+                match begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest) {
+                    Ok(effect) => effect,
+                    Err(error) => {
+                        if cancellation
+                            .as_ref()
+                            .is_some_and(RunCancellationHandle::is_cancel_requested)
+                            && !pending_join_context_keys.is_empty()
+                            && let Some(delegate) = agent_delegate.as_deref_mut()
+                        {
+                            delegate.cancel_join_context_delivery(
+                                session,
+                                handler,
+                                &pending_join_context_keys,
+                                "root run cancelled before joined result provider dispatch",
+                            )?;
+                            pending_join_context_keys.clear();
+                        }
+                        return Err(error);
+                    }
+                };
             let provider_turn_result = match initial_frozen_request {
                 Some(frozen_request) => {
                     provider_stream::collect_frozen_provider_turn(
@@ -1346,6 +1443,20 @@ where
             let provider_turn = match provider_turn_result {
                 Ok(provider_turn) => provider_turn,
                 Err(error) => {
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(RunCancellationHandle::is_cancel_requested)
+                        && !pending_join_context_keys.is_empty()
+                        && let Some(delegate) = agent_delegate.as_deref_mut()
+                    {
+                        delegate.cancel_join_context_delivery(
+                            session,
+                            handler,
+                            &pending_join_context_keys,
+                            "root run cancelled during joined result provider dispatch",
+                        )?;
+                        pending_join_context_keys.clear();
+                    }
                     append_failed_run_lifecycle_events(
                         session,
                         "provider_stream_error",
@@ -1355,6 +1466,13 @@ where
                     return Err(error);
                 }
             };
+            if !pending_join_context_keys.is_empty()
+                && let Some(delegate) = agent_delegate.as_deref_mut()
+            {
+                for context_key in std::mem::take(&mut pending_join_context_keys) {
+                    delegate.confirm_join_context_delivery(session, handler, &context_key)?;
+                }
+            }
             let assistant_text = provider_turn.assistant_text;
             let completed_calls = provider_turn
                 .completed_calls
@@ -1410,6 +1528,9 @@ where
                     && completed_calls
                         .iter()
                         .any(task_planning_request_call_is_accepted);
+                if let Some(delegate) = agent_delegate.as_deref_mut() {
+                    delegate.set_join_batch_eligibility(&completed_calls);
+                }
                 let mut accepted_task_plan = false;
                 let mut accepted_task_handoff = None;
                 for call in completed_calls {
@@ -1516,7 +1637,30 @@ where
                         transient_context: &mut transient_context,
                         web_task_tree_budget: web_task_tree_budget.clone(),
                     };
-                    process_tool_call(tool_call_context, call, safe_call).await?;
+                    if let Err(error) = process_tool_call(tool_call_context, call, safe_call).await
+                    {
+                        if let Some(delegate) = agent_delegate.as_deref_mut()
+                            && let Err(cleanup_error) = delegate.abort_join_dependencies(
+                                session,
+                                handler,
+                                "parent tool result failed before host join settle",
+                            )
+                        {
+                            return Err(error.context(format!(
+                                "host join cleanup also failed: {cleanup_error:#}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                }
+                let settled_join_context = match agent_delegate.as_deref_mut() {
+                    Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,
+                    None => None,
+                };
+                if let Some(context) = settled_join_context {
+                    let context_key = context.key.clone();
+                    transient_context.push(ModelMessage::user(context.prompt));
+                    pending_join_context_keys.push(context_key);
                 }
                 if let Some(action) = accepted_task_handoff {
                     outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;

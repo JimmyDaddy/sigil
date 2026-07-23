@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -11,8 +13,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource,
-    AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentProfileSource, AgentRole,
-    AgentRouteId, AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentProfileSource,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRouteId,
+    AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,
     AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection,
     AgentThreadResult, AgentThreadResultDeliveredEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
@@ -59,8 +62,22 @@ const WAIT_AGENT_RUNNING_RETRY_AFTER_MS: u64 = 30 * 60 * 1_000;
 const WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT;
 const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT;
 
+fn tool_batch_allows_host_join(calls: &[ToolCall]) -> bool {
+    !calls.is_empty()
+        && calls.iter().all(|call| {
+            if call.name != SPAWN_AGENT_TOOL_NAME {
+                return false;
+            }
+            serde_json::from_str::<Value>(&call.args_json)
+                .ok()
+                .and_then(|args| SpawnAgentArgs::parse(&args).ok())
+                .is_some_and(|args| matches!(args.mode, AgentInvocationMode::JoinBeforeFinal))
+        })
+}
+
 mod background;
 mod chat;
+mod completion;
 mod handlers;
 mod permissions;
 mod result_pages;
@@ -77,12 +94,17 @@ pub use surface::{
     register_agent_tools_with_workspace_and_entries,
 };
 
+type JoinedChatAgentFuture =
+    Pin<Box<dyn Future<Output = Result<background::BackgroundChatAgentResult>> + Send>>;
+
 use background::{
-    BackgroundChatAgentHandle, BackgroundChatAgentThreadRecord, run_background_chat_agent,
+    BackgroundChatAgentHandle, BackgroundChatAgentThreadRecord, JoinedChatAgentHandle,
+    run_background_chat_agent,
 };
 use chat::close_agent_from_args;
 #[cfg(test)]
 use chat::wait_throttle_remaining_for_elapsed;
+use completion::append_agent_result_continuation;
 use handlers::{
     BackgroundApprovalHandler, ChatAgentApprovalRouteHandler, ChatChildEventHandler,
     ChatChildThreadGuard,
