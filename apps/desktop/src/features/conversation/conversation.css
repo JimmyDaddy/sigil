@@ -40,7 +40,7 @@
 .agent-activity-strip small { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
 .agent-activity-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--sg-domain-color-on-success); animation: conversation-activity-pulse 1.4s ease-in-out infinite; }
 
-.timeline { display: grid; width: 100%; min-width: 0; align-content: start; align-items: start; gap: 11px; min-height: 180px; max-height: 420px; padding: var(--sg-sys-space-3) clamp(4px, 2vw, 24px); overflow-x: hidden; overflow-y: auto; background: transparent; overscroll-behavior: contain; }
+.timeline { display: grid; width: 100%; min-width: 0; grid-auto-rows: max-content; align-content: start; align-items: start; gap: 11px; min-height: 180px; max-height: 420px; padding: var(--sg-sys-space-3) clamp(4px, 2vw, 24px); overflow-x: hidden; overflow-y: auto; background: transparent; overscroll-behavior: contain; }
 .timeline > * { min-width: 0; max-width: 100%; }
 .transcript-pagination { display: flex; justify-content: center; padding: 2px 0 5px; }
 .timeline-gap { padding: 10px var(--sg-sys-space-3); border: 1px solid var(--sg-domain-color-on-warning); border-radius: 9px; color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 13px; line-height: 1.45; }

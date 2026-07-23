@@ -281,6 +281,9 @@ if (!styles.includes(".sg-bounded-content")
   || !/\.timeline\s*\{[^}]*overflow-x:\s*hidden/.test(conversationStyles)) {
   fail("bounded prose and no-container-horizontal-scroll contract is missing");
 }
+if (!/\.timeline\s*\{[^}]*grid-auto-rows:\s*max-content/.test(conversationStyles)) {
+  fail("conversation timeline rows may shrink and overlap under a constrained approval dock");
+}
 for (const localScrollSurface of [".markdown-table-scroll", ".code-block pre", ".tool-output", ".diff-viewer pre"]) {
   const selector = localScrollSurface.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!new RegExp(`${selector}\\s*\\{[^}]*(?:overflow|overflow-x):\\s*(?:auto|scroll)`).test(conversationStyles)) {
