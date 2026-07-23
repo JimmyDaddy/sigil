@@ -636,6 +636,74 @@ pub enum AgentInvocationSource {
     Unknown,
 }
 
+/// Host-bound authority for creating a child agent.
+///
+/// This value is supplied by the runtime ingress or an accepted durable task plan. It is never a
+/// model tool argument, so a model cannot upgrade proactive authority into user or task authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationAuthority {
+    UserExplicit,
+    AcceptedTaskPlan {
+        task_id: crate::TaskId,
+        plan_version: u32,
+        step_id: crate::TaskStepId,
+    },
+    ModelProactive,
+    SystemRecovery,
+}
+
+/// Durable, non-executable projection of the authority used for one admitted child invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DelegationAuthorityRecord {
+    UserExplicit,
+    AcceptedTaskPlan {
+        task_id: crate::TaskId,
+        plan_version: u32,
+        step_id: crate::TaskStepId,
+    },
+    ModelProactive,
+    SystemRecovery,
+}
+
+impl From<&DelegationAuthority> for DelegationAuthorityRecord {
+    fn from(authority: &DelegationAuthority) -> Self {
+        match authority {
+            DelegationAuthority::UserExplicit => Self::UserExplicit,
+            DelegationAuthority::AcceptedTaskPlan {
+                task_id,
+                plan_version,
+                step_id,
+            } => Self::AcceptedTaskPlan {
+                task_id: task_id.clone(),
+                plan_version: *plan_version,
+                step_id: step_id.clone(),
+            },
+            DelegationAuthority::ModelProactive => Self::ModelProactive,
+            DelegationAuthority::SystemRecovery => Self::SystemRecovery,
+        }
+    }
+}
+
+/// Append-only evidence that the host admitted one concrete child-agent invocation.
+///
+/// Deserializing this record during replay does not recreate execution authority. Runtime
+/// admission is performed before this evidence is appended and binds the decision to the exact
+/// thread, profile, invocation shape, objective, and frozen child tool contracts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentDelegationAdmissionEntry {
+    pub thread_id: AgentThreadId,
+    pub profile_id: AgentProfileId,
+    pub invocation_mode: AgentInvocationMode,
+    pub invocation_source: AgentInvocationSource,
+    pub authority: DelegationAuthorityRecord,
+    pub objective_hash: String,
+    pub tool_contract_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_at_ms: Option<u64>,
+}
+
 /// Durable lifecycle status for one agent thread.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

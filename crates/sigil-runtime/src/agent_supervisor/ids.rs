@@ -1,20 +1,19 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use sigil_kernel::{
     AgentProfileId, AgentRole, AgentRouteId, AgentThreadId, TaskId, TaskRouteId, TaskStepId,
     TaskStepSpec,
 };
 
-use crate::{EXPLORE_PROFILE_ID, WORKER_PROFILE_ID};
+use crate::{BUILD_PROFILE_ID, EXPLORE_PROFILE_ID, PLAN_PROFILE_ID, WORKER_PROFILE_ID};
 
 use super::{hash_text, short_digest};
 
 pub(super) fn profile_id_for_role(role: AgentRole) -> Result<AgentProfileId> {
     match role {
+        AgentRole::Planner => AgentProfileId::new(PLAN_PROFILE_ID),
+        AgentRole::Executor => AgentProfileId::new(BUILD_PROFILE_ID),
         AgentRole::SubagentRead => AgentProfileId::new(EXPLORE_PROFILE_ID),
         AgentRole::SubagentWrite => AgentProfileId::new(WORKER_PROFILE_ID),
-        AgentRole::Planner | AgentRole::Executor => Err(anyhow!(
-            "agent supervisor child profile requires a subagent role"
-        )),
     }
 }
 

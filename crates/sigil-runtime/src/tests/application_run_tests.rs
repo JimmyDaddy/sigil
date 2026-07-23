@@ -9,15 +9,17 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use sigil_kernel::{
-    AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
-    AssistantMessageKind, AutoApproveHandler, ControlEntry, ConversationRunLifecycleRecordV1,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
-    DisclosurePresentationReceipt, EgressDisclosurePresenter, JsonlSessionStore, ModelMessage,
-    PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
-    RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
-    TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason,
+    ApprovalHandler, AssistantMessageKind, AutoApproveHandler, ControlEntry,
+    ConversationRunLifecycleRecordV1, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, DisclosurePresentationError, DisclosurePresentationReceipt,
+    EgressDisclosurePresenter, JsonlSessionStore, ModelMessage, PreEgressDisclosure,
+    PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig, RunCancellationOwner,
+    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, StartDurableTaskAction,
+    TaskHandoffId, TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess,
+    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    conversation_run_lifecycle_record_from_stream,
 };
 
 use super::{
@@ -1245,6 +1247,11 @@ fn non_final_kernel_terminals_do_not_project_as_run_finished() {
         ),
     ] {
         let output = AgentRunOutput {
+            disposition: match terminal_reason {
+                AgentRunTerminalReason::MaxTurns => AgentRunDisposition::Interrupted,
+                AgentRunTerminalReason::DelegationUnsatisfied => AgentRunDisposition::Blocked,
+                other => panic!("unexpected non-final terminal reason: {other:?}"),
+            },
             result: AgentRunResult {
                 final_text: String::new(),
                 tool_calls: 0,
@@ -1260,6 +1267,36 @@ fn non_final_kernel_terminals_do_not_project_as_run_finished() {
         assert_eq!(status, expected_status);
         assert!(matches!(event, PublicRunEventKind::RunFailed { .. }));
     }
+}
+
+#[test]
+fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
+    let task_id = TaskId::new("task-application-handoff")?;
+    let output = AgentRunOutput {
+        disposition: AgentRunDisposition::StartDurableTask(StartDurableTaskAction {
+            handoff_id: TaskHandoffId::new("handoff-application")?,
+            task_id: task_id.clone(),
+            source_turn: sigil_kernel::ConversationTurnRef::new(
+                "session-application",
+                "message-application",
+                "run-application",
+            )?,
+        }),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            ..AgentRunOutcome::default()
+        },
+    };
+
+    let (status, event) = application_terminal_projection(&output);
+    assert_eq!(status, ApplicationRunTerminalStatus::Blocked);
+    assert!(matches!(event, PublicRunEventKind::RunFailed { .. }));
+    Ok(())
 }
 
 #[tokio::test]

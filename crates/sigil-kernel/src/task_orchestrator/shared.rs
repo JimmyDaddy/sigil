@@ -71,7 +71,7 @@ where
             role: step.role,
             status,
             title: Some(crate::safe_persistence_text(&step.title)),
-            summary: summary.as_deref().map(crate::safe_persistence_text),
+            summary: summary.as_deref().map(bounded_task_participant_summary),
             reason: reason.as_deref().map(crate::safe_persistence_text),
         }),
     )

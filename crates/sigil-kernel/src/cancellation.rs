@@ -250,6 +250,12 @@ impl RunCancellationHandle {
             .is_ok()
     }
 
+    /// Returns true when this run tree already granted terminal authority to natural completion.
+    #[must_use]
+    pub fn is_naturally_finalized(&self) -> bool {
+        self.state.phase.load(Ordering::SeqCst) == RUN_PHASE_NATURALLY_FINALIZED
+    }
+
     #[must_use]
     pub fn active_effects(&self) -> usize {
         self.state.active_effects.load(Ordering::SeqCst)
@@ -532,6 +538,48 @@ pub fn reconcile_unfinished_run_cancellations(
         }
     }
     Ok(recovered)
+}
+
+/// Returns whether a durable cancellation request has already closed the named task's root run.
+///
+/// A request is sufficient: after it is durable, final-answer recovery must not infer natural
+/// completion merely because the UI crashed before projecting the task terminal state.
+///
+/// # Errors
+///
+/// Returns an error when the cancellation audit stream is malformed.
+pub fn durable_task_cancellation_requested(session: &Session, task_id: &str) -> Result<bool> {
+    if session.store_path().is_none() {
+        return Ok(false);
+    }
+    let Some(current_run_scope_id) = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            crate::SessionLogEntry::Control(
+                crate::ControlEntry::TaskRunCancellationScopeBound(binding),
+            ) if binding.task_id.as_str() == task_id => Some(binding.run_scope_id.as_str()),
+            _ => None,
+        })
+    else {
+        return Ok(false);
+    };
+    Ok(cancellation_records(session)?.iter().any(|record| {
+        let DurableRunCancellationRecord::Requested(request) = record else {
+            return false;
+        };
+        if request.run_scope_id != current_run_scope_id {
+            return false;
+        }
+        match &request.target {
+            RunCancellationTarget::Run => true,
+            RunCancellationTarget::Task {
+                task_id: target_task_id,
+            } => target_task_id == task_id,
+            RunCancellationTarget::AgentThread { .. } => false,
+        }
+    }))
 }
 
 fn cancellation_records(session: &Session) -> Result<Vec<DurableRunCancellationRecord>> {

@@ -70,10 +70,12 @@ pub fn register_agent_tools_with_registry_and_mode(
     multi_agent_mode: MultiAgentMode,
 ) -> Result<()> {
     let index = profile_registry.model_visible_index(&Default::default())?;
+    let base_tool_contracts = registry.contracts();
     let surface = Arc::new(AgentToolSurface {
         profile_registry,
         budget,
         multi_agent_mode,
+        base_tool_contracts,
         profile_index_description: profile_index_description(&index),
     });
     for kind in AgentToolKind::ALL {
@@ -114,6 +116,7 @@ struct AgentToolSurface {
     profile_registry: AgentProfileRegistry,
     budget: AgentBudgetPolicy,
     multi_agent_mode: MultiAgentMode,
+    base_tool_contracts: Vec<(ToolSpec, sigil_kernel::ToolMutationTracking)>,
     profile_index_description: String,
 }
 
@@ -219,6 +222,9 @@ impl Tool for AgentTool {
         args: &Value,
     ) -> Result<Option<sigil_kernel::ApprovalMode>> {
         Ok(match self.kind {
+            AgentToolKind::Spawn if self.surface.multi_agent_mode == MultiAgentMode::None => {
+                Some(sigil_kernel::ApprovalMode::Deny)
+            }
             AgentToolKind::Spawn if self.safe_model_spawn(args)? => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
@@ -279,10 +285,17 @@ impl AgentTool {
         let Some(resolved) = self.surface.profile_registry.get(&profile_id) else {
             return Ok(false);
         };
+        let resolved_contracts = self
+            .surface
+            .base_tool_contracts
+            .iter()
+            .filter(|(spec, _)| resolved.profile.tool_scope.allows(&spec.name))
+            .cloned()
+            .collect::<Vec<_>>();
         Ok(resolved.effective_enabled()
             && resolved.trust_state == AgentTrustState::Trusted
             && resolved.effective_model_invocation_allowed()
-            && tool_scope_is_safe_readonly_for_auto_spawn(&resolved.profile.tool_scope))
+            && tool_contracts_are_safe_readonly_for_auto_spawn(&resolved_contracts))
     }
 
     fn description(&self) -> String {

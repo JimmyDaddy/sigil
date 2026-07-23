@@ -11,6 +11,8 @@ pub struct AgentToolRuntime {
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
+    #[cfg(test)]
+    pub(super) delegation_authority_override: Option<DelegationAuthority>,
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -36,6 +38,8 @@ impl AgentToolRuntime {
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             web_task_tree_budget: None,
+            #[cfg(test)]
+            delegation_authority_override: None,
         }
     }
 
@@ -55,6 +59,8 @@ impl AgentToolRuntime {
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             web_task_tree_budget: None,
+            #[cfg(test)]
+            delegation_authority_override: None,
         }
     }
 
@@ -62,6 +68,25 @@ impl AgentToolRuntime {
     pub fn with_background_runs(mut self, background_runs: AgentToolBackgroundRuns) -> Self {
         self.background_runs = background_runs;
         self
+    }
+
+    /// Test-only injection for exercising host-owned delegation admission.
+    ///
+    /// Production model-tool runtimes always begin with proactive authority. O2 will expose a
+    /// scoped, consumable host grant rather than an ambient authority setter.
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn with_delegation_authority(mut self, authority: DelegationAuthority) -> Self {
+        self.delegation_authority_override = Some(authority);
+        self
+    }
+
+    pub(super) fn model_delegation_authority(&self) -> DelegationAuthority {
+        #[cfg(test)]
+        if let Some(authority) = &self.delegation_authority_override {
+            return authority.clone();
+        }
+        DelegationAuthority::ModelProactive
     }
 
     pub async fn collect_finished_background_runs(

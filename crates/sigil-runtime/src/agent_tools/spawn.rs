@@ -21,9 +21,6 @@ impl AgentToolRuntime {
                 );
             }
         };
-        if let Some(warning) = spawn_scope_overlap_warning(session, &parsed) {
-            let _ = handler.handle(RunEvent::Notice(warning));
-        }
         let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
             Ok(profile) => profile,
             Err(error) => {
@@ -36,6 +33,57 @@ impl AgentToolRuntime {
             return unsupported_background_write_tool_result(call, &parsed.profile_id);
         }
         let profile_tool_scope = resolved_profile.profile.tool_scope.clone();
+        let child_registry = child_tool_registry_for_profile(
+            &self.base_registry,
+            &self.root_config,
+            role,
+            changeset_only_write,
+            profile_tool_scope,
+        );
+        let authority = self.model_delegation_authority();
+        if let Err(error) = admit_model_agent_spawn(
+            self.root_config.task.multi_agent_mode,
+            &authority,
+            &resolved_profile,
+            &child_registry,
+        ) {
+            return agent_spawn_denied_tool_result(call, format!("{error:#}"));
+        }
+        let thread_id = match chat_agent_thread_id_for_call(&call.id, &parsed.profile_id) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let delegation_admission = match delegation_admission_entry(
+            authority,
+            thread_id.clone(),
+            parsed.profile_id.clone(),
+            parsed.mode,
+            AgentInvocationSource::Chat,
+            &parsed.objective,
+            &child_registry,
+        ) {
+            Ok(admission) => admission,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        if let Some(warning) = spawn_scope_overlap_warning(session, &parsed) {
+            let _ = handler.handle(RunEvent::Notice(warning));
+        }
+        let safe_detachable_registry =
+            tool_registry_is_safe_readonly_for_auto_spawn(&child_registry);
         let child_provider =
             match self
                 .provider_factory
@@ -52,17 +100,6 @@ impl AgentToolRuntime {
                 }
             };
         let child_capabilities = child_provider.capabilities();
-        let thread_id = match chat_agent_thread_id_for_call(&call.id, &parsed.profile_id) {
-            Ok(thread_id) => thread_id,
-            Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::InvalidInput,
-                    error.to_string(),
-                );
-            }
-        };
         let parent_session_ref = match parent_session_ref(session) {
             Ok(reference) => reference,
             Err(error) => {
@@ -124,6 +161,7 @@ impl AgentToolRuntime {
                 provider_capabilities: child_capabilities,
                 invocation_mode: parsed.mode,
                 invocation_source: AgentInvocationSource::Chat,
+                delegation_admission,
                 display_name_hint: parsed.display_name_hint.clone(),
             },
         ) {
@@ -150,13 +188,6 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let child_registry = child_tool_registry_for_profile(
-            &self.base_registry,
-            &self.root_config,
-            role,
-            changeset_only_write,
-            profile_tool_scope,
-        );
         let child_agent = Agent::new(child_provider, child_registry);
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&resolved_profile) {
@@ -177,10 +208,11 @@ impl AgentToolRuntime {
             options.interaction_mode,
             role,
         );
-        child_options.permission_config = effective_child_permission_config(
-            &options.permission_config,
-            &child_options.permission_config,
-            &resolved_profile.profile.permission_policy,
+        apply_child_permission_constraints(
+            &mut child_options,
+            options,
+            role,
+            resolved_profile.profile.permission_policy.clone(),
         );
 
         if matches!(parsed.mode, AgentInvocationMode::Background) {
@@ -266,7 +298,7 @@ impl AgentToolRuntime {
         if self.run_cancellation.is_none()
             && !changeset_only_write
             && matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
-            && tool_scope_is_safe_readonly_for_auto_spawn(&resolved_profile.profile.tool_scope)
+            && safe_detachable_registry
         {
             return self
                 .run_detachable_chat_child(
@@ -572,6 +604,30 @@ impl AgentToolRuntime {
         let changeset_only_write =
             profile_uses_changeset_only_write(role, &request.resolved_profile);
         let profile_tool_scope = request.resolved_profile.profile.tool_scope.clone();
+        let child_registry = child_tool_registry_for_profile(
+            &self.base_registry,
+            &self.root_config,
+            role,
+            changeset_only_write,
+            profile_tool_scope,
+        );
+        let authority = DelegationAuthority::UserExplicit;
+        admit_model_agent_spawn(
+            self.root_config.task.multi_agent_mode,
+            &authority,
+            &request.resolved_profile,
+            &child_registry,
+        )?;
+        let thread_id = chat_agent_thread_id_for_call(&call.id, &request.profile_id)?;
+        let delegation_admission = delegation_admission_entry(
+            authority,
+            thread_id.clone(),
+            request.profile_id.clone(),
+            request.mode,
+            request.invocation_source,
+            &request.objective,
+            &child_registry,
+        )?;
         let child_provider = self
             .provider_factory
             .build_provider(&self.root_config, role, &request.profile_id)
@@ -582,7 +638,6 @@ impl AgentToolRuntime {
                 )
             })?;
         let child_capabilities = child_provider.capabilities();
-        let thread_id = chat_agent_thread_id_for_call(&call.id, &request.profile_id)?;
         let parent_session_ref = parent_session_ref(session)?;
         let child_session_ref = agent_child_session_ref(&thread_id)?;
         let budget_scope_id = chat_budget_scope_id(&call.id)?;
@@ -605,6 +660,7 @@ impl AgentToolRuntime {
                 provider_capabilities: child_capabilities,
                 invocation_mode: request.mode,
                 invocation_source: request.invocation_source,
+                delegation_admission,
                 display_name_hint: request.display_name_hint.clone(),
             },
         )?;
@@ -620,13 +676,6 @@ impl AgentToolRuntime {
                 return Err(error);
             }
         };
-        let child_registry = child_tool_registry_for_profile(
-            &self.base_registry,
-            &self.root_config,
-            role,
-            changeset_only_write,
-            profile_tool_scope,
-        );
         let child_agent = Agent::new(child_provider, child_registry);
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&request.resolved_profile) {
@@ -647,10 +696,11 @@ impl AgentToolRuntime {
             options.interaction_mode,
             role,
         );
-        child_options.permission_config = effective_child_permission_config(
-            &options.permission_config,
-            &child_options.permission_config,
-            &request.resolved_profile.profile.permission_policy,
+        apply_child_permission_constraints(
+            &mut child_options,
+            options,
+            role,
+            request.resolved_profile.profile.permission_policy.clone(),
         );
         let child_input = self
             .run_cancellation
@@ -772,10 +822,11 @@ fn child_tool_registry_for_profile(
     changeset_only_write: bool,
     profile_tool_scope: sigil_kernel::ToolRegistryScope,
 ) -> ToolRegistry {
+    let base_registry = base_registry.snapshot();
     let registry = if changeset_only_write {
-        changeset_only_child_tool_registry(base_registry)
+        changeset_only_child_tool_registry(&base_registry)
     } else {
-        build_role_tool_registry(base_registry, root_config, role).into_registry()
+        build_role_tool_registry(&base_registry, root_config, role).into_registry()
     };
     registry.scoped(profile_tool_scope).into_registry()
 }

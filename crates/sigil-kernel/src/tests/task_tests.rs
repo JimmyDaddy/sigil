@@ -1,15 +1,19 @@
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef,
-    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
-    TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    AgentFinalAnswerRef, AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef,
+    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId,
+    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus,
     TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
     TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
     TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    normalize_task_agent_display_name, task_plan_update_entry, task_plan_update_result_content,
+    normalize_task_agent_display_name, task_final_message_id, task_participant_attempt_id,
+    task_participant_session_ref, task_plan_update_entry, task_plan_update_result_content,
     task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
 
@@ -77,6 +81,12 @@ fn step_projection(
         summary: None,
         reason: None,
     })
+}
+
+fn sha256_prefixed(value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(value.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
 }
 
 #[test]
@@ -1425,5 +1435,246 @@ fn task_projection_replays_child_session_display_name_entries() -> Result<()> {
         task.display_name_for_child_session(&child),
         Some("德语译员")
     );
+    Ok(())
+}
+
+#[test]
+fn task_projection_rejects_orphan_participant_results() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let summary = "orphan planner result".to_owned();
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
+            TaskParticipantResultEntry {
+                attempt_id,
+                task_id: task_id.clone(),
+                summary_hash: sha256_prefixed(&summary),
+                output_hash: format!("sha256:{}", "0".repeat(64)),
+                summary,
+                terminal_status: None,
+                final_answer_ref: None,
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification_refs: Vec::new(),
+            },
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert!(task.participant_results.is_empty());
+    assert_eq!(task.participant_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let summary = "bounded summary".to_owned();
+    let entry = TaskParticipantResultEntry {
+        attempt_id,
+        task_id,
+        summary_hash: sha256_prefixed(&summary),
+        output_hash: format!("sha256:{}", "0".repeat(64)),
+        summary,
+        terminal_status: None,
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changed_paths: vec!["path".to_owned(); TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS + 1],
+        verification_refs: Vec::new(),
+    };
+
+    let error = entry
+        .validate_shape()
+        .expect_err("unbounded changed paths must fail closed");
+    assert!(format!("{error:#}").contains("too many changed paths"));
+    Ok(())
+}
+
+#[test]
+fn task_projection_rejects_final_commit_for_another_plan_version() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    let summary = "completed plan v1".to_owned();
+    let output_hash = format!("sha256:{}", "1".repeat(64));
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
+            TaskParticipantAttemptEntry {
+                attempt_id: attempt_id.clone(),
+                task_id: task_id.clone(),
+                purpose: TaskParticipantPurpose::Synthesis,
+                ordinal: 1,
+                plan_version: Some(1),
+                step_id: None,
+                role: AgentRole::Planner,
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                status: TaskParticipantAttemptStatus::Completed,
+                reason: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
+            TaskParticipantResultEntry {
+                attempt_id: attempt_id.clone(),
+                task_id: task_id.clone(),
+                summary_hash: sha256_prefixed(&summary),
+                output_hash: output_hash.clone(),
+                summary,
+                terminal_status: None,
+                final_answer_ref: None,
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification_refs: Vec::new(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
+            TaskFinalAnswerCommittedEntry {
+                task_id: task_id.clone(),
+                plan_version: 2,
+                synthesis_attempt_id: attempt_id.clone(),
+                message_id: task_final_message_id(&task_id, &attempt_id),
+                content_hash: output_hash,
+            },
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert!(task.final_answer.is_none());
+    assert_eq!(task.participant_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn task_projection_rejects_result_ref_outside_attempt_session() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    let summary = "completed plan v1".to_owned();
+    let output_digest = "2".repeat(64);
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
+            TaskParticipantAttemptEntry {
+                attempt_id: attempt_id.clone(),
+                task_id: task_id.clone(),
+                purpose: TaskParticipantPurpose::Synthesis,
+                ordinal: 1,
+                plan_version: Some(1),
+                step_id: None,
+                role: AgentRole::Planner,
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                status: TaskParticipantAttemptStatus::Completed,
+                reason: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
+            TaskParticipantResultEntry {
+                attempt_id,
+                task_id: task_id.clone(),
+                summary_hash: sha256_prefixed(&summary),
+                output_hash: format!("sha256:{output_digest}"),
+                summary,
+                terminal_status: None,
+                final_answer_ref: Some(AgentFinalAnswerRef {
+                    session_ref: SessionRef::new_relative("children/another-attempt.jsonl")?,
+                    message_id: "child-final".to_owned(),
+                    content_hash: output_digest,
+                    char_count: 17,
+                }),
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification_refs: Vec::new(),
+            },
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert!(task.participant_results.is_empty());
+    assert_eq!(task.participant_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn task_projection_rejects_non_deterministic_parent_final_message_id() -> Result<()> {
+    let task_id = task_id("task_1")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    let summary = "completed plan v1".to_owned();
+    let output_hash = format!("sha256:{}", "3".repeat(64));
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
+            TaskParticipantAttemptEntry {
+                attempt_id: attempt_id.clone(),
+                task_id: task_id.clone(),
+                purpose: TaskParticipantPurpose::Synthesis,
+                ordinal: 1,
+                plan_version: Some(1),
+                step_id: None,
+                role: AgentRole::Planner,
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                status: TaskParticipantAttemptStatus::Completed,
+                reason: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
+            TaskParticipantResultEntry {
+                attempt_id: attempt_id.clone(),
+                task_id: task_id.clone(),
+                summary_hash: sha256_prefixed(&summary),
+                output_hash: output_hash.clone(),
+                summary,
+                terminal_status: None,
+                final_answer_ref: None,
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification_refs: Vec::new(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
+            TaskFinalAnswerCommittedEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                synthesis_attempt_id: attempt_id,
+                message_id: "task-final-wrong".to_owned(),
+                content_hash: output_hash,
+            },
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert!(task.final_answer.is_none());
+    assert_eq!(task.participant_conflicts, 1);
     Ok(())
 }

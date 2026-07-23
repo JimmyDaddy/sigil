@@ -19,14 +19,15 @@ use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
     AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CommandPermissionConfig,
-    CompactionConfig, CompletionRequest, ControlEntry, EventHandler, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode, PermissionConfig, PermissionMode,
-    PermissionPolicy, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig,
-    SessionLogEntry, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject,
-    UsageStats, WorkspaceConfig,
+    CompactionConfig, CompletionRequest, ControlEntry, DelegationAuthority, EventHandler,
+    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode,
+    PermissionConfig, PermissionEvaluationContext, PermissionMode, PermissionPolicyChain,
+    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, TaskId,
+    TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
+    ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -37,6 +38,100 @@ use super::{
     register_agent_tools, register_agent_tools_with_registry_and_mode,
     register_agent_tools_with_workspace_and_entries,
 };
+
+/// Existing runtime tests directly exercise user-directed spawn calls. Keep that authority
+/// explicit while admission-specific tests construct `AgentToolRuntime` directly.
+fn user_authorized_runtime(
+    supervisor: AgentSupervisor,
+    root_config: RootConfig,
+    mut base_registry: ToolRegistry,
+) -> AgentToolRuntime {
+    ensure_test_read_contract(&mut base_registry);
+    AgentToolRuntime::new(supervisor, root_config, base_registry)
+        .with_delegation_authority(DelegationAuthority::UserExplicit)
+}
+
+fn user_authorized_runtime_with_provider_factory(
+    supervisor: AgentSupervisor,
+    root_config: RootConfig,
+    mut base_registry: ToolRegistry,
+    provider_factory: Arc<dyn AgentToolProviderFactory>,
+) -> AgentToolRuntime {
+    ensure_test_read_contract(&mut base_registry);
+    AgentToolRuntime::with_provider_factory(
+        supervisor,
+        root_config,
+        base_registry,
+        provider_factory,
+    )
+    .with_delegation_authority(DelegationAuthority::UserExplicit)
+}
+
+fn ensure_test_read_contract(registry: &mut ToolRegistry) {
+    if registry.spec_for("read_file").is_none() {
+        registry.register(Arc::new(ContractTestTool {
+            spec: contract_test_spec("read_file", ToolAccess::Read),
+            mutation_tracking: ToolMutationTracking::None,
+        }));
+    }
+}
+
+#[derive(Clone)]
+struct ContractTestTool {
+    spec: ToolSpec,
+    mutation_tracking: ToolMutationTracking,
+}
+
+#[async_trait]
+impl Tool for ContractTestTool {
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        self.mutation_tracking
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec.name.clone(),
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+fn contract_test_spec(name: &str, access: ToolAccess) -> ToolSpec {
+    ToolSpec {
+        name: name.to_owned(),
+        description: "test contract".to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: ToolCategory::File,
+        access,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+fn registry_with_contract(
+    config: &RootConfig,
+    spec: ToolSpec,
+    mutation_tracking: ToolMutationTracking,
+) -> Result<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ContractTestTool {
+        spec,
+        mutation_tracking,
+    }));
+    register_agent_tools(&mut registry, config)?;
+    Ok(registry)
+}
 
 #[derive(Default)]
 struct RecordingEventHandler {
@@ -55,6 +150,30 @@ fn permission_test_spec(access: ToolAccess) -> ToolSpec {
     }
 }
 
+fn child_permission_decision(
+    parent: &PermissionConfig,
+    role: &PermissionConfig,
+    profile: &PermissionConfig,
+    spec: &ToolSpec,
+    tool_name: &str,
+    subjects: Vec<ToolSubject>,
+) -> Result<sigil_kernel::PermissionDecision> {
+    let context = PermissionEvaluationContext {
+        delegated_policy_constraints: vec![role.clone(), profile.clone()],
+        ..PermissionEvaluationContext::default()
+    };
+    PermissionPolicyChain::new_with_context(parent, &context)
+        .decide_with_operation_network_effect_and_default(
+            spec,
+            tool_name,
+            spec.access,
+            sigil_kernel::infer_tool_operation(tool_name, spec.access),
+            spec.network_effect,
+            subjects,
+            None,
+        )
+}
+
 #[test]
 fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
     let parent = PermissionConfig {
@@ -67,14 +186,15 @@ fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
     };
     let profile = PermissionConfig::default();
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Write),
         "write_file",
         vec![ToolSubject::path("src/main.rs", "src/main.rs")],
     )?;
 
-    assert_eq!(effective.mode, PermissionMode::ReadOnly);
     assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
@@ -91,8 +211,10 @@ fn child_permission_config_profile_deny_narrows_parent_allow() -> Result<()> {
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Write),
         "write_file",
         vec![ToolSubject::path("src/main.rs", "src/main.rs")],
@@ -114,8 +236,10 @@ fn child_permission_config_read_only_parent_remains_hard_cap() -> Result<()> {
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Write),
         "write_file",
         vec![ToolSubject::path("src/main.rs", "src/main.rs")],
@@ -141,8 +265,10 @@ fn child_permission_config_profile_command_allow_remains_capped_by_parent_read_o
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Execute),
         "bash",
         vec![ToolSubject::command(
@@ -156,7 +282,7 @@ fn child_permission_config_profile_command_allow_remains_capped_by_parent_read_o
 }
 
 #[test]
-fn child_permission_config_profile_command_allow_can_widen_manual_shell_default() -> Result<()> {
+fn child_permission_config_profile_command_allow_cannot_widen_parent_ask() -> Result<()> {
     let parent = PermissionConfig::default();
     let role = PermissionConfig::default();
     let profile = PermissionConfig {
@@ -167,8 +293,10 @@ fn child_permission_config_profile_command_allow_can_widen_manual_shell_default(
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Execute),
         "bash",
         vec![ToolSubject::command(
@@ -177,12 +305,95 @@ fn child_permission_config_profile_command_allow_can_widen_manual_shell_default(
         )],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert_eq!(decision.mode, ApprovalMode::Ask);
     Ok(())
 }
 
 #[test]
-fn child_permission_config_profile_tool_allow_overrides_parent_tool_deny() -> Result<()> {
+fn production_child_permission_materialization_preserves_ancestor_role_and_profile_caps()
+-> Result<()> {
+    let mut parent = run_options(std::env::temp_dir());
+    parent.permission_config.mode = PermissionMode::AutoEdit;
+    parent
+        .permission_context
+        .delegated_policy_constraints
+        .push(PermissionConfig {
+            mode: PermissionMode::ReadOnly,
+            ..PermissionConfig::default()
+        });
+    let profile = PermissionConfig {
+        mode: PermissionMode::AutoEdit,
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let mut child = run_options(std::env::temp_dir());
+
+    super::apply_child_permission_constraints(
+        &mut child,
+        &parent,
+        sigil_kernel::AgentRole::SubagentWrite,
+        profile,
+    );
+
+    assert_eq!(child.permission_config, parent.permission_config);
+    assert_eq!(
+        child.permission_context.delegated_policy_constraints.len(),
+        3
+    );
+    let decision = PermissionPolicyChain::new_with_context(
+        &child.permission_config,
+        &child.permission_context,
+    )
+    .decide_with_operation_network_effect_and_default(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        ToolAccess::Write,
+        ToolOperation::EditFile,
+        None,
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        None,
+    )?;
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn production_child_permission_materialization_applies_read_role_hard_cap() -> Result<()> {
+    let mut parent = run_options(std::env::temp_dir());
+    parent.permission_config.mode = PermissionMode::AutoEdit;
+    let profile = PermissionConfig {
+        mode: PermissionMode::AutoEdit,
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let mut child = run_options(std::env::temp_dir());
+
+    super::apply_child_permission_constraints(
+        &mut child,
+        &parent,
+        sigil_kernel::AgentRole::SubagentRead,
+        profile,
+    );
+
+    let decision = PermissionPolicyChain::new_with_context(
+        &child.permission_config,
+        &child.permission_context,
+    )
+    .decide_with_operation_network_effect_and_default(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        ToolAccess::Write,
+        ToolOperation::EditFile,
+        None,
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        None,
+    )?;
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_tool_allow_cannot_override_parent_tool_deny() -> Result<()> {
     let parent = PermissionConfig {
         tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Deny)]),
         ..PermissionConfig::default()
@@ -193,28 +404,32 @@ fn child_permission_config_profile_tool_allow_overrides_parent_tool_deny() -> Re
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Execute),
         "bash",
         vec![ToolSubject::command("cargo test", "cargo test")],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
 
 #[test]
-fn child_permission_config_default_role_and_profile_inherit_parent_tool_allow() -> Result<()> {
+fn child_permission_config_matching_role_and_profile_preserve_parent_tool_allow() -> Result<()> {
     let parent = PermissionConfig {
         tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
         ..PermissionConfig::default()
     };
-    let role = PermissionConfig::default();
+    let role = parent.clone();
     let profile = parent.clone();
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Execute),
         "bash",
         vec![ToolSubject::command("cargo test", "cargo test")],
@@ -236,8 +451,10 @@ fn child_permission_config_explicit_tool_ask_narrows_parent_allow() -> Result<()
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Execute),
         "bash",
         vec![ToolSubject::command("cargo test", "cargo test")],
@@ -263,8 +480,10 @@ fn child_permission_config_profile_rule_allow_cannot_widen_parent_read_only_cap(
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Write),
         "write_file",
         vec![ToolSubject::path("src/main.rs", "src/main.rs")],
@@ -275,7 +494,8 @@ fn child_permission_config_profile_rule_allow_cannot_widen_parent_read_only_cap(
 }
 
 #[test]
-fn child_permission_config_profile_external_rule_can_override_parent_default_deny() -> Result<()> {
+fn child_permission_config_profile_external_rule_cannot_override_parent_default_deny() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;
     let external_path = external_root.join("allowed").join("note.txt");
@@ -309,8 +529,10 @@ fn child_permission_config_profile_external_rule_can_override_parent_default_den
         ..PermissionConfig::default()
     };
 
-    let effective = super::effective_child_permission_config(&parent, &role, &profile);
-    let decision = PermissionPolicy::new(&effective).decide(
+    let decision = child_permission_decision(
+        &parent,
+        &role,
+        &profile,
         &permission_test_spec(ToolAccess::Read),
         "read_file",
         vec![ToolSubject::path_with_scope(
@@ -321,7 +543,7 @@ fn child_permission_config_profile_external_rule_can_override_parent_default_den
         )],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
 
@@ -895,6 +1117,36 @@ impl AgentToolProviderFactory for RejectingProviderFactory {
     }
 }
 
+async fn invoke_explore_spawn(
+    runtime: &mut AgentToolRuntime,
+    session: &mut Session,
+    call_id: &str,
+) -> Result<ToolResult> {
+    let call = ToolCall {
+        id: call_id.to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect runtime",
+            "prompt": "summarize runtime",
+            "mode": "foreground"
+        })
+        .to_string(),
+    };
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    runtime
+        .handle_agent_tool_call(
+            session,
+            &call,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("spawn_agent call was not handled"))
+}
+
 struct TextProviderFactory {
     text: String,
 }
@@ -1138,6 +1390,275 @@ fn spawn_agent_description_reflects_multi_agent_mode() -> Result<()> {
     assert!(disabled_spec.description.contains("cancel_agent"));
     assert!(!disabled_spec.description.contains("proactively"));
     assert!(!disabled_spec.description.contains("comprehensive review"));
+    let disabled_call = ToolCall {
+        id: "call-disabled-spawn".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect"
+        })
+        .to_string(),
+    };
+    assert_eq!(
+        disabled
+            .permission_default_mode(&ToolContext::new(std::env::temp_dir(), 30), &disabled_call,)?,
+        Some(ApprovalMode::Deny)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mode_none_denies_model_spawn_before_thread_or_provider_build() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::None;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    )
+    .with_delegation_authority(DelegationAuthority::UserExplicit);
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-mode-none").await?;
+
+    assert!(result.is_error());
+    assert!(result.content.contains("multi_agent_mode=none"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mode_none_denies_manual_profile_invocation_before_provider_build() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::None;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = match runtime
+        .invoke_agent_profile(
+            &mut session,
+            AgentProfileId::new("plan")?,
+            "draft a plan".to_owned(),
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await
+    {
+        Ok(_) => panic!("mode none must deny direct profile invocation"),
+        Err(error) => error,
+    };
+
+    assert!(format!("{error:#}").contains("multi_agent_mode=none"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_only_rejects_model_proactive_authority_before_provider_build() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-explicit-denied").await?;
+
+    assert!(result.is_error());
+    assert!(result.content.contains("requires explicit user"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_only_accepts_host_bound_user_authority() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    )
+    .with_delegation_authority(DelegationAuthority::UserExplicit);
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-explicit-allowed").await?;
+
+    assert!(!result.is_error(), "{}", result.content);
+    assert!(!session.agent_thread_state_projection().threads.is_empty());
+    let admission_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(_))
+            )
+        })
+        .expect("delegation admission recorded");
+    let start_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentThreadStarted(_))
+            )
+        })
+        .expect("agent start recorded");
+    assert!(admission_index < start_index);
+    let SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(admission)) =
+        &session.entries()[admission_index]
+    else {
+        unreachable!("matched admission above")
+    };
+    assert_eq!(admission.profile_id.as_str(), "explore");
+    assert_eq!(
+        admission.authority,
+        sigil_kernel::DelegationAuthorityRecord::UserExplicit
+    );
+    assert!(!admission.objective_hash.is_empty());
+    assert!(!admission.tool_contract_fingerprint.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_plan_authority_fails_closed_until_scoped_plan_binding_exists() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    )
+    .with_delegation_authority(DelegationAuthority::AcceptedTaskPlan {
+        task_id: TaskId::new("task_1")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("step_1")?,
+    });
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-unbound-plan").await?;
+
+    assert!(result.is_error());
+    assert!(result.content.contains("scoped grant"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn proactive_explore_uses_resolved_tool_contract_not_safe_name() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let mut registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    registry.register(Arc::new(ContractTestTool {
+        spec: contract_test_spec("read_file", ToolAccess::Execute),
+        mutation_tracking: ToolMutationTracking::Unknown,
+    }));
+    let surface_call = ToolCall {
+        id: "call-surface-stale-safe-proof".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect"
+        })
+        .to_string(),
+    };
+    assert_eq!(
+        registry
+            .permission_default_mode(&ToolContext::new(std::env::temp_dir(), 30), &surface_call,)?,
+        Some(ApprovalMode::Allow),
+        "the runtime admission must remain authoritative even if an older surface proof was safe"
+    );
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-unsafe-contract").await?;
+
+    assert!(result.is_error());
+    assert!(result.content.contains("resolved read-only"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn proactive_explore_accepts_verified_local_read_contract() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-proactive-safe").await?;
+
+    assert!(!result.is_error(), "{}", result.content);
+    assert!(!session.agent_thread_state_projection().threads.is_empty());
     Ok(())
 }
 
@@ -1160,6 +1681,10 @@ fn spawn_agent_args_default_to_join_before_final() -> Result<()> {
 fn agent_tool_permission_defaults_allow_safe_coordination_tools() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ContractTestTool {
+        spec: contract_test_spec("read_file", ToolAccess::Read),
+        mutation_tracking: ToolMutationTracking::None,
+    }));
     register_agent_tools(&mut registry, &config)?;
     let ctx = sigil_kernel::ToolContext::new(std::env::temp_dir(), 30);
     let safe_spawn = ToolCall {
@@ -1318,7 +1843,7 @@ async fn spawn_agent_injects_profile_prompt_into_child_request() -> Result<()> {
     register_agent_tools(&mut registry, &config)?;
     let observed_request = Arc::new(Mutex::new(None));
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -1426,12 +1951,12 @@ async fn spawn_agent_preview_contains_source_trust_mode_scope_budget() -> Result
 }
 
 #[tokio::test]
-async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
+async fn host_authorized_chat_subagent_prompt_spawns_child() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut agent_delegate = AgentToolRuntime::with_provider_factory(
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
         supervisor,
         config.clone(),
         registry.clone(),
@@ -1509,7 +2034,7 @@ async fn agent_tool_turn_does_not_persist_parent_pre_tool_text() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut agent_delegate = AgentToolRuntime::with_provider_factory(
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
         supervisor,
         config.clone(),
         registry.clone(),
@@ -1770,7 +2295,7 @@ async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let observed_followup = Arc::new(Mutex::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -1906,7 +2431,7 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -1970,7 +2495,7 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let provider_started = Arc::new(AtomicBool::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -2109,7 +2634,7 @@ async fn join_before_final_agent_returns_running_handle_and_wait_collects_result
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let observed_followup = Arc::new(Mutex::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -2218,7 +2743,7 @@ async fn join_before_final_spawns_do_not_wait_for_previous_child_completion() ->
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let observed_followup = Arc::new(Mutex::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -2316,7 +2841,7 @@ async fn join_before_final_spawns_do_not_wait_for_previous_child_completion() ->
 fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     let thread_id = append_projected_agent_thread(
         &mut session,
@@ -2351,7 +2876,7 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
 async fn wait_agent_unavailable_join_before_final_thread_unblocks_final_answer() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
@@ -2396,7 +2921,7 @@ async fn wait_agent_unavailable_join_before_final_thread_unblocks_final_answer()
 fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     let thread_id = append_projected_agent_thread(
         &mut session,
@@ -2498,7 +3023,7 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
 fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     append_projected_agent_thread(
         &mut session,
@@ -2528,7 +3053,7 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
 fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
         call_id: "call-check".to_owned(),
@@ -2633,7 +3158,7 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
 fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     session.append_control(ControlEntry::ToolApproval(
         sigil_kernel::ToolApprovalEntry {
@@ -2725,7 +3250,7 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
 fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
         call_id: "call-previous-check".to_owned(),
@@ -2769,7 +3294,7 @@ fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<(
 fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     session.append_control(ControlEntry::ToolApproval(
         sigil_kernel::ToolApprovalEntry {
@@ -2817,7 +3342,7 @@ fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
 fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("parent.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -2870,7 +3395,7 @@ fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() ->
 fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
     session.append_control(ControlEntry::ToolApproval(
         sigil_kernel::ToolApprovalEntry {
@@ -3037,7 +3562,7 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
     let request_supervisor = supervisor.clone();
     let background_runs = AgentToolBackgroundRuns::default();
     let observed_followup = Arc::new(Mutex::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor.clone(),
         config.clone(),
         registry.clone(),
@@ -3086,7 +3611,7 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
     assert!(background_runs.has_any());
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert!(background_runs.has_finished());
-    let mut collector = AgentToolRuntime::with_provider_factory(
+    let mut collector = user_authorized_runtime_with_provider_factory(
         supervisor.clone(),
         config.clone(),
         registry.clone(),
@@ -3155,7 +3680,7 @@ async fn wait_agent_collects_completed_background_result() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3240,7 +3765,7 @@ async fn wait_agent_waits_for_running_background_result() -> Result<()> {
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let observed_followup = Arc::new(Mutex::new(false));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3313,7 +3838,7 @@ async fn wait_agent_marks_running_thread_without_live_handle_unavailable() -> Re
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::new(supervisor, config, registry);
+    let mut runtime = user_authorized_runtime(supervisor, config, registry);
     let mut session = Session::new("parent", "model");
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
@@ -3453,7 +3978,7 @@ async fn spawn_agent_rejects_model_invisible_profile_before_building_provider() 
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3496,7 +4021,7 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3583,7 +4108,7 @@ async fn worker_changeset_only_invocation_records_merge_review_without_parent_mu
     "content": "--- current/README.md\n+++ proposed/README.md\n@@\n-old\n+new\n"
   }
 }"#;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3706,7 +4231,7 @@ async fn worker_background_spawn_is_rejected_without_creating_thread() -> Result
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3753,7 +4278,7 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry.clone(),
@@ -3847,7 +4372,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let full_text = format!("alpha\n{}\nomega", "x".repeat(3_200));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -3987,7 +4512,7 @@ async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read()
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let full_text = format!("alpha\n{}\nomega", "x".repeat(40_500));
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4155,7 +4680,7 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         "x".repeat(5_100)
     );
     let safe_full_text = sigil_kernel::safe_persistence_text(&full_text);
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4283,7 +4808,7 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let full_text = "short child result".to_owned();
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4441,7 +4966,7 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4552,7 +5077,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
     let supervisor = supervisor(&config)?;
     let page_text_marker = "SECRET_CHILD_PAGE_MARKER";
     let full_text = format!("alpha {page_text_marker} omega");
-    let mut agent_delegate = AgentToolRuntime::with_provider_factory(
+    let mut agent_delegate = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry.clone(),
@@ -4691,7 +5216,7 @@ async fn spawn_agent_records_usage_without_budget_warning() -> Result<()> {
         AgentBudgetPolicy::from_root_config(&config),
         provider_capabilities(),
     );
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4784,7 +5309,7 @@ async fn spawn_agent_enforces_max_subagents() -> Result<()> {
         budget,
         provider_capabilities(),
     );
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
@@ -4932,7 +5457,7 @@ async fn spawned_runtime_session()
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let mut runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry.clone(),

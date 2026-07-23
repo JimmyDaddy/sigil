@@ -1,20 +1,20 @@
 use anyhow::Result;
 
 use crate::{
-    AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationPolicy, AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus,
-    AgentMergeSafePointEntry, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
-    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
-    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationStatus,
-    AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
-    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
-    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultDeliveredEntry,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
-    ControlEntry, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, SessionRef,
-    WorkspaceRootSnapshot,
+    AgentApprovalRouteEntry, AgentArtifactRef, AgentDelegationAdmissionEntry,
+    AgentElicitationRouteEntry, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationSource,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentProfile,
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
+    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
+    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
+    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
+    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, ControlEntry, DelegationAuthorityRecord, JsonlSessionStore, ModelMessage,
+    Session, SessionLogEntry, SessionRef, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -1388,5 +1388,34 @@ fn profile_hash_change_can_be_captured_with_needs_review_trust() -> Result<()> {
         snapshot.profile_hash == "sha256:changed-profile"
             && snapshot.trust_state == AgentTrustState::NeedsReview
     }));
+    Ok(())
+}
+
+#[test]
+fn delegation_admission_roundtrips_as_audit_evidence_without_execution_authority() -> Result<()> {
+    let entry = SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(
+        AgentDelegationAdmissionEntry {
+            thread_id: thread_id("thread_1")?,
+            profile_id: profile_id("explore")?,
+            invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+            invocation_source: AgentInvocationSource::Chat,
+            authority: DelegationAuthorityRecord::ModelProactive,
+            objective_hash: "sha256:objective".to_owned(),
+            tool_contract_fingerprint: "sha256:contracts".to_owned(),
+            admitted_at_ms: None,
+        },
+    ));
+
+    let encoded = serde_json::to_string(&entry)?;
+    let decoded: SessionLogEntry = serde_json::from_str(&encoded)?;
+    let SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(admission)) = decoded else {
+        panic!("delegation admission must retain its control-entry shape")
+    };
+    assert_eq!(admission.thread_id.as_str(), "thread_1");
+    assert_eq!(admission.profile_id.as_str(), "explore");
+    assert_eq!(
+        admission.authority,
+        DelegationAuthorityRecord::ModelProactive
+    );
     Ok(())
 }

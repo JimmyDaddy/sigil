@@ -774,6 +774,32 @@ fn code_action_and_rename_tools_are_registered_as_previewed_write_tools() {
 }
 
 #[test]
+fn read_only_code_intelligence_tools_declare_no_workspace_mutation_tracking() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    let contracts = registry
+        .contracts()
+        .into_iter()
+        .map(|(spec, tracking)| (spec.name, tracking))
+        .collect::<BTreeMap<_, _>>();
+
+    for name in [
+        "code_symbols",
+        "code_workspace_symbols",
+        "code_definition",
+        "code_references",
+        "code_diagnostics",
+    ] {
+        assert_eq!(
+            contracts.get(name),
+            Some(&ToolMutationTracking::None),
+            "{name} should not trigger workspace mutation scans"
+        );
+    }
+}
+
+#[test]
 fn code_action_and_rename_permission_subjects_use_expected_scopes() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");

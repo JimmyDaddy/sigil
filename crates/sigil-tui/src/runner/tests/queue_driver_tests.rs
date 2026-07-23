@@ -151,6 +151,47 @@ fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
 }
 
 #[test]
+fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "coordinate a cross-layer task".to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let preparation = prepare_next_queued_conversation_candidate(
+        session.as_ref().expect("queued session"),
+        &exact_prompts,
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        vec![sigil_kernel::request_task_planning_tool_spec()],
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let QueuedConversationCandidatePreparation::Prepared(candidate) = preparation else {
+        panic!("queued chat should materialize a candidate");
+    };
+
+    assert!(
+        candidate
+            .frozen_request
+            .request()
+            .tools
+            .iter()
+            .any(|tool| { tool.name == sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME })
+    );
+    Ok(())
+}
+
+#[test]
 fn sensitive_queue_prompt_without_process_local_exact_material_becomes_stale() {
     let temp = tempfile::tempdir().expect("temporary queue store should create");
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))

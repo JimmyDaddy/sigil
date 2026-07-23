@@ -9,30 +9,37 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::{Agent, Provider};
 use crate::{
-    Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    ApprovalHandler, ChangeSet, CheckPromotion, CheckSpecId, CheckpointRestored,
-    CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler,
-    EvidenceScope, ExecutionBackend, ExecutionMutationProfile, FileType, JsonlSessionStore,
-    MergeReviewId, MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared,
-    MutationReconciled, MutationResolution, MutationSubject, Provider, ReadinessEvaluatedEntry,
-    ReadinessInput, RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry,
-    SessionStreamRecord, StoredEvent, ToolAccess, ToolCategory, ToolErrorKind, ToolExecutionStatus,
-    ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust,
-    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
-    WriteLeaseReleased, WriteLeaseScope, build_workspace_snapshot,
-    build_workspace_snapshot_for_event, evaluate_readiness,
+    AgentArtifactRef, AgentFinalAnswerRef, AgentRunInput, AgentRunOptions, AgentRunOutcome,
+    AgentRunPurpose, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind, ChangeSet,
+    CheckPromotion, CheckSpecId, CheckpointRestored, CompletionCriteria,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler, EvidenceScope,
+    ExecutionBackend, ExecutionMutationProfile, FileType, JsonlSessionStore, MergeReviewId,
+    MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared, MutationReconciled,
+    MutationResolution, MutationSubject, ReadinessEvaluatedEntry, ReadinessInput, RequiredAction,
+    RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent,
+    TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext, ToolAccess, ToolCategory,
+    ToolErrorKind, ToolExecutionStatus, ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec,
+    TrustedCheckSpec, VerificationAutoRunPolicy, VerificationCheckRunEntry,
+    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationVerdict,
+    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust, WriteIsolationMode,
+    WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
+    build_workspace_snapshot, build_workspace_snapshot_for_event, evaluate_readiness,
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
     task::{
-        AgentRole, SessionRef, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-        TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRunEntry,
-        TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
-        TaskStepStatus,
+        AgentRole, SessionRef, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId,
+        TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+        TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+        TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskReadyDeferredReason,
+        TaskReadyQueueOptions, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
+        TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, bounded_task_participant_summary,
+        task_final_message_id, task_participant_attempt_id, task_participant_logical_run_id,
+        task_participant_session_ref,
     },
     verification::PolicyHash,
     verification::{
@@ -46,10 +53,11 @@ use crate::{
     ToolApproval, ToolCall,
     task::{
         TaskChildSessionEntry, TaskChildSessionStatus, TaskRouteId, TaskRouteStatus,
-        TaskSubagentApprovalRouteEntry, child_session_ref,
+        TaskSubagentApprovalRouteEntry,
     },
 };
 
+#[cfg(test)]
 type BoxedAgent = Agent<Box<dyn Provider>>;
 
 mod changeset_only;
@@ -69,11 +77,15 @@ pub use changeset_only::{
     validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use child_session::TaskChildSessionRunner;
-pub use runner::SequentialTaskOrchestrator;
+#[cfg(test)]
+use runner::participant_result_entry;
+pub use runner::{SequentialTaskOrchestrator, reconcile_task_final_answer_prefix};
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskVerificationRerunOutput, TaskVerificationRerunRequest,
+    TaskChildSessionRunRequest, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, TaskVerificationRerunOutput,
+    TaskVerificationRerunRequest,
 };
 
 use changeset_only::{
@@ -86,7 +98,7 @@ use evidence::{
 };
 use prompts::{
     executor_step_prompt, normalize_task_guidance, planner_prompt, subagent_step_prompt,
-    task_continue_reason,
+    task_continue_reason, task_synthesis_prompt,
 };
 pub use readiness::rerun_task_verification_check;
 use readiness::{

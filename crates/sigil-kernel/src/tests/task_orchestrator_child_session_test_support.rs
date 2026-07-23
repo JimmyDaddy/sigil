@@ -1,22 +1,77 @@
 use super::scheduler::has_blocking_tool_error;
 use super::*;
+use crate::task_participant_child_task_id;
 
 pub(crate) struct TestAgentTaskChildSessionRunner {
+    planner: BoxedAgent,
+    executor: BoxedAgent,
     subagent_read: BoxedAgent,
     subagent_write: BoxedAgent,
+    synthesis: BoxedAgent,
 }
 
 impl TestAgentTaskChildSessionRunner {
-    pub fn new(subagent_read: BoxedAgent, subagent_write: BoxedAgent) -> Self {
+    pub fn new(
+        planner: BoxedAgent,
+        executor: BoxedAgent,
+        subagent_read: BoxedAgent,
+        subagent_write: BoxedAgent,
+        synthesis: BoxedAgent,
+    ) -> Self {
         Self {
+            planner,
+            executor,
             subagent_read,
             subagent_write,
+            synthesis,
         }
     }
 }
 
 #[async_trait]
 impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
+    async fn run_planner_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskPlannerSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskPlannerSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let mut child_session = build_child_session(parent_session, &request.child_session_ref)?;
+        self.planner
+            .run_with_approval_input(
+                &mut child_session,
+                request.child_input,
+                request.options,
+                handler,
+                approval_handler,
+            )
+            .await?;
+        let accepted_plan = child_session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                    if plan.task_id == request.task.task_id
+                        && plan.status == TaskPlanStatus::Accepted =>
+                {
+                    Some(plan.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("isolated planner did not produce an accepted plan"))?;
+        Ok(TaskPlannerSessionRunOutput {
+            attempt_id: request.attempt_id,
+            accepted_plan,
+            child_session_ref: request.child_session_ref,
+        })
+    }
+
     async fn run_child_session<H, A>(
         &self,
         parent_session: &mut Session,
@@ -30,15 +85,15 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
     {
         let TaskChildSessionRunRequest {
             task,
+            attempt_id,
+            child_session_ref,
             plan_version,
             step,
             child_input,
             options,
             changeset_only_base_snapshot_id,
         } = request;
-        let child_task_id =
-            TaskId::new(format!("child_v{plan_version}_{}", step.step_id.as_str()))?;
-        let child_session_ref = child_session_ref(&task.task_id, &step.step_id, &child_task_id)?;
+        let child_task_id = task_participant_child_task_id(&task.task_id, &attempt_id)?;
         append_child_session(
             parent_session,
             handler,
@@ -60,11 +115,10 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             child_session_ref: &child_session_ref,
         };
         let agent = match step.role {
+            AgentRole::Planner => &self.planner,
+            AgentRole::Executor => &self.executor,
             AgentRole::SubagentRead => &self.subagent_read,
             AgentRole::SubagentWrite => &self.subagent_write,
-            AgentRole::Planner | AgentRole::Executor => {
-                bail!("task child session runner requires a subagent role")
-            }
         };
         let output = match run_child_agent_for_step(
             agent,
@@ -127,9 +181,12 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             } else {
                 None
             };
+        let final_message_id = output.result.final_message_id.clone();
         let step_output = StepRunOutput {
             final_text: output.result.final_text,
             outcome: output.outcome,
+            final_answer_ref: None,
+            artifact_refs: Vec::new(),
             changeset_proposal,
             changeset_only_after_snapshot_id,
         };
@@ -146,11 +203,64 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             status,
             summary_hash,
         )?;
+        let final_answer_ref = final_message_id.map(|message_id| AgentFinalAnswerRef {
+            session_ref: child_session_ref.clone(),
+            message_id,
+            content_hash: hash_text(&step_output.final_text),
+            char_count: step_output.final_text.chars().count(),
+        });
         Ok(TaskChildSessionRunOutput {
+            attempt_id,
             final_text: step_output.final_text,
             outcome: step_output.outcome,
+            child_session_ref: child_session_ref.clone(),
+            final_answer_ref,
+            artifact_refs: Vec::new(),
             changeset_proposal: step_output.changeset_proposal,
             changeset_only_after_snapshot_id: step_output.changeset_only_after_snapshot_id,
+        })
+    }
+
+    async fn run_synthesis_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskSynthesisSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskSynthesisSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let mut child_session = build_child_session(parent_session, &request.child_session_ref)?;
+        let output = self
+            .synthesis
+            .run_with_approval_input(
+                &mut child_session,
+                request.child_input,
+                request.options,
+                handler,
+                approval_handler,
+            )
+            .await?;
+        let final_text = crate::safe_persistence_text(&output.result.final_text);
+        let final_answer_ref = output
+            .result
+            .final_message_id
+            .map(|message_id| AgentFinalAnswerRef {
+                session_ref: request.child_session_ref.clone(),
+                message_id,
+                content_hash: hash_text(&final_text),
+                char_count: final_text.chars().count(),
+            })
+            .ok_or_else(|| anyhow!("synthesis child did not persist a final answer"))?;
+        Ok(TaskSynthesisSessionRunOutput {
+            attempt_id: request.attempt_id,
+            final_text,
+            outcome: output.outcome,
+            child_session_ref: request.child_session_ref,
+            final_answer_ref,
+            artifact_refs: Vec::new(),
         })
     }
 }

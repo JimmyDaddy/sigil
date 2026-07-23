@@ -16,7 +16,7 @@ use crate::{
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCapability,
     ExecutionIsolationPolicy, ExecutionSandboxFallback, ExecutionSandboxProfile,
     McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
-    TaskMode, WorkspaceConfig,
+    TaskMode, TaskRoutingPolicy, WorkspaceConfig,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -926,6 +926,7 @@ provider = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
+routing_policy = "auto"
 default_mode = "plan"
 max_plan_steps = 8
 multi_agent_mode = "proactive"
@@ -942,6 +943,11 @@ prefixes = ["code_intel_"]
     let config: RootConfig = toml::from_str(raw).expect("task config should parse");
 
     assert_eq!(TaskConfig::default().default_mode, TaskMode::Chat);
+    assert_eq!(
+        TaskConfig::default().routing_policy,
+        TaskRoutingPolicy::Manual
+    );
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(config.task.default_mode, TaskMode::Plan);
     assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
     assert_eq!(config.task.max_plan_steps, 8);
@@ -1014,12 +1020,31 @@ fn task_config_role_config_and_mode_labels_are_stable() {
     );
     assert_eq!(TaskMode::Chat.as_str(), "chat");
     assert_eq!(TaskMode::Plan.as_str(), "plan");
+    assert_eq!(TaskRoutingPolicy::Manual.as_str(), "manual");
+    assert_eq!(TaskRoutingPolicy::Auto.as_str(), "auto");
     assert_eq!(MultiAgentMode::None.as_str(), "none");
     assert_eq!(
         MultiAgentMode::ExplicitRequestOnly.as_str(),
         "explicit_request_only"
     );
     assert_eq!(MultiAgentMode::Proactive.as_str(), "proactive");
+}
+
+#[test]
+fn task_routing_policy_preserves_manual_compatibility_when_missing() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[task]
+default_mode = "plan"
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("legacy task config should parse");
+
+    assert_eq!(config.task.default_mode, TaskMode::Plan);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
 }
 
 #[test]

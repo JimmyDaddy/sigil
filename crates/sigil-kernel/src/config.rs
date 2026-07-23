@@ -1451,6 +1451,12 @@ pub struct AgentConfig {
 pub struct TaskConfig {
     #[serde(default = "default_task_enabled")]
     pub enabled: bool,
+    /// Controls whether ordinary conversation input may hand off to durable task orchestration.
+    ///
+    /// Compatibility defaults to `manual`; `default_mode` remains a composer preference and does
+    /// not grant autonomous routing authority.
+    #[serde(default)]
+    pub routing_policy: TaskRoutingPolicy,
     #[serde(default)]
     pub default_mode: TaskMode,
     #[serde(default)]
@@ -1477,6 +1483,7 @@ impl Default for TaskConfig {
     fn default() -> Self {
         Self {
             enabled: default_task_enabled(),
+            routing_policy: TaskRoutingPolicy::default(),
             default_mode: TaskMode::default(),
             planner: RoleModelConfig::default(),
             executor: RoleModelConfig::default(),
@@ -1499,6 +1506,24 @@ impl TaskConfig {
             AgentRole::Executor => &self.executor,
             AgentRole::SubagentRead => &self.subagent_read,
             AgentRole::SubagentWrite => &self.subagent_write,
+        }
+    }
+}
+
+/// Admission policy for ordinary conversation-to-task routing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRoutingPolicy {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl TaskRoutingPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
         }
     }
 }

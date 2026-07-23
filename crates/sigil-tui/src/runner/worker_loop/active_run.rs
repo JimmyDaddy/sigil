@@ -7,6 +7,7 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_owner: RunCancellationOwner,
     pub(in crate::runner) cancellation_recorder: RunCancellationRecorder,
+    pub(in crate::runner) cancellation_target: RunCancellationTarget,
     pub(in crate::runner) url_capability_registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
     pub(in crate::runner) image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 }
@@ -33,6 +34,38 @@ pub(in crate::runner) fn prepare_run_cancellation(
         .register_task()
         .map_err(|error| format!("failed to register root run task: {error}"))?;
     Ok((owner, recorder, handle, task_guard))
+}
+
+pub(in crate::runner) fn prepare_task_run_cancellation(
+    session: &mut Session,
+    task_id: &TaskId,
+) -> std::result::Result<
+    (
+        RunCancellationOwner,
+        RunCancellationRecorder,
+        RunCancellationHandle,
+        RunTaskGuard,
+    ),
+    String,
+> {
+    let cancellation = prepare_run_cancellation(session)?;
+    bind_task_run_cancellation_scope(session, task_id, &cancellation.2)?;
+    Ok(cancellation)
+}
+
+pub(in crate::runner) fn bind_task_run_cancellation_scope(
+    session: &mut Session,
+    task_id: &TaskId,
+    handle: &RunCancellationHandle,
+) -> std::result::Result<(), String> {
+    session
+        .append_control(ControlEntry::TaskRunCancellationScopeBound(
+            TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: handle.scope_id().to_owned(),
+            },
+        ))
+        .map_err(|error| format!("failed to bind task cancellation scope: {error:#}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -66,7 +99,7 @@ pub(in crate::runner) fn cancel_active_run(
     let request = RunCancellationRequestedEntry {
         request_id: request_id.clone(),
         run_scope_id: active_run.cancellation_owner.handle().scope_id().to_owned(),
-        target: RunCancellationTarget::Run,
+        target: active_run.cancellation_target.clone(),
         reason: reason.to_owned(),
         requested_at_ms,
         quiescence_deadline_ms: requested_at_ms
@@ -304,6 +337,7 @@ pub(in crate::runner) enum RunTaskPayload {
     },
     Task {
         task_id: String,
+        queue_id: Option<ConversationInputQueueId>,
         result: std::result::Result<TaskRunStatus, String>,
     },
 }

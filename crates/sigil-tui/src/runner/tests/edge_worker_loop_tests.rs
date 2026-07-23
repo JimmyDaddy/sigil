@@ -13,14 +13,17 @@ use sigil_kernel::{
     AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DurableEventType, ExecutionCleanupStatus, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, ModelMessage, MutationEventRecorder, PlanApprovalPermission, Provider,
+    McpElicitationEntry, ModelMessage, MutationEventRecorder, PlanApprovalPermission, PlanDecision,
+    PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider,
     ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
-    ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope, WorkspaceMutationDetected,
-    WorkspaceRootSnapshot, project_user_message_for_persistence,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry,
+    TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
+    ToolRegistry, ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot, plan_draft_created_entry,
+    plan_task_input_from_draft, project_user_message_for_persistence, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -32,12 +35,13 @@ use super::{
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         worker_loop::append_cancelled_task_state,
         worker_loop::{
-            PlanApprovalRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
-            next_task_id, partition_agent_result_continuations,
-            pending_agent_result_continuations_from_session,
-            queued_background_ready_transient_context, refresh_terminal_task_statuses,
-            resolve_continue_task, run_worker_loop,
+            CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
+            WorkerLoopMcpHandlers, append_mcp_elicitation_audits, approve_plan,
+            cancel_terminal_task, close_agent_thread, create_task_from_plan, next_task_id,
+            partition_agent_result_continuations, pending_agent_result_continuations_from_session,
+            plan_handoff_workspace_snapshot_id, queued_background_ready_transient_context,
+            refresh_terminal_task_statuses, resolve_continue_task, run_worker_loop,
+            session_ref_for_log_path,
         },
     },
     common::{PlannedProvider, StreamPlan, test_root_config},
@@ -77,6 +81,345 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         next_task_id(&session).map_err(anyhow::Error::msg)?.as_str(),
         "task_2"
     );
+    Ok(())
+}
+
+#[test]
+fn task_from_plan_reconciles_decision_only_crash_prefix_with_the_same_task_id() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/plan-prefix.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+        .map_err(anyhow::Error::msg)?;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+```"#,
+        PlanSourceRef::default(),
+        1,
+        base_snapshot,
+    )?
+    .expect("structured plan draft");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let stable_task_id = task_id_from_plan_draft(&draft)?;
+    session.append_control(ControlEntry::PlanDecisionRecorded(
+        PlanDecisionRecordedEntry {
+            plan_id: draft.plan_id.clone(),
+            plan_hash: draft.plan_hash.clone(),
+            decision: PlanDecision::Accepted,
+            decided_by: PlanDecisionActor::User,
+            decided_at_ms: 2,
+            reason: Some("created task from plan".to_owned()),
+        },
+    ))?;
+    assert_eq!(
+        session
+            .plan_artifact_projection()
+            .latest_pending_plan()
+            .map(|pending| &pending.plan_id),
+        Some(&draft.plan_id)
+    );
+    let mut current_session = Some(session);
+
+    let created = create_task_from_plan(
+        &root_config,
+        &workspace_root,
+        &session_log_path,
+        &mut current_session,
+        CreateTaskFromPlanRequest {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash,
+            start_mode: PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(created.task_id, stable_task_id);
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(created.entry.task_plan_version, 1);
+    assert_eq!(created.entry.task_id, stable_task_id);
+    Ok(())
+}
+
+#[test]
+fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/plan-anchor-prefix.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+        .map_err(anyhow::Error::msg)?;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+```"#,
+        PlanSourceRef::default(),
+        1,
+        base_snapshot,
+    )?
+    .expect("structured plan draft");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let stable_task_id = task_id_from_plan_draft(&draft)?;
+    let objective = plan_task_input_from_draft(&draft);
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: stable_task_id.clone(),
+        parent_session_ref: session_ref_for_log_path(&session_log_path)
+            .map_err(anyhow::Error::msg)?,
+        objective,
+        status: TaskRunStatus::Started,
+        reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
+    }))?;
+    let (promoted, step_mapping) = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
+        .expect("v2 plan should promote");
+    session.append_control(ControlEntry::TaskPlan(promoted))?;
+    session.append_control(ControlEntry::TaskCreatedFromPlan(
+        TaskCreatedFromPlanEntry {
+            plan_id: draft.plan_id.clone(),
+            plan_hash: draft.plan_hash.clone(),
+            task_id: stable_task_id.clone(),
+            task_plan_version: 1,
+            step_mapping,
+            stale_reason: None,
+            created_at_ms: 2,
+        },
+    ))?;
+    assert!(
+        session
+            .plan_artifact_projection()
+            .latest_pending_plan()
+            .is_some()
+    );
+    let mut current_session = Some(session);
+
+    let created = create_task_from_plan(
+        &root_config,
+        &workspace_root,
+        &session_log_path,
+        &mut current_session,
+        CreateTaskFromPlanRequest {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash,
+            start_mode: PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(created.task_id, stable_task_id);
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        created
+            .entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
+                    if decision.decision == PlanDecision::Accepted
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        current_session
+            .as_ref()
+            .expect("session remains available")
+            .plan_artifact_projection()
+            .latest_pending_plan()
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn task_from_plan_without_base_snapshot_uses_compatibility_planner() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/plan-no-base-snapshot.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+```"#,
+        PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("structured plan draft");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let mut current_session = Some(session);
+
+    let created = create_task_from_plan(
+        &root_config,
+        &workspace_root,
+        &session_log_path,
+        &mut current_session,
+        CreateTaskFromPlanRequest {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash,
+            start_mode: PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(created.entry.task_plan_version, 0);
+    assert!(created.entry.step_mapping.is_empty());
+    assert!(
+        created
+            .entry
+            .stale_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("base workspace snapshot is unavailable"))
+    );
+    let task = current_session
+        .as_ref()
+        .expect("session remains available")
+        .task_state_projection()
+        .tasks
+        .get(&created.task_id)
+        .cloned()
+        .expect("task remains projected");
+    assert!(task.plans.is_empty());
+    assert_eq!(task.status, TaskRunStatus::Started);
+    Ok(())
+}
+
+#[test]
+fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir_all(&workspace_root)?;
+    fs::write(workspace_root.join("README.md"), "snapshot a\n")?;
+    let session_log_path = temp.path().join(".sigil/sessions/plan-drift-prefix.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+        .map_err(anyhow::Error::msg)?;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+```"#,
+        PlanSourceRef::default(),
+        1,
+        base_snapshot,
+    )?
+    .expect("structured plan draft");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let stable_task_id = task_id_from_plan_draft(&draft)?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: stable_task_id.clone(),
+        parent_session_ref: session_ref_for_log_path(&session_log_path)
+            .map_err(anyhow::Error::msg)?,
+        objective: plan_task_input_from_draft(&draft),
+        status: TaskRunStatus::Started,
+        reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
+    }))?;
+    let (promoted, _) = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
+        .expect("v2 plan should promote");
+    session.append_control(ControlEntry::TaskPlan(promoted))?;
+    fs::write(workspace_root.join("README.md"), "snapshot b\n")?;
+    let mut current_session = Some(session);
+
+    let error = match create_task_from_plan(
+        &root_config,
+        &workspace_root,
+        &session_log_path,
+        &mut current_session,
+        CreateTaskFromPlanRequest {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash,
+            start_mode: PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        },
+    ) {
+        Ok(_) => panic!("workspace drift must not reuse an earlier promoted plan"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("workspace drift"));
+    let projection = current_session
+        .as_ref()
+        .expect("session remains available")
+        .plan_artifact_projection();
+    assert!(!projection.task_created_for_plan(&draft.plan_id));
+    assert!(projection.latest_pending_plan().is_some());
+    let task_projection = current_session
+        .as_ref()
+        .expect("session remains available")
+        .task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(&stable_task_id)
+        .expect("stale prefix task remains auditable");
+    assert_eq!(task.status, TaskRunStatus::Cancelled);
+    assert_eq!(
+        task.plans
+            .get(&1)
+            .expect("promoted plan remains audited")
+            .status,
+        TaskPlanStatus::Superseded
+    );
+    let continue_error = resolve_continue_task(
+        current_session.as_ref().expect("session remains available"),
+        Some(stable_task_id.as_str().to_owned()),
+    )
+    .expect_err("stale cancelled prefix must not be continuable");
+    assert!(continue_error.contains("cancelled"));
     Ok(())
 }
 
@@ -240,12 +583,13 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         reason: None,
     }))?;
 
-    let (task_id, task_id_value, objective) =
+    let (task_id, task_id_value, objective, needs_planning) =
         resolve_continue_task(&session, None).map_err(anyhow::Error::msg)?;
 
     assert_eq!(task_id.as_str(), "task_1");
     assert_eq!(task_id_value, "task_1");
     assert_eq!(objective, "resume me");
+    assert!(!needs_planning);
     Ok(())
 }
 
@@ -277,7 +621,9 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
     }))?;
 
     let error = match resolve_continue_task(&session, None) {
-        Ok((task_id, _, _)) => anyhow::bail!("completed task unexpectedly resumed: {task_id:?}"),
+        Ok((task_id, _, _, _)) => {
+            anyhow::bail!("completed task unexpectedly resumed: {task_id:?}")
+        }
         Err(error) => error,
     };
 

@@ -52,6 +52,7 @@ fn permission_evaluation_context(
         ],
         user_state_roots: vec![paths.state_root.clone()],
         user_cache_roots: vec![paths.cache_root.clone(), paths.workspace_cache_root.clone()],
+        delegated_policy_constraints: Vec::new(),
         effective_policy_cap: None,
         network_policy,
     }

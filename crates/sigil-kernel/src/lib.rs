@@ -35,6 +35,7 @@ pub mod session;
 pub mod skill;
 pub mod sse;
 pub mod task;
+pub mod task_handoff;
 pub mod task_memory;
 pub mod task_orchestrator;
 pub mod terminal_task;
@@ -45,26 +46,29 @@ pub mod web_budget;
 pub mod write_isolation;
 
 pub use agent::{
-    Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnPreparer, AgentRunInput,
-    AgentRunInputPreparer, AgentRunOptions, AgentRunOutcome, AgentRunOutput, AgentRunResult,
-    AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext, projected_agent_run_readiness,
+    Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnPreparer,
+    AgentRunDisposition, AgentRunInput, AgentRunInputPreparer, AgentRunOptions, AgentRunOutcome,
+    AgentRunOutput, AgentRunPurpose, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
+    ConversationPurposeContext, FinalAnswerContext, StartDurableTaskAction, TaskParticipantContext,
+    TaskPlannerContext, TaskSynthesisContext, projected_agent_run_readiness,
 };
 pub use agent_thread::{
-    AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentFinalAnswerRef,
-    AgentGraphSummary, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest,
-    AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
-    AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
-    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
-    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationProjection,
-    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
-    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
-    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
-    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
-    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
-    AgentThreadStateProjection, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, WorkspaceRootSnapshot,
+    AgentApprovalRouteEntry, AgentArtifactRef, AgentDelegationAdmissionEntry,
+    AgentElicitationRouteEntry, AgentFinalAnswerRef, AgentGraphSummary, AgentInvocationMode,
+    AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource, AgentMailboxMessageEntry,
+    AgentMailboxStatus, AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile,
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
+    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
+    AgentResultContinuationProjection, AgentResultContinuationStatus, AgentResultPolicy,
+    AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
+    AgentRunAttemptProjection, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry,
+    AgentThreadProjection, AgentThreadResult, AgentThreadResultDeliveredEntry,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, DelegationAuthority, DelegationAuthorityRecord, WorkspaceRootSnapshot,
     closed_agent_routes, interrupted_agent_attempts, interrupted_agent_mailbox_messages,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
@@ -73,7 +77,8 @@ pub use cancellation::{
     RunCancellationRecorder, RunCancellationRequested, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEffectClass, RunEffectGuard,
     RunEffectKind, RunQuiescenceOutcome, RunTaskGuard, append_run_cancellation_finalized,
-    append_run_cancellation_requested, reconcile_unfinished_run_cancellations,
+    append_run_cancellation_requested, durable_task_cancellation_requested,
+    reconcile_unfinished_run_cancellations,
 };
 pub use changeset::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
@@ -106,11 +111,11 @@ pub use config::{
     MultiAgentMode, MutationArtifactRetentionConfig, RoleModelConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SessionRetentionConfig, SkillConfig,
-    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, TerminalKeyboardEnhancement,
-    TerminalNotificationConfig, TerminalNotificationMethod, ThemeColorOverrides, ThemeId,
-    ToolAllowlistConfig, UsageCostCurrency, WebBundledSearchConfig, WebConfig, WebPolicyCap,
-    WebProxyMode, WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute, WorkspaceConfig,
-    default_user_config_dir, default_user_config_path, preferred_config_path,
+    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, TaskRoutingPolicy,
+    TerminalKeyboardEnhancement, TerminalNotificationConfig, TerminalNotificationMethod,
+    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WebBundledSearchConfig,
+    WebConfig, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute,
+    WorkspaceConfig, default_user_config_dir, default_user_config_path, preferred_config_path,
     resolve_workspace_root,
 };
 pub use context_engine::{
@@ -253,9 +258,9 @@ pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,
     EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
     NetworkPolicy, PathTrustZone, PermissionConfig, PermissionConfirmation, PermissionDecision,
-    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionRisk, PermissionRule,
-    ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope, ToolOperation,
-    apply_risk_overlay, classify_path_trust_zone, derive_permission_risk,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionPolicyChain,
+    PermissionRisk, PermissionRule, ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope,
+    ToolOperation, apply_risk_overlay, classify_path_trust_zone, derive_permission_risk,
     derive_permission_risk_with_network_effect, evaluate_network_policy, infer_tool_operation,
     tool_approval_session_grant_available, tool_approval_session_grant_available_for_facets,
     tool_approval_session_grant_available_for_parts,
@@ -281,7 +286,8 @@ pub use plan::{
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanDraftStep, PlanId,
     PlanPermissionGrantedEntry, PlanSourceRef, PlanSuggestedCheck, PlanTaskStartMode,
     PlanToTaskStepMapping, TaskCreatedFromPlanEntry, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -436,15 +442,31 @@ pub use skill::{
 pub use sse::SseFrameBuffer;
 pub use task::{
     AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+    TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS, TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS,
+    TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
+    TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS, TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS,
     TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskGraphProjection, TaskGraphStepProjection, TaskId,
-    TaskIsolationMode, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
-    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus,
-    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
-    child_session_ref, normalize_task_agent_display_name, task_plan_update_entry,
-    task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
+    TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
+    TaskGraphStepProjection, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
+    TaskParticipantResultEntry, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue,
+    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepAttemptId,
+    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+    bounded_task_participant_summary, child_session_ref, normalize_task_agent_display_name,
+    task_final_message_id, task_participant_attempt_id, task_participant_child_task_id,
+    task_participant_logical_run_id, task_participant_session_ref, task_plan_update_entry,
+    task_plan_update_result_content, task_plan_update_tool_spec, task_planner_logical_run_id,
+    validate_task_plan_graph_steps,
+};
+pub use task_handoff::{
+    ConversationTurnRef, MAX_TASK_ADMISSION_REASON_CODES, REQUEST_TASK_PLANNING_TOOL_NAME,
+    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
+    TaskHandoffProjection, TaskHandoffProjectionEntry, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, request_task_planning_tool_spec,
+    task_planning_reason_codes,
 };
 pub use task_memory::{
     AttemptRef, BranchId, CommandReceiptId, FileChangeRef, ModelAssistedMemoryDecision,
@@ -455,10 +477,12 @@ pub use task_memory::{
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskVerificationRerunOutput,
-    TaskVerificationRerunRequest, changeset_only_child_contract_prompt,
-    changeset_only_child_tool_registry, changeset_only_child_tool_scope,
-    decode_changeset_only_child_output, rerun_task_verification_check,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskPlannerSessionRunOutput,
+    TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
+    TaskVerificationRerunOutput, TaskVerificationRerunRequest,
+    changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
+    changeset_only_child_tool_scope, decode_changeset_only_child_output,
+    reconcile_task_final_answer_prefix, rerun_task_verification_check,
     validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{

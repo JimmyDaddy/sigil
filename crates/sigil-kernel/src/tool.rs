@@ -2094,6 +2094,38 @@ impl ToolRegistry {
         }
     }
 
+    /// Freezes the currently visible tool implementations into an independent registry map.
+    ///
+    /// The tool implementations remain shared `Arc`s, but later registration or replacement in
+    /// the source registry cannot change this snapshot's resolved contracts. Child-agent
+    /// admission uses this to bind its ToolSpec proof to the tools it will actually execute.
+    pub fn snapshot(&self) -> Self {
+        let visible_tools = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .iter()
+                .filter(|(name, _)| self.allows(name))
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let input_preparer = {
+            let preparer = match self.run_input_preparer.read() {
+                Ok(preparer) => preparer,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            preparer.clone()
+        };
+        Self {
+            tools: Arc::new(RwLock::new(visible_tools)),
+            run_input_preparer: Arc::new(RwLock::new(input_preparer)),
+            scope: None,
+            deny_scope: None,
+        }
+    }
+
     /// Registers one tool by its stable spec name, replacing any prior entry with the same name.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.spec().name.clone();
@@ -2235,6 +2267,25 @@ impl ToolRegistry {
             .filter_map(|tool| {
                 let spec = tool.spec();
                 self.allows(&spec.name).then_some(spec)
+            })
+            .collect()
+    }
+
+    /// Returns the resolved contract and mutation evidence strategy for every visible tool.
+    ///
+    /// Admission checks use this instead of tool-name allowlists so a same-name replacement with
+    /// broader effects cannot inherit read-only trust from the replaced implementation.
+    pub fn contracts(&self) -> Vec<(ToolSpec, ToolMutationTracking)> {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools
+            .values()
+            .filter_map(|tool| {
+                let spec = tool.spec();
+                self.allows(&spec.name)
+                    .then(|| (spec, tool.mutation_tracking()))
             })
             .collect()
     }
@@ -2866,12 +2917,11 @@ fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> 
 }
 
 fn default_tool_mutation_tracking(spec: &ToolSpec) -> ToolMutationTracking {
-    if spec.access == ToolAccess::Read {
+    if matches!(spec.category, ToolCategory::Mcp | ToolCategory::Custom) {
+        ToolMutationTracking::Unknown
+    } else if spec.access == ToolAccess::Read {
         ToolMutationTracking::None
-    } else if matches!(
-        spec.category,
-        ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
-    ) {
+    } else if spec.category == ToolCategory::Shell {
         ToolMutationTracking::Unknown
     } else {
         ToolMutationTracking::None

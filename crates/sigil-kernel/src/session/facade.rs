@@ -691,6 +691,11 @@ impl Session {
         TaskStateProjection::from_entries(&self.entries)
     }
 
+    /// Replays durable conversation-to-task admission facts without manufacturing task runs.
+    pub fn task_handoff_projection(&self) -> TaskHandoffProjection {
+        TaskHandoffProjection::from_entries(&self.entries)
+    }
+
     /// Returns durable resume job state reconstructed from append-only control entries.
     pub fn resume_job_state_projection(
         &self,

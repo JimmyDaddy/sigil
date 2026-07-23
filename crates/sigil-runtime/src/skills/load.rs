@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, ModelMessage, SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
     SkillTrustState, Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectKind, ToolSubjectScope,
+    ToolMutationTracking, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 
 use super::{LOAD_SKILL_TOOL_NAME, SkillDiscoveryReport, discover_skill_index_with_user_dir};
@@ -89,6 +89,10 @@ impl Tool for LoadSkillTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
     }
 
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {

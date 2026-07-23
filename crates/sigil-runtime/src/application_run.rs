@@ -9,20 +9,19 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentProfileId, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput,
-    AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
-    AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
-    ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
-    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler, PermissionMode,
-    PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig, RunCancellationFinalizedEntry,
-    RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
-    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
-    RunQuiescenceOutcome, RunTaskGuard, SecretString, Session, SessionLogEntry,
-    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
-    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
-    verification_product_view, workspace_trust_from_entries,
+    Agent, AgentProfileId, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunOutcome,
+    AgentRunOutput, AgentRunResult, AgentThreadStatus, ApprovalHandler, AssistantMessageKind,
+    ControlEntry, ConversationRunFinalizedEntryV1, ConversationRunLifecycleRecorder,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, EgressDisclosurePresenter,
+    EventHandler, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
+    McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler,
+    PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
+    Session, SessionLogEntry, SessionRef, TaskVerificationRerunRequest, ToolRegistryScope,
+    VerificationProductView, WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root,
+    safe_persistence_text, verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -548,7 +547,24 @@ impl PreparedApplicationRun {
             ));
         }
 
-        **input = queued.input;
+        let queued_input = self
+            .execution
+            .conversation_coordinator
+            .bind_conversation_input(
+                &self.execution.session,
+                queued.input,
+                self.execution.parent_session_ref.clone(),
+                self.execution.run_id.clone(),
+                Some(crate::ConversationSourceTurn {
+                    message_id: durable_message_id,
+                    objective: queued.safe_prompt,
+                }),
+                current_unix_time_ms(),
+            )
+            .map_err(|source| {
+                ApplicationQueuedRunPrepareError::promotion_commit("task_handoff_binding", source)
+            })?;
+        **input = queued_input;
         Ok(self)
     }
 
@@ -899,6 +915,8 @@ pub struct ApplicationRunExecution {
     conversation_lifecycle: ConversationRunLifecycleRecorder,
     conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
+    conversation_coordinator: crate::ConversationCoordinator,
+    parent_session_ref: SessionRef,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -1168,6 +1186,7 @@ async fn execute_application_agent_profile(
     session.append_assistant_message(message.clone())?;
     handler.handle(RunEvent::AssistantMessage(message))?;
     Ok(AgentRunOutput {
+        disposition: AgentRunDisposition::FinalAnswer,
         result: AgentRunResult {
             final_text: parent_summary,
             tool_calls: 0,
@@ -1371,15 +1390,41 @@ async fn prepare_application_run_internal(
         registry = constrain_application_tool_registry(registry, &scope)
             .map_err(ApplicationRunPrepareError::execution)?;
     }
+    let parent_session_ref = SessionRef::new_relative(
+        session_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("session.jsonl"),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    // Application/HTTP/Desktop do not yet own the durable task executor. Keep their conversation
+    // purpose explicit but force manual routing so Auto cannot create a stranded Started task.
+    // TUI is the only O2 surface that attaches handoff admission to planner/executor ownership.
+    let conversation_coordinator =
+        crate::ConversationCoordinator::new(false, root_config.task.routing_policy);
+    if queued_first_request.is_none() && agent_invocation.is_none() {
+        input = conversation_coordinator
+            .bind_conversation_input(
+                &session,
+                input,
+                parent_session_ref.clone(),
+                run_id.clone(),
+                None,
+                current_unix_time_ms(),
+            )
+            .map_err(ApplicationRunPrepareError::execution)?;
+    }
     let queued_first_assembly =
         if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
             let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
             exact_user_message.id = durable_user_message_id.clone();
+            let tool_specs = registry.specs();
             let request = session
                 .build_pre_turn_candidate_request(
                     &workspace_root,
                     &options.memory_config,
-                    registry.specs(),
+                    tool_specs,
                     target_max_tokens,
                     options.reasoning_effort.clone(),
                     session.latest_response_handle(provider.name()),
@@ -1450,6 +1495,8 @@ async fn prepare_application_run_internal(
             conversation_lifecycle: conversation_lifecycle.clone(),
             conversation_start: conversation_start.clone(),
             events: events.clone(),
+            conversation_coordinator,
+            parent_session_ref,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -2707,23 +2754,36 @@ fn validate_execution_contract(
 fn application_terminal_projection(
     output: &AgentRunOutput,
 ) -> (ApplicationRunTerminalStatus, PublicRunEventKind) {
-    match output.outcome.terminal_reason {
-        AgentRunTerminalReason::FinalAnswer => (
+    match output.disposition {
+        AgentRunDisposition::FinalAnswer => (
             ApplicationRunTerminalStatus::Succeeded,
             PublicRunEventKind::RunFinished {
                 final_text: output.result.final_text.clone(),
             },
         ),
-        AgentRunTerminalReason::MaxTurns => (
+        AgentRunDisposition::Interrupted => (
             ApplicationRunTerminalStatus::Interrupted,
             PublicRunEventKind::RunFailed {
                 error: "run interrupted after reaching the configured turn limit".to_owned(),
             },
         ),
-        AgentRunTerminalReason::DelegationUnsatisfied => (
+        AgentRunDisposition::Blocked => (
             ApplicationRunTerminalStatus::Blocked,
             PublicRunEventKind::RunFailed {
                 error: "run blocked because its required delegation was not satisfied".to_owned(),
+            },
+        ),
+        AgentRunDisposition::StartDurableTask(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "run requested a durable task handoff, but this application surface has not attached the task executor"
+                    .to_owned(),
+            },
+        ),
+        AgentRunDisposition::TaskPlanAccepted => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "task planning completed outside an attached task executor".to_owned(),
             },
         ),
     }

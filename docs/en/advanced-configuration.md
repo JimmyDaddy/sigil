@@ -13,6 +13,7 @@ Use these settings only after the normal setup works. Change one area at a time 
 ```toml
 [task]
 enabled = true
+routing_policy = "manual"
 default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
@@ -21,7 +22,7 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-Ordinary input stays chat-first. Use `/plan` for a read-only plan and `/task` for multi-step execution. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
+`routing_policy` is separate from the composer `default_mode`. The compatibility default is `manual`, so ordinary input stays chat-first. In the current O3 implementation, TUI `auto` routing lets the model request a typed handoff from a complex chat turn into the durable planner/executor flow; simple prompts still remain chat, and the handoff never bypasses write, shell, network, or merge approval. Planner, executor, subagent, and final-synthesis transcripts stay in isolated child sessions, while the parent keeps bounded results and one host-committed final answer. HTTP/Desktop application surfaces remain forced to manual routing until they attach the same task executor, which prevents stranded tasks. Use `/plan` for a read-only plan and `/task` for deterministic multi-step execution; a complete `sigil-plan-v2` DAG is promoted directly without replanning. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
 
 ## Verification
 

@@ -6,14 +6,44 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Digest;
 
 use crate::{
+    AgentArtifactRef, AgentFinalAnswerRef,
     provider::ToolCall,
     session::{ControlEntry, SessionLogEntry},
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
 };
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
+/// Maximum number of characters copied from a participant transcript into parent task control.
+pub const TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS: usize = 4_000;
+/// Maximum artifact references copied from one participant into parent task control.
+pub const TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS: usize = 16;
+/// Maximum changed paths copied from one participant into parent task control.
+pub const TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS: usize = 64;
+/// Maximum verification references copied from one participant into parent task control.
+pub const TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS: usize = 32;
+/// Maximum characters retained for one participant result reference field.
+pub const TASK_PARTICIPANT_RESULT_REF_MAX_CHARS: usize = 1_024;
+/// Maximum characters retained for the short kind of an artifact reference.
+pub const TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS: usize = 128;
+
+const TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN: &str = "sigil-task-participant-attempt-v1";
+const TASK_PARTICIPANT_CHILD_ID_DOMAIN: &str = "sigil-task-participant-child-v1";
+const TASK_FINAL_MESSAGE_ID_DOMAIN: &str = "sigil-task-final-message-v1";
+
+/// Stable logical-run correlation for the planner attempt owned by one durable task.
+#[must_use]
+pub fn task_planner_logical_run_id(task_id: &TaskId) -> String {
+    format!("task-planner:{}", task_id.as_str())
+}
+
+/// Stable logical-run correlation for one participant physical attempt.
+#[must_use]
+pub fn task_participant_logical_run_id(attempt_id: &TaskParticipantAttemptId) -> String {
+    format!("task-participant:{}", attempt_id.as_str())
+}
 /// Small bounded replan budget for one task planning run.
 pub const DEFAULT_TASK_MAX_PLAN_VERSIONS: usize = 3;
 /// Maximum number of Unicode scalar values allowed in a user-facing task agent display name.
@@ -63,6 +93,150 @@ impl TaskStepId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Stable identifier for one planner, executable-step, or synthesis attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct TaskParticipantAttemptId(String);
+
+impl TaskParticipantAttemptId {
+    /// Creates a path-safe participant attempt identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identifier is empty or unstable.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_stable_id("task participant attempt id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Compatibility name used by step-specific orchestration code and RFC language.
+pub type TaskStepAttemptId = TaskParticipantAttemptId;
+
+/// Participant phase owned by one isolated transcript.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskParticipantPurpose {
+    Planner,
+    Step,
+    Synthesis,
+}
+
+impl TaskParticipantPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Step => "step",
+            Self::Synthesis => "synthesis",
+        }
+    }
+}
+
+/// Durable lifecycle for a participant attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskParticipantAttemptStatus {
+    Started,
+    Completed,
+    Failed,
+    Blocked,
+    Cancelled,
+    Interrupted,
+}
+
+impl TaskParticipantAttemptStatus {
+    pub fn is_terminal(self) -> bool {
+        self != Self::Started
+    }
+}
+
+/// Builds the stable identity for one participant retry.
+///
+/// # Errors
+///
+/// Returns an error when the resulting identifier cannot be represented safely.
+pub fn task_participant_attempt_id(
+    task_id: &TaskId,
+    purpose: TaskParticipantPurpose,
+    plan_version: Option<u32>,
+    step_id: Option<&TaskStepId>,
+    ordinal: u32,
+) -> Result<TaskParticipantAttemptId> {
+    if ordinal == 0 {
+        bail!("task participant attempt ordinal must start at one");
+    }
+    let plan = plan_version.map_or_else(|| "-".to_owned(), |value| value.to_string());
+    let step = step_id.map_or("-", TaskStepId::as_str);
+    let digest = task_domain_hash(
+        TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN,
+        &[
+            task_id.as_str(),
+            purpose.as_str(),
+            &plan,
+            step,
+            &ordinal.to_string(),
+        ],
+    );
+    TaskParticipantAttemptId::new(format!("attempt-{}", &digest[..24]))
+}
+
+/// Builds the child-session reference owned by one participant attempt.
+///
+/// # Errors
+///
+/// Returns an error when the resulting relative path is invalid.
+pub fn task_participant_session_ref(
+    task_id: &TaskId,
+    attempt_id: &TaskParticipantAttemptId,
+) -> Result<SessionRef> {
+    SessionRef::new_relative(
+        PathBuf::from("children")
+            .join(task_id.as_str())
+            .join(format!("{}.jsonl", attempt_id.as_str())),
+    )
+}
+
+/// Builds the supervisor child task identity owned by one participant attempt.
+///
+/// # Errors
+///
+/// Returns an error when the resulting identifier is invalid.
+pub fn task_participant_child_task_id(
+    task_id: &TaskId,
+    attempt_id: &TaskParticipantAttemptId,
+) -> Result<TaskId> {
+    let digest = task_domain_hash(
+        TASK_PARTICIPANT_CHILD_ID_DOMAIN,
+        &[task_id.as_str(), attempt_id.as_str()],
+    );
+    TaskId::new(format!("child-{}", &digest[..24]))
+}
+
+/// Stable parent Assistant message identity for a committed synthesis attempt.
+#[must_use]
+pub fn task_final_message_id(task_id: &TaskId, attempt_id: &TaskParticipantAttemptId) -> String {
+    let digest = task_domain_hash(
+        TASK_FINAL_MESSAGE_ID_DOMAIN,
+        &[task_id.as_str(), attempt_id.as_str()],
+    );
+    format!("task-final-{}", &digest[..24])
+}
+
+/// Produces the bounded, persistence-safe result summary stored in the parent control log.
+#[must_use]
+pub fn bounded_task_participant_summary(value: &str) -> String {
+    crate::safe_persistence_text(value)
+        .trim()
+        .chars()
+        .take(TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS)
+        .collect()
 }
 
 /// Stable identifier for an approval or elicitation route.
@@ -738,6 +912,17 @@ pub struct TaskRunEntry {
     pub reason: Option<String>,
 }
 
+/// Binds one concrete task-run incarnation to its root cancellation scope.
+///
+/// A later binding supersedes earlier scopes for the same task, allowing an explicit Continue to
+/// recover normally after an older run was cancelled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskRunCancellationScopeBoundEntry {
+    pub task_id: TaskId,
+    pub run_scope_id: String,
+}
+
 /// Append-only task plan entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -766,6 +951,195 @@ pub struct TaskStepEntry {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Append-only lifecycle record for an isolated task participant transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskParticipantAttemptEntry {
+    pub attempt_id: TaskParticipantAttemptId,
+    pub task_id: TaskId,
+    pub purpose: TaskParticipantPurpose,
+    pub ordinal: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<TaskStepId>,
+    pub role: AgentRole,
+    pub child_session_ref: SessionRef,
+    pub status: TaskParticipantAttemptStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl TaskParticipantAttemptEntry {
+    /// Validates purpose-specific identity fields before durable append or replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when planner, step, or synthesis facts are inconsistent.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.ordinal == 0 {
+            bail!("task participant attempt ordinal must start at one");
+        }
+        match self.purpose {
+            TaskParticipantPurpose::Planner => {
+                if self.plan_version.is_some()
+                    || self.step_id.is_some()
+                    || self.role != AgentRole::Planner
+                {
+                    bail!("planner participant attempt has invalid plan or role facts");
+                }
+            }
+            TaskParticipantPurpose::Step => {
+                if self.plan_version.is_none() || self.step_id.is_none() {
+                    bail!("step participant attempt is missing plan or step identity");
+                }
+            }
+            TaskParticipantPurpose::Synthesis => {
+                if self.plan_version.is_none()
+                    || self.step_id.is_some()
+                    || self.role != AgentRole::Planner
+                {
+                    bail!("synthesis participant attempt has invalid plan or role facts");
+                }
+            }
+        }
+        let expected = task_participant_attempt_id(
+            &self.task_id,
+            self.purpose,
+            self.plan_version,
+            self.step_id.as_ref(),
+            self.ordinal,
+        )?;
+        if self.attempt_id != expected {
+            bail!("task participant attempt id conflicts with its durable identity facts");
+        }
+        let expected_ref = task_participant_session_ref(&self.task_id, &self.attempt_id)?;
+        if self.child_session_ref != expected_ref {
+            bail!("task participant attempt child session ref is not deterministic");
+        }
+        Ok(())
+    }
+}
+
+/// Bounded result committed from a participant-owned transcript into the parent task log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskParticipantResultEntry {
+    pub attempt_id: TaskParticipantAttemptId,
+    pub task_id: TaskId,
+    pub summary: String,
+    pub summary_hash: String,
+    pub output_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_status: Option<TaskParticipantAttemptStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_answer_ref: Option<AgentFinalAnswerRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_refs: Vec<String>,
+}
+
+impl TaskParticipantResultEntry {
+    /// Validates the bounded result and its content hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the summary is oversized, unsafe, empty, or hash-inconsistent.
+    pub fn validate_shape(&self) -> Result<()> {
+        let bounded = bounded_task_participant_summary(&self.summary);
+        if bounded.is_empty() {
+            bail!("task participant result summary cannot be empty");
+        }
+        if bounded != self.summary {
+            bail!("task participant result summary is not safely bounded");
+        }
+        let expected_hash = format!("sha256:{}", task_text_hash(&self.summary));
+        if self.summary_hash != expected_hash {
+            bail!("task participant result summary hash does not match its content");
+        }
+        if !self.output_hash.starts_with("sha256:") || self.output_hash.len() != 71 {
+            bail!("task participant result output hash is invalid");
+        }
+        if self
+            .terminal_status
+            .is_some_and(|status| status == TaskParticipantAttemptStatus::Started)
+        {
+            bail!("task participant result terminal status cannot be started");
+        }
+        if self.artifact_refs.len() > TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS {
+            bail!("task participant result has too many artifact refs");
+        }
+        for artifact in &self.artifact_refs {
+            validate_bounded_participant_result_field(
+                "artifact kind",
+                &artifact.kind,
+                TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS,
+            )?;
+            validate_bounded_participant_result_field(
+                "artifact path",
+                &artifact.path,
+                TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
+            )?;
+            if let Some(hash) = artifact.hash.as_deref() {
+                validate_bounded_participant_result_field(
+                    "artifact hash",
+                    hash,
+                    TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
+                )?;
+            }
+        }
+        if self.changed_paths.len() > TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS {
+            bail!("task participant result has too many changed paths");
+        }
+        for path in &self.changed_paths {
+            validate_bounded_participant_result_field(
+                "changed path",
+                path,
+                TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
+            )?;
+        }
+        if self.verification_refs.len() > TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS {
+            bail!("task participant result has too many verification refs");
+        }
+        for reference in &self.verification_refs {
+            validate_bounded_participant_result_field(
+                "verification ref",
+                reference,
+                TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_bounded_participant_result_field(
+    field: &str,
+    value: &str,
+    max_chars: usize,
+) -> Result<()> {
+    if value.is_empty() {
+        bail!("task participant result {field} cannot be empty");
+    }
+    if value.chars().count() > max_chars || crate::safe_persistence_text(value) != value {
+        bail!("task participant result {field} is not safely bounded");
+    }
+    Ok(())
+}
+
+/// Parent commit proving that exactly one synthesis result became the task's visible final answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskFinalAnswerCommittedEntry {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub synthesis_attempt_id: TaskParticipantAttemptId,
+    pub message_id: String,
+    pub content_hash: String,
 }
 
 /// Append-only parent-to-child session link.
@@ -870,6 +1244,9 @@ impl TaskStateProjection {
             ControlEntry::TaskRun(entry) => self.apply_run(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
+            ControlEntry::TaskParticipantAttempt(entry) => self.apply_participant_attempt(entry),
+            ControlEntry::TaskParticipantResult(entry) => self.apply_participant_result(entry),
+            ControlEntry::TaskFinalAnswerCommitted(entry) => self.apply_final_answer(entry),
             ControlEntry::TaskChildSession(entry) => self.apply_child_session(entry),
             ControlEntry::TaskChildSessionDisplayName(entry) => {
                 self.apply_child_display_name(entry)
@@ -965,6 +1342,107 @@ impl TaskStateProjection {
         }
     }
 
+    fn apply_participant_attempt(&mut self, entry: &TaskParticipantAttemptEntry) {
+        self.record_task_replay(&entry.task_id);
+        let task = self.ensure_task(&entry.task_id);
+        if entry.validate_shape().is_err() {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        let attempt = task
+            .participant_attempts
+            .entry(entry.attempt_id.clone())
+            .or_insert_with(|| entry.clone());
+        if attempt.task_id != entry.task_id
+            || attempt.purpose != entry.purpose
+            || attempt.ordinal != entry.ordinal
+            || attempt.plan_version != entry.plan_version
+            || attempt.step_id != entry.step_id
+            || attempt.role != entry.role
+            || attempt.child_session_ref != entry.child_session_ref
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        if attempt.status.is_terminal() && attempt.status != entry.status {
+            task.duplicate_terminal_entries = task.duplicate_terminal_entries.saturating_add(1);
+            return;
+        }
+        if entry.status.is_terminal()
+            && task
+                .participant_results
+                .get(&entry.attempt_id)
+                .and_then(|result| result.terminal_status)
+                .is_some_and(|status| status != entry.status)
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        *attempt = entry.clone();
+    }
+
+    fn apply_participant_result(&mut self, entry: &TaskParticipantResultEntry) {
+        self.record_task_replay(&entry.task_id);
+        let task = self.ensure_task(&entry.task_id);
+        let attempt = task.participant_attempts.get(&entry.attempt_id);
+        if entry.validate_shape().is_err()
+            || attempt.is_none_or(|attempt| attempt.task_id != entry.task_id)
+            || entry.terminal_status.is_some_and(|status| {
+                attempt
+                    .is_some_and(|attempt| attempt.status.is_terminal() && attempt.status != status)
+            })
+            || entry.final_answer_ref.as_ref().is_some_and(|reference| {
+                attempt.is_none_or(|attempt| {
+                    reference.session_ref != attempt.child_session_ref
+                        || format!("sha256:{}", reference.content_hash) != entry.output_hash
+                })
+            })
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match task.participant_results.get(&entry.attempt_id) {
+            Some(existing) if existing != entry => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            Some(_) => {}
+            None => {
+                task.participant_results
+                    .insert(entry.attempt_id.clone(), entry.clone());
+            }
+        }
+    }
+
+    fn apply_final_answer(&mut self, entry: &TaskFinalAnswerCommittedEntry) {
+        self.record_task_replay(&entry.task_id);
+        let task = self.ensure_task(&entry.task_id);
+        if task
+            .participant_attempts
+            .get(&entry.synthesis_attempt_id)
+            .is_none_or(|attempt| {
+                attempt.purpose != TaskParticipantPurpose::Synthesis
+                    || attempt.plan_version != Some(entry.plan_version)
+                    || attempt.status != TaskParticipantAttemptStatus::Completed
+            })
+            || task
+                .participant_results
+                .get(&entry.synthesis_attempt_id)
+                .is_none_or(|result| result.output_hash != entry.content_hash)
+            || entry.message_id
+                != task_final_message_id(&entry.task_id, &entry.synthesis_attempt_id)
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match &task.final_answer {
+            Some(existing) if existing != entry => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            Some(_) => {}
+            None => task.final_answer = Some(entry.clone()),
+        }
+    }
+
     fn apply_child_session(&mut self, entry: &TaskChildSessionEntry) {
         self.record_task_replay(&entry.task_id);
         let task = self.ensure_task(&entry.task_id);
@@ -1050,6 +1528,9 @@ pub struct TaskRunProjection {
     pub plans: BTreeMap<u32, TaskPlanProjection>,
     pub steps: BTreeMap<(u32, TaskStepId), TaskStepProjection>,
     pub current_step: Option<(u32, TaskStepId)>,
+    pub participant_attempts: BTreeMap<TaskParticipantAttemptId, TaskParticipantAttemptEntry>,
+    pub participant_results: BTreeMap<TaskParticipantAttemptId, TaskParticipantResultEntry>,
+    pub final_answer: Option<TaskFinalAnswerCommittedEntry>,
     pub child_sessions: BTreeMap<(u32, TaskStepId, TaskId), TaskChildSessionEntry>,
     pub child_display_names: BTreeMap<(u32, TaskStepId, TaskId), String>,
     pub approval_routes: BTreeMap<TaskRouteId, TaskSubagentApprovalRouteEntry>,
@@ -1058,6 +1539,7 @@ pub struct TaskRunProjection {
     pub superseded_plan_versions: BTreeSet<u32>,
     pub route_unverified: bool,
     pub child_unavailable: bool,
+    pub participant_conflicts: usize,
 }
 
 impl TaskRunProjection {
@@ -1072,6 +1554,9 @@ impl TaskRunProjection {
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
             current_step: None,
+            participant_attempts: BTreeMap::new(),
+            participant_results: BTreeMap::new(),
+            final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
@@ -1080,6 +1565,7 @@ impl TaskRunProjection {
             superseded_plan_versions: BTreeSet::new(),
             route_unverified: false,
             child_unavailable: false,
+            participant_conflicts: 0,
         }
     }
 
@@ -1096,6 +1582,9 @@ impl TaskRunProjection {
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
             current_step: None,
+            participant_attempts: BTreeMap::new(),
+            participant_results: BTreeMap::new(),
+            final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
@@ -1104,7 +1593,44 @@ impl TaskRunProjection {
             superseded_plan_versions: BTreeSet::new(),
             route_unverified: false,
             child_unavailable: false,
+            participant_conflicts: 0,
         }
+    }
+
+    /// Returns participant attempts for one purpose in durable ordinal order.
+    pub fn participant_attempts_for(
+        &self,
+        purpose: TaskParticipantPurpose,
+        plan_version: Option<u32>,
+        step_id: Option<&TaskStepId>,
+    ) -> Vec<&TaskParticipantAttemptEntry> {
+        let mut attempts = self
+            .participant_attempts
+            .values()
+            .filter(|attempt| {
+                attempt.purpose == purpose
+                    && attempt.plan_version == plan_version
+                    && attempt.step_id.as_ref() == step_id
+            })
+            .collect::<Vec<_>>();
+        attempts.sort_by_key(|attempt| attempt.ordinal);
+        attempts
+    }
+
+    /// Returns the next retry ordinal for one participant identity.
+    #[must_use]
+    pub fn next_participant_ordinal(
+        &self,
+        purpose: TaskParticipantPurpose,
+        plan_version: Option<u32>,
+        step_id: Option<&TaskStepId>,
+    ) -> u32 {
+        self.participant_attempts_for(purpose, plan_version, step_id)
+            .into_iter()
+            .map(|attempt| attempt.ordinal)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     /// Returns the latest persisted display name for a child session, if one was recorded.
@@ -1206,9 +1732,12 @@ impl TaskGraphProjection {
             .iter()
             .filter(|step| {
                 let step_key = (self.graph_version, step.step_id.clone());
-                let not_started = statuses
-                    .get(&step_key)
-                    .is_none_or(|status| status.status == TaskStepStatus::Pending);
+                let not_started = statuses.get(&step_key).is_none_or(|status| {
+                    matches!(
+                        status.status,
+                        TaskStepStatus::Pending | TaskStepStatus::Interrupted
+                    )
+                });
                 not_started
                     && step.depends_on.iter().all(|dependency| {
                         statuses
@@ -1442,6 +1971,22 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
         bail!("{label} contains unsupported characters");
     }
     Ok(())
+}
+
+fn task_domain_hash(domain: &str, parts: &[&str]) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(domain.as_bytes());
+    for part in parts {
+        digest.update([0]);
+        digest.update(part.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn task_text_hash(value: &str) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(value.as_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 /// Normalizes and validates a user-facing task agent display name.

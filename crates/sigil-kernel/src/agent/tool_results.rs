@@ -155,11 +155,6 @@ pub(super) fn agent_tool_result_satisfies_delegation(result: &ToolResult) -> boo
         return false;
     }
     let details = &result.metadata.details;
-    if details.get("thread_id").and_then(Value::as_str).is_some()
-        && details.get("status").and_then(Value::as_str).is_some()
-    {
-        return true;
-    }
     if details
         .get("result_available")
         .and_then(Value::as_bool)

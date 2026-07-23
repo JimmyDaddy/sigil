@@ -12,9 +12,10 @@ use super::{
     ApprovalMode, CommandPermissionConfig, EffectivePermissionPolicyCap, ExternalDirectoryConfig,
     ExternalDirectoryRule, PathRiskOverlay, PathTrustZone, PermissionConfig,
     PermissionConfirmation, PermissionEvaluationContext, PermissionMode, PermissionPolicy,
-    PermissionRisk, PermissionRule, ToolOperation, classify_path_trust_analysis,
-    classify_path_trust_analysis_with_context, classify_path_trust_zone,
-    classify_path_trust_zone_with_context, tool_approval_session_grant_available,
+    PermissionPolicyChain, PermissionRisk, PermissionRule, ToolOperation,
+    classify_path_trust_analysis, classify_path_trust_analysis_with_context,
+    classify_path_trust_zone, classify_path_trust_zone_with_context,
+    tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -34,6 +35,60 @@ fn network_spec(effect: NetworkEffect) -> ToolSpec {
         network_effect: Some(effect),
         ..spec(ToolAccess::Read)
     }
+}
+
+#[test]
+fn permission_policy_chain_combines_parent_role_and_profile_monotonically() -> Result<()> {
+    let parent = PermissionConfig {
+        tools: BTreeMap::from([
+            ("parent_denied".to_owned(), ApprovalMode::Deny),
+            ("parent_allowed".to_owned(), ApprovalMode::Allow),
+        ]),
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig {
+        tools: BTreeMap::from([
+            ("parent_denied".to_owned(), ApprovalMode::Allow),
+            ("parent_allowed".to_owned(), ApprovalMode::Ask),
+        ]),
+        ..parent.clone()
+    };
+    let profile = PermissionConfig {
+        tools: BTreeMap::from([
+            ("parent_denied".to_owned(), ApprovalMode::Allow),
+            ("parent_allowed".to_owned(), ApprovalMode::Allow),
+        ]),
+        ..parent.clone()
+    };
+    let context = PermissionEvaluationContext {
+        delegated_policy_constraints: vec![role, profile],
+        ..PermissionEvaluationContext::default()
+    };
+    let chain = PermissionPolicyChain::new_with_context(&parent, &context);
+    let tool_spec = spec(ToolAccess::Read);
+
+    let denied = chain.decide_with_operation_network_effect_and_default(
+        &tool_spec,
+        "parent_denied",
+        ToolAccess::Read,
+        ToolOperation::Read,
+        None,
+        Vec::new(),
+        None,
+    )?;
+    let narrowed_to_ask = chain.decide_with_operation_network_effect_and_default(
+        &tool_spec,
+        "parent_allowed",
+        ToolAccess::Read,
+        ToolOperation::Read,
+        None,
+        Vec::new(),
+        None,
+    )?;
+
+    assert_eq!(denied.mode, ApprovalMode::Deny);
+    assert_eq!(narrowed_to_ask.mode, ApprovalMode::Ask);
+    Ok(())
 }
 
 fn path_subject(path: &str) -> ToolSubject {
@@ -464,6 +519,7 @@ fn permission_context_classifies_runtime_user_and_project_asset_roots() -> Resul
         runtime_state_roots: vec![state_root.join("workspaces/ws")],
         user_state_roots: vec![state_root.clone()],
         user_cache_roots: vec![cache_root.clone()],
+        delegated_policy_constraints: Vec::new(),
         effective_policy_cap: None,
         network_policy: super::NetworkPolicy::Allow,
     };
@@ -546,6 +602,7 @@ fn permission_context_handles_caps_relative_roots_and_fallbacks() -> Result<()> 
         runtime_state_roots: Vec::new(),
         user_state_roots: Vec::new(),
         user_cache_roots: Vec::new(),
+        delegated_policy_constraints: Vec::new(),
         effective_policy_cap: Some(EffectivePermissionPolicyCap {
             policy_hash: "cap".to_owned(),
             mode: ApprovalMode::Deny,

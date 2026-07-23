@@ -123,6 +123,9 @@ pub(in crate::runner) fn spawn_task_run(
         } = spawn;
         let _cancellation_task_guard = cancellation_task_guard;
         let terminal_cancellation = cancellation_handle.clone();
+        let terminal_task_id = task_id.clone();
+        let terminal_parent_session_ref = parent_session_ref.clone();
+        let terminal_objective = objective.clone();
         let result = run_task_orchestration(
             &mut session,
             TaskRunOrchestration {
@@ -140,11 +143,14 @@ pub(in crate::runner) fn spawn_task_run(
             },
         )
         .await;
-        let result = if terminal_cancellation.try_finalize_naturally() {
-            result
-        } else {
-            Err("run cancellation won the task terminal-state race".to_owned())
-        };
+        let result = finalize_task_root(
+            &mut session,
+            &terminal_task_id,
+            &terminal_parent_session_ref,
+            &terminal_objective,
+            &terminal_cancellation,
+            result,
+        );
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
             Ok(()) => result,
             Err(error) => Err(error),
@@ -180,6 +186,9 @@ pub(in crate::runner) fn spawn_task_continue(
         } = spawn;
         let _cancellation_task_guard = cancellation_task_guard;
         let terminal_cancellation = cancellation_handle.clone();
+        let terminal_task_id = task_id.clone();
+        let terminal_parent_session_ref = parent_session_ref.clone();
+        let terminal_objective = objective.clone();
         let result = continue_task_orchestration(
             &mut session,
             TaskContinueOrchestration {
@@ -198,11 +207,14 @@ pub(in crate::runner) fn spawn_task_continue(
             },
         )
         .await;
-        let result = if terminal_cancellation.try_finalize_naturally() {
-            result
-        } else {
-            Err("run cancellation won the task terminal-state race".to_owned())
-        };
+        let result = finalize_task_root(
+            &mut session,
+            &terminal_task_id,
+            &terminal_parent_session_ref,
+            &terminal_objective,
+            &terminal_cancellation,
+            result,
+        );
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
             Ok(()) => result,
             Err(error) => Err(error),
@@ -260,7 +272,9 @@ pub(in crate::runner) fn spawn_skill_child_run(
             },
         )
         .await;
-        let result = if terminal_cancellation.try_finalize_naturally() {
+        let result = if terminal_cancellation.is_naturally_finalized()
+            || terminal_cancellation.try_finalize_naturally()
+        {
             result
         } else {
             Err("run cancellation won the task terminal-state race".to_owned())
@@ -285,6 +299,19 @@ pub(in crate::runner) struct TaskRunOrchestration<'a> {
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
+}
+
+pub(in crate::runner) struct AdmittedTaskRunOrchestration<'a> {
+    pub(in crate::runner) task_id: TaskId,
+    pub(in crate::runner) parent_session_ref: SessionRef,
+    pub(in crate::runner) objective: String,
+    pub(in crate::runner) root_config: RootConfig,
+    pub(in crate::runner) options: AgentRunOptions,
+    pub(in crate::runner) base_registry: ToolRegistry,
+    pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub(in crate::runner) handler: &'a mut ChannelEventHandler,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
 }
 
 pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
@@ -336,6 +363,46 @@ pub(in crate::runner) async fn run_task_orchestration(
         handler,
         cancellation_handle,
     } = request;
+    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+    run_admitted_task_orchestration(
+        session,
+        AdmittedTaskRunOrchestration {
+            task_id,
+            parent_session_ref,
+            objective,
+            root_config,
+            options,
+            base_registry,
+            agent_supervisor,
+            role_provider_builder,
+            handler,
+            cancellation_handle,
+        },
+        &mut approval_handler,
+    )
+    .await
+}
+
+pub(in crate::runner) async fn run_admitted_task_orchestration<A>(
+    session: &mut Session,
+    request: AdmittedTaskRunOrchestration<'_>,
+    approval_handler: &mut A,
+) -> std::result::Result<TaskRunStatus, String>
+where
+    A: ApprovalHandler + Send,
+{
+    let AdmittedTaskRunOrchestration {
+        task_id,
+        parent_session_ref,
+        objective,
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+        handler,
+        cancellation_handle,
+    } = request;
     materialize_task_verification_config(
         session,
         handler,
@@ -357,7 +424,6 @@ pub(in crate::runner) async fn run_task_orchestration(
         role_provider_builder,
     )?;
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
-    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .run(
             session,
@@ -372,11 +438,81 @@ pub(in crate::runner) async fn run_task_orchestration(
             subagent_write_options,
             root_config.task.max_plan_steps,
             handler,
-            &mut approval_handler,
+            approval_handler,
         )
         .await
         .map(|output| output.status)
         .map_err(|error| format!("{error:#}"))
+}
+
+/// Runs an admitted handoff task and atomically claims the shared root cancellation terminal.
+///
+/// Unlike ordinary `/task` spawning, conversation handoff reuses the already-open chat root. The
+/// chat agent deliberately yields terminal authority when it returns `StartDurableTask`, so this
+/// wrapper is the single place where direct and queued handoffs close that root after orchestration.
+pub(in crate::runner) async fn run_admitted_task_to_root_terminal<A>(
+    session: &mut Session,
+    request: AdmittedTaskRunOrchestration<'_>,
+    approval_handler: &mut A,
+) -> std::result::Result<TaskRunStatus, String>
+where
+    A: ApprovalHandler + Send,
+{
+    let terminal_cancellation = request.cancellation_handle.clone();
+    let terminal_task_id = request.task_id.clone();
+    let terminal_parent_session_ref = request.parent_session_ref.clone();
+    let terminal_objective = request.objective.clone();
+    let result = run_admitted_task_orchestration(session, request, approval_handler).await;
+    finalize_task_root(
+        session,
+        &terminal_task_id,
+        &terminal_parent_session_ref,
+        &terminal_objective,
+        &terminal_cancellation,
+        result,
+    )
+}
+
+fn finalize_task_root(
+    session: &mut Session,
+    task_id: &TaskId,
+    parent_session_ref: &SessionRef,
+    objective: &str,
+    terminal_cancellation: &RunCancellationHandle,
+    result: std::result::Result<TaskRunStatus, String>,
+) -> std::result::Result<TaskRunStatus, String> {
+    if !terminal_cancellation.is_naturally_finalized()
+        && !terminal_cancellation.try_finalize_naturally()
+    {
+        return Err("run cancellation won the task terminal-state race".to_owned());
+    }
+    let Err(error) = &result else {
+        return result;
+    };
+    let status = session
+        .task_state_projection()
+        .tasks
+        .get(task_id)
+        .map(|task| task.status);
+    if matches!(
+        status,
+        Some(TaskRunStatus::Started | TaskRunStatus::Running)
+    ) {
+        session
+            .append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                objective: sigil_kernel::safe_persistence_text(objective),
+                status: TaskRunStatus::Failed,
+                reason: Some(sigil_kernel::safe_persistence_text(&format!(
+                    "task orchestration failed before a terminal state: {error}"
+                ))),
+            }))
+            .map_err(|append_error| {
+                format!("failed to persist task orchestration failure: {append_error:#}")
+            })?;
+    }
+    result
 }
 
 pub(in crate::runner) async fn continue_task_orchestration(
@@ -919,6 +1055,7 @@ pub(in crate::runner) fn build_task_role_runtime(
 ) -> std::result::Result<TaskRoleRuntime, String> {
     let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
+    let synthesis_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let subagent_read_provider =
         role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
     let subagent_write_provider =
@@ -943,20 +1080,19 @@ pub(in crate::runner) fn build_task_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
-    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new(
+    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
+        Agent::new(planner_provider, planner_registry),
+        Agent::new(executor_provider, executor_registry),
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
+        Agent::new(synthesis_provider, ToolRegistry::new()),
     );
     let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
         .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
-            Agent::new(planner_provider, planner_registry),
-            Agent::new(executor_provider, executor_registry),
-            child_runner,
-        )
-        .with_execution_backend(execution_backend),
+        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
+            .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
             workspace_root.clone(),
@@ -995,6 +1131,7 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
 ) -> std::result::Result<TaskRoleRuntime, String> {
     let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
+    let synthesis_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let subagent_read_provider =
         role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
     let subagent_write_provider =
@@ -1033,20 +1170,19 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
-    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new(
+    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
+        Agent::new(planner_provider, planner_registry),
+        Agent::new(executor_provider, executor_registry),
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
+        Agent::new(synthesis_provider, ToolRegistry::new()),
     );
     let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
         .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
-            Agent::new(planner_provider, planner_registry),
-            Agent::new(executor_provider, executor_registry),
-            child_runner,
-        )
-        .with_execution_backend(execution_backend),
+        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
+            .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
             workspace_root.clone(),
@@ -1146,7 +1282,11 @@ pub(in crate::runner) fn send_task_result(
     let _ = task_result_tx.send(RunTaskResult {
         run_id,
         session,
-        payload: RunTaskPayload::Task { task_id, result },
+        payload: RunTaskPayload::Task {
+            task_id,
+            queue_id: None,
+            result,
+        },
     });
 }
 
@@ -1267,7 +1407,7 @@ pub(in crate::runner) struct CreatedTaskFromPlan {
     pub(in crate::runner) entries: Vec<SessionLogEntry>,
 }
 
-fn plan_handoff_workspace_snapshot_id(
+pub(in crate::runner) fn plan_handoff_workspace_snapshot_id(
     root_config: &RootConfig,
     workspace_root: &Path,
 ) -> std::result::Result<Option<String>, String> {
@@ -1285,16 +1425,20 @@ fn plan_handoff_stale_reason(
     current_workspace_snapshot_id: Option<&str>,
 ) -> Option<String> {
     match (base_workspace_snapshot_id, current_workspace_snapshot_id) {
-        (Some(base), Some(current)) if base != current => Some(format!(
-            "plan may be stale: workspace changed since plan was created (base={}, current={})",
-            truncate_plan_snapshot_id(base),
-            truncate_plan_snapshot_id(current)
-        )),
+        (Some(base), Some(current)) => (base != current).then(|| {
+            format!(
+                "plan may be stale: workspace changed since plan was created (base={}, current={})",
+                truncate_plan_snapshot_id(base),
+                truncate_plan_snapshot_id(current)
+            )
+        }),
         (Some(base), None) => Some(format!(
             "plan may be stale: current workspace snapshot is unavailable (base={})",
             truncate_plan_snapshot_id(base)
         )),
-        _ => None,
+        (None, _) => Some(
+            "plan cannot be direct-promoted: its base workspace snapshot is unavailable".to_owned(),
+        ),
     }
 }
 
@@ -1322,6 +1466,7 @@ pub(in crate::runner) fn create_task_from_plan(
     let draft = projection
         .plans
         .get(&plan_id)
+        .cloned()
         .ok_or_else(|| format!("plan {} is not present in this session", plan_id.as_str()))?;
     if draft.plan_hash != request.expected_plan_hash {
         return Err(format!(
@@ -1334,10 +1479,6 @@ pub(in crate::runner) fn create_task_from_plan(
     if projection.plan_is_rejected(&plan_id) {
         return Err(format!("plan {} was rejected", plan_id.as_str()));
     }
-    if projection.task_created_for_plan(&plan_id) {
-        return Err(format!("plan {} already created a task", plan_id.as_str()));
-    }
-
     let current_workspace_snapshot_id =
         plan_handoff_workspace_snapshot_id(root_config, workspace_root)
             .map_err(|error| format!("failed to build current workspace snapshot: {error}"))?;
@@ -1345,10 +1486,11 @@ pub(in crate::runner) fn create_task_from_plan(
         draft.workspace_snapshot_id.as_deref(),
         current_workspace_snapshot_id.as_deref(),
     );
-    let task_id = next_task_id(&session)?;
+    let task_id = task_id_from_plan_draft(&draft)
+        .map_err(|error| format!("failed to derive stable task id from plan: {error:#}"))?;
     let task_id_value = task_id.as_str().to_owned();
     let parent_session_ref = session_ref_for_log_path(current_session_log_path)?;
-    let objective = plan_task_input_from_draft(draft);
+    let objective = plan_task_input_from_draft(&draft);
     let decision = PlanDecisionRecordedEntry {
         plan_id: plan_id.clone(),
         plan_hash: draft.plan_hash.clone(),
@@ -1357,12 +1499,78 @@ pub(in crate::runner) fn create_task_from_plan(
         decided_at_ms: current_unix_time_ms(),
         reason: Some("created task from plan".to_owned()),
     };
+    if draft.steps.len() > root_config.task.max_plan_steps {
+        return Err(format!(
+            "plan {} has {} steps, exceeding task.max_plan_steps={}",
+            plan_id.as_str(),
+            draft.steps.len(),
+            root_config.task.max_plan_steps
+        ));
+    }
+    let promoted = if stale_reason.is_none() {
+        task_plan_from_plan_draft(&draft, task_id.clone(), 1)
+            .map_err(|error| format!("approved plan cannot be promoted safely: {error:#}"))?
+    } else {
+        None
+    };
+    let (task_plan, step_mapping) = match promoted {
+        Some((plan, mapping)) => (Some(plan), mapping),
+        None => (None, Vec::new()),
+    };
+    let existing_accepted_plan = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .and_then(|task| {
+            task.plans
+                .values()
+                .find(|plan| plan.status == TaskPlanStatus::Accepted)
+        })
+        .cloned();
+    if task_plan.is_none()
+        && let Some(existing_plan) = existing_accepted_plan
+    {
+        session
+            .append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+                task_id: task_id.clone(),
+                plan_version: existing_plan.plan_version,
+                status: TaskPlanStatus::Superseded,
+                steps: existing_plan.steps,
+                reason: Some(
+                    "workspace drift invalidated a crash-interrupted plan promotion".to_owned(),
+                ),
+            }))
+            .map_err(|error| format!("failed to supersede stale promoted task plan: {error:#}"))?;
+        let existing_task = session
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .cloned()
+            .ok_or_else(|| "stale promoted task prefix is missing its task run".to_owned())?;
+        session
+            .append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: existing_task.parent_session_ref,
+                objective: existing_task.objective,
+                status: TaskRunStatus::Cancelled,
+                reason: Some(
+                    "plan creation cancelled because the workspace changed before commit"
+                        .to_owned(),
+                ),
+            }))
+            .map_err(|error| format!("failed to cancel stale promoted task prefix: {error:#}"))?;
+        *current_session = Some(session);
+        return Err(format!(
+            "plan {} creation prefix conflicts with current workspace drift; refusing to execute an earlier promoted task plan",
+            plan_id.as_str()
+        ));
+    }
     let task_created = TaskCreatedFromPlanEntry {
         plan_id: plan_id.clone(),
         plan_hash: draft.plan_hash.clone(),
         task_id: task_id.clone(),
-        task_plan_version: 0,
-        step_mapping: Vec::new(),
+        task_plan_version: task_plan.as_ref().map_or(0, |plan| plan.plan_version),
+        step_mapping,
         stale_reason,
         created_at_ms: current_unix_time_ms(),
     };
@@ -1391,24 +1599,156 @@ pub(in crate::runner) fn create_task_from_plan(
         None => None,
     };
 
-    let mut controls = vec![ControlEntry::PlanDecisionRecorded(decision)];
-    if request.start_mode == PlanTaskStartMode::CreatePaused {
-        controls.push(ControlEntry::TaskRun(TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref,
-            objective: sigil_kernel::safe_persistence_text(&objective),
-            status: TaskRunStatus::Paused,
-            reason: Some(format!("created from plan {}", plan_id.as_str())),
-        }));
+    let desired_task_status = if request.start_mode == PlanTaskStartMode::CreatePaused {
+        TaskRunStatus::Paused
+    } else {
+        TaskRunStatus::Started
+    };
+    let safe_objective = sigil_kernel::safe_persistence_text(&objective);
+    let existing_task = session.task_state_projection().tasks.get(&task_id).cloned();
+    match existing_task {
+        Some(existing)
+            if existing.parent_session_ref == parent_session_ref
+                && existing.objective == safe_objective
+                && existing.status == desired_task_status => {}
+        Some(existing)
+            if existing.parent_session_ref == parent_session_ref
+                && existing.objective == safe_objective
+                && existing.status == TaskRunStatus::Paused
+                && desired_task_status == TaskRunStatus::Started
+                && existing.participant_attempts.is_empty()
+                && existing.steps.is_empty() =>
+        {
+            session
+                .append_control(ControlEntry::TaskRun(TaskRunEntry {
+                    task_id: task_id.clone(),
+                    parent_session_ref: parent_session_ref.clone(),
+                    objective: safe_objective.clone(),
+                    status: TaskRunStatus::Started,
+                    reason: Some(format!(
+                        "resumed crash-interrupted creation from plan {}",
+                        plan_id.as_str()
+                    )),
+                }))
+                .map_err(|error| format!("failed to resume task-from-plan prefix: {error:#}"))?;
+        }
+        Some(_) => {
+            return Err(format!(
+                "plan {} task prefix conflicts with the requested task facts",
+                plan_id.as_str()
+            ));
+        }
+        None => session
+            .append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                objective: safe_objective,
+                status: desired_task_status,
+                reason: Some(format!("created from plan {}", plan_id.as_str())),
+            }))
+            .map_err(|error| format!("failed to append task-from-plan run: {error:#}"))?,
     }
-    controls.push(ControlEntry::TaskCreatedFromPlan(task_created.clone()));
+
+    if let Some(task_plan) = task_plan {
+        let existing_plan = session
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .and_then(|task| task.plans.get(&task_plan.plan_version))
+            .cloned();
+        match existing_plan {
+            Some(existing)
+                if existing.plan_version == task_plan.plan_version
+                    && existing.status == task_plan.status
+                    && existing.steps == task_plan.steps
+                    && existing.reason == task_plan.reason => {}
+            Some(_) => {
+                return Err(format!(
+                    "plan {} task-plan prefix conflicts with direct promotion",
+                    plan_id.as_str()
+                ));
+            }
+            None => session
+                .append_control(ControlEntry::TaskPlan(task_plan))
+                .map_err(|error| format!("failed to append promoted task plan: {error:#}"))?,
+        }
+    }
+
     if let Some(grant) = permission_grant {
-        controls.push(ControlEntry::PlanPermissionGranted(grant));
+        let existing_grants = session
+            .plan_artifact_projection()
+            .permission_grants
+            .get(&plan_id)
+            .cloned()
+            .unwrap_or_default();
+        if existing_grants.iter().any(|existing| {
+            existing.plan_hash == grant.plan_hash
+                && existing.task_id == grant.task_id
+                && existing.workspace_snapshot_id == grant.workspace_snapshot_id
+                && existing.permission == grant.permission
+                && existing.scope == grant.scope
+                && existing.expires == grant.expires
+        }) {
+            // The crash-prefix retry already persisted this exact grant.
+        } else if existing_grants
+            .iter()
+            .any(|existing| existing.task_id == task_id)
+        {
+            return Err(format!(
+                "plan {} already has a conflicting permission grant for this task",
+                plan_id.as_str()
+            ));
+        } else {
+            session
+                .append_control(ControlEntry::PlanPermissionGranted(grant))
+                .map_err(|error| format!("failed to append task permission grant: {error:#}"))?;
+        }
     }
-    for control in controls {
-        session
-            .append_control(control)
-            .map_err(|error| format!("failed to append task-from-plan state: {error:#}"))?;
+
+    let existing_created = session
+        .plan_artifact_projection()
+        .tasks_created
+        .get(&plan_id)
+        .and_then(|entries| entries.last())
+        .cloned();
+    match existing_created {
+        Some(existing)
+            if existing.plan_id == task_created.plan_id
+                && existing.plan_hash == task_created.plan_hash
+                && existing.task_id == task_created.task_id
+                && existing.task_plan_version == task_created.task_plan_version
+                && existing.step_mapping == task_created.step_mapping
+                && existing.stale_reason == task_created.stale_reason => {}
+        Some(_) => {
+            return Err(format!(
+                "plan {} already has a conflicting task-created anchor",
+                plan_id.as_str()
+            ));
+        }
+        None => session
+            .append_control(ControlEntry::TaskCreatedFromPlan(task_created.clone()))
+            .map_err(|error| format!("failed to append task-from-plan anchor: {error:#}"))?,
+    }
+
+    // Acceptance is the final commit marker. Until it is durable, the plan remains visible as a
+    // pending handoff and another user action can reconcile the deterministic prefix above.
+    let existing_decision = session
+        .plan_artifact_projection()
+        .latest_decision(&plan_id)
+        .cloned();
+    match existing_decision {
+        Some(existing)
+            if existing.decision == PlanDecision::Accepted
+                && existing.plan_hash == draft.plan_hash => {}
+        Some(existing) if existing.decision == PlanDecision::Accepted => {
+            return Err(format!(
+                "plan {} already has an accepted decision for another hash",
+                plan_id.as_str()
+            ));
+        }
+        _ => session
+            .append_control(ControlEntry::PlanDecisionRecorded(decision))
+            .map_err(|error| format!("failed to append plan acceptance: {error:#}"))?,
     }
 
     let entries = session.entries().to_vec();
@@ -1587,7 +1927,7 @@ pub(in crate::runner) fn session_ref_for_log_path(
 pub(in crate::runner) fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
     vec![
         ModelMessage::system(
-            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v1 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. The steps array must contain at least one object with id, title, optional detail, target_paths, suggested_checks, risk, notes, and acceptance. target_paths, suggested_checks, notes, and acceptance are JSON arrays; use [] when empty. If you are only summarizing, reviewing, or cannot produce executable steps, do not include the sigil-plan-v1 block.",
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v2 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. Each step must include id, title, role, depends_on, mode, isolation, target_paths, suggested_checks, notes, and acceptance; detail, display_name, and risk are optional. Use the same role/mode/isolation values as task_plan_update. Use [] for empty arrays. Dependencies must reference step ids in the same block. If you are only summarizing, reviewing, or cannot produce executable steps, do not include a structured block.",
         ),
         ModelMessage::user(prompt),
     ]
@@ -1610,7 +1950,7 @@ pub(in crate::runner) fn next_task_id(session: &Session) -> std::result::Result<
 pub(in crate::runner) fn resolve_continue_task(
     session: &Session,
     requested_task_id: Option<String>,
-) -> std::result::Result<(TaskId, String, String), String> {
+) -> std::result::Result<(TaskId, String, String, bool), String> {
     let projection = session.task_state_projection();
     let task = match requested_task_id {
         Some(value) => {
@@ -1642,15 +1982,11 @@ pub(in crate::runner) fn resolve_continue_task(
         | TaskRunStatus::Failed
         | TaskRunStatus::Interrupted => {}
     }
-    if task.latest_plan_version.is_none() {
-        return Err(format!(
-            "task {} has no plan to continue",
-            task.task_id.as_str()
-        ));
-    }
+    let needs_planning = task.latest_plan_version.is_none();
     Ok((
         task.task_id.clone(),
         task.task_id.as_str().to_owned(),
         task.objective.clone(),
+        needs_planning,
     ))
 }

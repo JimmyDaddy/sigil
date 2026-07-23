@@ -6,6 +6,21 @@ use super::*;
 /// session creation, profile snapshots, provider/tool assembly, and route-aware child lifecycle.
 #[async_trait]
 pub trait TaskChildSessionRunner: Send + Sync {
+    /// Runs the task planner in an isolated transcript and returns its accepted plan artifact.
+    async fn run_planner_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskPlannerSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskPlannerSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        bail!("task child session runner does not support isolated planner sessions")
+    }
+
     /// Runs one task child session and returns its bounded terminal output.
     ///
     /// # Errors
@@ -22,4 +37,19 @@ pub trait TaskChildSessionRunner: Send + Sync {
     where
         H: EventHandler + Send,
         A: ApprovalHandler + Send;
+
+    /// Runs final synthesis in an isolated read-only transcript.
+    async fn run_synthesis_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskSynthesisSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskSynthesisSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        bail!("task child session runner does not support isolated synthesis sessions")
+    }
 }

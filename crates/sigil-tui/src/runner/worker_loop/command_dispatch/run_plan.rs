@@ -18,7 +18,7 @@ where
         message_tx,
         elicitation_handler,
         mcp_event_handler: _,
-        role_provider_builder: _,
+        role_provider_builder,
         context_resolver,
         state,
     } = context;
@@ -92,6 +92,7 @@ where
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let run_message_tx = message_tx.clone();
                 let agent = Arc::clone(agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
@@ -112,6 +113,22 @@ where
                 let run_id = state.run.next_id;
                 state.run.next_id += 1;
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
+                    Ok(session_ref) => session_ref,
+                    Err(error) => {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let conversation_coordinator = ConversationCoordinator::new(
+                    root_config.task.enabled && !plan_mode,
+                    root_config.task.routing_policy,
+                );
+                let task_root_config = root_config.clone();
+                let task_base_registry = agent.tool_registry().clone();
+                let task_agent_supervisor = state.agent.supervisor.clone();
+                let task_role_provider_builder = Arc::clone(role_provider_builder);
                 let context_resolver = context_resolver.clone();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
@@ -134,7 +151,7 @@ where
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
-                    let result = {
+                    let mut payload = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
                         let input = chat_agent_run_input_with_repo_context(
                             &context_resolver,
@@ -143,53 +160,191 @@ where
                             Vec::new(),
                         )
                         .await
-                        .with_image_attachments(attachments)
-                        .with_logical_run_id(provider_logical_run_id.clone())
-                        .with_cancellation(cancellation_handle);
-                        if let Some(tools) = plan_tools {
-                            agent
-                                .run_with_approval_input_tool_registry_and_agent_delegate(
-                                    &mut run_session,
-                                    input,
-                                    options,
-                                    tools,
-                                    &mut handler,
-                                    &mut approval_handler,
-                                    &mut agent_delegate,
-                                )
-                                .await
+                        .with_image_attachments(attachments);
+                        let input = if plan_mode {
+                            // Plan-mode prompts are intentionally transient and therefore have no
+                            // durable user turn for ConversationCoordinator to bind. They keep the
+                            // ordinary logical-run/cancellation contract but cannot request an
+                            // automatic conversation-to-task handoff.
+                            Ok(input
+                                .with_logical_run_id(provider_logical_run_id.clone())
+                                .with_cancellation(cancellation_handle.clone()))
                         } else {
-                            agent
-                                .run_with_approval_input_and_agent_delegate(
-                                    &mut run_session,
+                            conversation_coordinator
+                                .bind_conversation_input(
+                                    &run_session,
                                     input,
-                                    options,
-                                    &mut handler,
-                                    &mut approval_handler,
-                                    &mut agent_delegate,
+                                    parent_session_ref.clone(),
+                                    provider_logical_run_id.clone(),
+                                    None,
+                                    current_unix_time_ms(),
                                 )
-                                .await
+                                .map(|input| input.with_cancellation(cancellation_handle.clone()))
+                                .map_err(|error| format!("{error:#}"))
+                        };
+                        let output = match input {
+                            Ok(input) => if let Some(tools) = plan_tools {
+                                agent
+                                    .run_with_approval_input_tool_registry_and_agent_delegate(
+                                        &mut run_session,
+                                        input,
+                                        options.clone(),
+                                        tools,
+                                        &mut handler,
+                                        &mut approval_handler,
+                                        &mut agent_delegate,
+                                    )
+                                    .await
+                            } else {
+                                agent
+                                    .run_with_approval_input_and_agent_delegate(
+                                        &mut run_session,
+                                        input,
+                                        options.clone(),
+                                        &mut handler,
+                                        &mut approval_handler,
+                                        &mut agent_delegate,
+                                    )
+                                    .await
+                            }
+                            .map_err(|error| format!("{error:#}")),
+                            Err(error) => Err(error),
+                        };
+                        match output {
+                            Ok(output) => match output.disposition {
+                                AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
+                                    result: Ok(output.result),
+                                    plan_mode,
+                                    queue_id: None,
+                                    provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                },
+                                AgentRunDisposition::StartDurableTask(action) => {
+                                    let projection = run_session.task_state_projection();
+                                    let task = projection.tasks.get(&action.task_id).cloned();
+                                    match task {
+                                        Some(task) => {
+                                            let task_id = action.task_id.as_str().to_owned();
+                                            let _ = run_message_tx.send(
+                                                WorkerMessage::TaskRunStarted {
+                                                    task_id: task_id.clone(),
+                                                    objective: task.objective.clone(),
+                                                },
+                                            );
+                                            let result = run_admitted_task_to_root_terminal(
+                                                &mut run_session,
+                                                AdmittedTaskRunOrchestration {
+                                                    task_id: action.task_id,
+                                                    parent_session_ref: task.parent_session_ref,
+                                                    objective: task.objective,
+                                                    root_config: task_root_config,
+                                                    options,
+                                                    base_registry: task_base_registry,
+                                                    agent_supervisor: task_agent_supervisor,
+                                                    role_provider_builder:
+                                                        task_role_provider_builder.as_ref(),
+                                                    handler: &mut handler,
+                                                    cancellation_handle,
+                                                },
+                                                &mut approval_handler,
+                                            )
+                                            .await;
+                                            RunTaskPayload::Task {
+                                                task_id,
+                                                queue_id: None,
+                                                result,
+                                            }
+                                        }
+                                        None => {
+                                            let error = if cancellation_handle
+                                                .try_finalize_naturally()
+                                            {
+                                                "accepted task handoff is missing its durable task"
+                                                    .to_owned()
+                                            } else {
+                                                "run cancellation won the missing-task terminal-state race"
+                                                    .to_owned()
+                                            };
+                                            RunTaskPayload::Chat {
+                                                result: Err(error),
+                                                plan_mode,
+                                                queue_id: None,
+                                                provider_logical_run_id: None,
+                                                agent_result_continuation_thread_ids: Vec::new(),
+                                            }
+                                        }
+                                    }
+                                }
+                                AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
+                                    result: Err(
+                                        "run was interrupted before a final answer".to_owned()
+                                    ),
+                                    plan_mode,
+                                    queue_id: None,
+                                    provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                },
+                                AgentRunDisposition::Blocked => RunTaskPayload::Chat {
+                                    result: Err("run was blocked before a final answer".to_owned()),
+                                    plan_mode,
+                                    queue_id: None,
+                                    provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                },
+                                AgentRunDisposition::TaskPlanAccepted => RunTaskPayload::Chat {
+                                    result: Err(
+                                        "task planning completed outside a task run".to_owned()
+                                    ),
+                                    plan_mode,
+                                    queue_id: None,
+                                    provider_logical_run_id: None,
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                },
+                            },
+                            Err(error) => RunTaskPayload::Chat {
+                                result: Err(error),
+                                plan_mode,
+                                queue_id: None,
+                                provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                agent_result_continuation_thread_ids: Vec::new(),
+                            },
                         }
-                        .map(|output| output.result)
-                        .map_err(|error| format!("{error:#}"))
                     };
-                    let result = match append_mcp_elicitation_audits(
+                    if let Err(error) = append_mcp_elicitation_audits(
                         &mut run_session,
                         &run_elicitation_audit_buffer,
                     ) {
-                        Ok(()) => result,
-                        Err(error) => Err(error),
-                    };
+                        payload = match payload {
+                            RunTaskPayload::Chat {
+                                plan_mode,
+                                queue_id,
+                                provider_logical_run_id,
+                                agent_result_continuation_thread_ids,
+                                ..
+                            } => RunTaskPayload::Chat {
+                                result: Err(error),
+                                plan_mode,
+                                queue_id,
+                                provider_logical_run_id,
+                                agent_result_continuation_thread_ids,
+                            },
+                            RunTaskPayload::Task {
+                                task_id, queue_id, ..
+                            } => RunTaskPayload::Task {
+                                task_id,
+                                queue_id,
+                                result: Err(error),
+                            },
+                            RunTaskPayload::Agent { profile_id, .. } => RunTaskPayload::Agent {
+                                profile_id,
+                                result: Err(error),
+                            },
+                        };
+                    }
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Chat {
-                            result,
-                            plan_mode,
-                            queue_id: None,
-                            provider_logical_run_id: Some(provider_logical_run_id),
-                            agent_result_continuation_thread_ids: Vec::new(),
-                        },
+                        payload,
                     });
                 });
 
@@ -200,6 +355,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target: RunCancellationTarget::Run,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -331,6 +487,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target: RunCancellationTarget::Run,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });

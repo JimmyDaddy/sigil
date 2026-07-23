@@ -39,6 +39,7 @@ impl WorkerLoopState {
                 active: None,
                 discarded_ids: BTreeSet::new(),
                 next_id: 1,
+                pending_task_handoffs: Vec::new(),
             },
             compaction: CompactionWorkerState {
                 preparation_tx: compaction_preparation_tx,
@@ -93,6 +94,7 @@ pub(in crate::runner) struct RunWorkerState {
     pub(in crate::runner) active: Option<ActiveRun>,
     pub(in crate::runner) discarded_ids: BTreeSet<u64>,
     pub(in crate::runner) next_id: u64,
+    pub(in crate::runner) pending_task_handoffs: Vec<StartDurableTaskAction>,
 }
 
 pub(in crate::runner) struct CompactionWorkerState {

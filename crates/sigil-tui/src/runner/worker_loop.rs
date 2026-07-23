@@ -8,42 +8,45 @@ use std::{
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentInvocationMode, AgentProfileId, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentRole, AgentRunInput, AgentRunOptions, AgentRunResult,
-    AgentThreadId, AgentThreadStatus, AgentThreadStatusChangedEntry, CheckDiscoverySource,
-    CheckPromotion, CheckSpec, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
-    ControlledCheckpointRestoreOutput, ControlledCheckpointRestorePreview,
-    ControlledCheckpointRestoreRequest, ConversationForkOutput, ConversationForkRequest,
-    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
-    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile,
-    ImageAttachmentResolver, JsonlSessionStore, MemoryConfig, ModelMessage,
-    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
-    MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
-    PlanSourceRef, PlanTaskStartMode, ProviderCapabilities, ReasoningEffort, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
-    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard,
-    RuntimeContextCandidates, SandboxProfileRequirement, SecretString, SequentialTaskOrchestrator,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
-    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
-    ToolSubjectAudit, UserUrlCapabilityRegistrar, VerificationPolicy,
-    VerificationPolicyChangedEntry, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, build_workspace_snapshot, default_user_config_dir,
-    discover_candidate_checks_with_user_config, plan_draft_created_entry,
+    AgentResultContinuationStatus, AgentRole, AgentRunDisposition, AgentRunInput, AgentRunOptions,
+    AgentRunResult, AgentThreadId, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
+    CompletionCriteria, ControlEntry, ControlledCheckpointRestoreOutput,
+    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationForkOutput,
+    ConversationForkRequest, ConversationInputEditedEntry, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
+    EventHandler, EvidenceScope, ExecutionMutationProfile, ImageAttachmentResolver,
+    JsonlSessionStore, MemoryConfig, ModelMessage, MutationArtifactLifecycleRecorded,
+    MutationArtifactLifecycleStatus, MutationArtifactRetentionReport, MutationEventRecorder,
+    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision,
+    PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
+    PlanPermissionGrantedEntry, PlanSourceRef, PlanTaskStartMode, ProviderCapabilities,
+    ReasoningEffort, RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle,
+    RunCancellationOwner, RunCancellationRecorder, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
+    RunTaskGuard, RuntimeContextCandidates, SandboxProfileRequirement, SecretString,
+    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    SkillDescriptor, SkillRunMode, StartDurableTaskAction, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
+    TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
+    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, UserUrlCapabilityRegistrar,
+    VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, build_workspace_snapshot,
+    default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
     plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
     rerun_task_verification_check, saturating_elapsed, stable_event_uuid, stable_workspace_id,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 
 use sigil_runtime::{
-    ProviderStatusTaskManager, ProviderStatusTaskResult, append_session_control_entries,
+    ConversationCoordinator, ConversationSourceTurn, ProviderStatusTaskManager,
+    ProviderStatusTaskResult, append_session_control_entries,
     append_session_control_entries_and_track_detached, current_unix_time_ms,
     effective_compaction_config,
 };
@@ -83,7 +86,8 @@ mod task_runtime;
 mod terminal_refresh;
 
 pub(in crate::runner) use active_run::{
-    ActiveRun, RunTaskPayload, RunTaskResult, cancel_active_run, prepare_run_cancellation,
+    ActiveRun, RunTaskPayload, RunTaskResult, bind_task_run_cancellation_scope, cancel_active_run,
+    prepare_run_cancellation, prepare_task_run_cancellation,
 };
 pub(in crate::runner) use advancement::{
     WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
@@ -152,15 +156,16 @@ pub(in crate::runner) use session_transition::{
 };
 pub(in crate::runner) use state::WorkerLoopState;
 pub(in crate::runner) use task_runtime::{
-    CreateTaskFromPlanRequest, PlanApprovalRequest, RejectPlanRequest, SkillChildRunSpawn,
-    TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
-    VerificationCheckPromotionOutcome, append_plan_draft, approve_plan, clean_mutation_artifacts,
-    create_task_from_plan, delete_mutation_artifact, ensure_session_workspace_trust,
-    format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
-    load_worker_skill, next_task_id, plan_mode_transient_context,
-    promote_workspace_verification_check, reject_plan, resolve_continue_task,
-    session_ref_for_log_path, session_workspace_is_trusted, skill_child_session_objective,
-    skill_invocation_prompt, spawn_skill_child_run, spawn_task_continue, spawn_task_run,
+    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, PlanApprovalRequest,
+    RejectPlanRequest, SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn,
+    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, append_plan_draft,
+    approve_plan, clean_mutation_artifacts, create_task_from_plan, delete_mutation_artifact,
+    ensure_session_workspace_trust, format_mutation_artifact_cleanup_report,
+    format_mutation_artifact_delete_report, load_worker_skill, next_task_id,
+    plan_mode_transient_context, promote_workspace_verification_check, reject_plan,
+    resolve_continue_task, run_admitted_task_to_root_terminal, session_ref_for_log_path,
+    session_workspace_is_trusted, skill_child_session_objective, skill_invocation_prompt,
+    spawn_skill_child_run, spawn_task_continue, spawn_task_run,
 };
 pub(in crate::runner) use terminal_refresh::{
     cancel_terminal_task, refresh_terminal_task_statuses,
@@ -178,7 +183,8 @@ pub(in crate::runner) use task_runtime::{
 };
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
-    materialize_task_verification_config, skill_child_agent_role,
+    materialize_task_verification_config, plan_handoff_workspace_snapshot_id,
+    skill_child_agent_role,
 };
 
 const TERMINAL_TASK_REFRESH_INTERVAL: Duration = Duration::from_millis(500);

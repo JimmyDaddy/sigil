@@ -3640,7 +3640,7 @@ fn plan_artifact_projection_replays_durable_stream_records() -> Result<()> {
 
     assert_eq!(projection.plans.len(), 2);
     assert_eq!(projection.latest_plan(), Some(&second));
-    assert!(projection.latest_pending_plan().is_none());
+    assert_eq!(projection.latest_pending_plan(), Some(&second));
     assert_eq!(projection.latest_decision(&second.plan_id), Some(&decision));
     Ok(())
 }

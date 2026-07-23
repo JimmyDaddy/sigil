@@ -17,26 +17,29 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
-    ApprovalHandler, ApprovalMode, AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle,
-    BackgroundTaskStatus, CompactionConfig, CompletionRequest, ControlEntry, DurableEventType,
-    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel,
-    ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
-    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, PreparedToolExecution, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
-    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
-    ProviderRequestRejection, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, RunEvent, SecretString, Session, SessionLogEntry, SessionStreamRecord,
-    SourceCacheStatus, SourceFreshness, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess,
-    ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
-    ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
-    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
-    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    plan_text_hash,
+    AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode, AssistantMessageKind,
+    AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus, CompactionConfig,
+    CompletionRequest, ControlEntry, ConversationPurposeContext, ConversationTurnRef,
+    DurableEventType, EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule,
+    ExternalEvidenceLevel, ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
+    PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
+    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry,
+    PreparedToolExecution, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptStartedEntry,
+    ProviderPhysicalAttemptTerminalEntry, ProviderRequestRejection,
+    REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session, SessionLogEntry,
+    SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
+    ToolExecutionId, ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult,
+    ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar,
+    UserUrlCapabilityRegistration, VerificationVerdict, VisibleCompletionState,
+    WebUrlProvenanceKind, WorkspaceMutationDetected, plan_text_hash,
 };
 
 use super::{
@@ -2586,6 +2589,46 @@ async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn required_agent_delegation_fails_before_provider_without_agent_tools() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = NonDelegatingTextProvider {
+        calls: Arc::clone(&calls),
+    };
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await
+        .expect_err("missing agent tools must fail closed");
+
+    assert!(error.to_string().contains("no agent tools"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn required_agent_delegation_ignores_failed_agent_tool_before_final_answer() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(FailingAgentCategoryTool));
@@ -4405,6 +4448,166 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
 }
 
 #[tokio::test]
+async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batch() -> Result<()> {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(TaskHandoffSideEffectTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(TaskHandoffProvider, registry);
+    let mut session = Session::new("mock-task-handoff", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let prompt = "ship the cross-crate orchestration change";
+    let logical_run_id = "foreground-run-1";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let handoff_id = TaskHandoffId::new("handoff-automatic-1")?;
+    let task_id = TaskId::new("task-automatic-1")?;
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_scope_id = cancellation_owner.handle().scope_id().to_owned();
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn: source_turn.clone(),
+                routing_policy: TaskRoutingPolicy::Auto,
+                task_handoff: Some(TaskPlanningHandoffBinding {
+                    handoff_id: handoff_id.clone(),
+                    task_id: task_id.clone(),
+                    source_turn: source_turn.clone(),
+                    parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                    objective: prompt.to_owned(),
+                    policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    requested_at_ms: 42,
+                    decided_at_ms: 43,
+                }),
+            },
+        )))
+        .with_cancellation(cancellation_owner.handle());
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let AgentRunDisposition::StartDurableTask(action) = &output.disposition else {
+        panic!("accepted handoff must return a typed start action");
+    };
+    assert_eq!(action.handoff_id, handoff_id);
+    assert_eq!(action.task_id, task_id);
+    assert_eq!(action.source_turn, source_turn);
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::TaskHandoff
+    );
+    assert!(output.result.final_text.is_empty());
+    assert!(output.result.final_message_id.is_none());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    let scope_binding_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                    if binding.task_id == task_id && binding.run_scope_id == cancellation_scope_id
+            )
+        })
+        .expect("task handoff must bind the root cancellation scope");
+    let request_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+            )
+        })
+        .expect("task handoff request must be durable");
+    let task_started_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                    if run.task_id == task_id && run.status == TaskRunStatus::Started
+            )
+        })
+        .expect("task run must be durable");
+    assert!(scope_binding_index < request_index);
+    assert!(request_index < task_started_index);
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskHandoffResolved(_))
+            ))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            if run.task_id == action.task_id && run.status == TaskRunStatus::Started
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-side-effect"
+                && execution.status == ToolExecutionStatus::Cancelled
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-handoff-2"
+                && execution.status == ToolExecutionStatus::Cancelled
+    )));
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Assistant(message)
+            if message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Result<()> {
     let agent = Agent::new(
         PlanUpdateProvider {
@@ -4476,6 +4679,10 @@ struct LoopingToolProvider;
 struct PlanUpdateProvider {
     valid: bool,
     stream_calls: Option<Arc<AtomicUsize>>,
+}
+struct TaskHandoffProvider;
+struct TaskHandoffSideEffectTool {
+    executions: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -4700,6 +4907,96 @@ impl Provider for PlanUpdateProvider {
             })),
             Ok(ProviderChunk::Done),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for TaskHandoffProvider {
+    fn name(&self) -> &str {
+        "mock-task-handoff"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let handoff_args = r#"{"reason_codes":["cross_layer","multi_stage_change"]}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-side-effect".to_owned(),
+                name: "handoff_side_effect".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-side-effect".to_owned(),
+                delta: "{}".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-side-effect".to_owned(),
+                name: "handoff_side_effect".to_owned(),
+                args_json: "{}".to_owned(),
+            })),
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-handoff-1".to_owned(),
+                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-handoff-1".to_owned(),
+                delta: handoff_args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-handoff-1".to_owned(),
+                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+                args_json: handoff_args.to_owned(),
+            })),
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-handoff-2".to_owned(),
+                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-handoff-2".to_owned(),
+                delta: handoff_args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-handoff-2".to_owned(),
+                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+                args_json: handoff_args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Tool for TaskHandoffSideEffectTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "handoff_side_effect".to_owned(),
+            description: "must be ignored after accepted handoff".to_owned(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "handoff_side_effect",
+            "executed",
+            ToolResultMeta::default(),
+        ))
     }
 }
 

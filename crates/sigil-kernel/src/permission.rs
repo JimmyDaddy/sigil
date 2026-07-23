@@ -460,6 +460,14 @@ pub struct PermissionEvaluationContext {
     pub runtime_state_roots: Vec<PathBuf>,
     pub user_state_roots: Vec<PathBuf>,
     pub user_cache_roots: Vec<PathBuf>,
+    /// Additional materialized delegated policies that may only narrow the primary run policy.
+    ///
+    /// Child-agent runs use this for role and profile constraints. Every layer is evaluated
+    /// against the same concrete tool call and subjects before the decisions are combined with
+    /// `Deny > Ask > Allow`; callers must not pre-merge these configs by overwriting fields. Each
+    /// entry must be a complete policy derived from its parent, not a sparse config whose serde
+    /// defaults would accidentally introduce new restrictions.
+    pub delegated_policy_constraints: Vec<PermissionConfig>,
     pub effective_policy_cap: Option<EffectivePermissionPolicyCap>,
     pub network_policy: NetworkPolicy,
 }
@@ -683,6 +691,43 @@ impl PermissionDecision {
         ]);
     }
 
+    fn restrict_with(&mut self, constraint: Self) {
+        debug_assert_eq!(self.access, constraint.access);
+        debug_assert_eq!(self.network_effect, constraint.network_effect);
+        debug_assert_eq!(self.operation, constraint.operation);
+        debug_assert_eq!(self.subjects, constraint.subjects);
+        debug_assert_eq!(self.subject_zones, constraint.subject_zones);
+
+        self.base_local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            constraint.base_local_policy_decision,
+        ]);
+        self.external_directory_policy_decision = combine_modes(vec![
+            self.external_directory_policy_decision,
+            constraint.external_directory_policy_decision,
+        ]);
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.network_policy_decision = combine_modes(vec![
+            self.network_policy_decision,
+            constraint.network_policy_decision,
+        ]);
+        self.source_policy_decision = combine_modes(vec![
+            self.source_policy_decision,
+            constraint.source_policy_decision,
+        ]);
+        self.external_directory_required |= constraint.external_directory_required;
+        self.snapshot_required |= constraint.snapshot_required;
+        if self.confirmation.is_none() {
+            self.confirmation = constraint.confirmation;
+        }
+        self.command_permission_matches
+            .extend(constraint.command_permission_matches);
+        self.recompute_mode();
+    }
+
     pub(crate) fn request_external_directory_interactive_approval(&mut self) {
         if !self.external_directory_required
             || self.external_directory_policy_decision != ApprovalMode::Deny
@@ -705,6 +750,78 @@ pub struct PermissionPolicy<'a> {
     command_patterns: Vec<CompiledCommandPermissionPattern<'a>>,
     rules: Vec<CompiledPermissionRule<'a>>,
     external_rules: Vec<CompiledExternalDirectoryRule<'a>>,
+}
+
+/// Permission evaluator for a primary run policy plus delegated narrowing constraints.
+///
+/// Each policy is evaluated independently for the concrete tool spec, operation, and subjects.
+/// The resulting decisions are then combined monotonically, so a child role or profile cannot
+/// relax a parent `Ask` or `Deny` decision.
+pub struct PermissionPolicyChain<'a> {
+    policies: Vec<PermissionPolicy<'a>>,
+}
+
+impl<'a> PermissionPolicyChain<'a> {
+    /// Creates a decision-time policy chain from the primary config and runtime constraints.
+    pub fn new_with_context(
+        config: &'a PermissionConfig,
+        context: &'a PermissionEvaluationContext,
+    ) -> Self {
+        let mut policies =
+            Vec::with_capacity(context.delegated_policy_constraints.len().saturating_add(1));
+        policies.push(PermissionPolicy::new_with_context(config, context));
+        policies.extend(
+            context
+                .delegated_policy_constraints
+                .iter()
+                .map(|constraint| PermissionPolicy::new_with_context(constraint, context)),
+        );
+        Self { policies }
+    }
+
+    /// Resolves one tool call across every permission layer and returns the strictest decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any configured subject glob is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_with_operation_network_effect_and_default(
+        &self,
+        spec: &ToolSpec,
+        tool_name: &str,
+        access: ToolAccess,
+        operation: ToolOperation,
+        network_effect: Option<NetworkEffect>,
+        subjects: Vec<ToolSubject>,
+        tool_default_mode: Option<ApprovalMode>,
+    ) -> Result<PermissionDecision> {
+        let mut policies = self.policies.iter();
+        let primary = policies
+            .next()
+            .expect("permission policy chain always contains the primary policy");
+        let mut decision = primary.decide_with_operation_network_effect_and_default(
+            spec,
+            tool_name,
+            access,
+            operation,
+            network_effect,
+            subjects.clone(),
+            tool_default_mode,
+        )?;
+        for policy in policies {
+            let constraint = policy.decide_with_operation_network_effect_and_default(
+                spec,
+                tool_name,
+                access,
+                operation,
+                network_effect,
+                subjects.clone(),
+                tool_default_mode,
+            )?;
+            decision.restrict_with(constraint);
+        }
+        Ok(decision)
+    }
 }
 
 impl<'a> PermissionPolicy<'a> {

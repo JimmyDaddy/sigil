@@ -18,6 +18,7 @@ pub(in crate::runner) struct WorkerAdvancementContext<'a, P> {
     pub(in crate::runner) mcp_event_rx: &'a mpsc::Receiver<McpRuntimeEvent>,
     pub(in crate::runner) elicitation_handler: &'a Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) mcp_event_handler: &'a Arc<ChannelMcpRuntimeEventHandler>,
+    pub(in crate::runner) role_provider_builder: &'a Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) context_resolver: &'a sigil_runtime::RequestContextResolver,
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
@@ -35,6 +36,7 @@ impl<'a, P> WorkerAdvancementContext<'a, P> {
             mcp_event_rx: self.mcp_event_rx,
             elicitation_handler: self.elicitation_handler,
             mcp_event_handler: self.mcp_event_handler,
+            role_provider_builder: self.role_provider_builder,
             context_resolver: self.context_resolver,
             state: &mut *self.state,
         }
@@ -63,6 +65,10 @@ where
             WorkerAdvancementControl::SkipCommandPoll
         )
         || matches!(
+            advance_pending_task_handoffs(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
             advance_idle_compaction(context.reborrow()),
             WorkerAdvancementControl::SkipCommandPoll
         )
@@ -83,6 +89,107 @@ where
     } else {
         WorkerAdvancementControl::PollCommand
     }
+}
+
+fn advance_pending_task_handoffs<P>(
+    context: WorkerAdvancementContext<'_, P>,
+) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        runtime,
+        agent,
+        root_config,
+        options,
+        message_tx,
+        elicitation_handler,
+        role_provider_builder,
+        state,
+        ..
+    } = context;
+    if state.run.active.is_some() || state.run.pending_task_handoffs.is_empty() {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    let action = state.run.pending_task_handoffs.remove(0);
+    let Some(mut run_session) = state.session.current.take() else {
+        let _ = message_tx.send(WorkerMessage::RunFailed(
+            "session state is unavailable for recovered task handoff".to_owned(),
+        ));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    };
+    let task = run_session
+        .task_state_projection()
+        .tasks
+        .get(&action.task_id)
+        .cloned();
+    let Some(task) = task else {
+        state.session.current = Some(run_session);
+        let _ = message_tx.send(WorkerMessage::RunFailed(
+            "recovered task handoff is missing its durable task".to_owned(),
+        ));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    };
+    let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
+        match prepare_task_run_cancellation(&mut run_session, &action.task_id) {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+        };
+    let task_id_value = action.task_id.as_str().to_owned();
+    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+        task_id: task_id_value.clone(),
+        objective: task.objective.clone(),
+    });
+    let handler = ChannelEventHandler::new(message_tx.clone());
+    let (approval_tx, approval_rx) = mpsc::channel();
+    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+    let run_id = state.run.next_id;
+    state.run.next_id = state.run.next_id.saturating_add(1);
+    let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
+    let cancellation_target = RunCancellationTarget::Task {
+        task_id: task_id_value.clone(),
+    };
+    let handle = spawn_task_run(
+        runtime,
+        TaskRunSpawn {
+            run_id,
+            session: run_session,
+            task_id: action.task_id,
+            task_id_value,
+            parent_session_ref: task.parent_session_ref,
+            objective: task.objective,
+            root_config: root_config.clone(),
+            options: options.clone(),
+            base_registry: agent.tool_registry().clone(),
+            agent_supervisor: state.agent.supervisor.clone(),
+            role_provider_builder: Arc::clone(role_provider_builder),
+            task_result_tx: state.run.result_tx.clone(),
+            approval_rx,
+            handler,
+            elicitation_audit_buffer: Arc::clone(&elicitation_audit_buffer),
+            cancellation_handle,
+            cancellation_task_guard,
+        },
+    );
+    state.run.active = Some(ActiveRun {
+        run_id,
+        handle,
+        approval_tx,
+        elicitation_audit_buffer,
+        cancellation_owner,
+        cancellation_recorder,
+        cancellation_target,
+        url_capability_registrar,
+        image_attachment_resolver,
+    });
+    WorkerAdvancementControl::SkipCommandPoll
 }
 
 fn advance_refreshes<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl
@@ -744,8 +851,18 @@ where
             }
             RunTaskPayload::Task {
                 task_id,
+                queue_id,
                 result: Ok(status),
             } => {
+                if let Some(queue_id) = queue_id {
+                    append_queue_status_and_notify(
+                        &mut state.session.current,
+                        message_tx,
+                        queue_id,
+                        ConversationInputStatus::Delivered,
+                        Some("queued prompt handed off to a durable task".to_owned()),
+                    );
+                }
                 let entries = state
                     .session
                     .current
@@ -759,9 +876,42 @@ where
                 });
             }
             RunTaskPayload::Task {
-                task_id: _,
+                task_id,
+                queue_id,
                 result: Err(error),
             } => {
+                if let Some(queue_id) = queue_id {
+                    append_queue_status_and_notify(
+                        &mut state.session.current,
+                        message_tx,
+                        queue_id,
+                        ConversationInputStatus::Delivered,
+                        Some("queued prompt handed off to a durable task".to_owned()),
+                    );
+                }
+                let entries = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.entries().to_vec())
+                    .unwrap_or_default();
+                let status = TaskId::new(task_id.clone())
+                    .ok()
+                    .and_then(|task_id| {
+                        state.session.current.as_ref().and_then(|session| {
+                            session
+                                .task_state_projection()
+                                .tasks
+                                .get(&task_id)
+                                .map(|task| task.status)
+                        })
+                    })
+                    .unwrap_or(TaskRunStatus::Failed);
+                let _ = message_tx.send(WorkerMessage::TaskRunFinished {
+                    task_id,
+                    status,
+                    entries,
+                });
                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
             }
         }
@@ -1030,6 +1180,7 @@ where
         options,
         message_tx,
         elicitation_handler,
+        role_provider_builder,
         context_resolver,
         state,
         ..
@@ -1055,7 +1206,12 @@ where
             let session_log_path = state.session.log_path.clone();
             let exact_prompts = state.session.exact_prompts.clone();
             let options = options.clone();
-            let tools = agent.tool_registry().specs();
+            let mut tools = agent.tool_registry().specs();
+            if root_config.task.enabled
+                && root_config.task.routing_policy == sigil_kernel::TaskRoutingPolicy::Auto
+            {
+                tools.push(sigil_kernel::request_task_planning_tool_spec());
+            }
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();
             let runtime_attachments =
@@ -1262,6 +1418,8 @@ where
                                         &state.run.result_tx,
                                         message_tx,
                                         Arc::clone(elicitation_handler),
+                                        Arc::clone(role_provider_builder),
+                                        &state.session.log_path,
                                         &mut state.run.next_id,
                                         candidate,
                                     );

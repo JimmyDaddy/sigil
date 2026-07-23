@@ -159,6 +159,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target: RunCancellationTarget::Run,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -196,7 +197,7 @@ where
                     )));
                     continue;
                 }
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -212,6 +213,7 @@ where
                     }
                 };
                 let task_id_value = task_id.as_str().to_owned();
+
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -239,7 +241,7 @@ where
                     cancellation_recorder,
                     cancellation_handle,
                     cancellation_task_guard,
-                ) = match prepare_run_cancellation(&run_session) {
+                ) = match prepare_task_run_cancellation(&mut run_session, &task_id) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -250,6 +252,9 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                let cancellation_target = RunCancellationTarget::Task {
+                    task_id: task_id_value.clone(),
+                };
                 let handle = spawn_skill_child_run(
                     runtime,
                     SkillChildRunSpawn {
@@ -283,6 +288,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -301,22 +307,13 @@ where
                     continue;
                 }
 
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
                     continue;
                 };
 
-                let task_id = match next_task_id(&run_session) {
-                    Ok(task_id) => task_id,
-                    Err(error) => {
-                        state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                        continue;
-                    }
-                };
-                let task_id_value = task_id.as_str().to_owned();
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -325,17 +322,6 @@ where
                         continue;
                     }
                 };
-                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                    task_id: task_id_value.clone(),
-                    objective: sigil_kernel::safe_persistence_text(&prompt),
-                });
-
-                let handler = ChannelEventHandler::new(message_tx.clone());
-                let (approval_tx, approval_rx) = mpsc::channel();
-                let elicitation_audit_buffer: McpElicitationAuditBuffer =
-                    Arc::new(std::sync::Mutex::new(Vec::new()));
-                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
-                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let run_id = state.run.next_id;
                 state.run.next_id += 1;
                 let (
@@ -351,9 +337,52 @@ where
                         continue;
                     }
                 };
+                let coordinator = ConversationCoordinator::new(
+                    root_config.task.enabled,
+                    root_config.task.routing_policy,
+                );
+                let action = match coordinator.admit_explicit_task(
+                    &mut run_session,
+                    ModelMessage::user(prompt.clone()),
+                    parent_session_ref.clone(),
+                    format!("task-command-{run_id}"),
+                    current_unix_time_ms(),
+                ) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        continue;
+                    }
+                };
+                let task_id = action.task_id;
+                if let Err(error) = bind_task_run_cancellation_scope(
+                    &mut run_session,
+                    &task_id,
+                    &cancellation_handle,
+                ) {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
+                let task_id_value = task_id.as_str().to_owned();
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&prompt),
+                });
+
+                let handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                let cancellation_target = RunCancellationTarget::Task {
+                    task_id: task_id_value.clone(),
+                };
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -384,6 +413,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -402,13 +432,13 @@ where
                     continue;
                 }
 
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
                     continue;
                 };
-                let (task_id, task_id_value, objective) =
+                let (task_id, task_id_value, objective, needs_planning) =
                     match resolve_continue_task(&run_session, task_id) {
                         Ok(resolved) => resolved,
                         Err(error) => {
@@ -417,6 +447,14 @@ where
                             continue;
                         }
                     };
+                if needs_planning && guidance.is_some() {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "recovered task has no accepted plan; continue it without guidance to rerun the planner"
+                            .to_owned(),
+                    ));
+                    continue;
+                }
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -443,7 +481,7 @@ where
                     cancellation_recorder,
                     cancellation_handle,
                     cancellation_task_guard,
-                ) = match prepare_run_cancellation(&run_session) {
+                ) = match prepare_task_run_cancellation(&mut run_session, &task_id) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -454,29 +492,57 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
-                let handle = spawn_task_continue(
-                    runtime,
-                    TaskContinueSpawn {
-                        run_id,
-                        session: run_session,
-                        task_id,
-                        task_id_value,
-                        parent_session_ref,
-                        objective,
-                        guidance,
-                        root_config: root_config.clone(),
-                        options: options.clone(),
-                        base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: state.agent.supervisor.clone(),
-                        role_provider_builder: Arc::clone(role_provider_builder),
-                        task_result_tx: state.run.result_tx.clone(),
-                        approval_rx,
-                        handler,
-                        elicitation_audit_buffer: run_elicitation_audit_buffer,
-                        cancellation_handle,
-                        cancellation_task_guard,
-                    },
-                );
+                let cancellation_target = RunCancellationTarget::Task {
+                    task_id: task_id_value.clone(),
+                };
+                let handle = if needs_planning {
+                    spawn_task_run(
+                        runtime,
+                        TaskRunSpawn {
+                            run_id,
+                            session: run_session,
+                            task_id,
+                            task_id_value,
+                            parent_session_ref,
+                            objective,
+                            root_config: root_config.clone(),
+                            options: options.clone(),
+                            base_registry: agent.tool_registry().clone(),
+                            agent_supervisor: state.agent.supervisor.clone(),
+                            role_provider_builder: Arc::clone(role_provider_builder),
+                            task_result_tx: state.run.result_tx.clone(),
+                            approval_rx,
+                            handler,
+                            elicitation_audit_buffer: run_elicitation_audit_buffer,
+                            cancellation_handle,
+                            cancellation_task_guard,
+                        },
+                    )
+                } else {
+                    spawn_task_continue(
+                        runtime,
+                        TaskContinueSpawn {
+                            run_id,
+                            session: run_session,
+                            task_id,
+                            task_id_value,
+                            parent_session_ref,
+                            objective,
+                            guidance,
+                            root_config: root_config.clone(),
+                            options: options.clone(),
+                            base_registry: agent.tool_registry().clone(),
+                            agent_supervisor: state.agent.supervisor.clone(),
+                            role_provider_builder: Arc::clone(role_provider_builder),
+                            task_result_tx: state.run.result_tx.clone(),
+                            approval_rx,
+                            handler,
+                            elicitation_audit_buffer: run_elicitation_audit_buffer,
+                            cancellation_handle,
+                            cancellation_task_guard,
+                        },
+                    )
+                };
 
                 state.run.active = Some(ActiveRun {
                     run_id,
@@ -485,6 +551,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -580,7 +647,7 @@ where
                     continue;
                 }
 
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -611,7 +678,7 @@ where
                     cancellation_recorder,
                     cancellation_handle,
                     cancellation_task_guard,
-                ) = match prepare_run_cancellation(&run_session) {
+                ) = match prepare_task_run_cancellation(&mut run_session, &created.task_id) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -621,6 +688,9 @@ where
                 };
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                let cancellation_target = RunCancellationTarget::Task {
+                    task_id: created.task_id_value.clone(),
+                };
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -650,6 +720,7 @@ where
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    cancellation_target,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });

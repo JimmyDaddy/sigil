@@ -5,9 +5,10 @@ use crate::{
     ControlEntry, NetworkEffect, PlanApprovalExpiry, PlanApprovalPermission,
     PlanApprovalProjection, PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection,
     PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, Session,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, ToolAccess, ToolCategory,
-    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_task_input_from_draft,
-    plan_text_hash, plan_workspace_paths,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess,
+    ToolCategory, ToolPreviewCapability, ToolSpec, plan_draft_created_entry,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 
 fn tool_spec(
@@ -207,6 +208,86 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
 }
 
 #[test]
+fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Inspect then report",
+  "steps": [
+    {
+      "id": "inspect",
+      "title": "Inspect README",
+      "role": "executor",
+      "depends_on": [],
+      "mode": "read",
+      "isolation": "shared_read_only",
+      "target_paths": ["README.md"]
+    },
+    {
+      "id": "report",
+      "title": "Report findings",
+      "role": "subagent_read",
+      "depends_on": ["inspect"],
+      "mode": "read",
+      "isolation": "shared_read_only",
+      "target_paths": ["README.md"]
+    }
+  ],
+  "target_paths": ["README.md"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("v2 plan should create a draft");
+    assert_eq!(draft.schema_version, 2);
+    assert_eq!(
+        task_id_from_plan_draft(&draft)?,
+        task_id_from_plan_draft(&draft)?
+    );
+
+    let (task_plan, mapping) = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
+        .expect("v2 plan should promote directly");
+    assert_eq!(task_plan.steps.len(), 2);
+    assert_eq!(mapping.len(), 2);
+    assert_eq!(task_plan.steps[1].depends_on[0].as_str(), "inspect");
+    assert_eq!(task_plan.steps[0].effective_mode(), TaskStepMode::Read);
+    assert_eq!(
+        task_plan.steps[0].effective_isolation(),
+        TaskIsolationMode::SharedReadOnly
+    );
+    Ok(())
+}
+
+#[test]
+fn sigil_plan_v1_never_direct_promotes_even_with_v2_fields() -> Result<()> {
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v1
+{
+  "summary": "Legacy fully specified plan",
+  "steps": [{
+    "id": "inspect",
+    "title": "Inspect README",
+    "role": "executor",
+    "depends_on": [],
+    "mode": "read",
+    "isolation": "shared_read_only"
+  }]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("v1 plan should remain a durable compatibility draft");
+
+    assert_eq!(draft.schema_version, 1);
+    assert!(task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn sigil_plan_v1_accepts_single_string_notes_and_acceptance() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v1
@@ -318,6 +399,9 @@ fn plan_artifact_projection_tracks_pending_decision_and_created_task() -> Result
         SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created.clone())),
     ];
 
+    let accepted_without_task = PlanArtifactProjection::from_entries(&entries[..2]);
+    assert_eq!(accepted_without_task.latest_pending_plan(), Some(&draft));
+
     let projection = PlanArtifactProjection::from_entries(&entries);
 
     assert_eq!(projection.latest_plan(), Some(&draft));
@@ -359,7 +443,7 @@ fn plan_draft_projects_sensitive_model_text_before_hash_and_persistence() -> Res
 }
 
 #[test]
-fn approved_plan_input_is_stable_and_does_not_materialize_task_plan() -> Result<()> {
+fn legacy_approved_plan_input_is_stable_and_requires_planner_fallback() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"
 Plan:
@@ -399,9 +483,9 @@ Plan:
 
     assert_eq!(left, right);
     assert!(left.contains("Update docs/en/quickstart.md copy"));
-    assert!(left.contains("task execution plan"));
-    assert!(left.contains("include a concise reason in the task step detail"));
+    assert!(left.contains("authoritative task input"));
     assert!(!left.contains("sigil-plan-v1"));
+    assert!(task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?.is_none());
     Ok(())
 }
 

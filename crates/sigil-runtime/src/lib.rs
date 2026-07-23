@@ -79,6 +79,7 @@ pub mod application_recovery;
 pub mod application_run;
 pub mod context;
 pub mod context_window;
+pub mod conversation_coordinator;
 pub mod conversation_display;
 pub mod doctor;
 pub mod egress_ordering;
@@ -147,6 +148,7 @@ pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
     resolve_context_window_tokens,
 };
+pub use conversation_coordinator::{ConversationCoordinator, ConversationSourceTurn};
 pub use egress_ordering::{
     ActiveHostedEgress, ActiveQueryEgress, AuthorizedHostedEgress, AuthorizedQueryEgress,
     AuthorizedTransportEgress, EgressOrderingCoordinator, EgressOrderingError,

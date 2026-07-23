@@ -1,6 +1,6 @@
 # RFC-0007 Task DAG and Isolated Agent Workflows
 
-状态：draft / E07.1-E07.5 implemented
+状态：draft / E07.1、E07.3-E07.5 implemented；E07.2 仅完成 ready batching
 
 创建日期：2026-06-28
 
@@ -15,6 +15,11 @@
 ## 1. Summary
 
 本 RFC 定义 `/task` 从 sequential orchestrator 演进到 DAG-based orchestrator 的边界。目标是支持只读步骤并发、显式依赖、review / verify 阶段和 bounded replanning，同时不引入共享工作区并行写入风险。
+
+截至 2026-07-22，scheduler 已能选择多个 `read_only_batch` step，但
+`SequentialTaskOrchestrator` 仍逐项 `.await`，所以真实并发尚未实现。后续 execution、
+completion、permission 和 parallel-write integration 的完整闭环由
+[RFC-0053](0053-autonomous-task-routing-and-parallel-agent-orchestration-v1.md) 定义。
 
 ## 2. Goals
 
@@ -115,7 +120,7 @@ Main task UI should keep one recommended action per state, such as `continue`, `
 ## 9.1 Implementation Progress
 
 - E07.1 implemented plan schema, dependency metadata and durable graph projection.
-- E07.2 implemented read-only ready queue batching with concurrency budget, running-write exclusion, sequential write handoff and shared-read-only write denial coverage.
+- E07.2 implemented read-only ready queue selection with concurrency budget, running-write exclusion, sequential write handoff and shared-read-only write denial coverage. Batch execution remains sequential; this slice must not be described as read-only execution concurrency.
 - E07.3 implemented review / verify state separation while keeping system verification authoritative.
 - E07.4 implemented bounded plan versions and `Superseded` projection semantics: accepting a newer plan version marks older plan versions superseded, preserves completed step history, marks unfinished old-plan steps as `Superseded`, clears current-step pointers to superseded plans, and surfaces the state in TUI summaries.
 - E07.5 implemented write isolation integration through RFC-0014 E14.1-E14.6: task DAG continue uses write-isolation ready queue, read-only steps can batch, shared-workspace write steps acquire durable write leases, changeset-only child writes remain parent-non-mutating, merge handoff creates parent mutation evidence, and failed writes cancel dependent steps.

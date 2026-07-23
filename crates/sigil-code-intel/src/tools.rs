@@ -135,6 +135,10 @@ impl Tool for CodeSymbolsTool {
         }
     }
 
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![self.path_subject(required_string(args, "path")?)?])
     }
@@ -186,6 +190,10 @@ impl Tool for CodeWorkspaceSymbolsTool {
         }
     }
 
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![workspace_subject(self.service.workspace_root())?])
     }
@@ -220,6 +228,10 @@ impl Tool for CodeDefinitionTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
     }
 
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
@@ -268,6 +280,10 @@ impl Tool for CodeReferencesTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
     }
 
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
@@ -552,6 +568,10 @@ impl Tool for CodeDiagnosticsTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
     }
 
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {

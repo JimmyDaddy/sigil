@@ -30,7 +30,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let default_image_attachment_resolver: Arc<dyn ImageAttachmentResolver> = Arc::new(
         sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
     );
-    let initial_session = match load_session_with_runtime_attachments(
+    let mut initial_session = match load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         &session_log_path,
@@ -54,6 +54,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+            return;
+        }
+    };
+    let pending_task_handoffs = match initial_session.as_mut() {
+        Some(session) => {
+            session_ref_for_log_path(&session_log_path).and_then(|parent_session_ref| {
+                ConversationCoordinator::new(
+                    root_config.task.enabled,
+                    root_config.task.routing_policy,
+                )
+                .reconcile(session, &parent_session_ref, current_unix_time_ms())
+                .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))
+            })
+        }
+        None => Ok(Vec::new()),
+    };
+    let pending_task_handoffs = match pending_task_handoffs {
+        Ok(actions) => actions,
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::RunFailed(error));
             return;
         }
     };
@@ -88,6 +108,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         agent_supervisor,
         background_agent_runs,
     );
+    state.run.pending_task_handoffs = pending_task_handoffs;
     let _ = message_tx.send(WorkerMessage::WorkerReady);
 
     loop {
@@ -103,6 +124,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 mcp_event_rx: &mcp_event_rx,
                 elicitation_handler: &elicitation_handler,
                 mcp_event_handler: &mcp_event_handler,
+                role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
                 state: &mut state,
             }),

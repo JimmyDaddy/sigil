@@ -313,6 +313,17 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             run.task_id.as_str(),
             task_run_status_label(run.status)
         ),
+        ControlEntry::TaskRunCancellationScopeBound(entry) => format!(
+            "[ctl] task {} cancellation scope={}",
+            entry.task_id.as_str(),
+            truncate_session_view_text(&entry.run_scope_id, 24)
+        ),
+        ControlEntry::TaskHandoffRequested(entry) => {
+            format!("[ctl] task handoff requested trigger={:?}", entry.trigger)
+        }
+        ControlEntry::TaskHandoffResolved(entry) => {
+            format!("[ctl] task handoff resolved decision={:?}", entry.decision)
+        }
         ControlEntry::TaskPlan(plan) => format!(
             "[ctl] plan {} v{} status={} steps={}",
             plan.task_id.as_str(),
@@ -326,6 +337,28 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             step.plan_version,
             step.step_id.as_str(),
             task_step_status_label(step.status)
+        ),
+        ControlEntry::TaskParticipantAttempt(attempt) => format!(
+            "[ctl] participant {} purpose={:?} ordinal={} status={:?}",
+            attempt.task_id.as_str(),
+            attempt.purpose,
+            attempt.ordinal,
+            attempt.status
+        ),
+        ControlEntry::TaskParticipantResult(result) => format!(
+            "[ctl] participant result {} terminal={} summary={} changed={}",
+            result.task_id.as_str(),
+            result
+                .terminal_status
+                .map(task_participant_attempt_status_label)
+                .unwrap_or("legacy"),
+            truncate_session_view_text(&result.summary, 64),
+            result.changed_paths.len()
+        ),
+        ControlEntry::TaskFinalAnswerCommitted(entry) => format!(
+            "[ctl] task final {} message={}",
+            entry.task_id.as_str(),
+            truncate_session_view_text(&entry.message_id, 32)
         ),
         ControlEntry::TaskChildSession(child) => format!(
             "[ctl] child {} v{}:{} status={}",
@@ -472,6 +505,16 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             optional_bool_label(entry.user_invocable),
             optional_bool_label(entry.model_invocable),
             truncate_session_view_text(&entry.profile_hash, 16)
+        ),
+        ControlEntry::AgentDelegationAdmitted(entry) => format!(
+            "[ctl] agent {} admitted profile={} mode={} source={} authority={} objective={} tools={}",
+            entry.thread_id.as_str(),
+            entry.profile_id.as_str(),
+            agent_invocation_mode_label(entry.invocation_mode),
+            agent_invocation_source_label(entry.invocation_source),
+            delegation_authority_record_label(&entry.authority),
+            truncate_session_view_text(&entry.objective_hash, 16),
+            truncate_session_view_text(&entry.tool_contract_fingerprint, 16)
         ),
         ControlEntry::AgentThreadStarted(entry) => format!(
             "[ctl] agent {} started profile={} mode={}",
@@ -835,6 +878,19 @@ pub(super) fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'
     }
 }
 
+pub(super) fn task_participant_attempt_status_label(
+    status: sigil_kernel::TaskParticipantAttemptStatus,
+) -> &'static str {
+    match status {
+        sigil_kernel::TaskParticipantAttemptStatus::Started => "started",
+        sigil_kernel::TaskParticipantAttemptStatus::Completed => "completed",
+        sigil_kernel::TaskParticipantAttemptStatus::Failed => "failed",
+        sigil_kernel::TaskParticipantAttemptStatus::Blocked => "blocked",
+        sigil_kernel::TaskParticipantAttemptStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskParticipantAttemptStatus::Interrupted => "interrupted",
+    }
+}
+
 pub(super) fn task_child_session_status_label(
     status: sigil_kernel::TaskChildSessionStatus,
 ) -> &'static str {
@@ -1144,6 +1200,40 @@ pub(super) fn agent_invocation_mode_label(mode: sigil_kernel::AgentInvocationMod
         sigil_kernel::AgentInvocationMode::Background => "background",
         sigil_kernel::AgentInvocationMode::JoinBeforeFinal => "join_before_final",
         sigil_kernel::AgentInvocationMode::Unknown => "unknown",
+    }
+}
+
+pub(super) fn agent_invocation_source_label(
+    source: sigil_kernel::AgentInvocationSource,
+) -> &'static str {
+    match source {
+        sigil_kernel::AgentInvocationSource::Chat => "chat",
+        sigil_kernel::AgentInvocationSource::Mention => "mention",
+        sigil_kernel::AgentInvocationSource::Skill => "skill",
+        sigil_kernel::AgentInvocationSource::Task => "task",
+        sigil_kernel::AgentInvocationSource::Plugin => "plugin",
+        sigil_kernel::AgentInvocationSource::System => "system",
+        sigil_kernel::AgentInvocationSource::Unknown => "unknown",
+    }
+}
+
+pub(super) fn delegation_authority_record_label(
+    authority: &sigil_kernel::DelegationAuthorityRecord,
+) -> String {
+    match authority {
+        sigil_kernel::DelegationAuthorityRecord::UserExplicit => "user_explicit".to_owned(),
+        sigil_kernel::DelegationAuthorityRecord::AcceptedTaskPlan {
+            task_id,
+            plan_version,
+            step_id,
+        } => format!(
+            "accepted_task_plan:{}:v{}:{}",
+            task_id.as_str(),
+            plan_version,
+            step_id.as_str()
+        ),
+        sigil_kernel::DelegationAuthorityRecord::ModelProactive => "model_proactive".to_owned(),
+        sigil_kernel::DelegationAuthorityRecord::SystemRecovery => "system_recovery".to_owned(),
     }
 }
 

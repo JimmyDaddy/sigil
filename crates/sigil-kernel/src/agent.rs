@@ -13,23 +13,33 @@ use crate::{
     FrozenProviderRequestMaterial, RuntimeContextCandidates,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
-    config::{CompactionConfig, MemoryConfig},
+    config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
     event::{EventHandler, RunEvent},
     permission::{
         ApprovalMode, InteractionMode, PermissionConfig, PermissionEvaluationContext,
-        PermissionPolicy, tool_approval_session_grant_available,
+        PermissionPolicyChain, tool_approval_session_grant_available,
     },
     provider::{ModelMessage, Provider, ToolCall},
     session::{
         ControlEntry, Session, SessionLogEntry, ToolApprovalAuditAction, ToolApprovalUserDecision,
         ToolExecutionStatus,
     },
-    task::{TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_tool_spec},
+    task::{
+        TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskParticipantAttemptId, TaskPlanUpdateContext,
+        TaskStepId, task_plan_update_tool_spec,
+    },
+    task_handoff::{
+        ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId,
+        TaskPlanningHandoffBinding, request_task_planning_tool_spec,
+    },
     tool::{
         PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
         ToolProgressSink, ToolRegistry, ToolResult, ToolSpec, ToolSubject,
     },
 };
+
+#[cfg(test)]
+use crate::permission::PermissionPolicy;
 
 mod approval_policy;
 mod assistant_messages;
@@ -37,6 +47,7 @@ mod preview;
 mod provider_stream;
 mod readiness;
 mod run_lifecycle;
+mod task_handoff;
 mod task_plan;
 mod tool_audit;
 mod tool_results;
@@ -60,6 +71,10 @@ pub use readiness::projected_agent_run_readiness;
 use run_lifecycle::{
     append_completed_run_lifecycle_events, append_failed_run_lifecycle_events,
     append_run_lifecycle_events,
+};
+use task_handoff::{
+    append_tool_ignored_after_task_handoff, handle_task_planning_request_call,
+    task_planning_request_call_is_accepted,
 };
 use task_plan::{
     append_tool_ignored_after_task_plan_acceptance, handle_task_plan_update_call,
@@ -143,6 +158,66 @@ pub struct AgentRunResult {
     pub final_message_id: Option<String>,
 }
 
+/// Host-owned purpose for one model run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRunPurpose {
+    Conversation(Box<ConversationPurposeContext>),
+    TaskPlanner(TaskPlannerContext),
+    TaskParticipant(TaskParticipantContext),
+    TaskSynthesis(TaskSynthesisContext),
+}
+
+/// Root conversation facts controlling internal tool visibility and handoff authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationPurposeContext {
+    pub root_run_id: String,
+    pub source_turn: ConversationTurnRef,
+    pub routing_policy: TaskRoutingPolicy,
+    pub task_handoff: Option<TaskPlanningHandoffBinding>,
+}
+
+/// Purpose binding for the internal task planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPlannerContext {
+    pub task_id: TaskId,
+    pub attempt_id: Option<TaskParticipantAttemptId>,
+}
+
+/// Purpose binding for one task plan participant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskParticipantContext {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub step_id: TaskStepId,
+    pub attempt_id: TaskParticipantAttemptId,
+}
+
+/// Purpose binding for the single task synthesis run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSynthesisContext {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub attempt_id: TaskParticipantAttemptId,
+}
+
+/// Typed disposition that callers must inspect before finalizing a root run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRunDisposition {
+    FinalAnswer,
+    StartDurableTask(StartDurableTaskAction),
+    TaskPlanAccepted,
+    Interrupted,
+    Blocked,
+}
+
+/// Stable action emitted after a durable conversation-to-task handoff is accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartDurableTaskAction {
+    pub handoff_id: TaskHandoffId,
+    pub task_id: TaskId,
+    pub source_turn: ConversationTurnRef,
+}
+
 /// Input contract for one agent run.
 #[derive(Clone)]
 pub struct AgentRunInput {
@@ -153,6 +228,7 @@ pub struct AgentRunInput {
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
+    pub purpose: Option<AgentRunPurpose>,
     logical_run_id: Option<String>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
@@ -185,6 +261,7 @@ impl fmt::Debug for AgentRunInput {
             .field("runtime_context", &self.runtime_context)
             .field("task_plan_update", &self.task_plan_update)
             .field("agent_delegation", &self.agent_delegation)
+            .field("purpose", &self.purpose)
             .field("logical_run_id", &self.logical_run_id)
             .field("cancellation", &self.cancellation)
             .field(
@@ -234,6 +311,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            purpose: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -260,6 +338,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            purpose: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -285,6 +364,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            purpose: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -308,8 +388,53 @@ impl AgentRunInput {
         self
     }
 
+    /// Computes the exact durable user message that this run will append, without staging live
+    /// URL capabilities or mutating session state.
+    ///
+    /// Runtime admission uses this projection so a task handoff objective cannot drift from URL
+    /// capability labels or image placeholders applied later by the agent loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a persisted input is missing its identity/capability facts or its
+    /// attachment metadata is invalid.
+    pub fn durable_user_message_projection(&self) -> Result<Option<ModelMessage>> {
+        let Some(message) = self.persisted_user_message.as_ref() else {
+            return Ok(None);
+        };
+        let durable_message_id = self
+            .persisted_user_message_id
+            .as_ref()
+            .ok_or_else(|| anyhow!("persisted user message is missing its durable entry id"))?;
+        let issued_at_ms = self.url_capability_issued_at_ms.ok_or_else(|| {
+            anyhow!("persisted user message is missing its URL capability issue time")
+        })?;
+        crate::project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at(
+            durable_message_id.clone(),
+            message.clone(),
+            self.persisted_image_attachments.clone(),
+            self.source_capability_nonce.as_deref(),
+            issued_at_ms,
+            None,
+        )
+        .map(|projection| Some(projection.durable_message))
+    }
+
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
+        if self.purpose.is_none() {
+            self.purpose = Some(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                task_id: context.task_id.clone(),
+                attempt_id: None,
+            }));
+        }
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Binds the host-owned run purpose used for internal protocol admission.
+    #[must_use]
+    pub fn with_run_purpose(mut self, purpose: AgentRunPurpose) -> Self {
+        self.purpose = Some(purpose);
         self
     }
 
@@ -522,6 +647,7 @@ impl AgentDelegationRequirement {
 pub struct AgentRunOutput {
     pub result: AgentRunResult,
     pub outcome: AgentRunOutcome,
+    pub disposition: AgentRunDisposition,
 }
 
 /// Outcome summary derived from provider chunks, approvals, and tool results.
@@ -542,6 +668,7 @@ pub enum AgentRunTerminalReason {
     FinalAnswer,
     MaxTurns,
     DelegationUnsatisfied,
+    TaskHandoff,
 }
 
 impl AgentRunTerminalReason {
@@ -550,6 +677,7 @@ impl AgentRunTerminalReason {
             Self::FinalAnswer => "final_answer",
             Self::MaxTurns => "max_turns",
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
+            Self::TaskHandoff => "task_handoff",
         }
     }
 }
@@ -898,6 +1026,7 @@ where
             runtime_context,
             task_plan_update,
             agent_delegation,
+            purpose,
             logical_run_id,
             cancellation,
             cancellation_terminal_authority,
@@ -917,6 +1046,35 @@ where
         // capabilities survive normal multi-turn ownership moves.
         let user_url_capability_registrar =
             user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
+
+        let task_handoff_binding = match purpose.as_ref() {
+            Some(AgentRunPurpose::Conversation(context))
+                if context.routing_policy == TaskRoutingPolicy::Auto =>
+            {
+                context.task_handoff.clone()
+            }
+            Some(AgentRunPurpose::Conversation(context)) => {
+                if context.task_handoff.is_some() {
+                    return Err(anyhow!(
+                        "manual task routing cannot carry an automatic handoff binding"
+                    ));
+                }
+                None
+            }
+            Some(
+                AgentRunPurpose::TaskPlanner(_)
+                | AgentRunPurpose::TaskParticipant(_)
+                | AgentRunPurpose::TaskSynthesis(_),
+            )
+            | None => None,
+        };
+        if task_handoff_binding.is_some()
+            && tools.spec_for(REQUEST_TASK_PLANNING_TOOL_NAME).is_some()
+        {
+            return Err(anyhow!(
+                "tool registry collides with reserved internal tool {REQUEST_TASK_PLANNING_TOOL_NAME}"
+            ));
+        }
 
         if cancellation
             .as_ref()
@@ -1019,7 +1177,7 @@ where
             current_run_overlays.push(projection.overlay);
         }
 
-        let permission_policy = PermissionPolicy::new_with_context(
+        let permission_policy = PermissionPolicyChain::new_with_context(
             &options.permission_config,
             &options.permission_context,
         );
@@ -1032,8 +1190,12 @@ where
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
-        let agent_delegation_enforced =
-            agent_delegation.filter(|_| tool_registry_has_agent_tools(tools));
+        if agent_delegation.is_some() && !tool_registry_has_agent_tools(tools) {
+            return Err(anyhow!(
+                "agent delegation is required, but this run has no agent tools"
+            ));
+        }
+        let agent_delegation_enforced = agent_delegation;
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
@@ -1069,6 +1231,7 @@ where
                         final_message_id: None,
                     },
                     outcome,
+                    disposition: AgentRunDisposition::Interrupted,
                 });
             }
             if initial_frozen_provider_request.is_none()
@@ -1091,6 +1254,9 @@ where
                 .collect::<Vec<_>>();
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
+            }
+            if task_handoff_binding.is_some() {
+                tool_specs.push(request_task_planning_tool_spec());
             }
             let initial_frozen_request = initial_frozen_provider_request.take();
             let provider_logical_run_id = if initial_frozen_request.is_some() {
@@ -1240,16 +1406,68 @@ where
                         .as_ref()
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
+                let accepted_task_handoff_in_batch = task_handoff_binding.is_some()
+                    && completed_calls
+                        .iter()
+                        .any(task_planning_request_call_is_accepted);
                 let mut accepted_task_plan = false;
+                let mut accepted_task_handoff = None;
                 for call in completed_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    if accepted_task_handoff_in_batch
+                        && (call.name != REQUEST_TASK_PLANNING_TOOL_NAME
+                            || accepted_task_handoff.is_some())
+                    {
+                        append_tool_ignored_after_task_handoff(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
                             session,
                             handler,
                             &mut outcome,
                             &call,
+                        )?;
+                        continue;
+                    }
+                    if call.name == REQUEST_TASK_PLANNING_TOOL_NAME {
+                        let Some(binding) = task_handoff_binding.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "request_task_planning is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        };
+                        accepted_task_handoff = handle_task_planning_request_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            binding,
+                            cancellation
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    anyhow!("task handoff requires a root cancellation scope")
+                                })?
+                                .scope_id(),
                         )?;
                         continue;
                     }
@@ -1300,6 +1518,19 @@ where
                     };
                     process_tool_call(tool_call_context, call, safe_call).await?;
                 }
+                if let Some(action) = accepted_task_handoff {
+                    outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::StartDurableTask(action),
+                    });
+                }
                 if accepted_task_plan {
                     outcome.tool_calls = total_tool_calls;
                     claim_natural_run_terminal(
@@ -1321,6 +1552,7 @@ where
                             final_message_id: None,
                         },
                         outcome,
+                        disposition: AgentRunDisposition::TaskPlanAccepted,
                     });
                 }
                 continue;
@@ -1359,6 +1591,7 @@ where
                         final_message_id: None,
                     },
                     outcome,
+                    disposition: AgentRunDisposition::Blocked,
                 });
             }
 
@@ -1430,6 +1663,7 @@ where
                     final_message_id: Some(final_message_id),
                 },
                 outcome,
+                disposition: AgentRunDisposition::FinalAnswer,
             });
         }
     }
@@ -1448,7 +1682,7 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     handler: &'run mut H,
     tools: &'run ToolRegistry,
     options: &'run AgentRunOptions,
-    permission_policy: &'run PermissionPolicy<'policy>,
+    permission_policy: &'run PermissionPolicyChain<'policy>,
     tool_ctx: ToolContext,
     cancellation: Option<RunCancellationHandle>,
     agent_delegate: &'run mut Option<&'delegate mut (dyn AgentToolDelegate + Send)>,

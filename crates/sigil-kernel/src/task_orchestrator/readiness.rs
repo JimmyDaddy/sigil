@@ -640,6 +640,8 @@ pub(super) async fn task_step_failure_readiness_nonblocking(
     let output = StepRunOutput {
         final_text: String::new(),
         outcome: AgentRunOutcome::default(),
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
         changeset_proposal: None,
         changeset_only_after_snapshot_id: None,
     };

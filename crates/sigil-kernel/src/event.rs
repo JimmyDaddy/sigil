@@ -18,11 +18,12 @@ use crate::{
     ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
     ProviderObservedResolutionPlanRecordedEntry, ProviderPhysicalAttemptStartedEntry,
     ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome, QueryEgressStarted, SessionLogEntry,
-    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1,
-    TerminalTaskEntry, ToolCall, ToolOperation, ToolOutputProjectionShrinkRecorded, ToolPreview,
-    ToolProgressEvent, ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
-    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
-    WebFetchTransportAuthorization, WorkspaceMutationDetected,
+    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry, ToolCall, ToolOperation,
+    ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent, ToolResult, ToolSpec,
+    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
+    WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -198,6 +199,8 @@ durable_event_types! {
     EnvironmentFingerprintRecorded => ("environment_fingerprint_recorded", RecoveryCritical, Critical, DirectJson, "environment_fingerprint_recorded"),
     ReadinessEvaluated => ("readiness_evaluated", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ChildVerificationReceiptLinked => ("child_verification_receipt_linked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ChildChangesetMerged => ("child_changeset_merged", RecoveryCritical, Critical, DirectJson, "child_changeset_merged"),
     AgentMergeApplied => ("agent_merge_applied", RecoveryCritical, Critical, DirectJson, "agent_merge_applied"),
@@ -472,6 +475,8 @@ pub enum TypedDomainEvent {
     StepLeaseRecorded(StepLeaseEntry),
     StepLeaseHeartbeatRecorded(StepLeaseHeartbeatEntry),
     TaskStatusChanged(ControlEntry),
+    TaskHandoffRequested(TaskHandoffRequestedEntry),
+    TaskHandoffResolved(TaskHandoffResolvedEntry),
     AgentThread(ControlEntry),
     TerminalTask(TerminalTaskEntry),
     ChangeSetProposed(ChangeSet),
@@ -677,15 +682,36 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             let control = decode_control_entry(&event)?;
             match control {
                 ControlEntry::TaskRun(_)
+                | ControlEntry::TaskRunCancellationScopeBound(_)
                 | ControlEntry::TaskPlan(_)
-                | ControlEntry::TaskStep(_) => TypedDomainEvent::TaskStatusChanged(control),
+                | ControlEntry::TaskStep(_)
+                | ControlEntry::TaskParticipantAttempt(_)
+                | ControlEntry::TaskParticipantResult(_)
+                | ControlEntry::TaskFinalAnswerCommitted(_) => {
+                    TypedDomainEvent::TaskStatusChanged(control)
+                }
                 _ => bail!("task status event carried non-task control payload"),
             }
+        }
+        DurableEventType::TaskHandoffRequested => {
+            let control = decode_control_entry(&event)?;
+            let ControlEntry::TaskHandoffRequested(entry) = control else {
+                bail!("task handoff requested event carried a different control payload");
+            };
+            TypedDomainEvent::TaskHandoffRequested(entry)
+        }
+        DurableEventType::TaskHandoffResolved => {
+            let control = decode_control_entry(&event)?;
+            let ControlEntry::TaskHandoffResolved(entry) = control else {
+                bail!("task handoff resolved event carried a different control payload");
+            };
+            TypedDomainEvent::TaskHandoffResolved(entry)
         }
         DurableEventType::SessionEntryRecorded => {
             if let Some(control) = maybe_decode_control_entry(&event)? {
                 match control {
-                    ControlEntry::AgentThreadStarted(_)
+                    ControlEntry::AgentDelegationAdmitted(_)
+                    | ControlEntry::AgentThreadStarted(_)
                     | ControlEntry::AgentThreadStatusChanged(_)
                     | ControlEntry::AgentThreadMessageRouted(_)
                     | ControlEntry::AgentMailboxMessage(_)
@@ -1331,9 +1357,15 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::PlanDecisionRecorded(_) => "plan_decision_recorded",
         ControlEntry::PlanPermissionGranted(_) => "plan_permission_granted",
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
+        ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
+        ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",
         ControlEntry::TaskRun(_) => "task_run",
+        ControlEntry::TaskRunCancellationScopeBound(_) => "task_run_cancellation_scope_bound",
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskStep(_) => "task_step",
+        ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
+        ControlEntry::TaskParticipantResult(_) => "task_participant_result",
+        ControlEntry::TaskFinalAnswerCommitted(_) => "task_final_answer_committed",
         ControlEntry::TaskChildSession(_) => "task_child_session",
         ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",
         ControlEntry::TaskSubagentApprovalRoute(_) => "task_subagent_approval_route",
@@ -1361,6 +1393,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",
         ControlEntry::AgentProfilePolicyDecision(_) => "agent_profile_policy_decision",
+        ControlEntry::AgentDelegationAdmitted(_) => "agent_delegation_admitted",
         ControlEntry::AgentThreadStarted(_) => "agent_thread_started",
         ControlEntry::AgentThreadStatusChanged(_) => "agent_thread_status_changed",
         ControlEntry::AgentThreadMessageRouted(_) => "agent_thread_message_routed",

@@ -102,6 +102,12 @@ where
         ensure_session_workspace_trust(&mut session, workspace_root, kind.trust_reason())?;
     }
 
+    let parent_session_ref = session_ref_for_log_path(&session_log_path)?;
+    let pending_task_handoffs =
+        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+            .reconcile(&mut session, &parent_session_ref, current_unix_time_ms())
+            .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))?;
+
     let target_agent_registry =
         sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             root_config,
@@ -145,6 +151,7 @@ where
     state.session.current = Some(session);
     state.session.log_path = session_log_path.clone();
     state.agent.supervisor = target_agent_supervisor;
+    state.run.pending_task_handoffs = pending_task_handoffs;
 
     Ok(SessionTransitionOutcome {
         session_log_path,

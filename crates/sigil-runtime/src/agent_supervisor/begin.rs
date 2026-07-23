@@ -214,12 +214,27 @@ impl AgentSupervisor {
             provider_background_handle_ref: None,
         };
 
+        if start.delegation_admission.thread_id != thread_id
+            || start.delegation_admission.profile_id != start.profile_id
+            || start.delegation_admission.invocation_mode != start.invocation_mode
+            || start.delegation_admission.invocation_source != start.invocation_source
+            || start.delegation_admission.objective_hash
+                != hash_text(&sigil_kernel::safe_persistence_text(&start.objective))
+        {
+            bail!("child-agent delegation admission is not bound to the requested invocation");
+        }
+
         append_control(
             session,
             handler,
             ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
                 snapshot: snapshot.clone(),
             }),
+        )?;
+        append_control(
+            session,
+            handler,
+            ControlEntry::AgentDelegationAdmitted(start.delegation_admission.clone()),
         )?;
         append_control(
             session,

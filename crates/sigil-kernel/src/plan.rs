@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     session::{ControlEntry, SessionLogEntry},
-    task::{TaskId, TaskStepId},
+    task::{
+        AgentRole, TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+        TaskStepId, TaskStepMode, TaskStepSpec,
+    },
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
     verification::{CheckCommand, ToolEffect},
 };
@@ -74,7 +77,17 @@ pub struct PlanDraftStep {
     pub step_id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AgentRole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TaskStepMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<TaskIsolationMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -90,6 +103,8 @@ pub struct PlanDraftStep {
 #[serde(rename_all = "snake_case")]
 pub struct PlanDraftCreatedEntry {
     pub plan_id: PlanId,
+    #[serde(default = "legacy_plan_schema_version")]
+    pub schema_version: u32,
     pub source: PlanSourceRef,
     pub plan_hash: String,
     pub summary: String,
@@ -333,8 +348,13 @@ impl PlanArtifactProjection {
     }
 
     pub fn latest_pending_plan(&self) -> Option<&PlanDraftCreatedEntry> {
-        self.latest_plan()
-            .filter(|plan| !self.plan_has_terminal_decision(&plan.plan_id))
+        self.latest_plan().filter(|plan| {
+            !(self.plan_is_rejected(&plan.plan_id)
+                || (self
+                    .latest_decision(&plan.plan_id)
+                    .is_some_and(|entry| entry.decision == PlanDecision::Accepted)
+                    && self.task_created_for_plan(&plan.plan_id)))
+        })
     }
 
     pub fn latest_decision(&self, plan_id: &PlanId) -> Option<&PlanDecisionRecordedEntry> {
@@ -423,6 +443,7 @@ pub fn plan_draft_created_entry(
         (inline_plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_plan_text);
     Ok(Some(PlanDraftCreatedEntry {
         plan_id,
+        schema_version: structured.schema_version,
         source,
         plan_hash,
         summary: structured.summary,
@@ -444,6 +465,7 @@ pub fn plan_draft_created_entry(
 pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
     let plan_text = entry.inline_text.clone().unwrap_or_else(|| {
         render_structured_plan_text(&StructuredPlanDraft {
+            schema_version: entry.schema_version,
             summary: entry.summary.clone(),
             steps: entry.steps.clone(),
             target_paths: entry.target_paths.clone(),
@@ -453,9 +475,100 @@ pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
         })
     });
     format!(
-        "Execute the following user-approved structured plan. Treat the listed steps as the authoritative task input; first create the normal task execution plan, then carry it out with the configured approval and verification requirements. Preserve the approved plan's scope and order unless a change is necessary for correctness; if you must add, remove, or reorder executable steps, include a concise reason in the task step detail.\n\nApproved structured plan:\n\n{}",
+        "Execute the following user-approved structured plan with the configured approval and verification requirements. Treat the listed steps, dependencies, roles, modes, and isolation contracts as the authoritative task input. Preserve the approved plan's scope and order unless a change is necessary for correctness.\n\nApproved structured plan:\n\n{}",
         plan_text.trim()
     )
+}
+
+/// Promotes a fully executable plan draft directly into an accepted task plan.
+///
+/// Legacy drafts that do not carry the shared task fields return `None` so callers can retain the
+/// isolated planner fallback. A draft that claims the executable schema but contains an invalid
+/// graph fails closed.
+///
+/// # Errors
+///
+/// Returns an error for invalid step identities, dependencies, role/mode/isolation combinations,
+/// or an invalid task graph.
+pub fn task_plan_from_plan_draft(
+    entry: &PlanDraftCreatedEntry,
+    task_id: TaskId,
+    plan_version: u32,
+) -> Result<Option<(TaskPlanEntry, Vec<PlanToTaskStepMapping>)>> {
+    if entry.schema_version != 2
+        || entry.steps.is_empty()
+        || entry
+            .steps
+            .iter()
+            .any(|step| step.role.is_none() || step.mode.is_none() || step.isolation.is_none())
+    {
+        return Ok(None);
+    }
+    let steps = entry
+        .steps
+        .iter()
+        .map(|step| {
+            Ok(TaskStepSpec {
+                step_id: TaskStepId::new(step.step_id.clone())?,
+                title: crate::safe_persistence_text(&step.title),
+                display_name: step
+                    .display_name
+                    .as_deref()
+                    .map(crate::normalize_task_agent_display_name)
+                    .transpose()?,
+                detail: step.detail.as_deref().map(crate::safe_persistence_text),
+                role: step.role.expect("executable schema was checked"),
+                depends_on: step
+                    .depends_on
+                    .iter()
+                    .cloned()
+                    .map(TaskStepId::new)
+                    .collect::<Result<Vec<_>>>()?,
+                mode: step.mode,
+                isolation: step.isolation,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan = TaskPlanEntry {
+        task_id,
+        plan_version,
+        status: TaskPlanStatus::Accepted,
+        steps,
+        reason: Some(format!(
+            "directly promoted from approved plan {}",
+            entry.plan_id.as_str()
+        )),
+    };
+    TaskGraphProjection::from_plan_entry(&plan)?;
+    let mapping = plan
+        .steps
+        .iter()
+        .map(|step| PlanToTaskStepMapping {
+            plan_step_id: step.step_id.as_str().to_owned(),
+            task_step_id: step.step_id.clone(),
+            title: step.title.clone(),
+        })
+        .collect();
+    Ok(Some((plan, mapping)))
+}
+
+/// Returns the retry-stable task identity owned by one durable plan artifact.
+///
+/// The identity intentionally excludes timestamps and replay-order counters so a crash before the
+/// final accepted-plan commit marker can reconcile the same task instead of allocating another.
+///
+/// # Errors
+///
+/// Returns an error when the derived task identifier cannot be represented safely.
+pub fn task_id_from_plan_draft(entry: &PlanDraftCreatedEntry) -> Result<TaskId> {
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-plan-task-v1");
+    digest.update([0]);
+    digest.update(entry.plan_id.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(entry.plan_hash.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    TaskId::new(format!("plan-task-{}", &digest[..24]))
 }
 
 /// Extracts conservative workspace path scopes from plan text.
@@ -549,6 +662,7 @@ fn collapse_plan_workspace_paths(paths: BTreeSet<String>) -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StructuredPlanDraft {
+    schema_version: u32,
     summary: String,
     steps: Vec<PlanDraftStep>,
     target_paths: Vec<String>,
@@ -587,7 +701,17 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDr
         };
         step.step_id = unique_plan_step_id(&id_seed, index, &mut step_ids);
         step.title = crate::safe_persistence_text(&step.title);
+        step.display_name = step
+            .display_name
+            .as_deref()
+            .map(crate::safe_persistence_text);
         step.detail = step.detail.as_deref().map(crate::safe_persistence_text);
+        step.depends_on = step
+            .depends_on
+            .iter()
+            .map(|dependency| crate::safe_persistence_text(dependency))
+            .filter(|dependency| validate_plan_stable_id("plan dependency", dependency).is_ok())
+            .collect();
         step.risk = step.risk.as_deref().map(crate::safe_persistence_text);
         step.target_paths.retain(|path| {
             crate::safe_persistence_text(path) == *path && !plan_identifier_has_secret_marker(path)
@@ -689,9 +813,17 @@ struct RawPlanDraftStep {
     step_id: Option<String>,
     title: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     detail: Option<String>,
     #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    isolation: Option<String>,
     #[serde(default)]
     target_paths: Vec<String>,
     #[serde(default)]
@@ -745,11 +877,11 @@ struct RawPlanSuggestedCheckObject {
 }
 
 fn structured_plan_draft(plan_text: &str) -> Option<StructuredPlanDraft> {
-    for block in structured_plan_blocks(plan_text) {
+    for (schema_version, block) in structured_plan_blocks(plan_text) {
         let Ok(raw) = serde_json::from_str::<RawStructuredPlanDraft>(&block) else {
             continue;
         };
-        let structured = materialize_structured_plan(raw);
+        let structured = materialize_structured_plan(schema_version, raw);
         if !structured.steps.is_empty() {
             return Some(structured);
         }
@@ -757,25 +889,25 @@ fn structured_plan_draft(plan_text: &str) -> Option<StructuredPlanDraft> {
     None
 }
 
-fn structured_plan_blocks(plan_text: &str) -> Vec<String> {
+fn structured_plan_blocks(plan_text: &str) -> Vec<(u32, String)> {
     let mut blocks = Vec::new();
     let mut active_fence: Option<&str> = None;
-    let mut collecting = false;
+    let mut schema_version = None;
     let mut buffer = String::new();
 
     for line in plan_text.lines() {
         let trimmed = line.trim_start();
         if let Some(fence) = active_fence {
             if trimmed.starts_with(fence) {
-                if collecting {
-                    blocks.push(buffer.trim().to_owned());
+                if let Some(schema_version) = schema_version {
+                    blocks.push((schema_version, buffer.trim().to_owned()));
                 }
                 active_fence = None;
-                collecting = false;
+                schema_version = None;
                 buffer.clear();
                 continue;
             }
-            if collecting {
+            if schema_version.is_some() {
                 buffer.push_str(line);
                 buffer.push('\n');
             }
@@ -786,7 +918,7 @@ fn structured_plan_blocks(plan_text: &str) -> Vec<String> {
             continue;
         };
         active_fence = Some(fence);
-        collecting = fence_info_has_structured_plan_schema(info);
+        schema_version = structured_plan_schema_version(info);
         buffer.clear();
     }
 
@@ -803,11 +935,22 @@ fn parse_fence_start(line: &str) -> Option<(&'static str, &str)> {
     }
 }
 
-fn fence_info_has_structured_plan_schema(info: &str) -> bool {
-    info.split_whitespace().any(|part| part == "sigil-plan-v1")
+fn structured_plan_schema_version(info: &str) -> Option<u32> {
+    let mut versions = info.split_whitespace().filter_map(|part| match part {
+        "sigil-plan-v1" => Some(1),
+        "sigil-plan-v2" => Some(2),
+        _ => None,
+    });
+    let version = versions.next()?;
+    versions
+        .all(|candidate| candidate == version)
+        .then_some(version)
 }
 
-fn materialize_structured_plan(raw: RawStructuredPlanDraft) -> StructuredPlanDraft {
+fn materialize_structured_plan(
+    schema_version: u32,
+    raw: RawStructuredPlanDraft,
+) -> StructuredPlanDraft {
     let mut step_ids = BTreeSet::new();
     let steps = raw
         .steps
@@ -848,6 +991,7 @@ fn materialize_structured_plan(raw: RawStructuredPlanDraft) -> StructuredPlanDra
         .collect();
 
     StructuredPlanDraft {
+        schema_version,
         summary,
         steps,
         target_paths: collapse_plan_workspace_paths(target_paths),
@@ -855,6 +999,10 @@ fn materialize_structured_plan(raw: RawStructuredPlanDraft) -> StructuredPlanDra
         risk: raw.risk.and_then(nonempty_trimmed),
         notes: raw.notes.into_iter().filter_map(nonempty_trimmed).collect(),
     }
+}
+
+const fn legacy_plan_schema_version() -> u32 {
+    1
 }
 
 fn materialize_plan_step(
@@ -886,9 +1034,6 @@ fn materialize_plan_step(
             .filter_map(nonempty_trimmed)
             .map(|acceptance| format!("acceptance: {acceptance}")),
     );
-    if let Some(mode) = raw_step.mode.and_then(nonempty_trimmed) {
-        notes.insert(0, format!("mode: {mode}"));
-    }
     let step_id = unique_plan_step_id(
         raw_step.step_id.as_deref().unwrap_or(&title),
         index,
@@ -897,12 +1042,51 @@ fn materialize_plan_step(
     Some(PlanDraftStep {
         step_id,
         title,
+        display_name: raw_step.display_name.and_then(nonempty_trimmed),
         detail: raw_step.detail.and_then(nonempty_trimmed),
+        role: raw_step.role.as_deref().and_then(parse_plan_agent_role),
+        depends_on: raw_step
+            .depends_on
+            .into_iter()
+            .filter_map(nonempty_trimmed)
+            .collect(),
+        mode: raw_step.mode.as_deref().and_then(parse_plan_step_mode),
+        isolation: raw_step.isolation.as_deref().and_then(parse_plan_isolation),
         target_paths: collapse_plan_workspace_paths(target_paths),
         suggested_checks,
         risk: raw_step.risk.and_then(nonempty_trimmed),
         notes,
     })
+}
+
+fn parse_plan_agent_role(value: &str) -> Option<AgentRole> {
+    match value.trim() {
+        "planner" => Some(AgentRole::Planner),
+        "executor" => Some(AgentRole::Executor),
+        "subagent_read" => Some(AgentRole::SubagentRead),
+        "subagent_write" => Some(AgentRole::SubagentWrite),
+        _ => None,
+    }
+}
+
+fn parse_plan_step_mode(value: &str) -> Option<TaskStepMode> {
+    match value.trim() {
+        "read" => Some(TaskStepMode::Read),
+        "write" => Some(TaskStepMode::Write),
+        "review" => Some(TaskStepMode::Review),
+        "verify" => Some(TaskStepMode::Verify),
+        _ => None,
+    }
+}
+
+fn parse_plan_isolation(value: &str) -> Option<TaskIsolationMode> {
+    match value.trim() {
+        "shared_read_only" => Some(TaskIsolationMode::SharedReadOnly),
+        "sequential_workspace_write" => Some(TaskIsolationMode::SequentialWorkspaceWrite),
+        "changeset_only" => Some(TaskIsolationMode::ChangesetOnly),
+        "worktree" => Some(TaskIsolationMode::Worktree),
+        _ => None,
+    }
 }
 
 fn materialize_plan_suggested_check(raw: RawPlanSuggestedCheck) -> Option<PlanSuggestedCheck> {
@@ -1027,6 +1211,18 @@ fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
         lines.push(format!("{}. {} [{}]", index + 1, step.title, step.step_id));
         if let Some(detail) = &step.detail {
             lines.push(format!("   Detail: {detail}"));
+        }
+        if let Some(role) = step.role {
+            lines.push(format!("   Role: {}", role.as_str()));
+        }
+        if !step.depends_on.is_empty() {
+            lines.push(format!("   Depends on: {}", step.depends_on.join(", ")));
+        }
+        if let Some(mode) = step.mode {
+            lines.push(format!("   Mode: {}", mode.as_str()));
+        }
+        if let Some(isolation) = step.isolation {
+            lines.push(format!("   Isolation: {}", isolation.as_str()));
         }
         if !step.target_paths.is_empty() {
             lines.push(format!("   Paths: {}", step.target_paths.join(", ")));

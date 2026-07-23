@@ -311,6 +311,7 @@ where
         elicitation_audit_buffer,
         cancellation_owner,
         cancellation_recorder,
+        cancellation_target: RunCancellationTarget::Run,
         url_capability_registrar,
         image_attachment_resolver,
     })
@@ -344,6 +345,8 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     task_result_tx: &mpsc::Sender<RunTaskResult>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    session_log_path: &Path,
     next_run_id: &mut u64,
     queued: PreparedQueuedConversationCandidate,
 ) -> Option<ActiveRun>
@@ -365,6 +368,20 @@ where
             "session state is unavailable for follow-up".to_owned(),
         ));
         return None;
+    };
+    let parent_session_ref = match session_ref_for_log_path(session_log_path) {
+        Ok(session_ref) => session_ref,
+        Err(error) => {
+            append_queue_status_and_notify(
+                current_session,
+                message_tx,
+                queue_id,
+                ConversationInputStatus::Rejected,
+                Some(error.clone()),
+            );
+            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+            return None;
+        }
     };
     let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
         match prepare_run_cancellation(session) {
@@ -390,7 +407,7 @@ where
 
     let _ = message_tx.send(WorkerMessage::ConversationQueueDispatchStarted {
         queue_id: queue_id.clone(),
-        prompt: safe_prompt,
+        prompt: safe_prompt.clone(),
     });
 
     let mut handler = ChannelEventHandler::new(message_tx.clone());
@@ -399,6 +416,7 @@ where
         Arc::new(std::sync::Mutex::new(Vec::new()));
     elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+    let run_message_tx = message_tx.clone();
     let mut options = options.clone();
     if let Some(reasoning_effort) = reasoning_effort {
         options.reasoning_effort = Some(reasoning_effort);
@@ -410,6 +428,11 @@ where
     )
     .with_background_runs(background_runs.clone());
     let task_result_tx = task_result_tx.clone();
+    let conversation_coordinator =
+        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy);
+    let task_root_config = root_config.clone();
+    let task_base_registry = base_registry.clone();
+    let task_agent_supervisor = agent_supervisor.clone();
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
@@ -417,40 +440,162 @@ where
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
-        let result = {
+        let mut payload = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
-                .with_initial_frozen_provider_request(frozen_request)
-                .with_logical_run_id(dispatch_run_id)
-                .with_cancellation(cancellation_handle);
-            agent
-                .run_with_approval_input_and_agent_delegate(
-                    &mut run_session,
+                .with_initial_frozen_provider_request(frozen_request);
+            let input = conversation_coordinator
+                .bind_conversation_input(
+                    &run_session,
                     input,
-                    options,
-                    &mut handler,
-                    &mut approval_handler,
-                    &mut agent_delegate,
+                    parent_session_ref.clone(),
+                    dispatch_run_id.clone(),
+                    Some(ConversationSourceTurn {
+                        message_id: queued.promotion.durable_user_message.id.clone(),
+                        objective: safe_prompt.clone(),
+                    }),
+                    current_unix_time_ms(),
                 )
-                .await
-                .map(|output| output.result)
-                .map_err(|error| format!("{error:#}"))
-        };
-        let result =
-            match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
-                Ok(()) => result,
+                .map(|input| input.with_cancellation(cancellation_handle.clone()))
+                .map_err(|error| format!("{error:#}"));
+            let output = match input {
+                Ok(input) => agent
+                    .run_with_approval_input_and_agent_delegate(
+                        &mut run_session,
+                        input,
+                        options.clone(),
+                        &mut handler,
+                        &mut approval_handler,
+                        &mut agent_delegate,
+                    )
+                    .await
+                    .map_err(|error| format!("{error:#}")),
                 Err(error) => Err(error),
             };
+            match output {
+                Ok(output) => match output.disposition {
+                    AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
+                        result: Ok(output.result),
+                        plan_mode: false,
+                        queue_id: Some(queue_id.clone()),
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    AgentRunDisposition::StartDurableTask(action) => {
+                        let projection = run_session.task_state_projection();
+                        let task = projection.tasks.get(&action.task_id).cloned();
+                        match task {
+                            Some(task) => {
+                                let task_id = action.task_id.as_str().to_owned();
+                                let _ = run_message_tx.send(WorkerMessage::TaskRunStarted {
+                                    task_id: task_id.clone(),
+                                    objective: task.objective.clone(),
+                                });
+                                let result = run_admitted_task_to_root_terminal(
+                                    &mut run_session,
+                                    AdmittedTaskRunOrchestration {
+                                        task_id: action.task_id,
+                                        parent_session_ref: task.parent_session_ref,
+                                        objective: task.objective,
+                                        root_config: task_root_config,
+                                        options,
+                                        base_registry: task_base_registry,
+                                        agent_supervisor: task_agent_supervisor,
+                                        role_provider_builder: role_provider_builder.as_ref(),
+                                        handler: &mut handler,
+                                        cancellation_handle,
+                                    },
+                                    &mut approval_handler,
+                                )
+                                .await;
+                                RunTaskPayload::Task {
+                                    task_id,
+                                    queue_id: Some(queue_id.clone()),
+                                    result,
+                                }
+                            }
+                            None => {
+                                let error = if cancellation_handle.try_finalize_naturally() {
+                                    "accepted task handoff is missing its durable task".to_owned()
+                                } else {
+                                    "run cancellation won the missing-task terminal-state race"
+                                        .to_owned()
+                                };
+                                RunTaskPayload::Chat {
+                                    result: Err(error),
+                                    plan_mode: false,
+                                    queue_id: Some(queue_id.clone()),
+                                    provider_logical_run_id: None,
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                }
+                            }
+                        }
+                    }
+                    AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
+                        result: Err("run was interrupted before a final answer".to_owned()),
+                        plan_mode: false,
+                        queue_id: Some(queue_id.clone()),
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    AgentRunDisposition::Blocked => RunTaskPayload::Chat {
+                        result: Err("run was blocked before a final answer".to_owned()),
+                        plan_mode: false,
+                        queue_id: Some(queue_id.clone()),
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    AgentRunDisposition::TaskPlanAccepted => RunTaskPayload::Chat {
+                        result: Err("task planning completed outside a task run".to_owned()),
+                        plan_mode: false,
+                        queue_id: Some(queue_id.clone()),
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                },
+                Err(error) => RunTaskPayload::Chat {
+                    result: Err(error),
+                    plan_mode: false,
+                    queue_id: Some(queue_id.clone()),
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
+                },
+            }
+        };
+        if let Err(error) =
+            append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer)
+        {
+            payload = match payload {
+                RunTaskPayload::Chat {
+                    plan_mode,
+                    queue_id,
+                    provider_logical_run_id,
+                    agent_result_continuation_thread_ids,
+                    ..
+                } => RunTaskPayload::Chat {
+                    result: Err(error),
+                    plan_mode,
+                    queue_id,
+                    provider_logical_run_id,
+                    agent_result_continuation_thread_ids,
+                },
+                RunTaskPayload::Task {
+                    task_id, queue_id, ..
+                } => RunTaskPayload::Task {
+                    task_id,
+                    queue_id,
+                    result: Err(error),
+                },
+                RunTaskPayload::Agent { profile_id, .. } => RunTaskPayload::Agent {
+                    profile_id,
+                    result: Err(error),
+                },
+            };
+        }
         let _ = task_result_tx.send(RunTaskResult {
             run_id,
             session: run_session,
-            payload: RunTaskPayload::Chat {
-                result,
-                plan_mode: false,
-                queue_id: Some(queue_id),
-                provider_logical_run_id: None,
-                agent_result_continuation_thread_ids: Vec::new(),
-            },
+            payload,
         });
     });
 
@@ -461,6 +606,7 @@ where
         elicitation_audit_buffer,
         cancellation_owner,
         cancellation_recorder,
+        cancellation_target: RunCancellationTarget::Run,
         url_capability_registrar,
         image_attachment_resolver,
     })
@@ -567,6 +713,7 @@ where
         elicitation_audit_buffer,
         cancellation_owner,
         cancellation_recorder,
+        cancellation_target: RunCancellationTarget::Run,
         url_capability_registrar,
         image_attachment_resolver,
     })

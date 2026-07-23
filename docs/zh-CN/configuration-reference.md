@@ -80,6 +80,7 @@
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
 | `[task].enabled` | `true` | 开启任务规划。 |
+| `[task].routing_policy` | `"manual"` | 普通对话路由策略：`manual` 或由 coordinator 接管的 `auto`；不会授予工具权限。 |
 | `[task].default_mode` | `"chat"` | 输入框的默认工作模式。 |
 | `[task].max_plan_steps` | `12` | 单个计划最多包含多少步。 |
 | `[task].max_replans` | `2` | 最多允许重新规划多少次。 |

@@ -12,17 +12,19 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentConfig, AgentFinalAnswerRef, AgentInvocationMode, AgentInvocationSource, AgentRole,
-    AgentRouteId, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    AgentThreadId, AgentThreadTerminalStatus, AgentUsageSummary, ApprovalMode, AutoApproveHandler,
-    CompactionConfig, CompletionRequest, EventHandler, InteractionMode, JsonlSessionStore,
-    MemoryConfig, ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    Agent, AgentConfig, AgentDelegationAdmissionEntry, AgentFinalAnswerRef, AgentInvocationMode,
+    AgentInvocationSource, AgentRole, AgentRouteId, AgentRunInput, AgentRunOptions,
+    AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
+    AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
+    DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
+    ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
     ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry,
     SessionRef, TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskParticipantAttemptId, TaskParticipantPurpose, TaskPlannerSessionRunRequest,
     TaskRouteStatus, TaskStepId, TaskStepSpec, TaskSubagentApprovalRouteEntry, Tool, ToolAccess,
     ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability,
     ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    WorkspaceConfig, child_session_ref,
+    WorkspaceConfig, child_session_ref, task_participant_attempt_id, task_participant_session_ref,
 };
 
 use super::{
@@ -43,6 +45,22 @@ impl EventHandler for RecordingEventHandler {
         self.events.push(event);
         Ok(())
     }
+}
+
+fn participant_attempt_id_for(step_id: &str) -> Result<TaskParticipantAttemptId> {
+    task_participant_attempt_id(
+        &TaskId::new("task_1")?,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&TaskStepId::new(step_id)?),
+        1,
+    )
+}
+
+fn participant_session_ref_for(step_id: &str) -> Result<SessionRef> {
+    let task_id = TaskId::new("task_1")?;
+    let attempt_id = participant_attempt_id_for(step_id)?;
+    task_participant_session_ref(&task_id, &attempt_id)
 }
 
 struct TextProvider {
@@ -401,23 +419,50 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
 }
 
 fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentChatChildStart> {
+    let call_id = format!("call_{profile_id}");
+    let profile_id = sigil_kernel::AgentProfileId::new(profile_id)?;
+    let thread_id = super::chat_agent_thread_id_for_call(&call_id, &profile_id)?;
     Ok(AgentChatChildStart {
-        call_id: format!("call_{profile_id}"),
+        call_id,
         budget_scope_id: TaskId::new("chat_1")?,
         parent_thread_id: AgentThreadId::new("main")?,
         parent_depth: 0,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        profile_id: sigil_kernel::AgentProfileId::new(profile_id)?,
+        profile_id: profile_id.clone(),
         role: AgentRole::SubagentRead,
-        child_session_ref: SessionRef::new_relative(format!("children/{profile_id}.jsonl"))?,
+        child_session_ref: SessionRef::new_relative(format!(
+            "children/{}.jsonl",
+            profile_id.as_str()
+        ))?,
         objective: "inspect code".to_owned(),
         prompt: "inspect code".to_owned(),
         workspace_root,
         provider_capabilities: provider_capabilities(),
         invocation_mode: AgentInvocationMode::JoinBeforeFinal,
         invocation_source: AgentInvocationSource::Chat,
+        delegation_admission: AgentDelegationAdmissionEntry {
+            thread_id,
+            profile_id,
+            invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+            invocation_source: AgentInvocationSource::Chat,
+            authority: DelegationAuthorityRecord::ModelProactive,
+            objective_hash: super::hash_text("inspect code"),
+            tool_contract_fingerprint: "sha256:test-contracts".to_owned(),
+            admitted_at_ms: None,
+        },
         display_name_hint: Some("inspect".to_owned()),
     })
+}
+
+fn rebind_chat_delegation_admission(start: &mut AgentChatChildStart) -> Result<()> {
+    start.delegation_admission.thread_id =
+        super::chat_agent_thread_id_for_call(&start.call_id, &start.profile_id)?;
+    start.delegation_admission.profile_id = start.profile_id.clone();
+    start.delegation_admission.invocation_mode = start.invocation_mode;
+    start.delegation_admission.invocation_source = start.invocation_source;
+    start.delegation_admission.objective_hash =
+        super::hash_text(&sigil_kernel::safe_persistence_text(&start.objective));
+    Ok(())
 }
 
 #[test]
@@ -469,6 +514,7 @@ fn chat_child_start_projects_sensitive_objective_and_prompt_hash_before_control_
     let mut start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
     start.objective = raw.to_owned();
     start.prompt = raw.to_owned();
+    rebind_chat_delegation_admission(&mut start)?;
 
     let thread = supervisor.begin_chat_child_thread(&mut session, &mut handler, start)?;
 
@@ -729,6 +775,7 @@ fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()
     let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
     background_start.call_id = "call_background_mailbox".to_owned();
     background_start.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut background_start)?;
     let mut background =
         supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
     let route_id = AgentRouteId::new("route_background")?;
@@ -763,6 +810,7 @@ async fn route_agent_message_records_mailbox_delivery_state() -> Result<()> {
     let mut handler = RecordingEventHandler::default();
     let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
     background_start.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut background_start)?;
     let background =
         supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
     let mut runtime = AgentToolRuntime::new(supervisor, root_config(), ToolRegistry::new());
@@ -820,6 +868,7 @@ fn foreground_background_request_reports_missing_foreground() -> Result<()> {
     let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
     background_start.call_id = "call_background_budget".to_owned();
     background_start.invocation_mode = AgentInvocationMode::Background;
+    rebind_chat_delegation_admission(&mut background_start)?;
     supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
 
     let missing_foreground = supervisor
@@ -1477,6 +1526,103 @@ fn provider_background_resume_defaults_to_interrupted() -> Result<()> {
 }
 
 #[tokio::test]
+async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_subagents = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "planner returned prose without committing a plan",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "reader done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_planner_postprocess")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "produce a durable task plan".to_owned(),
+                },
+                attempt_id,
+                child_session_ref,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("plan the task"),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await
+        .expect_err("planner prose without task_plan_update must fail postprocessing");
+
+    assert!(
+        error
+            .to_string()
+            .contains("did not produce an accepted plan")
+    );
+    let projection = session.agent_thread_state_projection();
+    let failed = projection
+        .latest_thread()
+        .expect("planner thread is projected");
+    assert_eq!(failed.status, sigil_kernel::AgentThreadStatus::Failed);
+    assert!(
+        failed
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("did not produce an accepted plan"))
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+
+    supervisor.begin_task_child_thread(
+        &mut session,
+        &mut handler,
+        child_start(step("slot-reused")?, temp.path().to_path_buf())?,
+    )?;
+    assert_eq!(supervisor.active_profile_ids().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
@@ -1505,6 +1651,8 @@ async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()
                 },
                 plan_version: 1,
                 step: step("usage")?,
+                attempt_id: participant_attempt_id_for("usage")?,
+                child_session_ref: participant_session_ref_for("usage")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill"),
                 ]),
@@ -1563,6 +1711,8 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 },
                 plan_version: 1,
                 step: step("usage_one")?,
+                attempt_id: participant_attempt_id_for("usage_one")?,
+                child_session_ref: participant_session_ref_for("usage_one")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill"),
                 ]),
@@ -1585,6 +1735,8 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 },
                 plan_version: 1,
                 step: step("usage_two")?,
+                attempt_id: participant_attempt_id_for("usage_two")?,
+                child_session_ref: participant_session_ref_for("usage_two")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill again"),
                 ]),
@@ -1607,6 +1759,8 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 },
                 plan_version: 1,
                 step: step("usage_three")?,
+                attempt_id: participant_attempt_id_for("usage_three")?,
+                child_session_ref: participant_session_ref_for("usage_three")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill after budget"),
                 ]),
@@ -1674,6 +1828,8 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
                 },
                 plan_version: 1,
                 step: write_step("inspect")?,
+                attempt_id: participant_attempt_id_for("inspect")?,
+                child_session_ref: participant_session_ref_for("inspect")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("inspect only"),
                 ]),
@@ -1741,6 +1897,8 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
                 },
                 plan_version: 1,
                 step: step("invoke_skill")?,
+                attempt_id: participant_attempt_id_for("invoke_skill")?,
+                child_session_ref: participant_session_ref_for("invoke_skill")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill"),
                 ]),
@@ -1761,6 +1919,10 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
         .get(&TaskId::new("task_1")?)
         .expect("task child session projected");
     assert_eq!(task.child_sessions.len(), 1);
+    assert!(!handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::AssistantMessage(_) | RunEvent::TextDelta(_)
+    )));
     Ok(())
 }
 
@@ -1801,6 +1963,8 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
                 },
                 plan_version: 1,
                 step: step("approval_route")?,
+                attempt_id: participant_attempt_id_for("approval_route")?,
+                child_session_ref: participant_session_ref_for("approval_route")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("read through approval"),
                 ]),
@@ -1820,8 +1984,8 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
     assert!(task_statuses.contains(&TaskRouteStatus::Requested));
     assert!(task_statuses.contains(&TaskRouteStatus::Resolved));
     assert!(
-        temp.path()
-            .join("children/task_1/approval_route-child_v1_approval_route.jsonl")
+        participant_session_ref_for("approval_route")?
+            .resolve(temp.path())
             .exists()
     );
     Ok(())
@@ -1861,6 +2025,8 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
                 },
                 plan_version: 1,
                 step: step("invoke_skill")?,
+                attempt_id: participant_attempt_id_for("invoke_skill")?,
+                child_session_ref: participant_session_ref_for("invoke_skill")?,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("apply skill"),
                 ]),

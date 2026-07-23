@@ -58,6 +58,39 @@ fn session_model_selection_has_a_stable_audit_line() {
 }
 
 #[test]
+fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_audit_result")?;
+    let attempt_id = sigil_kernel::task_participant_attempt_id(
+        &task_id,
+        sigil_kernel::TaskParticipantPurpose::Planner,
+        None,
+        None,
+        1,
+    )?;
+    let mut result = sigil_kernel::TaskParticipantResultEntry {
+        attempt_id,
+        task_id,
+        summary: "bounded result".to_owned(),
+        summary_hash: format!("sha256:{}", "1".repeat(64)),
+        output_hash: format!("sha256:{}", "2".repeat(64)),
+        terminal_status: Some(sigil_kernel::TaskParticipantAttemptStatus::Completed),
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changed_paths: vec!["src/lib.rs".to_owned()],
+        verification_refs: Vec::new(),
+    };
+
+    let terminal = render_control_entry_line(&ControlEntry::TaskParticipantResult(result.clone()));
+    assert!(terminal.contains("terminal=completed"));
+    assert!(terminal.contains("changed=1"));
+
+    result.terminal_status = None;
+    let legacy = render_control_entry_line(&ControlEntry::TaskParticipantResult(result));
+    assert!(legacy.contains("terminal=legacy"));
+    Ok(())
+}
+
+#[test]
 fn session_history_marks_legacy_raw_logs_as_unsupported() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session-legacy.jsonl");
@@ -1264,6 +1297,18 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
                 },
             }),
         )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentDelegationAdmitted(sigil_kernel::AgentDelegationAdmissionEntry {
+                thread_id: thread_id.clone(),
+                profile_id: profile_id.clone(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                authority: sigil_kernel::DelegationAuthorityRecord::ModelProactive,
+                objective_hash: "sha256:objective".to_owned(),
+                tool_contract_fingerprint: "sha256:contracts".to_owned(),
+                admitted_at_ms: None,
+            }),
+        )),
         render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
@@ -1376,6 +1421,9 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
     .join("\n");
 
     assert!(rendered.contains("[ctl] agent profile explore trust=trusted"));
+    assert!(rendered.contains(
+        "[ctl] agent thread_1 admitted profile=explore mode=foreground source=chat authority=model_proactive"
+    ));
     assert!(rendered.contains("[ctl] agent thread_1 started profile=explore mode=foreground"));
     assert!(rendered.contains("[ctl] agent thread_1 status=running"));
     assert!(rendered.contains("[ctl] agent message route_1 status=resolved"));

@@ -51,6 +51,8 @@ pub struct TaskVerificationRerunOutput {
 #[derive(Debug, Clone)]
 pub struct TaskChildSessionRunRequest {
     pub task: SequentialTaskRequest,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub child_session_ref: SessionRef,
     pub plan_version: u32,
     pub step: TaskStepSpec,
     pub child_input: AgentRunInput,
@@ -61,10 +63,54 @@ pub struct TaskChildSessionRunRequest {
 /// Output returned by a child-session runner after a terminal child run.
 #[derive(Debug, Clone)]
 pub struct TaskChildSessionRunOutput {
+    pub attempt_id: TaskParticipantAttemptId,
     pub final_text: String,
     pub outcome: AgentRunOutcome,
+    pub child_session_ref: SessionRef,
+    pub final_answer_ref: Option<AgentFinalAnswerRef>,
+    pub artifact_refs: Vec<AgentArtifactRef>,
     pub changeset_proposal: Option<TaskChildChangeSetProposal>,
     pub changeset_only_after_snapshot_id: Option<String>,
+}
+
+/// Input for the isolated planner transcript owned by one durable participant attempt.
+#[derive(Debug, Clone)]
+pub struct TaskPlannerSessionRunRequest {
+    pub task: SequentialTaskRequest,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub child_session_ref: SessionRef,
+    pub child_input: AgentRunInput,
+    pub options: AgentRunOptions,
+}
+
+/// Parent-committable output from an isolated planner transcript.
+#[derive(Debug, Clone)]
+pub struct TaskPlannerSessionRunOutput {
+    pub attempt_id: TaskParticipantAttemptId,
+    pub accepted_plan: TaskPlanEntry,
+    pub child_session_ref: SessionRef,
+}
+
+/// Input for the isolated, read-only final synthesis transcript.
+#[derive(Debug, Clone)]
+pub struct TaskSynthesisSessionRunRequest {
+    pub task: SequentialTaskRequest,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub child_session_ref: SessionRef,
+    pub plan_version: u32,
+    pub child_input: AgentRunInput,
+    pub options: AgentRunOptions,
+}
+
+/// Exact synthesis result returned to the parent single-writer commit boundary.
+#[derive(Debug, Clone)]
+pub struct TaskSynthesisSessionRunOutput {
+    pub attempt_id: TaskParticipantAttemptId,
+    pub final_text: String,
+    pub outcome: AgentRunOutcome,
+    pub child_session_ref: SessionRef,
+    pub final_answer_ref: AgentFinalAnswerRef,
+    pub artifact_refs: Vec<AgentArtifactRef>,
 }
 
 /// Structured output contract returned by a `ChangesetOnly` child writer.
@@ -87,6 +133,8 @@ pub struct TaskChildChangeSetArtifact {
 pub(super) struct StepRunOutput {
     pub(super) final_text: String,
     pub(super) outcome: AgentRunOutcome,
+    pub(super) final_answer_ref: Option<AgentFinalAnswerRef>,
+    pub(super) artifact_refs: Vec<AgentArtifactRef>,
     pub(super) changeset_proposal: Option<TaskChildChangeSetProposal>,
     pub(super) changeset_only_after_snapshot_id: Option<String>,
 }

@@ -421,6 +421,24 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
     Ok(())
 }
 
+#[test]
+fn tool_registry_snapshot_is_not_changed_by_same_name_replacement() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RegistryFixtureTool));
+    let snapshot = registry.snapshot();
+
+    registry.register(Arc::new(NamedRegistryTool("fixture")));
+
+    assert_eq!(
+        registry.spec_for("fixture").map(|spec| spec.access),
+        Some(ToolAccess::Read)
+    );
+    assert_eq!(
+        snapshot.spec_for("fixture").map(|spec| spec.access),
+        Some(ToolAccess::Execute)
+    );
+}
+
 #[tokio::test]
 async fn tool_registry_allows_read_only_shell_without_started_audit_marker() -> Result<()> {
     let temp = tempfile::tempdir()?;

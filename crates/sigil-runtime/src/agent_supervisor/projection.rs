@@ -3,7 +3,9 @@ use serde_json::json;
 use sigil_kernel::{
     AgentArtifactRef, AgentFinalAnswerRef, AgentRunOutcome, AgentRunResult, AgentThreadId,
     AgentThreadResult, AgentThreadTerminalStatus, AgentUsageSummary, AssistantMessageKind,
-    ModelMessage, Session, SessionRef,
+    ModelMessage, Session, SessionRef, TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS,
+    TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
+    TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
 };
 
 use super::hash_text;
@@ -79,18 +81,59 @@ pub(super) fn build_agent_thread_result(
         summary: summary.text,
         summary_truncated: summary.truncated,
         original_summary_chars: summary.original_chars,
-        artifacts: agent_result_artifacts(
+        artifacts: bounded_agent_artifacts(agent_result_artifacts(
             &session_ref,
             &materialized.final_text,
             materialized.extra_artifacts.clone(),
+        )),
+        changed_paths: bounded_agent_result_fields(
+            outcome.changed_files.iter().map(String::as_str),
+            TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
         ),
-        changed_paths: outcome.changed_files.clone(),
         risks: Vec::new(),
         followups: Vec::new(),
         usage,
         output_hash: hash_text(&materialized.final_text),
         final_answer_ref: materialized.final_answer_ref.clone(),
     }
+}
+
+fn bounded_agent_artifacts(artifacts: Vec<AgentArtifactRef>) -> Vec<AgentArtifactRef> {
+    artifacts
+        .into_iter()
+        .take(TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS)
+        .map(|mut artifact| {
+            artifact.kind = bounded_agent_result_field(
+                &artifact.kind,
+                TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS,
+            );
+            artifact.path =
+                bounded_agent_result_field(&artifact.path, TASK_PARTICIPANT_RESULT_REF_MAX_CHARS);
+            artifact.hash = artifact.hash.as_deref().map(|hash| {
+                bounded_agent_result_field(hash, TASK_PARTICIPANT_RESULT_REF_MAX_CHARS)
+            });
+            artifact
+        })
+        .filter(|artifact| !artifact.kind.is_empty() && !artifact.path.is_empty())
+        .collect()
+}
+
+fn bounded_agent_result_fields<'a>(
+    values: impl Iterator<Item = &'a str>,
+    max_items: usize,
+) -> Vec<String> {
+    values
+        .take(max_items)
+        .map(|value| bounded_agent_result_field(value, TASK_PARTICIPANT_RESULT_REF_MAX_CHARS))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn bounded_agent_result_field(value: &str, max_chars: usize) -> String {
+    sigil_kernel::safe_persistence_text(value)
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 pub(crate) async fn materialize_child_agent_final_answer(

@@ -13,6 +13,7 @@
 ```toml
 [task]
 enabled = true
+routing_policy = "manual"
 default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
@@ -21,7 +22,7 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-普通输入始终从对话开始。只读计划使用 `/plan`，多步骤执行使用 `/task`。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
+`routing_policy` 与输入框的 `default_mode` 是两件事。兼容默认值为 `manual`，因此普通输入仍从对话开始。在当前 O3 实现中，TUI 设为 `auto` 后，模型可以把复杂普通输入通过 typed handoff 交给 durable planner/executor；简单问题仍直接回答，而且 handoff 不会绕过写文件、shell、网络或 merge 审批。Planner、Executor、Subagent 与最终 Synthesis transcript 均保存在隔离 child session，parent 只保留 bounded result 和一个由 host 提交的正式 final。HTTP/Desktop application surface 在接入同一 task executor 前仍强制使用 manual routing，避免创建无人执行的 task。只读计划使用 `/plan`，需要确定进入多步骤执行时使用 `/task`；字段完整的 `sigil-plan-v2` DAG 会直接 promotion，不再二次规划。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
 
 ## 验证
 
