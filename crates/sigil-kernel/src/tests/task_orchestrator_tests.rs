@@ -784,6 +784,64 @@ impl TaskChildSessionRunner for MixedReadBatchChildRunner {
     }
 }
 
+#[derive(Clone)]
+struct ChangesetBatchChildRunner {
+    batch_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for ChangesetBatchChildRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        changeset_batch_child_output(request)
+    }
+
+    async fn run_child_session_batch<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.batch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(requests
+            .into_iter()
+            .map(changeset_batch_child_output)
+            .collect())
+    }
+}
+
+fn changeset_batch_child_output(
+    request: TaskChildSessionRunRequest,
+) -> Result<TaskChildSessionRunOutput> {
+    let change_id = format!("change-{}", request.step.step_id.as_str());
+    Ok(TaskChildSessionRunOutput {
+        attempt_id: request.attempt_id,
+        final_text: format!("{} proposed", request.step.step_id.as_str()),
+        outcome: crate::AgentRunOutcome::default(),
+        child_session_ref: request.child_session_ref,
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changeset_proposal: Some(decode_changeset_only_child_output(
+            &changeset_only_child_final_text(&change_id),
+        )?),
+        changeset_only_after_snapshot_id: request.changeset_only_base_snapshot_id,
+    })
+}
+
 fn successful_read_child_output(request: TaskChildSessionRunRequest) -> TaskChildSessionRunOutput {
     TaskChildSessionRunOutput {
         attempt_id: request.attempt_id,
@@ -2856,6 +2914,107 @@ async fn read_batch_commits_independent_success_before_blocking_failed_dependent
                     })
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn changeset_only_ready_steps_batch_proposals_without_parent_workspace_mutation() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let batch_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(ChangesetBatchChildRunner {
+            batch_calls: Arc::clone(&batch_calls),
+        })
+        .with_max_parallel_changeset_steps(2);
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("proposal_a")?,
+                title: "proposal A".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::ChangesetOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("proposal_b")?,
+                title: "proposal B".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::ChangesetOnly),
+            },
+        ],
+    )?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+    let options = options_for_workspace(temp.path());
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "propose independent changes".to_owned(),
+            },
+            options.clone(),
+            options.clone(),
+            options,
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(batch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps.len(), 2);
+    assert!(
+        output
+            .steps
+            .iter()
+            .all(|step| step.status == TaskStepStatus::Blocked)
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("note.txt"))?,
+        "old\n"
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ChangeSetProposed(_))
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::MergeReviewRequested(_))
+            ))
+            .count(),
+        2
+    );
+    assert!(session.entries().iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
+    )));
     Ok(())
 }
 

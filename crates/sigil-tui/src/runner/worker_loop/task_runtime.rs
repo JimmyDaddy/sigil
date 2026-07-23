@@ -1100,6 +1100,9 @@ pub(in crate::runner) fn build_task_role_runtime(
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
+            .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
+                &root_config.task,
+            ))
             .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
@@ -1198,6 +1201,9 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
+            .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
+                &root_config.task,
+            ))
             .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
@@ -1232,10 +1238,16 @@ pub(in crate::runner) fn configured_max_parallel_read_steps(
     config.max_parallel_read_steps.max(1)
 }
 
+pub(in crate::runner) fn configured_max_parallel_changeset_steps(
+    config: &sigil_kernel::TaskConfig,
+) -> usize {
+    config.max_parallel_changeset_steps.max(1)
+}
+
 pub(in crate::runner) fn configured_provider_route_concurrency_limit(
     config: &sigil_kernel::TaskConfig,
 ) -> usize {
-    configured_max_parallel_read_steps(config)
+    configured_max_parallel_read_steps(config).max(configured_max_parallel_changeset_steps(config))
 }
 
 pub(in crate::runner) fn skill_child_agent_role(skill: &SkillDescriptor) -> AgentRole {

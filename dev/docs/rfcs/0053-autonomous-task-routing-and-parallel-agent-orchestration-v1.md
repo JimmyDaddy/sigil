@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O5b2 implemented；O6-O8 deferred
+状态：accepted / O0-O5b2、O6a implemented；O6b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -508,6 +508,10 @@ min(
 ```
 
 O5a 已把 read concurrency 改为 `[task].max_parallel_read_steps` config input，默认值为 `4`。
+O6a 为独立 `ChangesetOnly` proposal 增加第二个有界并发面：有效并发度由
+`[task].max_parallel_changeset_steps`（默认 `2`）、`max_subagents`、runtime active-child
+budget 和 provider route budget 共同限制。read-only 与 changeset-only batch 不混跑，
+shared-workspace direct write 继续保持 exclusive。
 
 ### 10.3 Projection
 
@@ -918,6 +922,7 @@ max_plan_steps = 12
 max_replans = 2
 max_subagents = 8
 max_parallel_read_steps = 4
+max_parallel_changeset_steps = 2
 max_planning_research_agents = 3
 allow_write_subagents = true
 ```
@@ -991,7 +996,9 @@ process-local provider route cooldown、O5b2c shared-read-only durable bounded r
 O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis retry
 以及 O5b2d3a 实时 route attribution/diagnostics、O5b2d3b completion-arrival 与
 request-order durable commit 双序视图，以及显式 prepare/detached future/one-shot commit
-envelope 边界均已完成；后续工作从 O6 开始。
+envelope 边界均已完成。O6a 也已完成 changeset-only proposal 的有界真实并发、共享 immutable
+base snapshot、parent snapshot revalidation 与稳定 proposal/review commit；后续工作从 O6b
+开始。
 
 ### O0: Truth baseline and contract correction
 
@@ -1249,8 +1256,21 @@ O5b2 coordinator boundary 已完成：
 
 ### O6: Parallel isolated writes and integration lanes
 
-- 并行 changeset-only proposals。
-- worktree snapshot materialization、path confinement、artifact isolation 和 cleanup ownership。
+- O6a（已完成）：并行 changeset-only proposals。
+  - scheduler 只把相互独立的 `SubagentWrite + ChangesetOnly` ready step 组成 homogeneous
+    batch；`[task].max_parallel_changeset_steps` 默认 `2`，并继续受 `max_subagents`、
+    supervisor active-child budget 与 provider route budget 限制。
+  - coordinator 在启动前冻结一份共享 immutable base snapshot，并把 exact snapshot id 绑定到
+    每个 child；whole-batch preflight 会在任一成员缺少 base snapshot 或身份/容量检查失败时保持
+    零 provider dispatch。
+  - runtime 复用 prepare / detached future / one-shot commit envelope，让 proposal provider
+    request 真并发且不跨 await 借用 parent Session。child 只能返回结构化 proposal，不能修改
+    parent workspace。
+  - parent 在稳定 request order 提交前重新校验 workspace snapshot；drift 会 fail closed。
+    通过校验的成员才追加 `ChangeSetProposed`、`IsolatedChangeSetProduced` 和
+    `MergeReviewRequested`。shared-workspace direct write 继续 exclusive。
+- O6b（未完成）：worktree snapshot materialization、path confinement、artifact isolation 和
+  cleanup ownership。
 - conflict graph、multi-lane integration refs、scoped verification。
 - final promotion CAS、parent verification、stale/conflict UX。
 - shared-workspace direct write 保持 exclusive；path-lease parallel direct write 作为后续 gated slice。

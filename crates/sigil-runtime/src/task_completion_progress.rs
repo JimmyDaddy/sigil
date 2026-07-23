@@ -19,7 +19,7 @@ impl TaskCompletionOutcome {
     }
 }
 
-/// Process-local dual-order progress for one shared-read-only task participant.
+/// Process-local dual-order progress for one parallel task participant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCompletionProgressMember {
     pub step_id: String,
@@ -31,7 +31,7 @@ pub struct TaskCompletionProgressMember {
     pub outcome: Option<TaskCompletionOutcome>,
 }
 
-/// Process-local progress for the latest shared-read-only task batch.
+/// Process-local progress for the latest parallel task batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCompletionProgress {
     pub generation: u64,

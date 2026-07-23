@@ -930,6 +930,7 @@ routing_policy = "auto"
 default_mode = "plan"
 max_plan_steps = 8
 max_parallel_read_steps = 2
+max_parallel_changeset_steps = 3
 max_planning_research_agents = 4
 multi_agent_mode = "proactive"
 
@@ -955,6 +956,8 @@ prefixes = ["code_intel_"]
     assert_eq!(config.task.max_plan_steps, 8);
     assert_eq!(TaskConfig::default().max_parallel_read_steps, 4);
     assert_eq!(config.task.max_parallel_read_steps, 2);
+    assert_eq!(TaskConfig::default().max_parallel_changeset_steps, 2);
+    assert_eq!(config.task.max_parallel_changeset_steps, 3);
     assert_eq!(config.task.max_planning_research_agents, 4);
     assert_eq!(
         config.task.planner.model.as_deref(),

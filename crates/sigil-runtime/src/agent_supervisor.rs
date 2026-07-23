@@ -97,7 +97,7 @@ impl AgentSupervisor {
         self.provider_pressure.diagnostics()
     }
 
-    /// Returns live completion-arrival order for the latest shared-read-only task batch.
+    /// Returns live completion-arrival order for the latest parallel task batch.
     ///
     /// This process-local snapshot is observational only. Durable parent commits remain ordered by
     /// stable request sequence and this snapshot must not be used as restart authority.

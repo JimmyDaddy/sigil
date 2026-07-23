@@ -190,9 +190,9 @@ pub(in crate::runner) use task_runtime::{
 };
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
-    configured_max_parallel_read_steps, configured_provider_route_concurrency_limit,
-    materialize_task_verification_config, plan_handoff_workspace_snapshot_id,
-    skill_child_agent_role,
+    configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
+    configured_provider_route_concurrency_limit, materialize_task_verification_config,
+    plan_handoff_workspace_snapshot_id, skill_child_agent_role,
 };
 
 const TERMINAL_TASK_REFRESH_INTERVAL: Duration = Duration::from_millis(500);

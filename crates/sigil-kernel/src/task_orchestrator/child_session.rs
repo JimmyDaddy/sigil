@@ -38,7 +38,7 @@ pub trait TaskChildSessionRunner: Send + Sync {
         H: EventHandler + Send,
         A: ApprovalHandler + Send;
 
-    /// Synchronously prepares a read batch and optionally returns parent-free participant work.
+    /// Synchronously prepares a parallel task batch and optionally returns parent-free work.
     ///
     /// The default keeps the exact requests for the compatibility path below. A detached
     /// implementation may mutate the parent only during this call, then return a future whose
@@ -57,7 +57,7 @@ pub trait TaskChildSessionRunner: Send + Sync {
         Ok(TaskChildSessionBatchPreparation::Fallback(requests))
     }
 
-    /// Runs one ready read-only batch and returns member outcomes in request order.
+    /// Runs one ready parallel task batch and returns member outcomes in request order.
     ///
     /// The default preserves compatibility by executing members sequentially. Runtime
     /// implementations that can detach child execution from the parent session should override

@@ -16,24 +16,29 @@ use crate::runner::{
     worker_loop::{
         VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
-        configured_max_parallel_read_steps, configured_provider_route_concurrency_limit,
-        delete_mutation_artifact, materialize_task_verification_config,
-        promote_workspace_verification_check,
+        configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
+        configured_provider_route_concurrency_limit, delete_mutation_artifact,
+        materialize_task_verification_config, promote_workspace_verification_check,
     },
 };
 
 #[test]
-fn task_read_concurrency_uses_config_and_clamps_zero() {
+fn task_parallel_concurrency_uses_config_and_clamps_zero() {
     let mut config = TaskConfig::default();
     assert_eq!(configured_max_parallel_read_steps(&config), 4);
+    assert_eq!(configured_max_parallel_changeset_steps(&config), 2);
     assert_eq!(configured_provider_route_concurrency_limit(&config), 4);
 
     config.max_parallel_read_steps = 2;
+    config.max_parallel_changeset_steps = 3;
     assert_eq!(configured_max_parallel_read_steps(&config), 2);
-    assert_eq!(configured_provider_route_concurrency_limit(&config), 2);
+    assert_eq!(configured_max_parallel_changeset_steps(&config), 3);
+    assert_eq!(configured_provider_route_concurrency_limit(&config), 3);
 
     config.max_parallel_read_steps = 0;
+    config.max_parallel_changeset_steps = 0;
     assert_eq!(configured_max_parallel_read_steps(&config), 1);
+    assert_eq!(configured_max_parallel_changeset_steps(&config), 1);
     assert_eq!(configured_provider_route_concurrency_limit(&config), 1);
 }
 

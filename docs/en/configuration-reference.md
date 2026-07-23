@@ -86,6 +86,7 @@ Color-token groups are surfaces, borders, text, accents, selection/buttons, stat
 | `[task].max_replans` | `2` | Replanning limit. |
 | `[task].max_subagents` | `8` | Active child-agent limit. |
 | `[task].max_parallel_read_steps` | `4` | Maximum independent shared-read-only Task steps launched together; terminal parent commits remain in stable plan order. |
+| `[task].max_parallel_changeset_steps` | `2` | Maximum independent `ChangesetOnly` write-subagent steps launched together; members share one immutable base snapshot and never mutate the parent workspace. |
 | `[task].max_planning_research_agents` | `3` | Planner-only read-only Explore probes per attempt; `0` disables and values above the hard limit `4` are clamped. |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`, `explicit_request_only`, or `proactive`. |
 | `[task].allow_write_subagents` | `true` | Whether an eligible child may request file-changing work. |

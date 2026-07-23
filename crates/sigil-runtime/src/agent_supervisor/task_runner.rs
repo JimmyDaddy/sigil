@@ -205,18 +205,19 @@ impl AgentSupervisorTaskChildRunner {
         }
     }
 
-    fn preflight_parallel_read_child(
+    fn preflight_parallel_task_child(
         &self,
         parent_session: &Session,
         request: TaskChildSessionRunRequest,
     ) -> Result<PreflightParallelTaskChild> {
-        if !matches!(
-            request.step.effective_mode(),
-            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
-        ) || request.step.effective_isolation()
-            != sigil_kernel::TaskIsolationMode::SharedReadOnly
+        ParallelTaskBatchKind::for_step(&request.step)?;
+        if request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly
+            && request.changeset_only_base_snapshot_id.is_none()
         {
-            anyhow::bail!("parallel task child batch accepts only shared-read-only steps");
+            anyhow::bail!(
+                "parallel changeset-only task child {} is missing its parent base snapshot",
+                request.step.step_id.as_str()
+            );
         }
         let agent = self.agent_for_step(&request.step)?;
         let child_task_id =
@@ -258,7 +259,7 @@ impl AgentSupervisorTaskChildRunner {
         })
     }
 
-    fn start_parallel_read_child<H>(
+    fn start_parallel_task_child<H>(
         &self,
         parent_session: &mut Session,
         preflight: PreflightParallelTaskChild,
@@ -307,7 +308,7 @@ impl AgentSupervisorTaskChildRunner {
         })
     }
 
-    async fn execute_parallel_read_child<H, A>(
+    async fn execute_parallel_task_child<H, A>(
         &self,
         mut prepared: PreparedParallelTaskChild,
         handler: &mut H,
@@ -340,22 +341,32 @@ impl AgentSupervisorTaskChildRunner {
         let controls = route_handler.controls;
         let result = match child_run {
             Ok(output) => {
-                let outcome = output.outcome;
-                match materialize_child_agent_final_answer(
-                    &mut prepared.child_session,
-                    &prepared.child_session_ref,
-                    &prepared.child_thread.thread_id,
-                    &output.result,
-                )
-                .await
-                {
-                    Ok(materialized) => Ok(ParallelTaskChildSuccess {
+                async {
+                    let changeset_proposal = if prepared.request.step.effective_isolation()
+                        == sigil_kernel::TaskIsolationMode::ChangesetOnly
+                    {
+                        Some(decode_changeset_only_child_output(
+                            &output.result.final_text,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let outcome = output.outcome;
+                    let materialized = materialize_child_agent_final_answer(
+                        &mut prepared.child_session,
+                        &prepared.child_session_ref,
+                        &prepared.child_thread.thread_id,
+                        &output.result,
+                    )
+                    .await?;
+                    Ok(ParallelTaskChildSuccess {
                         materialized,
                         outcome,
                         usage: usage_summary_from_stats(prepared.child_session.stats()),
-                    }),
-                    Err(error) => Err(error),
+                        changeset_proposal,
+                    })
                 }
+                .await
             }
             Err(error) => Err(self.retryable_child_error(
                 &prepared.request,
@@ -499,7 +510,7 @@ impl AgentSupervisorTaskChildRunner {
             .unwrap_or_else(|construction_error| construction_error)
     }
 
-    fn commit_parallel_read_child<H>(
+    fn commit_parallel_task_child<H>(
         supervisor: &AgentSupervisor,
         parent_session: &mut Session,
         handler: &mut H,
@@ -536,6 +547,40 @@ impl AgentSupervisorTaskChildRunner {
                 )?;
                 return Err(error);
             }
+        };
+        let changeset_only_after_snapshot_id = if let Some(base_snapshot_id) =
+            prepared.request.changeset_only_base_snapshot_id.as_deref()
+        {
+            match sigil_kernel::validate_changeset_only_parent_snapshot_unchanged_for_task(
+                parent_session,
+                &prepared.request.task,
+                prepared.request.plan_version,
+                &prepared.request.step,
+                &prepared.request.options,
+                base_snapshot_id,
+            ) {
+                Ok(snapshot_id) => Some(snapshot_id),
+                Err(error) => {
+                    append_task_child_session(
+                        parent_session,
+                        handler,
+                        &prepared.request,
+                        &prepared.child_task_id,
+                        &prepared.child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    supervisor.record_task_child_failure(
+                        parent_session,
+                        handler,
+                        &prepared.child_thread,
+                        format!("{error:#}"),
+                    )?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
         };
         let budget_warning = supervisor
             .validate_usage_budget(&prepared.request.task.task_id, &success.usage)
@@ -574,8 +619,8 @@ impl AgentSupervisorTaskChildRunner {
             child_session_ref: prepared.child_session_ref,
             final_answer_ref: success.materialized.final_answer_ref,
             artifact_refs: success.materialized.extra_artifacts,
-            changeset_proposal: None,
-            changeset_only_after_snapshot_id: None,
+            changeset_proposal: success.changeset_proposal,
+            changeset_only_after_snapshot_id,
         })
     }
 }
@@ -603,6 +648,7 @@ struct ParallelTaskChildSuccess {
     materialized: super::AgentResultMaterialization,
     outcome: sigil_kernel::AgentRunOutcome,
     usage: AgentUsageSummary,
+    changeset_proposal: Option<sigil_kernel::TaskChildChangeSetProposal>,
 }
 
 struct ExecutedParallelTaskChild {
@@ -613,6 +659,33 @@ struct ExecutedParallelTaskChild {
 
 struct ParallelTaskCompletionContext {
     request_index: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParallelTaskBatchKind {
+    SharedReadOnly,
+    ChangesetOnly,
+}
+
+impl ParallelTaskBatchKind {
+    fn for_step(step: &TaskStepSpec) -> Result<Self> {
+        if matches!(
+            step.effective_mode(),
+            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+        ) && step.effective_isolation() == sigil_kernel::TaskIsolationMode::SharedReadOnly
+        {
+            return Ok(Self::SharedReadOnly);
+        }
+        if step.role == AgentRole::SubagentWrite
+            && step.effective_mode() == TaskStepMode::Write
+            && step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly
+        {
+            return Ok(Self::ChangesetOnly);
+        }
+        anyhow::bail!(
+            "parallel task child batch accepts only shared-read-only or changeset-only steps"
+        )
+    }
 }
 
 struct TaskChildThreadReleaseGuard {
@@ -1039,16 +1112,25 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let member_count = requests.len();
         let batch_task_id = requests[0].task.task_id.clone();
         let batch_plan_version = requests[0].plan_version;
+        let batch_kind = match ParallelTaskBatchKind::for_step(&requests[0].step) {
+            Ok(kind) => kind,
+            Err(error) => {
+                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
+                    &requests, error,
+                )));
+            }
+        };
+        let batch_changeset_base_snapshot_id = requests[0].changeset_only_base_snapshot_id.clone();
         let mut attempt_ids = BTreeSet::new();
         for request in &requests {
             if request.task.task_id != batch_task_id || request.plan_version != batch_plan_version {
-                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                     &requests,
                     anyhow::anyhow!("parallel task child batch mixes task or plan identities"),
                 )));
             }
             if !attempt_ids.insert(request.attempt_id.clone()) {
-                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                     &requests,
                     anyhow::anyhow!(
                         "parallel task child batch contains duplicate attempt {}",
@@ -1056,13 +1138,40 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     ),
                 )));
             }
+            match ParallelTaskBatchKind::for_step(&request.step) {
+                Ok(kind) if kind == batch_kind => {}
+                Ok(_) => {
+                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
+                        &requests,
+                        anyhow::anyhow!(
+                            "parallel task child batch mixes shared-read-only and changeset-only steps"
+                        ),
+                    )));
+                }
+                Err(error) => {
+                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
+                        &requests, error,
+                    )));
+                }
+            }
+            if batch_kind == ParallelTaskBatchKind::ChangesetOnly
+                && request.changeset_only_base_snapshot_id.as_deref()
+                    != batch_changeset_base_snapshot_id.as_deref()
+            {
+                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
+                    &requests,
+                    anyhow::anyhow!(
+                        "parallel changeset-only task child batch mixes parent base snapshots"
+                    ),
+                )));
+            }
         }
         let mut preflight = Vec::with_capacity(member_count);
         for request in requests.iter().cloned() {
-            match self.preflight_parallel_read_child(parent_session, request) {
+            match self.preflight_parallel_task_child(parent_session, request) {
                 Ok(member) => preflight.push(member),
                 Err(error) => {
-                    return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                         &requests, error,
                     )));
                 }
@@ -1075,14 +1184,14 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let reservation = match self.supervisor.reserve_task_child_batch(&starts) {
             Ok(reservation) => reservation,
             Err(error) => {
-                return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                     &requests, error,
                 )));
             }
         };
         let mut prepared = Vec::with_capacity(member_count);
         for member in preflight {
-            match self.start_parallel_read_child(parent_session, member, handler) {
+            match self.start_parallel_task_child(parent_session, member, handler) {
                 Ok(member) => prepared.push(member),
                 Err(error) => {
                     let reason =
@@ -1104,7 +1213,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                             reason.to_owned(),
                         );
                     }
-                    return Ok(detached_task_batch_results(rejected_parallel_read_batch(
+                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                         &requests, error,
                     )));
                 }
@@ -1139,7 +1248,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 let mut member_approval = shared_approval.clone();
                 AgentCompletionRegistration::new(key, request_index as u64, context, async move {
                     Ok::<_, anyhow::Error>(
-                        self.execute_parallel_read_child(
+                        self.execute_parallel_task_child(
                             member,
                             &mut member_handler,
                             &mut member_approval,
@@ -1194,7 +1303,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                             .into_iter()
                             .map(|envelope| {
                                 envelope.result.and_then(|executed| {
-                                    Self::commit_parallel_read_child(
+                                    Self::commit_parallel_task_child(
                                         &supervisor,
                                         parent_session,
                                         handler,
@@ -1382,7 +1491,7 @@ async fn settle_runtime_task_child_batch(
     }
 }
 
-fn rejected_parallel_read_batch(
+fn rejected_parallel_task_batch(
     requests: &[TaskChildSessionRunRequest],
     error: anyhow::Error,
 ) -> Vec<Result<TaskChildSessionRunOutput>> {

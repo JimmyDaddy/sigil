@@ -9,7 +9,7 @@ type TaskChildSessionBatchCommitAction = Box<
         + Send,
 >;
 
-/// One-shot parent commit returned after a detached read batch has fully settled.
+/// One-shot parent commit returned after a detached task batch has fully settled.
 ///
 /// The action owns runtime-private completion material but cannot run until the kernel explicitly
 /// gives it the parent session again. This keeps the parent borrow out of the participant future.

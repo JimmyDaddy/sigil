@@ -7,6 +7,7 @@ pub struct SequentialTaskOrchestrator<R> {
     execution_backend: Option<Arc<dyn ExecutionBackend>>,
     cancellation: Option<RunCancellationHandle>,
     max_parallel_read_steps: usize,
+    max_parallel_changeset_steps: usize,
 }
 
 impl<R> SequentialTaskOrchestrator<R>
@@ -19,6 +20,7 @@ where
             execution_backend: None,
             cancellation: None,
             max_parallel_read_steps: DEFAULT_TASK_READ_ONLY_CONCURRENCY,
+            max_parallel_changeset_steps: 1,
         }
     }
 
@@ -45,6 +47,16 @@ where
     #[must_use]
     pub fn with_max_parallel_read_steps(mut self, max_parallel_read_steps: usize) -> Self {
         self.max_parallel_read_steps = max_parallel_read_steps.max(1);
+        self
+    }
+
+    /// Sets the maximum number of independent changeset-only proposals launched together.
+    #[must_use]
+    pub fn with_max_parallel_changeset_steps(
+        mut self,
+        max_parallel_changeset_steps: usize,
+    ) -> Self {
+        self.max_parallel_changeset_steps = max_parallel_changeset_steps.max(1);
         self
     }
 
@@ -290,6 +302,7 @@ where
                 plan_version,
                 &steps,
                 self.max_parallel_read_steps,
+                self.max_parallel_changeset_steps,
                 [
                     &executor_options,
                     &subagent_read_options,
@@ -354,7 +367,29 @@ where
                         TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
                     ) && step.effective_isolation() == TaskIsolationMode::SharedReadOnly
                 });
-            if is_parallel_read_batch {
+            let is_parallel_changeset_batch = runnable.steps.len() > 1
+                && runnable.steps.iter().all(|step| {
+                    step.role == AgentRole::SubagentWrite
+                        && step.effective_mode() == TaskStepMode::Write
+                        && step.effective_isolation() == TaskIsolationMode::ChangesetOnly
+                });
+            if is_parallel_read_batch || is_parallel_changeset_batch {
+                let changeset_batch_base_snapshot_id = if is_parallel_changeset_batch {
+                    let first_step = runnable
+                        .steps
+                        .first()
+                        .ok_or_else(|| anyhow!("parallel changeset batch is unexpectedly empty"))?;
+                    Some(capture_changeset_only_parent_snapshot_id(
+                        session,
+                        &request,
+                        plan_version,
+                        first_step,
+                        &subagent_write_options,
+                        "base",
+                    )?)
+                } else {
+                    None
+                };
                 let mut batch_contexts = Vec::with_capacity(runnable.steps.len());
                 let mut batch_requests = Vec::with_capacity(runnable.steps.len());
                 let mut child_effects = Vec::with_capacity(runnable.steps.len());
@@ -398,7 +433,7 @@ where
                             guidance.as_deref(),
                         )
                     };
-                    let child_input = self.bind_cancellation(
+                    let child_input =
                         AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
                             prompt,
                         )])
@@ -410,8 +445,13 @@ where
                                 attempt_id: attempt.attempt_id.clone(),
                             },
                         ))
-                        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
-                    );
+                        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id));
+                    let child_input = if changeset_batch_base_snapshot_id.is_some() {
+                        with_changeset_only_child_contract(child_input)
+                    } else {
+                        child_input
+                    };
+                    let child_input = self.bind_cancellation(child_input);
                     validate_scheduled_retry_input(session, &attempt, &child_input)?;
                     child_effects.push(
                         self.cancellation
@@ -430,9 +470,14 @@ where
                         step: step.clone(),
                         child_input,
                         options: step_options.clone(),
-                        changeset_only_base_snapshot_id: None,
+                        changeset_only_base_snapshot_id: changeset_batch_base_snapshot_id.clone(),
                     });
-                    batch_contexts.push((step, attempt, step_options));
+                    batch_contexts.push((
+                        step,
+                        attempt,
+                        step_options,
+                        changeset_batch_base_snapshot_id.clone(),
+                    ));
                 }
 
                 let batch_preparation = self.child_runner.prepare_child_session_batch(
@@ -469,7 +514,7 @@ where
 
                 let mut first_problem = None;
                 let mut retry_scheduled = false;
-                for ((step, attempt, step_options), child_result) in
+                for ((step, attempt, step_options, changeset_base_snapshot_id), child_result) in
                     batch_contexts.into_iter().zip(batch_results)
                 {
                     let step_output = match child_result {
@@ -479,6 +524,26 @@ where
                                 &output.attempt_id,
                                 &output.child_session_ref,
                             )?;
+                            let step_output = StepRunOutput {
+                                final_text: output.final_text,
+                                outcome: output.outcome,
+                                final_answer_ref: output.final_answer_ref,
+                                artifact_refs: output.artifact_refs,
+                                changeset_proposal: output.changeset_proposal,
+                                changeset_only_after_snapshot_id: output
+                                    .changeset_only_after_snapshot_id,
+                            };
+                            if let Some(base_snapshot_id) = changeset_base_snapshot_id.as_deref() {
+                                record_changeset_only_child_output(
+                                    session,
+                                    handler,
+                                    &request,
+                                    plan_version,
+                                    &step,
+                                    base_snapshot_id,
+                                    &step_output,
+                                )?;
+                            }
                             self.commit_step_output(
                                 session,
                                 handler,
@@ -489,15 +554,7 @@ where
                                 &attempt,
                                 &step_options,
                                 None,
-                                StepRunOutput {
-                                    final_text: output.final_text,
-                                    outcome: output.outcome,
-                                    final_answer_ref: output.final_answer_ref,
-                                    artifact_refs: output.artifact_refs,
-                                    changeset_proposal: output.changeset_proposal,
-                                    changeset_only_after_snapshot_id: output
-                                        .changeset_only_after_snapshot_id,
-                                },
+                                step_output,
                             )
                             .await?
                         }

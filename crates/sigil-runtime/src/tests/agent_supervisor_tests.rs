@@ -104,6 +104,13 @@ struct ParallelTaskChildProvider {
     completion_order: Arc<Mutex<Vec<String>>>,
 }
 
+struct ParallelChangesetChildProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+}
+
 struct RateLimitedTaskChildProvider {
     starts: Arc<AtomicUsize>,
     rate_limits_remaining: Arc<AtomicUsize>,
@@ -170,6 +177,49 @@ impl Provider for ParallelTaskChildProvider {
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("parallel read done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelChangesetChildProvider {
+    fn name(&self) -> &str {
+        "parallel-changeset-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let step_id = ["proposal_a", "proposal_b"]
+            .into_iter()
+            .find(|step_id| {
+                request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(step_id))
+                })
+            })
+            .ok_or_else(|| anyhow!("parallel changeset request did not identify a test step"))?;
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.barrier.wait().await;
+        if step_id == "proposal_a" {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        self.completion_order
+            .lock()
+            .expect("completion order should not be poisoned")
+            .push(step_id.to_owned());
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(changeset_output(step_id))),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -784,6 +834,43 @@ fn write_step(id: &str) -> Result<TaskStepSpec> {
         mode: None,
         isolation: None,
     })
+}
+
+fn changeset_step(id: &str) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: TaskStepId::new(id)?,
+        title: format!("propose {id}"),
+        display_name: Some(id.to_owned()),
+        detail: Some("test changeset-only child step".to_owned()),
+        role: AgentRole::SubagentWrite,
+        depends_on: Vec::new(),
+        mode: Some(sigil_kernel::TaskStepMode::Write),
+        isolation: Some(sigil_kernel::TaskIsolationMode::ChangesetOnly),
+    })
+}
+
+fn changeset_output(step_id: &str) -> String {
+    json!({
+        "change_set": {
+            "id": format!("change-{step_id}"),
+            "title": format!("Change {step_id}"),
+            "summary": format!("Would update {step_id}.txt"),
+            "risk": "low",
+            "files": [{
+                "path": format!("{step_id}.txt"),
+                "action": "update",
+                "risk": "low",
+                "additions": 1,
+                "deletions": 0
+            }],
+            "validations": []
+        },
+        "artifact": {
+            "media_type": "text/x-diff",
+            "content": format!("--- /dev/null\n+++ b/{step_id}.txt\n@@\n+{step_id}\n")
+        }
+    })
+    .to_string()
 }
 
 fn supervisor_with_budget(budget: AgentBudgetPolicy) -> Result<AgentSupervisor> {
@@ -2859,13 +2946,242 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
     Ok(())
 }
 
+#[tokio::test]
+async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_proposals() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("base.txt"), "unchanged\n")?;
+    let workspace_id = sigil_kernel::stable_workspace_id(temp.path())?;
+    let base_snapshot_id = sigil_kernel::build_workspace_snapshot(
+        temp.path(),
+        workspace_id,
+        &sigil_kernel::VerificationScope::all_tracked(
+            sigil_kernel::DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ),
+        0,
+    )?
+    .workspace_snapshot_id
+    .ok_or_else(|| anyhow!("test workspace snapshot should be complete"))?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(TextProvider { text: "read done" }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(ParallelChangesetChildProvider {
+                barrier,
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                completion_order: Arc::clone(&completion_order),
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "propose changes in parallel".to_owned(),
+    };
+    let requests = ["proposal_a", "proposal_b"]
+        .into_iter()
+        .map(|step_id| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: changeset_step(step_id)?,
+                attempt_id: participant_attempt_id_for(step_id)?,
+                child_session_ref: participant_session_ref_for(step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("propose {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: Some(base_snapshot_id.clone()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_attempts = requests
+        .iter()
+        .map(|request| request.attempt_id.clone())
+        .collect::<Vec<_>>();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let preparation =
+        runner.prepare_child_session_batch(&mut session, requests, &mut handler, &mut approval)?;
+    let commit = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        expect_detached_task_batch(preparation),
+    )
+    .await
+    .expect("parallel changeset provider barrier should complete")?;
+    let outputs = commit
+        .commit(&mut session, &mut handler)?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *completion_order
+            .lock()
+            .expect("completion order should not be poisoned"),
+        vec!["proposal_b", "proposal_a"]
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.attempt_id.clone())
+            .collect::<Vec<_>>(),
+        expected_attempts
+    );
+    assert!(outputs.iter().all(|output| {
+        output.changeset_proposal.is_some()
+            && output.changeset_only_after_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
+    }));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("base.txt"))?,
+        "unchanged\n"
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_changeset_batch_rejects_missing_base_snapshot_before_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(TextProvider { text: "read done" }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "propose changes in parallel".to_owned(),
+    };
+    let requests = ["proposal_a", "proposal_b"]
+        .into_iter()
+        .map(|step_id| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: changeset_step(step_id)?,
+                attempt_id: participant_attempt_id_for(step_id)?,
+                child_session_ref: participant_session_ref_for(step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("propose {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = runner
+        .run_child_session_batch(&mut session, requests, &mut handler, &mut approval)
+        .await?;
+
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(|output| {
+        output
+            .as_ref()
+            .err()
+            .is_some_and(|error| format!("{error:#}").contains("missing its parent base snapshot"))
+    }));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_changeset_batch_rejects_mixed_base_snapshots_before_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(TextProvider { text: "read done" }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "propose changes in parallel".to_owned(),
+    };
+    let requests = ["proposal_a", "proposal_b"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, step_id)| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: changeset_step(step_id)?,
+                attempt_id: participant_attempt_id_for(step_id)?,
+                child_session_ref: participant_session_ref_for(step_id)?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("propose {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: Some(format!("snapshot-{index}")),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = runner
+        .run_child_session_batch(&mut session, requests, &mut handler, &mut approval)
+        .await?;
+
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(|output| {
+        output
+            .as_ref()
+            .err()
+            .is_some_and(|error| format!("{error:#}").contains("mixes parent base snapshots"))
+    }));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
 async fn expect_detached_task_batch(
     preparation: TaskChildSessionBatchPreparation<'_>,
 ) -> Result<TaskChildSessionBatchCommitEnvelope> {
     match preparation {
         TaskChildSessionBatchPreparation::Detached(batch_future) => batch_future.await,
         TaskChildSessionBatchPreparation::Fallback(_) => {
-            panic!("runtime read batch should use detached execution");
+            panic!("runtime task batch should use detached execution");
         }
     }
 }
@@ -2999,7 +3315,7 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
     assert_eq!(outputs.len(), 2);
     assert!(outputs.iter().all(|output| {
         output.as_ref().err().is_some_and(|error| {
-            format!("{error:#}").contains("accepts only shared-read-only steps")
+            format!("{error:#}").contains("accepts only shared-read-only or changeset-only steps")
         })
     }));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
