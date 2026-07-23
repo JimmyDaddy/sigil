@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use futures::{Stream, stream};
 use serde_json::json;
+use sha2::Digest;
 use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
@@ -2525,6 +2526,7 @@ async fn spawn_agents_preflights_then_overlaps_members_without_model_polling() -
         agent.run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("inspect kernel and runtime in parallel")
+                .with_logical_run_id("root-run-batch-parallel")
                 .with_cancellation(cancellation_owner.handle()),
             {
                 let mut options = run_options(std::env::temp_dir());
@@ -2566,6 +2568,16 @@ async fn spawn_agents_preflights_then_overlaps_members_without_model_polling() -
     let batch_id = join_context_json["batch_id"]
         .as_str()
         .expect("batch id should be a string");
+    assert_eq!(
+        batch_id,
+        format!(
+            "batch_{}",
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(b"root-run-batch-parallel:call-batch-parallel")
+            )[..12]
+        )
+    );
     assert_eq!(join_context_json["members"][0]["batch_id"], json!(batch_id));
     assert_eq!(join_context_json["members"][1]["batch_id"], json!(batch_id));
     assert!(
@@ -2648,6 +2660,7 @@ async fn spawn_agents_capacity_failure_starts_no_member() -> Result<()> {
     runtime.set_join_batch_eligibility(std::slice::from_ref(&call));
     let cancellation_owner = RunCancellationOwner::new();
     runtime.set_run_cancellation(Some(cancellation_owner.handle()));
+    runtime.set_root_logical_run_id(Some("root-run-batch-capacity"));
     let mut session = Session::new("batch-capacity", "mock-model");
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
@@ -2712,6 +2725,7 @@ fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
     runtime.set_join_batch_eligibility(std::slice::from_ref(&call));
     let cancellation_owner = RunCancellationOwner::new();
     runtime.set_run_cancellation(Some(cancellation_owner.handle()));
+    runtime.set_root_logical_run_id(Some("root-run-batch-preflight"));
     let args: serde_json::Value = serde_json::from_str(&call.args_json)?;
     let mut session = Session::new("batch-preflight", "mock-model");
     let mut handler = RecordingEventHandler::default();

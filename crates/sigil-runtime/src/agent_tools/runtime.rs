@@ -14,6 +14,7 @@ pub struct AgentToolRuntime {
     pub(super) join_batch_eligible: bool,
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    pub(super) root_logical_run_id: Option<String>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
     #[cfg(test)]
     pub(super) delegation_authority_override: Option<DelegationAuthority>,
@@ -45,6 +46,7 @@ impl AgentToolRuntime {
             join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
+            root_logical_run_id: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -70,6 +72,7 @@ impl AgentToolRuntime {
             join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
+            root_logical_run_id: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -330,6 +333,10 @@ impl AgentToolProviderFactory for DefaultAgentToolProviderFactory {
 impl AgentToolDelegate for AgentToolRuntime {
     fn set_run_cancellation(&mut self, cancellation: Option<sigil_kernel::RunCancellationHandle>) {
         self.run_cancellation = cancellation;
+    }
+
+    fn set_root_logical_run_id(&mut self, logical_run_id: Option<&str>) {
+        self.root_logical_run_id = logical_run_id.map(str::to_owned);
     }
 
     fn set_web_task_tree_budget(&mut self, budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>) {

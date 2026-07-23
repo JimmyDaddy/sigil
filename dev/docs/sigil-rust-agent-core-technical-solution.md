@@ -926,8 +926,12 @@ planner/participant transcript isolation、唯一 parent final synthesis、Plan 
   加入 append-only `AgentThreadStarted`。普通 `spawn_agents` 与 planner discovery 都在 Started
   entry 中持久化 batch identity；旧日志缺字段保持兼容，不完整 identity fail closed，重复 member
   key 或 parent mismatch 会标记 projection degraded。TUI 从 durable projection 重建 batch header
-  和缩进成员，compact rail 保留 group context，header 不可选且不改变 `/agent` 可选序号。detached
-  background/restart reconciliation 与公开 logical-run identity 仍未实现。
+  和缩进成员，compact rail 保留 group context，header 不可选且不改变 `/agent` 可选序号。
+- O4b3b parent logical-run identity slice 已在 provider-neutral `AgentToolDelegate` 上绑定当前
+  root logical-run id。runtime 在 child admission 前使用 `root logical-run id + outer tool call
+  id` 派生 opaque `AgentBatchId`；缺失或空 identity 时整批拒绝，同一 root run replay 保持稳定，
+  不同 root run 互相隔离，且不再依赖 session 文件路径。detached background batch 与 restart
+  reconciliation 仍未实现。
 - Parent agent 在发起 Agent 类 tool call 的同一 model turn 中产生的 pre-tool assistant 文本只作为 live stream 展示，不作为持久 parent session history 重放，并在 TUI 中按 Thinking 样式渲染；这避免“先自己补做，再等待子 agent”的内容污染父上下文。最终面向用户的回答必须发生在 child result/status 已回到 parent 后的后续 turn。
 - Kernel 已提供 `AgentDelegationRequirement`：绑定该 requirement 的 run 会拒绝接受未产生 terminal 或 result-bearing Agent 类工具结果的 final answer，并通过 transient retry prompt 要求模型调用 agent-thread tool；无效输入、tool execution error 或仍处于 running 状态的 agent tool result 不会解除 hard gate。当前 TUI ordinary-chat 生产路径尚未稳定绑定该 requirement，接线与 typed delegation authority 属于 RFC-0053 O1。
 - Task DAG 当前只完成 read-only ready batch selection；`SequentialTaskOrchestrator` 仍按 step 顺序执行。O4b1 completion hub 只接入 ordinary-chat joined children，尚未拆除 task child execution 对 parent `Session` 的可变借用；completion-driven Task coordinator 和串行 parent commit 属于 RFC-0053 O5。

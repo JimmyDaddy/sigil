@@ -66,8 +66,13 @@ impl AgentToolRuntime {
             );
         }
 
-        let parent_session_ref = match parent_session_ref(session) {
-            Ok(reference) => reference,
+        let batch_id = match self
+            .root_logical_run_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("spawn_agents is missing the root logical-run identity"))
+            .and_then(|logical_run_id| agent_batch_id(logical_run_id, &call.id))
+        {
+            Ok(batch_id) => batch_id,
             Err(error) => {
                 return batch_spawn_error(
                     call,
@@ -77,15 +82,8 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let batch_id = match AgentBatchId::new(format!(
-            "batch_{}",
-            short_digest(&hash_text(&format!(
-                "{}:{}",
-                parent_session_ref.as_path().display(),
-                call.id
-            )))
-        )) {
-            Ok(batch_id) => batch_id,
+        let parent_session_ref = match parent_session_ref(session) {
+            Ok(reference) => reference,
             Err(error) => {
                 return batch_spawn_error(
                     call,
@@ -440,6 +438,16 @@ impl AgentToolRuntime {
     }
 }
 
+fn agent_batch_id(root_logical_run_id: &str, call_id: &str) -> Result<AgentBatchId> {
+    if root_logical_run_id.trim().is_empty() {
+        bail!("spawn_agents root logical-run identity is empty");
+    }
+    AgentBatchId::new(format!(
+        "batch_{}",
+        short_digest(&hash_text(&format!("{root_logical_run_id}:{call_id}")))
+    ))
+}
+
 fn batch_spawn_member_call_id(batch_id: &AgentBatchId, request_key: &AgentRouteId) -> String {
     format!("{}-member-{}", batch_id.as_str(), request_key.as_str())
 }
@@ -461,3 +469,7 @@ fn batch_spawn_error(
         }),
     )
 }
+
+#[cfg(test)]
+#[path = "tests/batch_spawn_tests.rs"]
+mod tests;

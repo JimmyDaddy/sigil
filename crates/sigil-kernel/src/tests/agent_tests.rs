@@ -319,7 +319,10 @@ impl Provider for CapturingTextProvider {
 struct ToolSideEffectProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
-struct ToolRunFactsDelegate;
+#[derive(Default)]
+struct ToolRunFactsDelegate {
+    root_logical_run_id: Option<String>,
+}
 struct ForegroundTerminalProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
     tool_completed: Arc<AtomicBool>,
@@ -376,6 +379,10 @@ impl Provider for ToolSideEffectProvider {
 
 #[async_trait]
 impl AgentToolDelegate for ToolRunFactsDelegate {
+    fn set_root_logical_run_id(&mut self, logical_run_id: Option<&str>) {
+        self.root_logical_run_id = logical_run_id.map(str::to_owned);
+    }
+
     async fn handle_agent_tool_call(
         &mut self,
         _session: &mut Session,
@@ -2306,7 +2313,7 @@ async fn final_answer_context_is_injected_before_the_post_tool_provider_request(
     let mut session = Session::new("mock-side-effect", "mock-model");
     let mut handler = RecordingEventHandler::default();
     let mut approval_handler = AutoApproveHandler;
-    let mut delegate = ToolRunFactsDelegate;
+    let mut delegate = ToolRunFactsDelegate::default();
 
     let output = agent
         .run_with_approval_input_and_agent_delegate(
@@ -2346,6 +2353,66 @@ async fn final_answer_context_is_injected_before_the_post_tool_provider_request(
     assert!(!handler.events.iter().any(|event| {
         matches!(event, RunEvent::Notice(message) if message.contains("recorded run facts added before final answer"))
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_tool_delegate_receives_root_logical_run_identity() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(AgentCategoryTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-agent-logical-run".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-agent-logical-run".to_owned(),
+                    delta: "{}".to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-agent-logical-run".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                    args_json: "{}".to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let mut delegate = ToolRunFactsDelegate::default();
+
+    agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("delegate").with_logical_run_id("root-logical-run-for-agent-tool"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+            &mut delegate,
+        )
+        .await?;
+
+    assert_eq!(
+        delegate.root_logical_run_id.as_deref(),
+        Some("root-logical-run-for-agent-tool")
+    );
     Ok(())
 }
 

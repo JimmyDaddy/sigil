@@ -692,6 +692,13 @@ pub trait AgentToolDelegate: Send {
     /// Binds the current root run cancellation scope before delegated child work is admitted.
     fn set_run_cancellation(&mut self, _cancellation: Option<RunCancellationHandle>) {}
 
+    /// Binds the current root logical-run identity before delegated child work is admitted.
+    ///
+    /// The value is a provider-neutral host identity. Delegates may use it to derive stable,
+    /// replay-safe child orchestration identities, but must not expose it to the model as a
+    /// provider request handle.
+    fn set_root_logical_run_id(&mut self, _logical_run_id: Option<&str>) {}
+
     /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
     fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
 
@@ -1630,6 +1637,7 @@ where
                         permission_policy: &permission_policy,
                         tool_ctx: tool_ctx.clone(),
                         cancellation: cancellation.clone(),
+                        root_logical_run_id: &logical_run_id,
                         agent_delegate: &mut agent_delegate,
                         approval_handler,
                         outcome: &mut outcome,
@@ -1829,6 +1837,7 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     permission_policy: &'run PermissionPolicyChain<'policy>,
     tool_ctx: ToolContext,
     cancellation: Option<RunCancellationHandle>,
+    root_logical_run_id: &'run str,
     agent_delegate: &'run mut Option<&'delegate mut (dyn AgentToolDelegate + Send)>,
     approval_handler: &'run mut A,
     outcome: &'run mut AgentRunOutcome,
@@ -1854,6 +1863,7 @@ where
         permission_policy,
         tool_ctx,
         cancellation,
+        root_logical_run_id,
         agent_delegate,
         approval_handler,
         outcome,
@@ -2415,6 +2425,7 @@ where
             permission_policy,
             tool_ctx,
             cancellation,
+            root_logical_run_id,
             agent_delegate,
             approval_handler,
             outcome,
@@ -2444,6 +2455,7 @@ where
         permission_policy,
         tool_ctx,
         cancellation,
+        root_logical_run_id,
         agent_delegate,
         approval_handler,
         outcome,
@@ -2560,6 +2572,7 @@ where
         {
             Some(delegate) => {
                 delegate.set_run_cancellation(cancellation.clone());
+                delegate.set_root_logical_run_id(Some(root_logical_run_id));
                 delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
                 match delegate
                     .handle_agent_tool_call(session, &call, options, handler, approval_handler)
