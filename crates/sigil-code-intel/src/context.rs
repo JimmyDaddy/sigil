@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -18,6 +18,10 @@ use crate::repo_language::{
     RepoDefinitionTag, RepoLanguage, extract_repo_tags, repo_language_for_path,
 };
 use crate::service::{CodeDiagnostic, CodeLocation, CodeRange, CodeSymbol};
+
+// Darwin marks cloud-backed placeholders with SF_DATALESS; opening one may trigger a download.
+#[cfg(any(target_os = "macos", test))]
+const DARWIN_SF_DATALESS: u32 = 0x4000_0000;
 
 /// One bounded code-intelligence result projected into Sigil's context contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -515,6 +519,10 @@ struct RepoMapIndex {
 }
 
 fn read_repo_map_index(path: &Path, max_bytes: usize) -> Option<RepoMapIndex> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata_is_dataless(&metadata) {
+        return None;
+    }
     let file = File::open(path).ok()?;
     let read_limit = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX - 1)
@@ -537,6 +545,23 @@ fn read_repo_map_index(path: &Path, max_bytes: usize) -> Option<RepoMapIndex> {
         Err(_) => return None,
     };
     Some(RepoMapIndex { text, truncated })
+}
+
+#[cfg(target_os = "macos")]
+fn metadata_is_dataless(metadata: &fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+
+    darwin_file_flags_are_dataless(metadata.st_flags())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn metadata_is_dataless(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_file_flags_are_dataless(flags: u32) -> bool {
+    flags & DARWIN_SF_DATALESS != 0
 }
 
 fn should_skip_repo_map_path(relative: &Path) -> bool {

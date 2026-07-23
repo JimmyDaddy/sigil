@@ -45,6 +45,9 @@ const CONTEXT_QUERY_MAX_TERMS: usize = 64;
 const CONTEXT_QUERY_MAX_TERM_BYTES: usize = 96;
 const REQUEST_CONTEXT_LSP_SNAPSHOT_MAX_RESULTS: usize = 24;
 const REQUEST_CONTEXT_LSP_SNAPSHOT_TIMEOUT_MS: u64 = 35;
+// Darwin marks cloud-backed placeholders with SF_DATALESS; opening one may trigger a download.
+#[cfg(any(target_os = "macos", test))]
+const DARWIN_SF_DATALESS: u32 = 0x4000_0000;
 
 #[derive(Debug, Clone)]
 struct RepoContextCandidate {
@@ -1694,6 +1697,10 @@ fn read_repo_context_index(path: &Path) -> Option<String> {
 }
 
 fn read_bounded_repo_text(path: &Path, max_bytes: usize) -> Option<String> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata_is_dataless(&metadata) {
+        return None;
+    }
     let file = File::open(path).ok()?;
     let read_limit = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX - 1)
@@ -1714,6 +1721,23 @@ fn read_bounded_repo_text(path: &Path, max_bytes: usize) -> Option<String> {
         }
         Err(_) => None,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn metadata_is_dataless(metadata: &fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+
+    darwin_file_flags_are_dataless(metadata.st_flags())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn metadata_is_dataless(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_file_flags_are_dataless(flags: u32) -> bool {
+    flags & DARWIN_SF_DATALESS != 0
 }
 
 fn query_has_source_intent(query: &str) -> bool {

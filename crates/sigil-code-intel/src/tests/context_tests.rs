@@ -14,6 +14,14 @@ fn range() -> CodeRange {
 }
 
 #[test]
+fn context_darwin_dataless_flag_is_detected_without_matching_unrelated_flags() {
+    assert!(darwin_file_flags_are_dataless(DARWIN_SF_DATALESS));
+    assert!(darwin_file_flags_are_dataless(DARWIN_SF_DATALESS | 1));
+    assert!(!darwin_file_flags_are_dataless(0));
+    assert!(!darwin_file_flags_are_dataless(1));
+}
+
+#[test]
 fn context_code_symbol_diagnostic_and_reference_hits_keep_lsp_provenance() {
     let builder = CodeContextBuilder::new().source_event_id("event-code-context");
     let symbol = CodeSymbol {

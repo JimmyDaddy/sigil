@@ -11,11 +11,12 @@ use sigil_kernel::{
 };
 
 use super::{
-    ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,
-    McpResourceContextProvider, PluginHookContextProvider, RequestContextResolver,
-    collect_context_from_source_provider, context_candidates_from_repo_query,
-    context_candidates_from_safe_sources, context_items_from_plugin_hook_output,
-    context_items_from_task_memory,
+    ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, DARWIN_SF_DATALESS,
+    McpResourceContextItem, McpResourceContextProvider, PluginHookContextProvider,
+    RequestContextResolver, collect_context_from_source_provider,
+    context_candidates_from_repo_query, context_candidates_from_safe_sources,
+    context_items_from_plugin_hook_output, context_items_from_task_memory,
+    darwin_file_flags_are_dataless,
 };
 
 #[derive(Clone)]
@@ -90,6 +91,14 @@ fn test_runtime_context(items: Vec<(&str, &str, usize)>) -> RuntimeContextCandid
         context.snippets.insert(id.to_owned(), body.to_owned());
     }
     context
+}
+
+#[test]
+fn darwin_dataless_flag_is_detected_without_matching_unrelated_flags() {
+    assert!(darwin_file_flags_are_dataless(DARWIN_SF_DATALESS));
+    assert!(darwin_file_flags_are_dataless(DARWIN_SF_DATALESS | 1));
+    assert!(!darwin_file_flags_are_dataless(0));
+    assert!(!darwin_file_flags_are_dataless(1));
 }
 
 fn has_score_component(item: &ContextItem, kind: ContextScoreComponentKind) -> bool {
