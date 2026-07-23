@@ -84,6 +84,82 @@ fn verification_labels_cover_all_sidebar_variants() {
 }
 
 #[test]
+fn task_sidebar_and_strip_project_all_concurrent_active_steps() {
+    let task_id = TaskId::new("task_parallel").expect("task id");
+    let steps = (1..=6)
+        .map(|index| TaskStepSpec {
+            step_id: TaskStepId::new(format!("read_{index}")).expect("step id"),
+            title: format!("Read {index}"),
+            display_name: None,
+            detail: None,
+            role: AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        })
+        .collect::<Vec<_>>();
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")
+                .expect("parent session ref"),
+            objective: "inspect in parallel".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: steps.clone(),
+            reason: None,
+        })),
+    ];
+    for step in &steps[4..] {
+        entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+            TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step.step_id.clone(),
+                role: step.role,
+                status: TaskStepStatus::Running,
+                title: Some(step.title.clone()),
+                summary: None,
+                reason: None,
+            },
+        )));
+    }
+
+    let lines = task_sidebar_lines(&entries);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "active: 2 · v1:read_5, v1:read_6")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("running read_5 · Read 5"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("running read_6 · Read 6"))
+    );
+
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("2 active"));
+    let active_rows = strip
+        .rows
+        .iter()
+        .filter(|row| row.active)
+        .collect::<Vec<_>>();
+    assert_eq!(active_rows.len(), 2);
+    assert!(active_rows.iter().any(|row| row.label == "5. Read 5"));
+    assert!(active_rows.iter().any(|row| row.label == "6. Read 6"));
+}
+
+#[test]
 fn task_sidebar_projects_completed_task_with_verification_actions() {
     let completed_entries = task_entries_with_readiness(
         TaskRunStatus::Completed,

@@ -361,6 +361,14 @@ fn focus_step(task: &TaskRunProjection) -> Option<(u32, &TaskStepSpec, TaskStepS
         let step = plan.steps.iter().find(|step| step.step_id == *step_id)?;
         return Some((*plan_version, step, step_status(task, *plan_version, step)));
     }
+    for (plan_version, plan) in &task.plans {
+        if let Some(step) = plan.steps.iter().find(|step| {
+            task.active_steps
+                .contains(&(*plan_version, step.step_id.clone()))
+        }) {
+            return Some((*plan_version, step, step_status(task, *plan_version, step)));
+        }
+    }
     last_problem_step(task).or_else(|| last_plan_step(task))
 }
 

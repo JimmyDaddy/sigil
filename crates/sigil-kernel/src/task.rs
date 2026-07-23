@@ -1274,6 +1274,7 @@ impl TaskStateProjection {
         task.status = entry.status;
         task.reason = entry.reason.clone();
         if entry.status.is_terminal() {
+            task.active_steps.clear();
             task.current_step = None;
         }
     }
@@ -1331,15 +1332,13 @@ impl TaskStateProjection {
             return;
         }
         *step = TaskStepProjection::from_step(entry);
+        let step_key = (entry.plan_version, entry.step_id.clone());
         if entry.status == TaskStepStatus::Running {
-            task.current_step = Some((entry.plan_version, entry.step_id.clone()));
-        } else if task
-            .current_step
-            .as_ref()
-            .is_some_and(|current| current == &(entry.plan_version, entry.step_id.clone()))
-        {
-            task.current_step = None;
+            task.active_steps.insert(step_key);
+        } else {
+            task.active_steps.remove(&step_key);
         }
+        refresh_current_step(task);
     }
 
     fn apply_participant_attempt(&mut self, entry: &TaskParticipantAttemptEntry) {
@@ -1527,6 +1526,9 @@ pub struct TaskRunProjection {
     pub latest_plan_version: Option<u32>,
     pub plans: BTreeMap<u32, TaskPlanProjection>,
     pub steps: BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+    /// All task steps whose latest append-only status is `Running`.
+    pub active_steps: BTreeSet<(u32, TaskStepId)>,
+    /// Compatibility view populated only when exactly one task step is active.
     pub current_step: Option<(u32, TaskStepId)>,
     pub participant_attempts: BTreeMap<TaskParticipantAttemptId, TaskParticipantAttemptEntry>,
     pub participant_results: BTreeMap<TaskParticipantAttemptId, TaskParticipantResultEntry>,
@@ -1553,6 +1555,7 @@ impl TaskRunProjection {
             latest_plan_version: None,
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
+            active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
             participant_results: BTreeMap::new(),
@@ -1581,6 +1584,7 @@ impl TaskRunProjection {
             latest_plan_version: None,
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
+            active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
             participant_results: BTreeMap::new(),
@@ -1677,13 +1681,17 @@ fn supersede_plan_steps(
             },
         );
     }
-    if task
-        .current_step
-        .as_ref()
-        .is_some_and(|current| current.0 == old_plan_version)
-    {
-        task.current_step = None;
-    }
+    task.active_steps
+        .retain(|(plan_version, _)| *plan_version != old_plan_version);
+    refresh_current_step(task);
+}
+
+fn refresh_current_step(task: &mut TaskRunProjection) {
+    task.current_step = if task.active_steps.len() == 1 {
+        task.active_steps.first().cloned()
+    } else {
+        None
+    };
 }
 
 /// Projection for one plan version.

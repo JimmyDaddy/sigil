@@ -95,7 +95,13 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
                 task_sidebar_focus_lines(task, plan_version, plan, &verification_projection);
         }
     }
-    if let Some((plan_version, step_id)) = &task.current_step {
+    if task.active_steps.len() > 1 {
+        lines.push(format!(
+            "active: {} · {}",
+            task.active_steps.len(),
+            task_active_step_labels(task).join(", ")
+        ));
+    } else if let Some((plan_version, step_id)) = &task.current_step {
         let readiness =
             task_step_readiness_by_id(task, *plan_version, step_id, &verification_projection);
         let step_spec = task_plan_step(task, *plan_version, step_id);
@@ -259,6 +265,9 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             task_run_status_label(task.status),
             plan.steps.len()
         );
+        if !task.active_steps.is_empty() {
+            detail.push_str(&format!(" · {} active", task.active_steps.len()));
+        }
         if let Some((scope, readiness)) =
             task_sidebar_focus_readiness_with_scope(task, &verification_projection)
         {
@@ -453,15 +462,13 @@ fn task_sidebar_focus_lines(
     verification_projection: &VerificationStateProjection,
 ) -> Vec<String> {
     let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
-    let mut selected_indices: Vec<usize> =
-        (0..plan.steps.len().min(TASK_SIDEBAR_STEP_LIMIT)).collect();
-    if let Some(focus_index) = focus_index
-        && focus_index >= selected_indices.len()
-        && !selected_indices.is_empty()
-    {
-        selected_indices.pop();
-        selected_indices.push(focus_index);
-    }
+    let selected_indices = task_step_window_indices(
+        task,
+        plan_version,
+        plan,
+        TASK_SIDEBAR_STEP_LIMIT,
+        focus_index,
+    );
 
     let mut lines = selected_indices
         .iter()
@@ -494,15 +501,8 @@ fn task_strip_step_rows(
     verification_projection: &VerificationStateProjection,
 ) -> Vec<TaskStripRow> {
     let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
-    let mut selected_indices: Vec<usize> =
-        (0..plan.steps.len().min(TASK_STRIP_STEP_LIMIT)).collect();
-    if let Some(focus_index) = focus_index
-        && focus_index >= selected_indices.len()
-        && !selected_indices.is_empty()
-    {
-        selected_indices.pop();
-        selected_indices.push(focus_index);
-    }
+    let selected_indices =
+        task_step_window_indices(task, plan_version, plan, TASK_STRIP_STEP_LIMIT, focus_index);
 
     let mut rows = selected_indices
         .iter()
@@ -523,7 +523,12 @@ fn task_strip_step_rows(
                 kind: task_step_status_kind(Some(step), status, readiness),
                 label,
                 detail: task_strip_step_detail(step, status, readiness),
-                active: focus_index == Some(*index),
+                active: if task.active_steps.is_empty() {
+                    focus_index == Some(*index)
+                } else {
+                    task.active_steps
+                        .contains(&(plan_version, step.step_id.clone()))
+                },
             }
         })
         .collect::<Vec<_>>();
@@ -641,6 +646,12 @@ fn task_sidebar_focus_step_index(
     {
         return Some(index);
     }
+    if let Some(index) = plan.steps.iter().position(|step| {
+        task.active_steps
+            .contains(&(plan_version, step.step_id.clone()))
+    }) {
+        return Some(index);
+    }
     if task.status == TaskRunStatus::Completed && !plan.steps.is_empty() {
         return Some(plan.steps.len() - 1);
     }
@@ -660,6 +671,75 @@ fn task_sidebar_focus_step_index(
                 task_sidebar_step_status(task, plan_version, step) != TaskStepStatus::Completed
             })
         })
+}
+
+fn task_step_window_indices(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    plan: &TaskPlanProjection,
+    limit: usize,
+    focus_index: Option<usize>,
+) -> Vec<usize> {
+    let active_indices = plan
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            task.active_steps
+                .contains(&(plan_version, step.step_id.clone()))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let mut selected_indices = (0..plan.steps.len().min(limit)).collect::<Vec<_>>();
+    for active_index in &active_indices {
+        if selected_indices.contains(active_index) {
+            continue;
+        }
+        let Some(replace_index) = selected_indices
+            .iter()
+            .rposition(|index| !active_indices.contains(index))
+        else {
+            break;
+        };
+        selected_indices[replace_index] = *active_index;
+    }
+    if let Some(focus_index) = focus_index
+        && !selected_indices.contains(&focus_index)
+        && let Some(replace_index) = selected_indices
+            .iter()
+            .rposition(|index| !active_indices.contains(index))
+    {
+        selected_indices[replace_index] = focus_index;
+    }
+    selected_indices.sort_unstable();
+    selected_indices.dedup();
+    selected_indices
+}
+
+fn task_active_step_labels(task: &TaskRunProjection) -> Vec<String> {
+    let mut labels = task
+        .plans
+        .iter()
+        .flat_map(|(plan_version, plan)| {
+            plan.steps
+                .iter()
+                .filter(move |step| {
+                    task.active_steps
+                        .contains(&(*plan_version, step.step_id.clone()))
+                })
+                .map(move |step| format!("v{plan_version}:{}", step.step_id.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if labels.len() < task.active_steps.len() {
+        let fallback_labels = task
+            .active_steps
+            .iter()
+            .map(|(plan_version, step_id)| format!("v{plan_version}:{}", step_id.as_str()))
+            .filter(|label| !labels.contains(label))
+            .collect::<Vec<_>>();
+        labels.extend(fallback_labels);
+    }
+    labels
 }
 
 fn task_sidebar_step_status(

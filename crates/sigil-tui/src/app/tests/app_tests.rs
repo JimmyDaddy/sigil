@@ -1818,8 +1818,10 @@ fn task_sidebar_lines_summarizes_hidden_non_pending_statuses() -> Result<()> {
     let lines = app.task_sidebar_lines();
 
     assert!(lines.contains(&"◐ 1. running step_1 · step 1".to_owned()));
+    assert!(lines.contains(&"◐ 7. running step_7 · step 7".to_owned()));
+    assert!(lines.contains(&"active: 2 · v1:step_1, v1:step_7".to_owned()));
     assert!(lines.contains(
-        &"+6 more steps · 1 running, 1 failed, 1 blocked, 1 cancelled, 1 interrupted, 1 completed"
+        &"+6 more steps · 1 failed, 1 blocked, 1 cancelled, 1 interrupted, 1 pending, 1 completed"
             .to_owned()
     ));
     Ok(())
@@ -1944,7 +1946,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
 
     let strip = app.task_strip_view().expect("task strip should render");
     assert_eq!(strip.title, "Task task_1");
-    assert_eq!(strip.detail, "running · v1 · 2/6 done");
+    assert_eq!(strip.detail, "running · v1 · 2/6 done · 1 active");
     assert_eq!(strip.rows.len(), 5);
     assert_eq!(strip.rows[0].label, "1. step 1");
     assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Success);

@@ -790,8 +790,11 @@ pub(in crate::runner) fn subagent_elicitation_route_for_control(
     };
     let projection = session.task_state_projection();
     let task = projection.latest_task()?;
-    let child = current_subagent_child(task)
-        .or_else(|| latest_subagent_child_from_entries(session, task))?;
+    let child = current_subagent_child(task).or_else(|| {
+        (task.active_steps.len() <= 1)
+            .then(|| latest_subagent_child_from_entries(session, task))
+            .flatten()
+    })?;
     let status = match elicitation.action {
         sigil_kernel::McpElicitationDecision::Accepted => TaskRouteStatus::Resolved,
         sigil_kernel::McpElicitationDecision::Declined => TaskRouteStatus::Rejected,

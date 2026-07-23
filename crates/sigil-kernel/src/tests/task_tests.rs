@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
@@ -970,6 +972,72 @@ fn task_projection_tracks_latest_task_by_replay_order() -> Result<()> {
 }
 
 #[test]
+fn task_projection_tracks_all_active_steps_and_keeps_current_step_compatible() -> Result<()> {
+    let read_a = step_id("read_a")?;
+    let read_b = step_id("read_b")?;
+    let running_step = |step_id: TaskStepId| {
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id("task_1").expect("valid task id"),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Running,
+            title: None,
+            summary: None,
+            reason: None,
+        }))
+    };
+    let completed_step = |step_id: TaskStepId| {
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id("task_1").expect("valid task id"),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Completed,
+            title: None,
+            summary: Some("done".to_owned()),
+            reason: None,
+        }))
+    };
+    let base = vec![
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Running)?),
+        running_step(read_a.clone()),
+        running_step(read_b.clone()),
+    ];
+
+    let projection = TaskStateProjection::from_entries(&base);
+    let task = projection.latest_task().expect("task should project");
+    assert_eq!(
+        task.active_steps,
+        BTreeSet::from([(1, read_a.clone()), (1, read_b.clone())])
+    );
+    assert_eq!(task.current_step, None);
+
+    let mut one_active = base.clone();
+    one_active.push(completed_step(read_a.clone()));
+    let projection = TaskStateProjection::from_entries(&one_active);
+    let task = projection.latest_task().expect("task should project");
+    assert_eq!(task.active_steps, BTreeSet::from([(1, read_b.clone())]));
+    assert_eq!(task.current_step, Some((1, read_b.clone())));
+
+    one_active.push(completed_step(read_b));
+    let projection = TaskStateProjection::from_entries(&one_active);
+    let task = projection.latest_task().expect("task should project");
+    assert!(task.active_steps.is_empty());
+    assert_eq!(task.current_step, None);
+
+    let mut terminal = base;
+    terminal.push(SessionLogEntry::Control(run_entry(
+        TaskRunStatus::Interrupted,
+    )?));
+    let projection = TaskStateProjection::from_entries(&terminal);
+    let task = projection.latest_task().expect("task should project");
+    assert!(task.active_steps.is_empty());
+    assert_eq!(task.current_step, None);
+    Ok(())
+}
+
+#[test]
 fn task_projection_tracks_latest_unfinished_task_by_replay_order() -> Result<()> {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
@@ -1303,6 +1371,7 @@ fn task_replan_projection_clears_current_step_from_superseded_plan() -> Result<(
         .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
 
     assert_eq!(task.current_step, None);
+    assert!(task.active_steps.is_empty());
     assert_eq!(
         task.steps.get(&(1, step)).map(|step| step.status),
         Some(TaskStepStatus::Superseded)

@@ -667,7 +667,7 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
 fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
     let task_id = TaskId::new("task_1")?;
-    let step_id = TaskStepId::new("step_1")?;
+    let step_ids = [TaskStepId::new("step_1")?, TaskStepId::new("step_2")?];
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -679,55 +679,78 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
         task_id: task_id.clone(),
         plan_version: 1,
         status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
+        steps: step_ids
+            .iter()
+            .map(|step_id| TaskStepSpec {
+                step_id: step_id.clone(),
+                title: format!("running {}", step_id.as_str()),
+                display_name: None,
+                detail: None,
+                role: AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            })
+            .collect(),
+        reason: None,
+    }))?;
+    for (index, step_id) in step_ids.iter().enumerate() {
+        session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
             step_id: step_id.clone(),
-            title: "running".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::SubagentWrite,
-            depends_on: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        role: AgentRole::SubagentWrite,
-        status: TaskStepStatus::Running,
-        title: Some("running".to_owned()),
-        summary: None,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id,
-        child_task_id: TaskId::new("child_1")?,
-        child_session_ref: SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
-        role: AgentRole::SubagentWrite,
-        status: TaskChildSessionStatus::Started,
-        summary_hash: None,
-    }))?;
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Running,
+            title: Some(format!("running {}", step_id.as_str())),
+            summary: None,
+            reason: None,
+        }))?;
+        session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            child_task_id: TaskId::new(format!("child_{}", index + 1))?,
+            child_session_ref: SessionRef::new_relative(format!(
+                "children/task_1/{}-child_{}.jsonl",
+                step_id.as_str(),
+                index + 1
+            ))?,
+            role: AgentRole::SubagentRead,
+            status: TaskChildSessionStatus::Started,
+            summary_hash: None,
+        }))?;
+    }
 
     append_cancelled_task_state(&mut session).map_err(anyhow::Error::msg)?;
 
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskStep(step))
-                if step.status == TaskStepStatus::Cancelled
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskChildSession(child))
-                if child.status == TaskChildSessionStatus::Cancelled
-        )
-    }));
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                        if step.status == TaskStepStatus::Cancelled
+                )
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::TaskChildSession(child))
+                        if child.status == TaskChildSessionStatus::Cancelled
+                )
+            })
+            .count(),
+        2
+    );
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -1298,6 +1321,61 @@ fn append_mcp_elicitation_audits_adds_subagent_route_summary() -> Result<()> {
                 if route.server_name == "server-a"
                     && route.status == TaskRouteStatus::Resolved
                     && route.step_id == step_id
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::McpElicitation(elicitation))
+                if elicitation.server_name == "server-a"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn append_mcp_elicitation_audits_does_not_guess_between_active_children() -> Result<()> {
+    let mut session = Session::new("deepseek", "model");
+    let task_id = TaskId::new("task_1")?;
+    let first_step_id = TaskStepId::new("step_1")?;
+    let second_step_id = TaskStepId::new("step_2")?;
+    seed_running_subagent_task(&mut session, &task_id, &first_step_id)?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: second_step_id.clone(),
+        role: AgentRole::SubagentRead,
+        status: TaskStepStatus::Running,
+        title: Some("second child".to_owned()),
+        summary: None,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
+        task_id,
+        plan_version: 1,
+        step_id: second_step_id,
+        child_task_id: TaskId::new("child_2")?,
+        child_session_ref: SessionRef::new_relative("children/task_1/step_2-child_2.jsonl")?,
+        role: AgentRole::SubagentRead,
+        status: TaskChildSessionStatus::Started,
+        summary_hash: None,
+    }))?;
+    let audit_buffer = Arc::new(std::sync::Mutex::new(vec![ControlEntry::McpElicitation(
+        Box::new(McpElicitationEntry::new(
+            "server-a",
+            "Need a value",
+            &serde_json::json!({"type": "object"}),
+            McpElicitationDecision::Accepted,
+            Some(&serde_json::json!({})),
+        )),
+    )]));
+
+    append_mcp_elicitation_audits(&mut session, &audit_buffer).map_err(anyhow::Error::msg)?;
+
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskSubagentElicitationRoute(_))
         )
     }));
     assert!(session.entries().iter().any(|entry| {

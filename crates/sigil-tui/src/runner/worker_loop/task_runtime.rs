@@ -1876,15 +1876,13 @@ fn append_terminated_task_state(
     let task_id = task.task_id.clone();
     let parent_session_ref = task.parent_session_ref.clone();
     let objective = task.objective.clone();
-    let current_step = task.current_step.clone().and_then(|key| {
-        task.steps.get(&key).and_then(|step| {
-            if step.status.is_terminal() {
-                None
-            } else {
-                Some(step.clone())
-            }
-        })
-    });
+    let active_steps = task
+        .active_steps
+        .iter()
+        .filter_map(|key| task.steps.get(key))
+        .filter(|step| !step.status.is_terminal())
+        .cloned()
+        .collect::<Vec<_>>();
     let child_cancellations = task
         .child_sessions
         .values()
@@ -1893,7 +1891,7 @@ fn append_terminated_task_state(
         .collect::<Vec<_>>();
     let _ = task;
 
-    if let Some(step) = current_step {
+    for step in active_steps {
         session
             .append_control(ControlEntry::TaskStep(TaskStepEntry {
                 task_id: task_id.clone(),

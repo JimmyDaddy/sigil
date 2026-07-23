@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b、O5a implemented；O5b-O8 deferred
+状态：accepted / O0-O4b3b、O5a-O5b1 implemented；O5b2-O8 deferred
 
 创建日期：2026-07-22
 
@@ -942,8 +942,8 @@ allow_write_subagents = true
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
 
-本 checkpoint 表示 O4b3a、O4b3b 和 O5a 已完成；provider-aware backpressure、
-完整 active-step 产品投影与诊断通道仍属于 O5b-O8。
+本 checkpoint 表示 O4b3a、O4b3b、O5a 和 O5b1 已完成；provider-aware backpressure
+与完整诊断通道仍属于 O5b2-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1087,11 +1087,21 @@ O5a 已完成：
 - 并发 child 共用的同步 approval decision 暂时通过 mutex 串行化；child session 内的真实
   approval/tool audit 先持久化，parent route summary 缓冲到稳定 commit。O7 再补实时并行审批归因。
 
-O5b 剩余：
+O5b1 已完成：
 
-- 提供完整 `active_steps` 产品投影与 completion-arrival 进度。
+- `TaskRunProjection.active_steps` 从 append-only `TaskStep(Running/terminal)` 重建全部 active
+  step；`current_step` 只在 active 集合恰好一个成员时保留兼容值。
+- Task terminal 与 plan supersede 会清空对应 active identity；TUI task strip/info rail
+  同时标记全部 active step，有限窗口优先保留 active 行。
+- 用户取消/中断 Task 时为全部 active step 和 started child 写 terminal，而不是只收口一个
+  `current_step`。无 source identity 的 legacy MCP elicitation 在多个 active child 间 fail closed，
+  不猜测 latest child。
+
+O5b2 剩余：
+
 - provider route cooldown/backpressure，以及 whole-batch capacity/preflight，避免容量压力下
   出现部分 admission 或 fan-out retry storm。
+- completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 
 退出条件：barrier 测试证明 overlap；无 parent mutable borrow 跨 child await；429 不产生 fan-out storm。
