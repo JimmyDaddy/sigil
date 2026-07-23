@@ -531,9 +531,16 @@ function mergeCanonicalItems(
     }
     if (reconciledIdentities.has(item.displayId)) continue;
 
-    for (const identity of item.reconciles ?? []) {
+    const reconciledByItem = new Set(item.reconciles ?? []);
+    for (const identity of reconciledByItem) {
       const existingSuccessor = reconciliationSuccessors.get(identity);
-      if (existingSuccessor !== undefined && existingSuccessor !== item.displayId) {
+      const extendsExistingChain = existingSuccessor !== undefined
+        && reconciledByItem.has(existingSuccessor);
+      if (
+        existingSuccessor !== undefined
+        && existingSuccessor !== item.displayId
+        && !extendsExistingChain
+      ) {
         return {
           error: {
             code: "invalid_reconciliation",

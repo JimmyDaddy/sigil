@@ -86,6 +86,52 @@ describe("conversation continuity reducer", () => {
     expect(resolveConversationIdentity(state, "live-final")).toBe("durable-final");
   });
 
+  it("accepts an exact durable lifecycle chain that advances one live slot", () => {
+    let state = receiveInitial([]);
+    state = reduceConversationContinuity(state, {
+      type: "live_item_received",
+      sessionId: SESSION_ID,
+      item: liveTool("live-tool", "run-1", "4", "running", "partial"),
+    });
+    const requested = toolItem("tool-requested", "5", "run-1", "requested");
+    state = reduceConversationContinuity(state, {
+      type: "refresh_page_received",
+      sessionId: SESSION_ID,
+      page: page([{
+        ...requested,
+        reconciles: ["live-tool"],
+      }, {
+        ...toolItem("tool-completed", "6", "run-1", "completed"),
+        reconciles: [requested.displayId, "live-tool"],
+      }], "6"),
+    });
+
+    expect(state.contractError).toBeUndefined();
+    expect(selectConversationTimeline(state).map(({ identity }) => identity)).toEqual([
+      "tool-completed",
+    ]);
+    expect(resolveConversationIdentity(state, "live-tool")).toBe("tool-completed");
+    expect(resolveConversationIdentity(state, "tool-requested")).toBe("tool-completed");
+  });
+
+  it("rejects two durable successors when the later item does not extend the first", () => {
+    let state = receiveInitial([{
+      ...toolItem("tool-requested", "5", "run-1", "requested"),
+      reconciles: ["live-tool"],
+    }]);
+    state = reduceConversationContinuity(state, {
+      type: "refresh_page_received",
+      sessionId: SESSION_ID,
+      page: page([{
+        ...approvalItem("unrelated-approval", "6", "run-1", "approved"),
+        reconciles: ["live-tool"],
+      }], "6"),
+    });
+
+    expect(state.lifecycle).toBe("error");
+    expect(state.contractError).toMatchObject({ code: "invalid_reconciliation" });
+  });
+
   it("keeps a canonical contract error sticky across owner lifecycle events", () => {
     let state = receiveInitial([messageItem("message-1", "1", "safe")]);
     state = reduceConversationContinuity(state, {
