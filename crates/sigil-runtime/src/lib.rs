@@ -69,6 +69,7 @@ mod reasoning_effort; // exact provider+model effort admission and stale binding
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod run_options; // shared run options and scoped tool registry views.
 
+mod agent_completion;
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;

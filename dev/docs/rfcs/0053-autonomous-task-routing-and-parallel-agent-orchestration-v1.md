@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O3 and O4a implemented; O4b-O8 deferred
+状态：accepted / O0-O3, O4a and O4b1 implemented; O4b2-O8 deferred
 
 创建日期：2026-07-22
 
@@ -894,6 +894,7 @@ allow_write_subagents = true
 - TUI 启动及 session switch 都执行本地 handoff reconciliation；Requested→Resolved→TaskRun 的 crash gap 不重放 provider。只有可证明未发起不确定 planner/participant 的 admission gap 才自动接管；stale Running step/lease 先记为 Interrupted、task 置 Paused，等待显式 continue。
 - direct chat 与 queued follow-up 的 task handoff 会在 `TaskHandoffRequested` / `Resolved` / `TaskRun::Started` 之前追加 `TaskRunCancellationScopeBound`，把 task 绑定到继承的 root run scope，避免 admission→binding 崩溃窗口。恢复只认可最新绑定 scope 上的 `Run` 或同 task `Task` cancellation；后续显式 continue 使用新 scope，因此旧取消不会永久污染 task。
 - O3 已落地 participant isolation：Planner、Executor、Subagent 和 Synthesis 都写入 retry-stable child session，parent 只保存 bounded summary、result ref、attempt/result lifecycle 与 task control state。child 的 assistant/text delta 不再进入 root TUI stream。
+- O4b1 已落地 runtime-owned `AgentCompletionHub` 和 single-delivery terminal envelope：完整 batch 在任何 participant future 被 poll 前拒绝重复 attempt identity；accepted registration 由 consuming hub 每项只产出一个 terminal envelope，同时保留真实 completion order 和稳定 request sequence。现有 O4a join barrier 已复用该 hub，完成顺序可以实时收集，parent durable commit 继续单写，注入模型前继续按原 tool-call sequence 稳定排序。该基础批次尚未提供 `spawn_agents`、planner discovery 或原子 slot reservation，不改变 O4b 其余延期状态。
 - approved `/plan` 的 `sigil-plan-v2` executable schema 只有在 base/current workspace snapshot 均存在且完全相等时，才直接 promotion 为同一份 `TaskPlan v1 Accepted`，保留 step mapping，不再调用第二个 Planner；snapshot 缺失、旧 `sigil-plan-v1` 或字段不完整的 draft 继续走隔离 planner 兼容路径。draft 会持久化解析出的 schema version；task id 由 plan id 与 plan hash 稳定派生，`TaskCreatedFromPlan` 记录 durable link，`PlanDecisionRecorded(Accepted)` 是最终提交标记。提交前 crash 会继续显示 pending 并幂等补齐同一 task；若期间 workspace drift，则 supersede 已提升 plan、取消未完成 task并要求重新规划。
 - Task 完成后由隔离 Synthesis participant 生成结果，只有 host 可以向 parent 追加唯一正式 final。`TaskFinalAnswerCommitted` 绑定 task、plan version、synthesis attempt、child message ref 和内容 hash；启动恢复可幂等修补 child-result-only 或 parent-assistant-only 的部分提交前缀。
 - ordinary-chat natural-language explicit delegation 仍不得用关键词扫描补 authority。`@profile` 使用固定的 user-explicit admission，并继续受 `multi_agent_mode` 约束。
@@ -948,7 +949,7 @@ allow_write_subagents = true
 
 ### O4: Completion hub and batch Explore
 
-实施状态：O4a 完成（2026-07-23），O4b deferred。
+实施状态：O4a、O4b1 完成（2026-07-23），O4b2 deferred。
 
 - O4a 已为 ordinary chat 的兼容 `spawn_agent(mode=join_before_final)` 接入 root-run
   host join barrier：只有同一 provider turn 的整批调用均为 runtime 明确认识的
@@ -977,10 +978,15 @@ allow_write_subagents = true
   和 results turn，polling turn 为 0。另有 max-turn 未交付、root cancellation/quiescence、单成员
   commit 失败继续收口 sibling、spawn result event 失败在 settle 前 abort、settle 后发送前取消 context，
   以及自定义 Agent 写工具不得进入 join batch 的负向回归。
+- O4b1 将 O4a 内联的 `FuturesUnordered` completion 收集提升为 runtime-owned
+  `AgentCompletionHub`。hub 对完整 batch 做 duplicate attempt identity preflight，只有全量通过后
+  才 poll participant future；每个 accepted registration 由 consuming hub 生成且仅生成一个
+  `AgentTerminalEnvelope`。envelope 同时携带 completion arrival index 和原始 stable sequence，
+  因此 runtime 可按真实完成顺序收集、由 parent single writer 提交，并在构造 model context 前
+  独立恢复稳定请求顺序。participant failure 也是 terminal envelope，不会使 sibling 消失。
 
-O4b 仍包括：
+O4b2 仍包括：
 
-- 引入 `AgentCompletionHub` 和 single-delivery terminal envelope。
 - 新增 `spawn_agents` compatibility surface 和 planner `request_task_discovery`。
 - batch 全量预检、稳定 ids、原子 slot reservation。
 - joined completion 自动恢复 parent/planner，不调用 wait。

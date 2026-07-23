@@ -1,6 +1,13 @@
-use futures::{StreamExt, stream::FuturesUnordered};
+use std::collections::BTreeSet;
 
 use super::*;
+use crate::agent_completion::{AgentCompletionHub, AgentCompletionRegistration};
+
+struct JoinedAgentCompletionContext {
+    call_id: String,
+    thread: BackgroundChatAgentThreadRecord,
+    _release_guard: ChatChildThreadGuard,
+}
 
 impl AgentToolRuntime {
     pub(super) async fn settle_current_join_dependencies(
@@ -13,9 +20,9 @@ impl AgentToolRuntime {
             return Ok(None);
         }
 
-        let mut pending = FuturesUnordered::new();
-        for dependency in dependencies {
-            pending.push(async move {
+        let registrations = dependencies
+            .into_iter()
+            .map(|dependency| {
                 let JoinedChatAgentHandle {
                     sequence,
                     call_id,
@@ -23,14 +30,61 @@ impl AgentToolRuntime {
                     future,
                     release_guard,
                 } = dependency;
-                (sequence, call_id, thread, future.await, release_guard)
-            });
-        }
-
-        let mut completions = Vec::new();
-        while let Some(completion) = pending.next().await {
-            completions.push(completion);
-        }
+                let key = (thread.thread_id.clone(), thread.attempt_id.clone());
+                AgentCompletionRegistration::new(
+                    key,
+                    sequence,
+                    JoinedAgentCompletionContext {
+                        call_id,
+                        thread,
+                        _release_guard: release_guard,
+                    },
+                    future,
+                )
+            })
+            .collect::<Vec<_>>();
+        let completion_hub = match AgentCompletionHub::from_batch(registrations) {
+            Ok(hub) => hub,
+            Err(rejection) => {
+                let (error, registrations) = rejection.into_parts();
+                let reason = format!("host join completion batch rejected: {error}");
+                let mut recorded = BTreeSet::new();
+                let mut first_cleanup_error = None;
+                for registration in registrations {
+                    let (key, _sequence, context, future) = registration.into_parts();
+                    drop(future);
+                    let thread = context.thread.to_runtime_thread();
+                    drop(context._release_guard);
+                    if !recorded.insert(key) {
+                        continue;
+                    }
+                    let failure_result = self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &thread,
+                        reason.clone(),
+                    );
+                    let continuation_result = append_agent_result_continuation(
+                        session,
+                        handler,
+                        thread.thread_id.clone(),
+                        AgentResultContinuationStatus::Failed,
+                        Some(reason.clone()),
+                    );
+                    if first_cleanup_error.is_none() {
+                        first_cleanup_error =
+                            failure_result.err().or_else(|| continuation_result.err());
+                    }
+                }
+                if let Some(cleanup_error) = first_cleanup_error {
+                    return Err(anyhow!(reason).context(format!(
+                        "completion batch cleanup also failed: {cleanup_error:#}"
+                    )));
+                }
+                return Err(error.into());
+            }
+        };
+        let completions = completion_hub.collect().await;
 
         let mut members = Vec::new();
         let mut delivered_threads = Vec::new();
@@ -39,9 +93,45 @@ impl AgentToolRuntime {
             .run_cancellation
             .as_ref()
             .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested);
-        for (sequence, call_id, thread_record, joined, _release_guard) in completions {
+        for completion in completions {
+            let (completion_thread_id, completion_attempt_id) = completion.key;
+            let sequence = completion.sequence;
+            let JoinedAgentCompletionContext {
+                call_id,
+                thread: thread_record,
+                _release_guard,
+            } = completion.context;
+            let joined = completion.result;
             let thread = thread_record.to_runtime_thread();
-            let thread_id = thread.thread_id.clone();
+            if thread.thread_id != completion_thread_id
+                || thread.attempt_id != completion_attempt_id
+            {
+                let reason = "completion hub identity did not match joined child context";
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    reason.to_owned(),
+                );
+                let _ = append_agent_result_continuation(
+                    session,
+                    handler,
+                    thread.thread_id.clone(),
+                    AgentResultContinuationStatus::Failed,
+                    Some(reason.to_owned()),
+                );
+                if first_commit_error.is_none() {
+                    first_commit_error = Some(anyhow!(
+                        "{reason}: expected thread {} attempt {:?}, received thread {} attempt {:?}",
+                        thread.thread_id.as_str(),
+                        thread.attempt_id,
+                        completion_thread_id.as_str(),
+                        completion_attempt_id,
+                    ));
+                }
+                continue;
+            }
+            let thread_id = completion_thread_id;
             let commit_result = if cancellation_requested {
                 append_joined_child_interrupted(
                     session,
