@@ -406,19 +406,33 @@ describe("desktop coding-agent components", () => {
     else Object.defineProperty(navigator, "clipboard", originalClipboard);
   });
 
-  it("keeps reasoning collapsed and renders read-only bounded tool and diff surfaces", async () => {
+  it("opens streaming reasoning, then collapses it to a bounded preview on completion", async () => {
     const user = userEvent.setup();
-    const { unmount } = render(
-      <Message message={{ key: "reasoning", kind: "reasoning", label: "Working", text: "private scratch", status: "details" }} />,
+    const text = "first reasoning line\nsecond reasoning line\nthird reasoning line\nhidden reasoning line";
+    const { rerender, unmount } = render(
+      <Message message={{ key: "reasoning", kind: "reasoning", label: "Working", text, status: "streaming" }} />,
     );
     const disclosure = screen.getByText("Working").closest("details") as HTMLDetailsElement;
-    expect(disclosure.open).toBe(false);
+    expect(disclosure.open).toBe(true);
+    expect(screen.getByText("Hide details")).toBeTruthy();
+    expect(disclosure.querySelector(".message-disclosure-preview")).toBeNull();
+
+    rerender(
+      <Message message={{ key: "reasoning", kind: "reasoning", label: "Reasoning", text }} />,
+    );
+    await waitFor(() => expect(disclosure.open).toBe(false));
     expect(screen.getByText("Show details")).toBeTruthy();
+    const preview = disclosure.querySelector(".message-disclosure-preview");
+    expect(preview?.textContent).toContain("third reasoning line");
+    expect(preview?.textContent).not.toContain("hidden reasoning line");
     await user.click(screen.getByText("Show details"));
     expect(disclosure.open).toBe(true);
     expect(screen.getByText("Hide details")).toBeTruthy();
     unmount();
+  });
 
+  it("renders read-only bounded tool and diff surfaces", async () => {
+    const user = userEvent.setup();
     const diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
     const diffRender = render(<DiffViewer diff={diff} />);
     expect(screen.getByLabelText("Unified diff")).toBeTruthy();
@@ -438,6 +452,34 @@ describe("desktop coding-agent components", () => {
     expect(screen.getByLabelText("shell output content").textContent).toContain("line 240");
     expect(screen.queryByText("duration not recorded")).toBeNull();
     expect(screen.queryByText("risk not classified")).toBeNull();
+  });
+
+  it("fully shows short streaming tool output", () => {
+    render(
+      <ToolCard tool={{ key: "short-streaming-tool", toolName: "bash", text: "still working", status: "running" }} />,
+    );
+
+    expect(screen.getByText("still working").tagName).toBe("P");
+    expect(screen.queryByRole("button", { name: /bash output/i })).toBeNull();
+  });
+
+  it("fully expands long streaming tool output and contracts it after completion", async () => {
+    const output = Array.from({ length: 8 }, (_, index) => `stream line ${index + 1}`).join("\n");
+    const { rerender } = render(
+      <ToolCard tool={{ key: "streaming-tool", toolName: "bash", text: output, status: "running" }} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Collapse bash output" })).toBeTruthy();
+    expect(screen.getByLabelText("bash output content").textContent).toContain("stream line 8");
+
+    rerender(
+      <ToolCard tool={{ key: "streaming-tool", toolName: "bash", text: output, status: "completed" }} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Expand bash output" })).toBeTruthy();
+    });
+    expect(screen.getByLabelText("bash output content").textContent).toContain("stream line 3");
+    expect(screen.getByLabelText("bash output content").textContent).not.toContain("stream line 4");
   });
 
   it("summarizes structured tool failures and keeps transport JSON collapsed", () => {
@@ -547,7 +589,8 @@ describe("desktop coding-agent components", () => {
     expect(screen.getByText("Result")).toBeTruthy();
     expect(screen.getByText("2 matches.")).toBeTruthy();
     expect(screen.getByText("Json · 10 lines")).toBeTruthy();
-    expect(screen.queryByLabelText("grep output content")).toBeNull();
+    expect(screen.getByLabelText("grep output content").textContent).toContain('"path"');
+    expect(screen.getByLabelText("grep output content").textContent).not.toContain("src/two.rs");
     await user.click(screen.getByRole("button", { name: "Expand grep output" }));
     expect(screen.getByLabelText("grep output content")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Collapse grep output" })).toBeTruthy();

@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 import { useLocale } from "./i18n";
 import { MessageContent } from "./MessageContent";
+
+const DISCLOSURE_PREVIEW_LINES = 3;
+const DISCLOSURE_PREVIEW_CHARACTERS = 360;
 
 export interface MessageView {
   key: string;
@@ -21,12 +24,18 @@ export function Message({
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
 }) {
   const { t } = useLocale();
-  const [disclosureOpen, setDisclosureOpen] = useState(false);
+  const streaming = message.status === "streaming";
+  const [disclosureOpen, setDisclosureOpen] = useState(streaming);
+  useLayoutEffect(() => {
+    setDisclosureOpen(streaming);
+  }, [message.key, streaming]);
   if (message.kind === "reasoning" || message.kind === "progress") {
+    const preview = disclosurePreview(message.text);
     return (
       <details
         className={`message-disclosure message-${message.kind}`}
         data-display-id={displayId}
+        open={disclosureOpen}
         onToggle={(event) => setDisclosureOpen(event.currentTarget.open)}
       >
         <summary>
@@ -36,6 +45,9 @@ export function Message({
           </span>
           <small>{t(disclosureOpen ? "hideDetails" : "showDetails")}</small>
         </summary>
+        {!disclosureOpen && preview !== "" ? (
+          <p className="message-disclosure-preview">{preview}</p>
+        ) : null}
         <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
       </details>
     );
@@ -49,4 +61,12 @@ export function Message({
       <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
     </article>
   );
+}
+
+function disclosurePreview(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === "") return "";
+  const linePreview = trimmed.split("\n").slice(0, DISCLOSURE_PREVIEW_LINES).join("\n");
+  if (linePreview.length <= DISCLOSURE_PREVIEW_CHARACTERS) return linePreview;
+  return `${linePreview.slice(0, DISCLOSURE_PREVIEW_CHARACTERS - 1).trimEnd()}…`;
 }

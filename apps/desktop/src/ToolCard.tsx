@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
@@ -32,6 +32,7 @@ interface ToolPresentation {
   readonly detailKind?: "diff" | "output" | "raw";
   readonly detailText?: string;
   readonly detailLanguage?: string;
+  readonly streaming: boolean;
 }
 
 interface StructuredOutput {
@@ -102,6 +103,7 @@ export function ToolCard({
           toolName={tool.toolName}
           text={presentation.detailText ?? ""}
           language={presentation.detailLanguage}
+          streaming={presentation.streaming}
         />
       ) : presentation.detailKind === undefined ? null : (
         <details className="tool-details">
@@ -139,18 +141,23 @@ function ToolOutputPanel({
   toolName,
   text,
   language,
+  streaming,
 }: {
   readonly toolName: string;
   readonly text: string;
   readonly language?: string;
+  readonly streaming: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(streaming);
+  useLayoutEffect(() => {
+    setExpanded(streaming);
+  }, [streaming, toolName]);
   const bounded = boundedOutput(text);
   const preview = outputPreview(bounded.text);
   const structured = language === "json";
   const expandable = structured || preview.truncated;
   const visibleText = expanded || !expandable ? bounded.text : preview.text;
-  const showOutput = expanded || !structured;
+  const showOutput = visibleText.trim() !== "";
   const lineCount = text.split("\n").length;
   const metadata = detailMetadata(language, lineCount);
   return (
@@ -231,6 +238,7 @@ export function presentTool(tool: ToolView): ToolPresentation {
       : detailKind === "output"
         ? outputPresentation?.language
         : undefined,
+    streaming: isStreamingStatus(tool.status ?? structured?.status),
   };
 }
 
@@ -286,9 +294,10 @@ function presentOutput(
     if (isEmptyJsonValue(json.value)) {
       return { summary: emptyOutputSummary(toolName) };
     }
+    const formatted = JSON.stringify(json.value, null, 2);
     return {
       summary: jsonOutputSummary(json.value, toolName),
-      detailText: trimmed,
+      detailText: formatted,
       language: explicitLanguage ?? "json",
     };
   }
@@ -515,8 +524,12 @@ function statusTone(value?: string): ToolTone {
   if (/failed|failure|error|crash|invalid/.test(status)) return "danger";
   if (/denied|cancel|blocked|warning|expired/.test(status)) return "warning";
   if (/^ok$|success|succeeded|complete|completed|ready|finished|passed/.test(status)) return "success";
-  if (/running|progress|pending|starting|waiting/.test(status)) return "info";
+  if (/streaming|running|progress|pending|starting|waiting/.test(status)) return "info";
   return "neutral";
+}
+
+function isStreamingStatus(value?: string): boolean {
+  return /streaming|running|progress|starting/.test(value?.toLocaleLowerCase() ?? "");
 }
 
 function toneIcon(tone: ToolTone): IconName {

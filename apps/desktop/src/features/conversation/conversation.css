@@ -104,6 +104,8 @@
 .message-disclosure > summary { cursor: pointer; }
 .message-disclosure-title { display: inline-flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-2); }
 .message-disclosure[open] > summary { margin-bottom: 9px; }
+.message-disclosure-preview { display: -webkit-box; margin: 7px 0 0; overflow: hidden; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.message-disclosure:not([open]) > .message-content { display: none; }
 .message-reasoning { border-left: 3px solid var(--sg-sys-color-outline-variant); background: var(--sg-sys-color-surface-container-low); }
 .message-reasoning > summary, .message-reasoning > summary .message-disclosure-title { color: var(--sg-sys-color-on-surface-subtle); }
 .message-reasoning .message-content { padding: 10px 12px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-input); font-size: 12.5px; line-height: 1.65; }
