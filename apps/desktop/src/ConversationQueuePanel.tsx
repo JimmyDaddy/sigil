@@ -63,14 +63,16 @@ export function ConversationQueuePanel({
           <strong>{t("queuedMessages", { count: queue.totalItems })}</strong>
           <small>{queue.paused ? t("conversationQueuePaused") : t("conversationQueueAutomatic")}</small>
         </div>
-        <Button
-          type="button"
-          variant="quiet"
-          busy={busy}
-          onClick={() => void onCommand({ action: queue.paused ? "resume" : "pause" })}
-        >
-          {queue.paused ? t("resumeQueue") : t("pauseQueue")}
-        </Button>
+        <Tooltip label={queue.paused ? t("resumeQueue") : t("pauseQueue")}>
+          <IconButton
+            type="button"
+            aria-label={queue.paused ? t("resumeQueue") : t("pauseQueue")}
+            aria-busy={busy || undefined}
+            icon={<Icon name={queue.paused ? "play" : "pause"} />}
+            disabled={busy}
+            onClick={() => void onCommand({ action: queue.paused ? "resume" : "pause" })}
+          />
+        </Tooltip>
       </header>
 
       {queue.items.length === 0 ? (
@@ -158,7 +160,7 @@ export function ConversationQueuePanel({
                       placeholder={t("replacementPromptPlaceholder")}
                       disabled={busy}
                       autoFocus
-                      rows={3}
+                      rows={2}
                       onChange={(event) => setReplacementPrompt(event.target.value)}
                     />
                     <div className="conversation-queue-edit-actions">

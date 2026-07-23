@@ -22,8 +22,8 @@ export function ApprovalDock({
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     dockRef.current?.focus();
     return () => {
-      if (document.contains(composerRef.current)) composerRef.current?.focus();
-      else if (document.contains(previousFocus ?? null)) previousFocus?.focus();
+      if (document.contains(composerRef.current)) composerRef.current?.focus({ preventScroll: true });
+      else if (document.contains(previousFocus ?? null)) previousFocus?.focus({ preventScroll: true });
     };
   }, [approval.approvalRequestId, composerRef]);
 
@@ -42,7 +42,7 @@ export function ApprovalDock({
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
-          composerRef.current?.focus();
+          composerRef.current?.focus({ preventScroll: true });
         }
       }}
     >

@@ -1,4 +1,4 @@
-import { createRef } from "react";
+import { createRef, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -198,6 +198,7 @@ function renderComposer(overrides: {
   queueCount?: number;
   queuePaused?: boolean;
   queueBusy?: boolean;
+  queuePanel?: ReactNode;
   onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onInterruptAndRunNext?: (prompt: string) => Promise<boolean>;
   onOpenQueue?: () => void;
@@ -240,6 +241,7 @@ function renderComposer(overrides: {
         queueCount={overrides.queueCount ?? 0}
         queuePaused={overrides.queuePaused ?? false}
         queueBusy={overrides.queueBusy ?? false}
+        queuePanel={overrides.queuePanel}
         onModelChange={() => undefined}
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
@@ -272,6 +274,17 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
+  it("focuses the editor without asking WebKit to reveal it by scrolling", () => {
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const focus = vi.spyOn(input, "focus");
+
+    fireEvent.pointerDown(input);
+
+    expect(focus).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+  });
+
   it("binds invocation suggestions to the composer with the combobox contract", async () => {
     const user = userEvent.setup();
     renderComposer();
@@ -490,13 +503,19 @@ describe("structured composer", () => {
 
   it("opens the durable queue without changing the draft", async () => {
     const user = userEvent.setup();
-    const { onOpenQueue } = renderComposer({ active: true, queueCount: 2 });
+    const { onOpenQueue } = renderComposer({
+      active: true,
+      queueCount: 2,
+      queuePanel: <span>Queued prompt controls</span>,
+    });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
 
     expect(onOpenQueue).toHaveBeenCalledOnce();
+    expect(screen.getByRole("dialog", { name: "Open follow-up queue, 2 messages" })).toBeTruthy();
+    expect(screen.getByText("Queued prompt controls")).toBeTruthy();
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
   });
 });

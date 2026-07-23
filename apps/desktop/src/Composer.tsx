@@ -1,4 +1,14 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type {
@@ -12,7 +22,7 @@ import type {
 } from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
-import { Button, Dialog, IconButton, Select, TextArea, Tooltip } from "./ui/primitives";
+import { Button, Dialog, IconButton, Popover, Select, TextArea, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
 const MAX_COMPOSER_HEIGHT = 176;
@@ -35,6 +45,7 @@ export function Composer({
   queueCount,
   queuePaused,
   queueBusy,
+  queuePanel,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -67,6 +78,7 @@ export function Composer({
   queueCount: number;
   queuePaused: boolean;
   queueBusy: boolean;
+  queuePanel?: ReactNode;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -96,13 +108,13 @@ export function Composer({
     if (requestedSkill === undefined) return;
     setSelectedSkill(requestedSkill);
     setSelectedAgent(undefined);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   }, [composerRef, requestedSkill]);
   useEffect(() => {
     if (requestedAgent === undefined) return;
     setSelectedAgent(requestedAgent);
     setSelectedSkill(undefined);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   }, [composerRef, requestedAgent]);
   const suggestionQuery = leadingInvocationToken(prompt);
   const suggestions = useMemo(
@@ -281,7 +293,7 @@ export function Composer({
     writeDraft(draftKey, value);
     setSuggestionsDismissedFor(undefined);
     setActiveSuggestion(0);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   };
   const modelName = selectedModelName ?? runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
   const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
@@ -351,6 +363,18 @@ export function Composer({
           aria-activedescendant={suggestionsOpen
             ? `${suggestionListId}-option-${Math.min(activeSuggestion, suggestions.length - 1)}`
             : undefined}
+          onPointerDown={(event) => {
+            if (document.activeElement !== event.currentTarget) {
+              event.preventDefault();
+              event.currentTarget.focus({ preventScroll: true });
+            }
+          }}
+          onMouseDown={(event) => {
+            if (document.activeElement !== event.currentTarget) {
+              event.preventDefault();
+              event.currentTarget.focus({ preventScroll: true });
+            }
+          }}
           onChange={(event) => {
             setPrompt(event.target.value);
             setSuggestionsDismissedFor(undefined);
@@ -444,20 +468,22 @@ export function Composer({
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
           <div className="composer-actions">
-            <Tooltip label={queuePaused ? t("conversationQueuePaused") : t("openConversationQueue")}>
-              <IconButton
-                className={`composer-queue-trigger${queueCount > 0 ? " has-items" : ""}`}
-                type="button"
-                aria-label={t("openConversationQueueCount", { count: queueCount })}
-                icon={(
-                  <>
-                    <Icon name="queue" />
-                    {queueCount > 0 ? <span className="composer-queue-count" aria-hidden="true">{queueCount}</span> : null}
-                  </>
-                )}
-                onClick={onOpenQueue}
-              />
-            </Tooltip>
+            <Popover
+              className="composer-queue-popover"
+              accessibleLabel={t("openConversationQueueCount", { count: queueCount })}
+              align="end"
+              label={(
+                <span className={`composer-queue-trigger${queueCount > 0 ? " has-items" : ""}`}>
+                  <Icon name="queue" />
+                  {queueCount > 0 ? <span className="composer-queue-count" aria-hidden="true">{queueCount}</span> : null}
+                </span>
+              )}
+              onOpenChange={(open) => {
+                if (open) onOpenQueue();
+              }}
+            >
+              {queuePanel}
+            </Popover>
           {active ? (
             <>
               <Tooltip label={t("interruptAndRunNextHint")}>
@@ -540,6 +566,10 @@ export function Composer({
     </Dialog>
     </>
   );
+}
+
+function focusWithoutScroll(element: HTMLElement | null): void {
+  element?.focus({ preventScroll: true });
 }
 
 interface LeadingInvocationToken {

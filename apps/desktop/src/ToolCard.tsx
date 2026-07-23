@@ -1,8 +1,13 @@
+import { useState } from "react";
+
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
 import { Icon, type IconName } from "./ui/icons";
+import { Button } from "./ui/primitives";
 
 const MAX_VISIBLE_OUTPUT_LINES = 240;
+const OUTPUT_PREVIEW_LINES = 3;
+const OUTPUT_PREVIEW_CHARACTERS = 480;
 const MAX_SUMMARY_CHARACTERS = 280;
 
 export interface ToolView {
@@ -21,7 +26,7 @@ interface ToolPresentation {
   readonly displayName: string;
   readonly status: string;
   readonly tone: ToolTone;
-  readonly summary: string;
+  readonly summary?: string;
   readonly input?: string;
   readonly detailLabel?: string;
   readonly detailKind?: "diff" | "output" | "raw";
@@ -31,10 +36,22 @@ interface ToolPresentation {
 
 interface StructuredOutput {
   readonly status?: string;
-  readonly summary: string;
+  readonly summary?: string;
   readonly input?: string;
   readonly output?: string;
   readonly language?: string;
+  readonly hasError: boolean;
+}
+
+interface OutputPresentation {
+  readonly summary: string;
+  readonly detailText?: string;
+  readonly language?: string;
+}
+
+interface OutputPreview {
+  readonly text: string;
+  readonly truncated: boolean;
 }
 
 export function ToolCard({
@@ -45,12 +62,11 @@ export function ToolCard({
   readonly displayId?: string;
 }) {
   const presentation = presentTool(tool);
-  const lines = presentation.detailText?.split("\n") ?? [];
-  const output = lines.slice(0, MAX_VISIBLE_OUTPUT_LINES).join("\n");
-  const omittedLines = Math.max(0, lines.length - MAX_VISIBLE_OUTPUT_LINES);
+  const boundedDetail = boundedOutput(presentation.detailText ?? "");
+  const inputLanguage = toolInputLanguage(tool.toolName);
   return (
     <article
-      className={`tool-card tool-tone-${presentation.tone}`}
+      className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined ? " tool-card-compact" : ""}`}
       data-display-id={displayId}
       aria-label={`${presentation.displayName}: ${presentation.status}`}
     >
@@ -58,37 +74,60 @@ export function ToolCard({
         <span className="tool-status-icon" aria-hidden="true"><Icon name={toneIcon(presentation.tone)} /></span>
         <span className="tool-card-heading">
           <strong>{presentation.displayName}</strong>
-          <small>{presentation.status}</small>
+          {presentation.tone === "success" ? null : <small>{presentation.status}</small>}
         </span>
         <span className="tool-card-meta">
           {tool.duration === undefined ? null : <small>{tool.duration}</small>}
           {tool.risk === undefined ? null : <small className="tool-risk">{tool.risk} risk</small>}
         </span>
       </header>
-      {presentation.input === undefined ? null : (
-        <div className="tool-input">
-          <small>Command</small>
-          <HighlightedCode text={presentation.input} language={toolInputLanguage(tool.toolName)} ariaLabel={`${tool.toolName} command`} />
+      {presentation.input === undefined && presentation.summary === undefined ? null : (
+        <div className="tool-card-main">
+          {presentation.input === undefined ? null : (
+            <div className={`tool-input${inputLanguage === undefined ? " is-parameters" : " is-command"}`}>
+              <HighlightedCode text={presentation.input} language={inputLanguage} ariaLabel={`${tool.toolName} input`} />
+            </div>
+          )}
+          {presentation.summary === undefined ? null : (
+            <div className="tool-result">
+              <small>{presentation.tone === "danger" || presentation.tone === "warning" ? "Status" : "Result"}</small>
+              <p>{presentation.summary}</p>
+            </div>
+          )}
         </div>
       )}
-      <p className="tool-summary">{presentation.summary}</p>
-      {presentation.detailKind === undefined ? null : (
+      {presentation.detailKind === "output" ? (
+        <ToolOutputPanel
+          key={tool.key}
+          toolName={tool.toolName}
+          text={presentation.detailText ?? ""}
+          language={presentation.detailLanguage}
+        />
+      ) : presentation.detailKind === undefined ? null : (
         <details className="tool-details">
           <summary>
             <span>{presentation.detailLabel}</span>
-            <small>{detailMetadata(presentation.detailLanguage, lines.length)}</small>
+            <small>{detailMetadata(
+              presentation.detailLanguage,
+              presentation.detailText?.split("\n").length ?? 0,
+            )}</small>
           </summary>
           <div className="tool-card-body">
             {presentation.detailKind === "diff" ? (
               <DiffViewer diff={presentation.detailText ?? ""} />
             ) : (
               <HighlightedCode
-                text={output}
+                text={boundedDetail.text}
                 language={presentation.detailLanguage}
                 ariaLabel={`${tool.toolName} ${presentation.detailKind === "raw" ? "raw details" : "output"}`}
               />
             )}
-            {omittedLines > 0 ? <small>{omittedLines} output line{omittedLines === 1 ? "" : "s"} omitted from this view.</small> : null}
+            {boundedDetail.omittedLines > 0 ? (
+              <small>
+                {boundedDetail.omittedLines} output line
+                {boundedDetail.omittedLines === 1 ? "" : "s"} omitted from this view.
+              </small>
+            ) : null}
           </div>
         </details>
       )}
@@ -96,24 +135,86 @@ export function ToolCard({
   );
 }
 
+function ToolOutputPanel({
+  toolName,
+  text,
+  language,
+}: {
+  readonly toolName: string;
+  readonly text: string;
+  readonly language?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const bounded = boundedOutput(text);
+  const preview = outputPreview(bounded.text);
+  const structured = language === "json";
+  const expandable = structured || preview.truncated;
+  const visibleText = expanded || !expandable ? bounded.text : preview.text;
+  const showOutput = expanded || !structured;
+  const lineCount = text.split("\n").length;
+  const metadata = detailMetadata(language, lineCount);
+  return (
+    <section
+      className={`tool-output-section${expanded ? " is-expanded" : ""}`}
+      aria-label={`${toolName} output`}
+    >
+      {expandable ? (
+        <Button
+          type="button"
+          variant="quiet"
+          className="tool-output-disclosure"
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${toolName} output`}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span className="tool-output-disclosure-title">
+            <Icon name={expanded ? "chevron-up" : "chevron-down"} />
+            <strong>Output</strong>
+          </span>
+          <small>{metadata}</small>
+        </Button>
+      ) : (
+        <header>
+          <strong>Output</strong>
+          <small>{metadata}</small>
+        </header>
+      )}
+      {showOutput ? (
+        <HighlightedCode
+          text={visibleText}
+          language={language}
+          ariaLabel={`${toolName} output content`}
+        />
+      ) : null}
+      {expanded && bounded.omittedLines > 0 ? (
+        <small>{bounded.omittedLines} output line{bounded.omittedLines === 1 ? "" : "s"} omitted from this view.</small>
+      ) : null}
+    </section>
+  );
+}
+
 export function presentTool(tool: ToolView): ToolPresentation {
   const structured = parseStructuredOutput(tool.text);
   const status = structured?.status ?? tool.status ?? "recorded";
   const tone = statusTone(status);
-  const trimmed = tool.text.trim();
   const diff = isUnifiedDiff(tool.text);
-  const plainLines = trimmed === "" ? [] : trimmed.split("\n");
+  const outputPresentation = diff
+    ? undefined
+    : presentOutput(
+      structured === undefined ? tool.text : structured.output,
+      tool.toolName,
+      tone,
+      structured?.language,
+    );
   const summary = structured?.summary
-    ?? (diff ? "File changes are ready to review." : summarizePlainOutput(plainLines, tone));
+    ?? (diff ? "File changes are ready to review." : outputPresentation?.summary);
   const detailKind = diff
     ? "diff" as const
-    : structured?.output !== undefined
-      ? "output" as const
-      : structured !== undefined
+    : structured?.hasError
       ? "raw" as const
-      : plainLines.length > 1
-        ? "output" as const
-        : undefined;
+      : outputPresentation?.detailText !== undefined
+      ? "output" as const
+      : undefined;
   return {
     displayName: humanizeToolName(tool.toolName),
     status: humanizeStatus(status),
@@ -121,12 +222,14 @@ export function presentTool(tool: ToolView): ToolPresentation {
     summary,
     input: tool.input ?? structured?.input,
     detailKind,
-    detailLabel: detailKind === "diff" ? "Review changes" : detailKind === "raw" ? "Raw details" : detailKind === "output" ? "View output" : undefined,
-    detailText: detailKind === undefined ? undefined : structured?.output ?? tool.text,
+    detailLabel: detailKind === "diff" ? "Review changes" : detailKind === "raw" ? "Raw details" : undefined,
+    detailText: detailKind === "raw"
+      ? tool.text
+      : detailKind === undefined ? undefined : outputPresentation?.detailText ?? tool.text,
     detailLanguage: detailKind === "raw"
       ? "json"
       : detailKind === "output"
-        ? structured === undefined ? inferContentLanguage(tool.text) : structured.language
+        ? outputPresentation?.language
         : undefined,
   };
 }
@@ -142,6 +245,9 @@ function parseStructuredOutput(text: string): StructuredOutput | undefined {
   }
   const root = asRecord(parsed);
   if (root === undefined) return undefined;
+  if (!("status" in root || "content" in root || "error" in root || "meta" in root)) {
+    return undefined;
+  }
   const error = asRecord(root.error);
   const meta = asRecord(root.meta);
   const details = asRecord(meta?.details);
@@ -151,12 +257,10 @@ function parseStructuredOutput(text: string): StructuredOutput | undefined {
   const summary = firstText(
     stringValue(error?.message),
     stringValue(details?.summary),
-    content === undefined ? undefined : summarizePlainOutput(content.split("\n"), statusTone(status)),
-    stringValue(call?.summary),
-  ) ?? fallbackSummary(statusTone(status));
+  );
   return {
     status,
-    summary: boundedSummary(summary),
+    summary: summary === undefined ? undefined : boundedSummary(summary),
     input: firstText(stringValue(call?.command), stringValue(call?.summary)),
     output: error === undefined ? content : undefined,
     language: inferOutputLanguage(
@@ -164,7 +268,122 @@ function parseStructuredOutput(text: string): StructuredOutput | undefined {
       firstText(stringValue(details?.path), stringValue(call?.path)),
       content,
     ),
+    hasError: error !== undefined,
   };
+}
+
+function presentOutput(
+  content: string | undefined,
+  toolName: string,
+  tone: ToolTone,
+  explicitLanguage?: string,
+): OutputPresentation | undefined {
+  const trimmed = content?.trim() ?? "";
+  if (trimmed === "") return fallbackSummary(tone);
+
+  const json = parseJson(trimmed);
+  if (json.parsed) {
+    if (isEmptyJsonValue(json.value)) {
+      return { summary: emptyOutputSummary(toolName) };
+    }
+    return {
+      summary: jsonOutputSummary(json.value, toolName),
+      detailText: trimmed,
+      language: explicitLanguage ?? "json",
+    };
+  }
+
+  const lines = trimmed.split("\n");
+  const firstLine = lines.find((line) => line.trim() !== "")?.trim();
+  const language = explicitLanguage ?? inferContentLanguage(content);
+  const summary = firstLine === undefined
+    ? fallbackSummary(tone)?.summary
+    : isStructuralOnlyLine(firstLine)
+      ? `${lines.length} lines of output.`
+      : textOutputSummary(lines, toolName);
+  if (summary === undefined) return undefined;
+  return {
+    summary,
+    detailText: lines.length > 1 || language !== undefined ? trimmed : undefined,
+    language,
+  };
+}
+
+function parseJson(value: string): { readonly parsed: true; readonly value: unknown } | { readonly parsed: false } {
+  if (!/^[\[{]/.test(value) && value !== "null") return { parsed: false };
+  try {
+    return { parsed: true, value: JSON.parse(value) as unknown };
+  } catch {
+    return { parsed: false };
+  }
+}
+
+function isEmptyJsonValue(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  const record = asRecord(value);
+  return record !== undefined && Object.keys(record).length === 0;
+}
+
+function emptyOutputSummary(toolName: string): string {
+  const normalized = toolName.toLocaleLowerCase();
+  if (/grep|search|find/.test(normalized)) return "No matches found.";
+  if (/glob|list|(?:^|[_-])ls(?:$|[_-])|directory/.test(normalized)) return "No entries found.";
+  return "Completed with no output.";
+}
+
+function jsonOutputSummary(value: unknown, toolName: string): string {
+  if (Array.isArray(value)) {
+    const matches = /grep|search|find/.test(toolName.toLocaleLowerCase());
+    const noun = matches
+      ? value.length === 1 ? "match" : "matches"
+      : value.length === 1 ? "item" : "items";
+    return `${value.length} ${noun}.`;
+  }
+  const record = asRecord(value);
+  if (record !== undefined) {
+    const fields = Object.keys(record).length;
+    return `${fields} field${fields === 1 ? "" : "s"} of structured output.`;
+  }
+  return "Structured output available.";
+}
+
+function isStructuralOnlyLine(value: string): boolean {
+  return /^[\[\]\{\},]+$/.test(value);
+}
+
+function textOutputSummary(lines: readonly string[], toolName: string): string {
+  const normalized = toolName.toLocaleLowerCase();
+  const lineCount = lines.length;
+  if (/(?:^|[_-])(?:read|read_file|view_file)(?:$|[_-])/.test(normalized)) {
+    return `${lineCount} line${lineCount === 1 ? "" : "s"} read.`;
+  }
+  if (lineCount > 1) return `${lineCount} lines of output.`;
+  return boundedSummary(lines[0]?.trim() ?? "");
+}
+
+function boundedOutput(text: string): { readonly text: string; readonly omittedLines: number } {
+  const lines = text.split("\n");
+  return {
+    text: lines.slice(0, MAX_VISIBLE_OUTPUT_LINES).join("\n"),
+    omittedLines: Math.max(0, lines.length - MAX_VISIBLE_OUTPUT_LINES),
+  };
+}
+
+function outputPreview(text: string): OutputPreview {
+  const lines = text.split("\n");
+  const linePreview = lines.slice(0, OUTPUT_PREVIEW_LINES).join("\n");
+  if (lines.length > OUTPUT_PREVIEW_LINES) {
+    return { text: linePreview, truncated: true };
+  }
+  if (linePreview.length > OUTPUT_PREVIEW_CHARACTERS) {
+    return {
+      text: `${linePreview.slice(0, OUTPUT_PREVIEW_CHARACTERS - 1).trimEnd()}…`,
+      truncated: true,
+    };
+  }
+  return { text: linePreview, truncated: false };
 }
 
 function toolInputLanguage(toolName: string): string | undefined {
@@ -263,18 +482,14 @@ function firstText(...values: Array<string | undefined>): string | undefined {
   return values.find((value) => value !== undefined);
 }
 
-function summarizePlainOutput(lines: readonly string[], tone: ToolTone): string {
-  const firstLine = lines.find((line) => line.trim() !== "")?.trim();
-  return firstLine === undefined ? fallbackSummary(tone) : boundedSummary(firstLine);
-}
-
-function fallbackSummary(tone: ToolTone): string {
+function fallbackSummary(tone: ToolTone): OutputPresentation | undefined {
   switch (tone) {
-    case "success": return "Completed.";
-    case "danger": return "The tool did not complete successfully.";
-    case "warning": return "The tool needs attention.";
-    case "info": return "The tool is running.";
-    case "neutral": return "Tool activity was recorded.";
+    case "danger": return { summary: "The tool did not complete successfully." };
+    case "warning": return { summary: "The tool needs attention." };
+    case "success":
+    case "info":
+    case "neutral":
+      return undefined;
   }
 }
 

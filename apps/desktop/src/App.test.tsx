@@ -23,6 +23,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import { Icon } from "./ui/icons";
+import { readLastSession, writeLastSession } from "./preferences";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
@@ -429,7 +430,12 @@ describe("desktop coding-agent components", () => {
 
     const output = Array.from({ length: 245 }, (_, index) => `line ${index + 1}`).join("\n");
     render(<ToolCard tool={{ key: "tool", toolName: "shell", text: output, status: "succeeded" }} />);
+    expect(screen.getByText("245 lines of output.")).toBeTruthy();
+    expect(screen.getByLabelText("shell output content").textContent).toContain("line 3");
+    expect(screen.getByLabelText("shell output content").textContent).not.toContain("line 4");
+    await user.click(screen.getByRole("button", { name: "Expand shell output" }));
     expect(screen.getByText("5 output lines omitted from this view.")).toBeTruthy();
+    expect(screen.getByLabelText("shell output content").textContent).toContain("line 240");
     expect(screen.queryByText("duration not recorded")).toBeNull();
     expect(screen.queryByText("risk not classified")).toBeNull();
   });
@@ -468,7 +474,7 @@ describe("desktop coding-agent components", () => {
       displayName: "Read file",
       status: "Ok",
       tone: "success",
-      summary: "pub fn ready() -> bool { true }",
+      summary: "1 line read.",
       detailKind: "output",
       detailText: "pub fn ready() -> bool { true }",
       detailLanguage: "rust",
@@ -476,10 +482,122 @@ describe("desktop coding-agent components", () => {
 
     render(<ToolCard tool={tool} />);
     expect(screen.getByText("path=src/lib.rs")).toBeTruthy();
-    expect(screen.getByText("View output")).toBeTruthy();
+    expect(screen.getByText("Result")).toBeTruthy();
+    expect(screen.getByText("1 line read.")).toBeTruthy();
+    expect(screen.getByText("Output")).toBeTruthy();
     expect(screen.getByText("Rust · 1 line")).toBeTruthy();
-    expect(screen.getByLabelText("read_file output").querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(screen.getByLabelText("read_file output content").querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(screen.queryByRole("button", { name: /show output|show all/i })).toBeNull();
     expect(screen.queryByText("Tool activity was recorded.")).toBeNull();
+  });
+
+  it("treats empty structured tool payloads as compact semantic results", () => {
+    const text = JSON.stringify({
+      content: "[]",
+      meta: {
+        details: {
+          call: { summary: "path=crates/sigil-kernel/src pattern=unwrap" },
+        },
+      },
+      status: "ok",
+    });
+    const tool = { key: "empty-grep", toolName: "grep", text };
+
+    expect(presentTool(tool)).toMatchObject({
+      displayName: "Grep",
+      status: "Ok",
+      tone: "success",
+      summary: "No matches found.",
+      input: "path=crates/sigil-kernel/src pattern=unwrap",
+    });
+    expect(presentTool(tool).detailKind).toBeUndefined();
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("No matches found.")).toBeTruthy();
+    expect(screen.getByLabelText("grep input")).toBeTruthy();
+    expect(screen.queryByText("Command")).toBeNull();
+    expect(screen.queryByText("View output")).toBeNull();
+    expect(screen.queryByText("[]")).toBeNull();
+  });
+
+  it("summarizes non-empty JSON collections and reveals structured output on demand", async () => {
+    const user = userEvent.setup();
+    const content = JSON.stringify([
+      { path: "src/one.rs", line: 4 },
+      { path: "src/two.rs", line: 9 },
+    ], null, 2);
+    const text = JSON.stringify({
+      content,
+      meta: {
+        details: {
+          call: { summary: "path=src pattern=todo" },
+        },
+      },
+      status: "ok",
+    });
+    const tool = { key: "grep-results", toolName: "grep", text };
+
+    expect(presentTool(tool)).toMatchObject({
+      summary: "2 matches.",
+      detailKind: "output",
+      detailLanguage: "json",
+    });
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("Result")).toBeTruthy();
+    expect(screen.getByText("2 matches.")).toBeTruthy();
+    expect(screen.getByText("Json · 10 lines")).toBeTruthy();
+    expect(screen.queryByLabelText("grep output content")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Expand grep output" }));
+    expect(screen.getByLabelText("grep output content")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse grep output" })).toBeTruthy();
+  });
+
+  it("keeps raw JSON objects visible instead of mistaking them for tool envelopes", () => {
+    const tool = {
+      key: "raw-json-result",
+      toolName: "inspect",
+      text: JSON.stringify({ path: "src/main.rs", lines: 42 }, null, 2),
+      status: "ok",
+    };
+
+    expect(presentTool(tool)).toMatchObject({
+      summary: "2 fields of structured output.",
+      detailKind: "output",
+      detailLanguage: "json",
+    });
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("2 fields of structured output.")).toBeTruthy();
+    expect(screen.getByText("Json · 4 lines")).toBeTruthy();
+  });
+
+  it("labels scalar shell output as a result instead of leaving a bare number", () => {
+    const tool = {
+      key: "shell-count",
+      toolName: "bash",
+      text: JSON.stringify({
+        content: "1551",
+        meta: {
+          details: {
+            call: { command: "grep -rn 'pub fn' crates/sigil-kernel/src | wc -l" },
+          },
+        },
+        status: "ok",
+      }),
+    };
+
+    expect(presentTool(tool)).toMatchObject({
+      summary: "1551",
+      input: "grep -rn 'pub fn' crates/sigil-kernel/src | wc -l",
+    });
+    expect(presentTool(tool).detailKind).toBeUndefined();
+
+    render(<ToolCard tool={tool} />);
+    expect(screen.getByText("Result")).toBeTruthy();
+    expect(screen.getByText("1551").tagName).toBe("P");
+    expect(screen.queryByText("View output")).toBeNull();
+    expect(screen.queryByRole("button", { name: /show output|show all/i })).toBeNull();
   });
 });
 
@@ -668,6 +786,55 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
     expect(openRecentWorkspace).toHaveBeenCalledWith(workspace.id);
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
+  });
+
+  it("restores the last selected conversation after the workspace is ready", async () => {
+    writeLastSession(workspace.id, {
+      sessionRef: "last-session.jsonl",
+      sessionId: "durable-last-session",
+      label: "Last selected conversation",
+    });
+    const openSession = vi.fn(async () => ({
+      id: "http-restored-session",
+      label: "Last selected conversation",
+      runCount: 2,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      openSession,
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Last selected conversation" })).toBeTruthy();
+    expect(openSession).toHaveBeenCalledWith(workspace.id, {
+      sessionRef: "last-session.jsonl",
+      sessionId: "durable-last-session",
+      label: "Last selected conversation",
+    });
+  });
+
+  it("falls back to the conversation list when the remembered session is stale", async () => {
+    writeLastSession(workspace.id, {
+      sessionRef: "missing-session.jsonl",
+      sessionId: "durable-missing-session",
+      label: "Missing conversation",
+    });
+    const openSession = vi.fn(async () => Promise.reject(new Error("missing")));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      openSession,
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
+    expect(readLastSession(workspace.id)).toBeUndefined();
   });
 
   it("retries the exact recent workspace and exposes only bounded safe recovery details", async () => {
@@ -1206,7 +1373,7 @@ describe("desktop workspace and history shell", () => {
     expect(navigation.querySelector(".history-skeleton")).toBeNull();
   });
 
-  it("opens canonical display items and pages older messages in chronological order", async () => {
+  it("opens canonical display items and automatically pages older messages at the top", async () => {
     const user = userEvent.setup();
     const displayQueries: Array<string | undefined> = [];
     const bridge = bridgeWith({
@@ -1338,7 +1505,10 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: /^History with messages/ }));
     expect(await screen.findByText("cargo test passed")).toBeTruthy();
     expect(screen.getByText("The change is complete.")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /Load earlier messages/ }));
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    fireEvent.wheel(timeline);
+    timeline.scrollTop = 0;
+    fireEvent.scroll(timeline);
     const older = await screen.findByText("Fix the parser");
     const latest = screen.getByText("The change is complete.");
     expect(older.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
@@ -2231,7 +2401,13 @@ describe("desktop workspace and history shell", () => {
     expect(document.querySelector("#verification-inspector")).toBeNull();
     const timeline = screen.getByRole("log", { name: "Conversation timeline" });
     const composer = screen.getByLabelText("Message Sigil") as HTMLTextAreaElement;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+    });
+    fireEvent.pointerEnter(timeline);
     timeline.scrollTop = 72;
+    fireEvent.scroll(timeline);
     await user.type(composer, "Preserve this draft");
     const reviewTrigger = await screen.findByRole("button", { name: "Open verification: passed" });
     await user.click(reviewTrigger);
@@ -2947,12 +3123,77 @@ describe("desktop workspace and history shell", () => {
     });
     expect(timeline.scrollTop).toBe(600);
 
+    fireEvent.wheel(timeline);
     timeline.scrollTop = 100;
     fireEvent.scroll(timeline);
     act(() => {
       eventListener?.({ ...base, sequence: 3, runSequence: "3", provisionalId: "live-scroll-answer", kind: "assistant_message", text: "Second" });
     });
     expect(timeline.scrollTop).toBe(100);
+  });
+
+  it("preserves the long-response viewport when focus moves outside the timeline", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 900 },
+    });
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-long-final",
+      replayable: false,
+    };
+    act(() => {
+      eventListener?.({
+        ...base,
+        sequence: 1,
+        runSequence: "1",
+        provisionalId: "live-long-final",
+        kind: "assistant_message",
+        assistantKind: "final_answer",
+        text: "A long final response",
+      });
+    });
+    expect(await screen.findByText("A long final response")).toBeTruthy();
+
+    fireEvent.pointerDown(timeline);
+    timeline.scrollTop = 800;
+    fireEvent.scroll(timeline);
+
+    const composer = screen.getByRole("combobox", { name: "Message Sigil" });
+    fireEvent.pointerDown(composer);
+    timeline.scrollTop = 240;
+    fireEvent.scroll(timeline);
+    fireEvent.focus(composer);
+    await waitFor(() => expect(timeline.scrollTop).toBe(800));
+
+    fireEvent.wheel(timeline);
+    timeline.scrollTop = 360;
+    fireEvent.scroll(timeline);
+    fireEvent.pointerDown(composer);
+    timeline.scrollTop = 180;
+    fireEvent.scroll(timeline);
+    fireEvent.focus(composer);
+    await waitFor(() => expect(timeline.scrollTop).toBe(360));
   });
 
   it("preserves the visible reader offset when canonical refresh reconciles a live item", async () => {
@@ -3123,6 +3364,7 @@ describe("desktop workspace and history shell", () => {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
     });
+    fireEvent.wheel(timeline);
     timeline.scrollTop = 300;
     fireEvent.scroll(timeline);
     const rect = (top: number, bottom: number): DOMRect => ({

@@ -31,6 +31,10 @@ describe("desktop UI catalog contract", () => {
       "verification-failed-diff",
       "long-copy",
       "missing-optional-metadata",
+      "compact-empty-tool-result",
+      "compact-json-tool-result",
+      "compact-scalar-tool-result",
+      "compact-text-tool-result",
     ]);
 
     for (const fixture of catalogFixtures) {
@@ -142,6 +146,10 @@ describe("desktop UI catalog contract", () => {
     expect(minimalTool?.toolName).toBe("shell");
     expect(minimalTool?.duration).toBeUndefined();
     expect(minimalTool?.risk).toBeUndefined();
+    expect(fixtures.get("compact-empty-tool-result")?.tool?.toolName).toBe("grep");
+    expect(fixtures.get("compact-json-tool-result")?.tool?.toolName).toBe("grep");
+    expect(fixtures.get("compact-scalar-tool-result")?.tool?.toolName).toBe("bash");
+    expect(fixtures.get("compact-text-tool-result")?.tool?.toolName).toBe("read_file");
   });
 
   it("renders missing optional tool metadata without placeholder noise", () => {
@@ -150,6 +158,35 @@ describe("desktop UI catalog contract", () => {
     render(createElement(ToolCard, { tool: tool! }));
     expect(screen.queryByText(/duration not recorded|risk not classified/i)).toBeNull();
     expect(screen.getByText("Shell")).toBeTruthy();
+  });
+
+  it("renders an empty structured tool result without raw brackets or a redundant disclosure", () => {
+    const tool = catalogFixtures.find(({ id }) => id === "compact-empty-tool-result")?.tool;
+    expect(tool).toBeDefined();
+    render(createElement(ToolCard, { tool: tool! }));
+    expect(screen.getByText("No matches found.")).toBeTruthy();
+    expect(screen.getByLabelText("grep input")).toBeTruthy();
+    expect(screen.queryByText("[]")).toBeNull();
+    expect(screen.queryByText("View output")).toBeNull();
+  });
+
+  it("renders scalar and multiline results with a consistent result hierarchy", () => {
+    const scalar = catalogFixtures.find(({ id }) => id === "compact-scalar-tool-result")?.tool;
+    const text = catalogFixtures.find(({ id }) => id === "compact-text-tool-result")?.tool;
+    expect(scalar).toBeDefined();
+    expect(text).toBeDefined();
+
+    const scalarRender = render(createElement(ToolCard, { tool: scalar! }));
+    expect(screen.getByText("Result")).toBeTruthy();
+    expect(screen.getByText("1551")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /show output|show all/i })).toBeNull();
+    scalarRender.unmount();
+
+    render(createElement(ToolCard, { tool: text! }));
+    expect(screen.getByText("7 lines read.")).toBeTruthy();
+    expect(screen.getByLabelText("read_file output content").textContent).toContain("fmt");
+    expect(screen.getByLabelText("read_file output content").textContent).not.toContain("pin::Pin");
+    expect(screen.getByRole("button", { name: "Expand read_file output" })).toBeTruthy();
   });
 
   it("provides a runnable catalog surface for theme and viewport inspection", () => {

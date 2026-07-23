@@ -12,7 +12,12 @@ import { SettingsPage } from "./features/settings/SettingsPage";
 import { SupportPage } from "./features/support/SupportPage";
 import { DESKTOP_ROUTE_MAP, useDesktopRouter } from "./features/navigation/useDesktopRouter";
 import { WorkspaceSwitcher } from "./features/workspaces/WorkspaceSwitcher";
-import { readDefaultModel, readReopenLastWorkspace } from "./preferences";
+import {
+  readDefaultModel,
+  readLastSession,
+  readReopenLastWorkspace,
+  writeLastSession,
+} from "./preferences";
 import type {
   CatalogEntry,
   CatalogPage,
@@ -128,6 +133,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const sessionSearchRef = useRef<HTMLInputElement>(null);
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
   const sessionRenameInputRef = useRef<HTMLInputElement>(null);
+  const sessionSelectionEpoch = useRef(0);
 
   const dismissWorkspaceClose = useCallback(() => {
     if (pendingWorkspaceClose !== undefined) {
@@ -316,6 +322,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   }, [activeWorkspaceId, loadHistory]);
 
   useEffect(() => {
+    const selectionEpoch = ++sessionSelectionEpoch.current;
     setSelectedSession(undefined);
     setSelectedDurableSessionId(undefined);
     setSessionActionState("idle");
@@ -325,7 +332,39 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setWorkspaceRunContext(undefined);
     setDefaultModel(activeWorkspaceId === undefined ? undefined : readDefaultModel(activeWorkspaceId));
     if (activeWorkspaceId !== undefined) setWorkspaceRecovery(undefined);
-  }, [activeWorkspaceId]);
+    if (activeWorkspaceId === undefined) return;
+
+    const remembered = readLastSession(activeWorkspaceId);
+    if (remembered === undefined) return;
+    setSessionActionState("working");
+    setConversationNavigation({
+      kind: "opening",
+      sessionRef: remembered.sessionRef,
+      title: remembered.label ?? "",
+    });
+    void bridge.openSession(activeWorkspaceId, {
+      sessionRef: remembered.sessionRef,
+      sessionId: remembered.sessionId,
+      label: remembered.label,
+    }).then((session) => {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      setSelectedSession(session);
+      setSelectedDurableSessionId(remembered.sessionId);
+      setConversationNavigation((current) =>
+        current?.kind === "opening" && current.sessionRef === remembered.sessionRef
+          ? { ...current, targetSessionId: session.id }
+          : current,
+      );
+      setSessionActionState("idle");
+      setSessionMessage(undefined);
+      setFailedSessionEntry(undefined);
+    }).catch(() => {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      writeLastSession(activeWorkspaceId, undefined);
+      setSessionActionState("idle");
+      setConversationNavigation(undefined);
+    });
+  }, [activeWorkspaceId, bridge]);
 
   const captureRunContext = useCallback((context: RunContext) => {
     setWorkspaceRunContext(context);
@@ -478,6 +517,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   const createSession = async (modelName?: string): Promise<boolean> => {
     if (activeWorkspaceId === undefined) return false;
+    const selectionEpoch = ++sessionSelectionEpoch.current;
+    const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
     setConversationNavigation({ kind: "creating" });
@@ -491,12 +532,24 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setConversationNavigation((current) =>
         current?.kind === "creating" ? { ...current, targetSessionId: session.id } : current,
       );
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       setSelectedSession(session);
-      setSelectedDurableSessionId(session.id);
+      setSelectedDurableSessionId(undefined);
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
-      await loadHistory(activeWorkspaceId);
+      const page = await loadHistory(activeWorkspaceId);
+      const createdEntry = page?.entries.find(
+        (entry) => entry.sessionId !== undefined && !previousSessionRefs.has(entry.sessionRef),
+      );
+      if (createdEntry?.sessionId !== undefined && sessionSelectionEpoch.current === selectionEpoch) {
+        setSelectedDurableSessionId(createdEntry.sessionId);
+        writeLastSession(activeWorkspaceId, {
+          sessionRef: createdEntry.sessionRef,
+          sessionId: createdEntry.sessionId,
+          label: createdEntry.title ?? session.label,
+        });
+      }
       return true;
     } catch {
       setSessionActionState("error");
@@ -513,6 +566,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       navigate("conversation");
       return;
     }
+    const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
     setConversationNavigation({
@@ -527,6 +581,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionId: entry.sessionId,
         label: entry.title,
       });
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setConversationNavigation((current) =>
         current?.kind === "opening" && current.sessionRef === entry.sessionRef
           ? { ...current, targetSessionId: session.id }
@@ -538,7 +593,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionActionState("idle");
       setSessionMessage(undefined);
       setFailedSessionEntry(undefined);
+      writeLastSession(activeWorkspaceId, {
+        sessionRef: entry.sessionRef,
+        sessionId: entry.sessionId,
+        label: entry.title,
+      });
     } catch {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
       setFailedSessionEntry(entry);
@@ -548,6 +609,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
 
   const openForkSession = async (sessionRef: string, sessionId: string) => {
     if (activeWorkspaceId === undefined) return;
+    const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
     setConversationNavigation({
       kind: "opening",
@@ -560,6 +622,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionId,
         label: t("forkCreated"),
       });
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setConversationNavigation((current) => current?.kind === "opening"
         ? { ...current, targetSessionId: session.id }
         : current);
@@ -568,8 +631,14 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
+      writeLastSession(activeWorkspaceId, {
+        sessionRef,
+        sessionId,
+        label: session.label,
+      });
       await loadHistory(activeWorkspaceId);
     } catch {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
       setConversationNavigation(undefined);
@@ -591,8 +660,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionId: pendingSessionRename.entry.sessionId ?? "",
         displayName,
       });
-      if (selectedDurableSessionId === pendingSessionRename.entry.sessionId) {
+      if (
+        pendingSessionRename.entry.sessionId !== undefined
+        && selectedDurableSessionId === pendingSessionRename.entry.sessionId
+      ) {
         setSelectedSession((current) => current === undefined ? current : { ...current, label: displayName });
+        writeLastSession(activeWorkspaceId, {
+          sessionRef: pendingSessionRename.entry.sessionRef,
+          sessionId: pendingSessionRename.entry.sessionId,
+          label: displayName,
+        });
       }
       setPendingSessionRename(undefined);
       setSessionActionState("idle");
@@ -614,8 +691,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionId: pendingSessionDelete.sessionId,
       });
       if (selectedDurableSessionId === pendingSessionDelete.sessionId) {
+        ++sessionSelectionEpoch.current;
         setSelectedSession(undefined);
         setSelectedDurableSessionId(undefined);
+        writeLastSession(activeWorkspaceId, undefined);
       }
       setPendingSessionDelete(undefined);
       setSessionActionState("idle");

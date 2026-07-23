@@ -271,4 +271,96 @@ export const catalogFixtures: readonly CatalogFixture[] = [
       text: "cargo test passed",
     },
   },
+  {
+    id: "compact-empty-tool-result",
+    description: "Compact grep result with an empty structured output payload",
+    ...environment,
+    tool: {
+      key: "catalog-tool-empty-grep",
+      toolName: "grep",
+      text: JSON.stringify({
+        content: "[]",
+        meta: {
+          details: {
+            call: { summary: "path=crates/sigil-kernel/src pattern=unwrap" },
+          },
+        },
+        status: "ok",
+      }),
+      status: "ok",
+    },
+  },
+  {
+    id: "compact-json-tool-result",
+    description: "Compact grep result with a collapsed structured output payload",
+    ...environment,
+    tool: {
+      key: "catalog-tool-json-grep",
+      toolName: "grep",
+      text: JSON.stringify({
+        content: JSON.stringify([
+          { path: "src/one.rs", line: 4 },
+          { path: "src/two.rs", line: 9 },
+        ], null, 2),
+        meta: {
+          details: {
+            call: { summary: "path=src pattern=todo" },
+          },
+        },
+        status: "ok",
+      }),
+      status: "ok",
+    },
+  },
+  {
+    id: "compact-scalar-tool-result",
+    description: "Compact shell command with a labeled scalar result",
+    ...environment,
+    tool: {
+      key: "catalog-tool-scalar-shell",
+      toolName: "bash",
+      text: JSON.stringify({
+        content: "1551",
+        meta: {
+          details: {
+            call: {
+              command: "grep -rn \"pub fn|pub async fn|pub struct|pub enum|pub trait|pub type\" crates/sigil-kernel/src/*.rs | wc -l",
+            },
+          },
+        },
+        status: "ok",
+      }),
+      status: "ok",
+    },
+  },
+  {
+    id: "compact-text-tool-result",
+    description: "Read tool with a three-line output preview and hidden tail",
+    ...environment,
+    tool: {
+      key: "catalog-tool-text-read",
+      toolName: "read_file",
+      text: JSON.stringify({
+        content: [
+          "use std::{",
+          "    collections::{BTreeMap, BTreeSet},",
+          "    fmt,",
+          "    pin::Pin,",
+          "};",
+          "",
+          "use anyhow::Result;",
+        ].join("\n"),
+        meta: {
+          details: {
+            call: {
+              path: "crates/sigil-kernel/src/provider.rs",
+              summary: "path=crates/sigil-kernel/src/provider.rs",
+            },
+          },
+        },
+        status: "ok",
+      }),
+      status: "ok",
+    },
+  },
 ];

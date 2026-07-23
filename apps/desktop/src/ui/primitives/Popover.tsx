@@ -70,7 +70,7 @@ export function Popover({
       event.preventDefault();
       event.stopImmediatePropagation();
       updateOpen(false);
-      triggerRef.current?.focus();
+      triggerRef.current?.focus({ preventScroll: true });
     };
     document.addEventListener("pointerdown", handlePointer);
     document.addEventListener("keydown", handleKey, true);
@@ -175,7 +175,7 @@ export function Menu({ label, accessibleLabel, children }: { readonly label: Rea
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dismiss = () => {
     setOpen(false);
-    window.requestAnimationFrame(() => triggerRef.current?.focus());
+    window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
   };
   return (
     <Popover

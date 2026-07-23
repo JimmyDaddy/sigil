@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 
 import { ApprovalDock } from "../../ApprovalDock";
 import { Composer } from "../../Composer";
+import { ConversationQueuePanel } from "../../ConversationQueuePanel";
 import { DiffViewer } from "../../DiffViewer";
 import { HistoryContent } from "../../HistoryPanel";
 import { Message } from "../../Message";
@@ -23,6 +24,40 @@ import {
   themeColorScheme,
 } from "../../appearance/resolveTheme";
 import type { ResolvedTheme } from "../../appearance/contract";
+import type { ConversationQueueView } from "../../types";
+
+const catalogQueue: ConversationQueueView = {
+  schemaVersion: 1,
+  sessionId: "catalog-session",
+  generation: "catalog-queue-v1",
+  paused: false,
+  totalItems: 2,
+  items: [
+    {
+      entryId: "catalog-queue-first",
+      order: 0,
+      kind: "chat",
+      status: "queued",
+      promptPreview: "Run the focused parser tests next",
+      promptPreviewTruncated: false,
+      promptMaterial: "persisted_safe",
+      dispatchable: false,
+      blockedReason: "foreground_run_active",
+    },
+    {
+      entryId: "catalog-queue-second",
+      order: 1,
+      kind: "chat",
+      status: "queued",
+      promptPreview: "Then summarize any remaining failures",
+      promptPreviewTruncated: false,
+      promptMaterial: "persisted_safe",
+      dispatchable: false,
+      blockedReason: "foreground_run_active",
+    },
+  ],
+  truncated: false,
+};
 
 export function CatalogApp() {
   const [fixtureId, setFixtureId] = useState(catalogFixtures[0]?.id ?? "no-workspace");
@@ -176,17 +211,27 @@ function FixtureSurface({
             permissionMode={permissionMode}
             reasoningEffort={reasoningEffort}
             requestedSkill={undefined}
-            queueCount={0}
-            queuePaused={false}
+            queueCount={catalogQueue.totalItems}
+            queuePaused={catalogQueue.paused}
             queueBusy={false}
+            queuePanel={(
+              <ConversationQueuePanel
+                queue={catalogQueue}
+                busy={false}
+                error={false}
+                reasoningEffort={reasoningEffort}
+                onRefresh={() => undefined}
+                onCommand={async () => false}
+              />
+            )}
             onModelChange={() => undefined}
             onNewSession={() => Promise.resolve(true)}
             onOpenSessionPicker={() => undefined}
             onOpenSettings={() => undefined}
             onOpenSupport={() => undefined}
             onOpenAgentWorkbench={() => undefined}
-          onOpenQueue={() => undefined}
-          onPreviewCompaction={() => undefined}
+            onOpenQueue={() => undefined}
+            onPreviewCompaction={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}
             onReasoningEffortChange={setReasoningEffort}

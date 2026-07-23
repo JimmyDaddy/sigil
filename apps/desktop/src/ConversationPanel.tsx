@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 
 import { ApprovalDock } from "./ApprovalDock";
 import { AgentActivityPanel } from "./AgentActivityPanel";
@@ -84,6 +92,14 @@ interface TimelineAnchor {
   readonly viewportOffset: number;
 }
 
+interface TimelineViewportSnapshot {
+  readonly pinnedToEnd: boolean;
+  readonly scrollTop: number;
+}
+
+const TIMELINE_USER_SCROLL_INTENT_MS = 1_200;
+const TIMELINE_VIEWPORT_RESTORE_FRAMES = 4;
+
 export function ConversationPanel({
   bridge,
   workspaceId,
@@ -148,7 +164,6 @@ export function ConversationPanel({
   const [conversationQueueLoading, setConversationQueueLoading] = useState(false);
   const [conversationQueueError, setConversationQueueError] = useState(false);
   const [conversationQueueReload, setConversationQueueReload] = useState(0);
-  const [conversationQueueOpen, setConversationQueueOpen] = useState(false);
   const [conversationRecovery, setConversationRecovery] = useState<ConversationRecoveryView>();
   const [compactionReview, setCompactionReview] = useState<CompactionReview>();
   const [checkpointRestorePreview, setCheckpointRestorePreview] = useState<CheckpointRestoreReview>();
@@ -157,8 +172,16 @@ export function ConversationPanel({
   const [conversationRecoveryError, setConversationRecoveryError] = useState(false);
   const [conversationRecoveryOpen, setConversationRecoveryOpen] = useState(false);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const transcriptStartRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
   const pendingTimelineAnchor = useRef<TimelineAnchor | undefined>(undefined);
+  const trustedTimelineViewport = useRef<TimelineViewportSnapshot>({
+    pinnedToEnd: true,
+    scrollTop: 0,
+  });
+  const timelineUserScrollIntentUntil = useRef(0);
+  const timelineViewportRestoreFrame = useRef<number | undefined>(undefined);
+  const timelineViewportRestoring = useRef(false);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
@@ -175,6 +198,47 @@ export function ConversationPanel({
   const initialContinuitySessionId = useRef<string | undefined>(undefined);
   const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
   const startRunPendingRef = useRef(false);
+  const markTimelineScrollIntent = useCallback(() => {
+    timelineUserScrollIntentUntil.current =
+      window.performance.now() + TIMELINE_USER_SCROLL_INTENT_MS;
+  }, []);
+  const rememberTrustedTimelineViewport = useCallback((timeline: HTMLDivElement) => {
+    const pinnedToEnd = isTimelineNearEnd(timeline);
+    timelinePinnedToEnd.current = pinnedToEnd;
+    trustedTimelineViewport.current = {
+      pinnedToEnd,
+      scrollTop: timeline.scrollTop,
+    };
+  }, []);
+  const restoreTrustedTimelineViewport = useCallback(() => {
+    const timeline = timelineRef.current;
+    if (timeline === null) return;
+    const snapshot = trustedTimelineViewport.current;
+    const maximumScrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+    const nextScrollTop = snapshot.pinnedToEnd
+      ? maximumScrollTop
+      : Math.min(snapshot.scrollTop, maximumScrollTop);
+    timeline.scrollTop = nextScrollTop;
+    timelinePinnedToEnd.current = snapshot.pinnedToEnd;
+  }, []);
+  const scheduleTrustedTimelineViewportRestore = useCallback(() => {
+    if (timelineViewportRestoreFrame.current !== undefined) {
+      window.cancelAnimationFrame(timelineViewportRestoreFrame.current);
+    }
+    timelineViewportRestoring.current = true;
+    let framesRemaining = TIMELINE_VIEWPORT_RESTORE_FRAMES;
+    const restore = () => {
+      restoreTrustedTimelineViewport();
+      framesRemaining -= 1;
+      if (framesRemaining > 0) {
+        timelineViewportRestoreFrame.current = window.requestAnimationFrame(restore);
+      } else {
+        timelineViewportRestoreFrame.current = undefined;
+        timelineViewportRestoring.current = false;
+      }
+    };
+    timelineViewportRestoreFrame.current = window.requestAnimationFrame(restore);
+  }, [restoreTrustedTimelineViewport]);
   const finishInitialLoadIfReady = useCallback((sessionId: string) => {
     if (
       initialLoadReportedSessionId.current !== sessionId
@@ -193,6 +257,62 @@ export function ConversationPanel({
   useEffect(() => {
     continuityRecoveryActionsRef.current = continuityRecoveryActions;
   }, [continuityRecoveryActions]);
+  useEffect(() => {
+    const eventTargetIsWithinTimeline = (target: EventTarget | null) => {
+      const timeline = timelineRef.current;
+      return timeline !== null && target instanceof Node && timeline.contains(target);
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const timeline = timelineRef.current;
+      if (timeline === null) return;
+      if (eventTargetIsWithinTimeline(event.target)) {
+        markTimelineScrollIntent();
+        return;
+      }
+      // Capture before WebKit applies its focus-reveal scroll adjustment.
+      rememberTrustedTimelineViewport(timeline);
+      timelineUserScrollIntentUntil.current = 0;
+      scheduleTrustedTimelineViewportRestore();
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (eventTargetIsWithinTimeline(event.target)) {
+        markTimelineScrollIntent();
+        return;
+      }
+      timelineUserScrollIntentUntil.current = 0;
+      scheduleTrustedTimelineViewportRestore();
+    };
+    const handleWheel = (event: WheelEvent) => {
+      if (eventTargetIsWithinTimeline(event.target)) markTimelineScrollIntent();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        eventTargetIsWithinTimeline(event.target)
+        && isTimelineScrollKey(event)
+      ) {
+        markTimelineScrollIntent();
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("focusin", handleFocusIn, true);
+    document.addEventListener("wheel", handleWheel, { capture: true, passive: true });
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("focusin", handleFocusIn, true);
+      document.removeEventListener("wheel", handleWheel, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+      if (timelineViewportRestoreFrame.current !== undefined) {
+        window.cancelAnimationFrame(timelineViewportRestoreFrame.current);
+        timelineViewportRestoreFrame.current = undefined;
+      }
+      timelineViewportRestoring.current = false;
+    };
+  }, [
+    markTimelineScrollIntent,
+    rememberTrustedTimelineViewport,
+    scheduleTrustedTimelineViewportRestore,
+  ]);
   useEffect(() => {
     setRun(undefined);
     setAgentActivity(undefined);
@@ -226,7 +346,6 @@ export function ConversationPanel({
     setConversationQueueBusy(false);
     setConversationQueueLoading(false);
     setConversationQueueError(false);
-    setConversationQueueOpen(false);
     setConversationRecovery(undefined);
     setCheckpointRestorePreview(undefined);
     setConversationRecoveryBusy(false);
@@ -243,6 +362,14 @@ export function ConversationPanel({
     initialDisplaySessionId.current = undefined;
     initialContinuitySessionId.current = undefined;
     initialLoadReportedSessionId.current = undefined;
+    timelinePinnedToEnd.current = true;
+    trustedTimelineViewport.current = { pinnedToEnd: true, scrollTop: 0 };
+    timelineUserScrollIntentUntil.current = 0;
+    if (timelineViewportRestoreFrame.current !== undefined) {
+      window.cancelAnimationFrame(timelineViewportRestoreFrame.current);
+      timelineViewportRestoreFrame.current = undefined;
+    }
+    timelineViewportRestoring.current = false;
   }, [session.id, workspaceId]);
 
   useEffect(() => {
@@ -758,13 +885,15 @@ export function ConversationPanel({
         timeline.scrollTop += nextOffset - anchor.viewportOffset;
       }
       pendingTimelineAnchor.current = undefined;
+      rememberTrustedTimelineViewport(timeline);
     } else if (timelinePinnedToEnd.current) {
       timeline.scrollTop = timeline.scrollHeight;
+      rememberTrustedTimelineViewport(timeline);
     }
-  }, [continuityState, rows]);
+  }, [continuityState, rememberTrustedTimelineViewport, rows]);
 
-  const loadEarlier = async () => {
-    if (continuityState.nextCursor === undefined || displayBusy) return;
+  const loadEarlier = useCallback(async () => {
+    if (continuityState.nextCursor === undefined || displayBusy || displayError) return;
     pendingTimelineAnchor.current = captureTimelineAnchor(timelineRef.current);
     setDisplayBusy(true);
     try {
@@ -780,7 +909,47 @@ export function ConversationPanel({
     } finally {
       setDisplayBusy(false);
     }
-  };
+  }, [bridge, continuityState.nextCursor, displayBusy, displayError, session.id, workspaceId]);
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    const sentinel = transcriptStartRef.current;
+    if (
+      timeline === null
+      || sentinel === null
+      || continuityState.nextCursor === undefined
+      || displayBusy
+      || displayError
+      || typeof IntersectionObserver === "undefined"
+    ) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadEarlier();
+      },
+      {
+        root: timeline,
+        rootMargin: "120px 0px 0px",
+        threshold: 0,
+      },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [continuityState.nextCursor, displayBusy, displayError, loadEarlier]);
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    const timelineItems = timeline?.querySelectorAll<HTMLElement>("[data-display-id]");
+    const tail = timelineItems?.[timelineItems.length - 1];
+    if (timeline === null || tail === undefined || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (timelinePinnedToEnd.current) {
+        timeline.scrollTop = timeline.scrollHeight;
+        rememberTrustedTimelineViewport(timeline);
+      }
+    });
+    observer.observe(tail);
+    return () => observer.disconnect();
+  }, [rememberTrustedTimelineViewport, rows]);
 
   const refreshConversationQueue = () => {
     setConversationQueueReload((value) => value + 1);
@@ -1312,10 +1481,27 @@ export function ConversationPanel({
         role="log"
         aria-live="off"
         aria-label={t("conversationTimeline")}
+        onPointerDownCapture={markTimelineScrollIntent}
+        onWheel={markTimelineScrollIntent}
+        onTouchStart={markTimelineScrollIntent}
+        onKeyDownCapture={(event) => {
+          if (isTimelineScrollKey(event.nativeEvent)) markTimelineScrollIntent();
+        }}
         onScroll={(event) => {
           const timeline = event.currentTarget;
-          timelinePinnedToEnd.current =
-            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
+          if (timelineViewportRestoring.current) return;
+          const activeElement = document.activeElement;
+          const focusWithinTimeline =
+            activeElement instanceof Node && timeline.contains(activeElement);
+          const userControlled =
+            focusWithinTimeline
+            || window.performance.now() <= timelineUserScrollIntentUntil.current;
+          if (!userControlled) {
+            scheduleTrustedTimelineViewportRestore();
+            return;
+          }
+          rememberTrustedTimelineViewport(timeline);
+          if (timeline.scrollTop <= 120) void loadEarlier();
         }}
       >
         {attachmentGap || continuityState.gapFacts.length > 0 ? (
@@ -1324,17 +1510,16 @@ export function ConversationPanel({
           </div>
         ) : null}
         {continuityState.nextCursor !== undefined ? (
-          <div className="transcript-pagination">
-            <Button
-              variant="quiet"
-              type="button"
-              disabled={displayBusy}
-              onClick={() => void loadEarlier()}
-            >
-              {displayBusy
-                ? t("loadingEarlierMessages")
-                : t("loadEarlierMessages", { count: remainingDisplayItems(continuityState) })}
-            </Button>
+          <div
+            className={`transcript-pagination${displayBusy ? " is-loading" : ""}`}
+            ref={transcriptStartRef}
+            role="status"
+            aria-label={displayBusy
+              ? t("loadingEarlierMessages")
+              : t("loadEarlierMessages", { count: remainingDisplayItems(continuityState) })}
+          >
+            <span className="transcript-pagination-spinner" aria-hidden="true" />
+            <span>{displayBusy ? t("loadingEarlierMessages") : t("earlierMessagesLoadAutomatically")}</span>
           </div>
         ) : null}
         {displayError || continuityState.contractError !== undefined ? (
@@ -1389,6 +1574,16 @@ export function ConversationPanel({
         queueCount={conversationQueue?.totalItems ?? 0}
         queuePaused={conversationQueue?.paused ?? false}
         queueBusy={conversationQueueBusy || conversationQueueLoading}
+        queuePanel={(
+          <ConversationQueuePanel
+            queue={conversationQueue}
+            busy={conversationQueueBusy || conversationQueueLoading}
+            error={conversationQueueError}
+            reasoningEffort={reasoningEffort}
+            onRefresh={refreshConversationQueue}
+            onCommand={commandConversationQueue}
+          />
+        )}
         onModelChange={(modelName) => {
           setSelectedModelName(modelName);
           const modelOption = runContext?.modelOptions.find(
@@ -1412,7 +1607,6 @@ export function ConversationPanel({
           setExtensionWorkbenchOpen(true);
         }}
         onOpenQueue={() => {
-          setConversationQueueOpen(true);
           refreshConversationQueue();
         }}
         onPreviewCompaction={previewCompaction}
@@ -1435,23 +1629,6 @@ export function ConversationPanel({
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active || submissionBlocked} onRerun={() => void rerunVerification()} />
         </Drawer>
       ) : null}
-      <Drawer
-        id="conversation-queue-inspector"
-        open={conversationQueueOpen}
-        title={t("conversationQueue")}
-        description={t("conversationQueueDetail")}
-        returnFocusRef={composerRef}
-        onOpenChange={setConversationQueueOpen}
-      >
-        <ConversationQueuePanel
-          queue={conversationQueue}
-          busy={conversationQueueBusy || conversationQueueLoading}
-          error={conversationQueueError}
-          reasoningEffort={reasoningEffort}
-          onRefresh={refreshConversationQueue}
-          onCommand={commandConversationQueue}
-        />
-      </Drawer>
       <Drawer
         id="conversation-recovery-inspector"
         open={conversationRecoveryOpen}
@@ -1638,6 +1815,21 @@ function captureTimelineAnchor(timeline: HTMLDivElement | null): TimelineAnchor 
       displayId: element.dataset.displayId,
       viewportOffset: element.getBoundingClientRect().top - timelineTop,
     };
+}
+
+function isTimelineNearEnd(timeline: HTMLDivElement): boolean {
+  return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
+}
+
+function isTimelineScrollKey(event: Pick<KeyboardEvent, "key" | "shiftKey">): boolean {
+  return event.key === "ArrowUp"
+    || event.key === "ArrowDown"
+    || event.key === "PageUp"
+    || event.key === "PageDown"
+    || event.key === "Home"
+    || event.key === "End"
+    || event.key === " "
+    || (event.key === "Spacebar" && !event.shiftKey);
 }
 
 function remainingDisplayItems(state: ConversationContinuityState): string {
