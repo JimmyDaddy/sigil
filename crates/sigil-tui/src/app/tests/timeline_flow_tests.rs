@@ -107,6 +107,8 @@ fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id,
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: child_session_ref,
                 profile_id,
@@ -2465,6 +2467,8 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: session_ref.clone(),
                 profile_id,

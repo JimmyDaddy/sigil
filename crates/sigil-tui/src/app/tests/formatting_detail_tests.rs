@@ -159,6 +159,8 @@ fn agent_thread_tool_blocks_include_mode_source_status_and_background_hint() -> 
     let started_entry = AgentThreadStartedEntry {
         thread_id: thread_id.clone(),
         parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
         thread_session_ref: sigil_kernel::SessionRef::new_relative("children/thread.jsonl")?,
         profile_id,

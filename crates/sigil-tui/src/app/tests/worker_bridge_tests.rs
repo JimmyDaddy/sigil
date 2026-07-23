@@ -1893,6 +1893,8 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: sigil_kernel::SessionRef::new_relative(
                 "children/agents/agent_chat_1.jsonl",
@@ -2042,6 +2044,8 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: sigil_kernel::AgentThreadId::new("agent_task_1")?,
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: sigil_kernel::SessionRef::new_relative(
                 "children/agents/agent_task_1.jsonl",

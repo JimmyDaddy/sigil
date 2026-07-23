@@ -502,6 +502,8 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: child_ref,
             profile_id,
@@ -680,6 +682,8 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: session_ref,
                 profile_id,
@@ -959,6 +963,8 @@ fn agent_graph_summary_uses_synced_entries_without_render_time_file_replay() -> 
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: sigil_kernel::SessionRef::new_relative(
                     "children/thread_1.jsonl",
@@ -1066,6 +1072,8 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: session_ref.clone(),
                 profile_id,

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    AgentApprovalRouteEntry, AgentArtifactRef, AgentDelegationAdmissionEntry,
+    AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId, AgentDelegationAdmissionEntry,
     AgentElicitationRouteEntry, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationSource,
     AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentProfile,
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
@@ -77,6 +77,8 @@ fn sample_started_entry() -> Result<AgentThreadStartedEntry> {
     Ok(AgentThreadStartedEntry {
         thread_id: thread_id("thread_1")?,
         parent_thread_id: Some(thread_id("main")?),
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: session_ref("parent.jsonl")?,
         thread_session_ref: session_ref("children/thread_1.jsonl")?,
         profile_id: profile_id("explore")?,
@@ -101,6 +103,7 @@ fn agent_identifiers_reject_path_unsafe_values() {
     assert!(WorkspaceRootSnapshot::new("").is_err());
     assert!(WorkspaceRootSnapshot::new("workspace\nroot").is_err());
     assert!(AgentRouteId::new("route_1").is_ok());
+    assert!(AgentBatchId::new("batch_1").is_ok());
     assert_eq!(
         AgentProfileSnapshotId::new("snap_1")
             .expect("snapshot id should parse")
@@ -125,6 +128,118 @@ fn agent_identifiers_reject_path_unsafe_values() {
             .as_str(),
         "thread_1"
     );
+}
+
+#[test]
+fn agent_batch_projection_replays_members_status_and_order() -> Result<()> {
+    let batch_id = AgentBatchId::new("batch_1")?;
+    let mut first = sample_started_entry()?;
+    first.batch_id = Some(batch_id.clone());
+    first.batch_member_key = Some(route_id("kernel")?);
+    let mut second = sample_started_entry()?;
+    second.thread_id = thread_id("thread_2")?;
+    second.thread_session_ref = session_ref("children/thread_2.jsonl")?;
+    second.batch_id = Some(batch_id.clone());
+    second.batch_member_key = Some(route_id("runtime")?);
+
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            AgentProfileCapturedEntry {
+                snapshot: sample_snapshot()?,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(first)),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(second)),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            AgentThreadStatusChangedEntry {
+                thread_id: thread_id("thread_2")?,
+                status: AgentThreadStatus::Completed,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ];
+
+    let projection = crate::AgentThreadStateProjection::from_entries(&entries);
+    let batch = projection.batches.get(&batch_id).expect("batch projection");
+    let summary = batch.status_summary(&projection.threads);
+
+    assert_eq!(projection.batch_replay_order, vec![batch_id]);
+    assert_eq!(
+        batch.member_thread_ids,
+        vec![thread_id("thread_1")?, thread_id("thread_2")?]
+    );
+    assert_eq!(
+        batch
+            .member_keys
+            .get(&route_id("kernel")?)
+            .map(AgentThreadId::as_str),
+        Some("thread_1")
+    );
+    assert_eq!(summary.total_members, 2);
+    assert_eq!(summary.active_members, 1);
+    assert_eq!(summary.terminal_members, 1);
+    assert_eq!(summary.problem_members, 0);
+    assert_eq!(projection.graph_summary().total_batches, 1);
+    assert_eq!(projection.graph_summary().active_batches, 1);
+    Ok(())
+}
+
+#[test]
+fn agent_batch_projection_preserves_first_member_key_and_rejects_incomplete_identity() -> Result<()>
+{
+    let batch_id = AgentBatchId::new("batch_1")?;
+    let member_key = route_id("kernel")?;
+    let mut first = sample_started_entry()?;
+    first.batch_id = Some(batch_id.clone());
+    first.batch_member_key = Some(member_key.clone());
+    let mut duplicate = sample_started_entry()?;
+    duplicate.thread_id = thread_id("thread_2")?;
+    duplicate.parent_thread_id = Some(thread_id("other_parent")?);
+    duplicate.thread_session_ref = session_ref("children/thread_2.jsonl")?;
+    duplicate.batch_id = Some(batch_id.clone());
+    duplicate.batch_member_key = Some(member_key.clone());
+    let mut incomplete = sample_started_entry()?;
+    incomplete.thread_id = thread_id("thread_3")?;
+    incomplete.thread_session_ref = session_ref("children/thread_3.jsonl")?;
+    incomplete.batch_id = Some(AgentBatchId::new("batch_incomplete")?);
+
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            AgentProfileCapturedEntry {
+                snapshot: sample_snapshot()?,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(first)),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(duplicate)),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(incomplete)),
+    ];
+
+    let projection = crate::AgentThreadStateProjection::from_entries(&entries);
+    let batch = projection.batches.get(&batch_id).expect("batch projection");
+    let incomplete = projection
+        .threads
+        .get(&thread_id("thread_3")?)
+        .expect("incomplete thread projection");
+
+    assert_eq!(
+        batch
+            .member_keys
+            .get(&member_key)
+            .map(AgentThreadId::as_str),
+        Some("thread_1")
+    );
+    assert_eq!(batch.duplicate_member_keys, 1);
+    assert!(batch.parent_mismatch);
+    assert!(batch.is_degraded());
+    assert_eq!(projection.graph_summary().degraded_batches, 1);
+    assert!(incomplete.batch_identity_incomplete);
+    assert_eq!(incomplete.status, AgentThreadStatus::Unavailable);
+    assert_eq!(
+        incomplete.reason.as_deref(),
+        Some("agent batch identity requires both batch id and member key")
+    );
+    Ok(())
 }
 
 #[test]

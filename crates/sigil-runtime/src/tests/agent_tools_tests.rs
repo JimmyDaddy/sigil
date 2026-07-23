@@ -2573,15 +2573,35 @@ async fn spawn_agents_preflights_then_overlaps_members_without_model_polling() -
             .as_str()
             .is_some_and(|call_id| call_id == format!("{batch_id}-member-kernel"))
     );
+    let projection = session.agent_thread_state_projection();
     assert_eq!(
-        session
-            .agent_thread_state_projection()
+        projection
             .threads
             .values()
             .filter(|thread| thread.status == AgentThreadStatus::Completed)
             .count(),
         2
     );
+    let batch = projection
+        .batches
+        .values()
+        .next()
+        .expect("durable batch projection");
+    assert_eq!(batch.batch_id.as_str(), batch_id);
+    assert_eq!(batch.member_thread_ids.len(), 2);
+    assert_eq!(
+        batch
+            .member_keys
+            .keys()
+            .map(sigil_kernel::AgentRouteId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["kernel", "runtime"]
+    );
+    assert!(batch.member_thread_ids.iter().all(|thread_id| {
+        projection.threads.get(thread_id).is_some_and(|thread| {
+            thread.batch_id.as_ref() == Some(&batch.batch_id) && thread.batch_member_key.is_some()
+        })
+    }));
     assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
     Ok(())
 }
@@ -4934,6 +4954,8 @@ async fn wait_agent_marks_running_thread_without_live_handle_unavailable() -> Re
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: sigil_kernel::SessionRef::new_relative(
                 "children/agents/agent_chat_pending.jsonl",
@@ -6492,6 +6514,8 @@ fn append_projected_agent_thread(
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: sigil_kernel::SessionRef::new_relative(format!(
                 "children/{}.jsonl",

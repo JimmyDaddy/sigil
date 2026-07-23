@@ -9,13 +9,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    AgentInvocationMode, AgentInvocationSource, AgentProfileSource, AgentRole, AgentRouteId,
-    AgentRunInput, AgentRunOptions, AgentThreadId, AgentTrustState, ApprovalHandler, ApprovalMode,
-    EventHandler, ModelMessage, RunCancellationHandle, RunEvent, SequentialTaskRequest, Session,
-    SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptId,
-    TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, WebTaskTreeBudget, child_session_ref,
+    AgentBatchId, AgentInvocationMode, AgentInvocationSource, AgentProfileSource, AgentRole,
+    AgentRouteId, AgentRunInput, AgentRunOptions, AgentThreadId, AgentTrustState, ApprovalHandler,
+    ApprovalMode, EventHandler, ModelMessage, RunCancellationHandle, RunEvent,
+    SequentialTaskRequest, Session, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode,
+    TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess,
+    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudget,
+    child_session_ref,
 };
 
 use crate::{
@@ -160,6 +161,14 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             ));
         }
 
+        let batch_id = AgentBatchId::new(format!(
+            "discovery_{}",
+            short_digest(&hash_text(&format!(
+                "{}:{}",
+                self.task.task_id.as_str(),
+                self.planner_attempt_id.as_str()
+            )))
+        ))?;
         let mut prepared = Vec::with_capacity(probes.len());
         for (sequence, probe) in probes.into_iter().enumerate() {
             let step_id = TaskStepId::new(format!("discovery-{}", probe.probe_id.as_str()))?;
@@ -199,6 +208,8 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 task_id: self.task.task_id.clone(),
                 parent_thread_id: self.planner_thread_id.clone(),
                 parent_depth: 1,
+                batch_id: Some(batch_id.clone()),
+                batch_member_key: Some(probe.probe_id.clone()),
                 parent_session_ref: self.task.parent_session_ref.clone(),
                 plan_version: 0,
                 step,
@@ -394,6 +405,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             "type": "task_discovery_results",
             "task_id": self.task.task_id.as_str(),
             "planner_attempt_id": self.planner_attempt_id.as_str(),
+            "batch_id": batch_id.as_str(),
             "message": "All planner discovery probes are terminal. Use these bounded results now and continue directly to task_plan_update. Do not call request_task_discovery, spawn_agent, spawn_agents, or wait_agent.",
             "members": members,
         });

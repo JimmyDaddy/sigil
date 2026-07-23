@@ -136,6 +136,8 @@ fn agent_thread_sidebar_detail_handles_fully_delivered_result_projection() -> an
     let thread = sigil_kernel::AgentThreadProjection {
         thread_id: thread_id.clone(),
         parent_thread_id: None,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: None,
         thread_session_ref: Some(session_ref.clone()),
         profile_id: Some(sigil_kernel::AgentProfileId::new("explore")?),
@@ -174,6 +176,7 @@ fn agent_thread_sidebar_detail_handles_fully_delivered_result_projection() -> an
         unresolved: false,
         profile_snapshot_missing: false,
         profile_snapshot_mismatch: false,
+        batch_identity_incomplete: false,
     };
 
     let detail = agent_thread_sidebar_detail(&thread, None, false);

@@ -141,6 +141,27 @@ pub(crate) fn info_rail_agent_row_entries(app: &AppState) -> Vec<(usize, Sidebar
             selected_indexes.insert(index);
         }
     }
+    let group_headers = app.agent_sidebar_group_header_indexes();
+    let anchored_indexes = selected_indexes.iter().copied().collect::<Vec<_>>();
+    for anchor in anchored_indexes {
+        if selected_indexes.len() >= INFO_RAIL_AGENT_ROW_LIMIT {
+            break;
+        }
+        if let Some(index) = group_headers
+            .iter()
+            .rev()
+            .copied()
+            .find(|index| *index < anchor)
+        {
+            selected_indexes.insert(index);
+        }
+    }
+    for index in group_headers {
+        if selected_indexes.len() >= INFO_RAIL_AGENT_ROW_LIMIT {
+            break;
+        }
+        selected_indexes.insert(index);
+    }
     for (index, row) in rows.iter().enumerate() {
         if selected_indexes.len() >= INFO_RAIL_AGENT_ROW_LIMIT {
             break;

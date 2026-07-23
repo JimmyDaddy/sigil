@@ -175,6 +175,8 @@ fn approval_source_agent_helper_uses_profile_and_thread_fallbacks() -> anyhow::R
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: profile_thread_id.clone(),
                 parent_thread_id: None,
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: sigil_kernel::SessionRef::new_relative(
                     "children/profile_thread.jsonl",

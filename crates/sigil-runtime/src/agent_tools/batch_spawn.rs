@@ -5,7 +5,7 @@ use super::*;
 
 struct PreparedBatchSpawnMember {
     request_key: AgentRouteId,
-    batch_id: String,
+    batch_id: AgentBatchId,
     call: ToolCall,
     start: crate::AgentChatChildStart,
     child_agent: Agent<Box<dyn Provider>>,
@@ -16,7 +16,7 @@ struct PreparedBatchSpawnMember {
 
 struct StartedBatchSpawnMember {
     request_key: AgentRouteId,
-    batch_id: String,
+    batch_id: AgentBatchId,
     call: ToolCall,
     child_thread: crate::AgentChatChildThread,
     child_agent: Agent<Box<dyn Provider>>,
@@ -77,14 +77,24 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let batch_id = format!(
+        let batch_id = match AgentBatchId::new(format!(
             "batch_{}",
             short_digest(&hash_text(&format!(
                 "{}:{}",
                 parent_session_ref.as_path().display(),
                 call.id
             )))
-        );
+        )) {
+            Ok(batch_id) => batch_id,
+            Err(error) => {
+                return batch_spawn_error(
+                    call,
+                    ToolErrorKind::Internal,
+                    None,
+                    format!("{error:#}"),
+                );
+            }
+        };
         let parent_thread_id = match AgentThreadId::new(MAIN_THREAD_ID) {
             Ok(thread_id) => thread_id,
             Err(error) => {
@@ -262,6 +272,8 @@ impl AgentToolRuntime {
                 budget_scope_id,
                 parent_thread_id: parent_thread_id.clone(),
                 parent_depth: 0,
+                batch_id: Some(batch_id.clone()),
+                batch_member_key: Some(request_key.clone()),
                 parent_session_ref: parent_session_ref.clone(),
                 profile_id: spawn.profile_id,
                 role,
@@ -354,7 +366,7 @@ impl AgentToolRuntime {
                 member.child_options,
                 handler,
                 Some(AgentBatchMemberContext {
-                    batch_id: member.batch_id.clone(),
+                    batch_id: member.batch_id.as_str().to_owned(),
                     request_key: member.request_key.as_str().to_owned(),
                 }),
             );
@@ -393,7 +405,7 @@ impl AgentToolRuntime {
             }
             joined_members.push(json!({
                 "request_key": member.request_key.as_str(),
-                "batch_id": member.batch_id,
+                "batch_id": member.batch_id.as_str(),
                 "thread_id": thread_id.as_str(),
                 "status": "running",
             }));
@@ -406,7 +418,7 @@ impl AgentToolRuntime {
                 "status": "running",
                 "terminal": false,
                 "host_join_registered": true,
-                "batch_id": batch_id,
+                "batch_id": batch_id.as_str(),
                 "member_count": joined_members.len(),
                 "members": joined_members,
                 "next_action": "the host will join every member before the next parent model turn",
@@ -418,7 +430,7 @@ impl AgentToolRuntime {
                     "status": "running",
                     "terminal": false,
                     "host_join_registered": true,
-                    "batch_id": batch_id,
+                    "batch_id": batch_id.as_str(),
                     "member_count": joined_members.len(),
                     "members": joined_members,
                 }),
@@ -428,8 +440,8 @@ impl AgentToolRuntime {
     }
 }
 
-fn batch_spawn_member_call_id(batch_id: &str, request_key: &AgentRouteId) -> String {
-    format!("{batch_id}-member-{}", request_key.as_str())
+fn batch_spawn_member_call_id(batch_id: &AgentBatchId, request_key: &AgentRouteId) -> String {
+    format!("{}-member-{}", batch_id.as_str(), request_key.as_str())
 }
 
 fn batch_spawn_error(

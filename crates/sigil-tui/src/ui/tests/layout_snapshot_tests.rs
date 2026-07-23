@@ -271,6 +271,8 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
         sigil_kernel::AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            batch_id: Some(sigil_kernel::AgentBatchId::new("batch_layout_1")?),
+            batch_member_key: Some(sigil_kernel::AgentRouteId::new("review")?),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: sigil_kernel::SessionRef::new_relative(
                 "children/task_1/step_1-child_1.jsonl",
@@ -310,16 +312,21 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);
 
-    assert_eq!(layout.info_rail_agent_rows.len(), 2);
+    assert_eq!(layout.info_rail_agent_rows.len(), 3);
     let main = layout.info_rail_agent_rows[0];
     assert_eq!(
         layout.hit_target(main.area.x, main.area.y),
         HitTarget::InfoRailAgentRow { index: 0 }
     );
-    let child = layout.info_rail_agent_rows[1];
+    let batch = layout.info_rail_agent_rows[1];
+    assert_eq!(
+        layout.hit_target(batch.area.x, batch.area.y),
+        HitTarget::InfoRailAgentRow { index: 1 }
+    );
+    let child = layout.info_rail_agent_rows[2];
     assert_eq!(
         layout.hit_target(child.area.x, child.area.y),
-        HitTarget::InfoRailAgentRow { index: 1 }
+        HitTarget::InfoRailAgentRow { index: 2 }
     );
     Ok(())
 }

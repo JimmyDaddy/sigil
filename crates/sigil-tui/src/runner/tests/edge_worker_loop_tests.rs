@@ -549,6 +549,8 @@ fn test_agent_thread_started_entry(
     Ok(AgentThreadStartedEntry {
         thread_id: thread_id.clone(),
         parent_thread_id: None,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         thread_session_ref: SessionRef::new_relative(format!(
             "children/{}.jsonl",
@@ -749,6 +751,8 @@ fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
     session.append_control(ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
         thread_id: thread_id.clone(),
         parent_thread_id: None,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: SessionRef::new_relative("session-agent.jsonl")?,
         thread_session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
         profile_id: AgentProfileId::new("explore")?,

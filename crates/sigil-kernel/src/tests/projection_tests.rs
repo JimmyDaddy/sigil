@@ -276,6 +276,8 @@ fn sample_agent_started_entry() -> Result<AgentThreadStartedEntry> {
     Ok(AgentThreadStartedEntry {
         thread_id: AgentThreadId::new("thread_1")?,
         parent_thread_id: Some(AgentThreadId::new("main")?),
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         thread_session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
         profile_id: AgentProfileId::new("explore")?,

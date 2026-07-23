@@ -238,6 +238,8 @@ fn restored_agent_thread_controls_render_user_facing_cards() -> Result<()> {
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: sigil_kernel::SessionRef::new_relative(
                     "children/agents/agent_restore_1.jsonl",

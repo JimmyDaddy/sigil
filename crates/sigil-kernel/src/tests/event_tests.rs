@@ -604,6 +604,8 @@ fn typed_event_decode_covers_task_agent_terminal_and_changeset_family() {
         ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
             thread_id: agent_thread_id(),
             parent_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: session_ref(),
             thread_session_ref: agent_session_ref(),
             profile_id: agent_profile_id(),
@@ -1744,6 +1746,8 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
                 thread_id: agent_thread_id(),
                 parent_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: session_ref(),
                 thread_session_ref: agent_session_ref(),
                 profile_id: agent_profile_id(),

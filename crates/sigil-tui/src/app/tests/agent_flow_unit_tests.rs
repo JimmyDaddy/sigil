@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use super::*;
+use crate::app::SessionViewCache;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
     SessionConfig, SkillConfig, WorkspaceConfig,
@@ -53,6 +54,8 @@ fn test_thread(
     Ok(AgentThreadProjection {
         thread_id: AgentThreadId::new(thread_id)?,
         parent_thread_id: None,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: None,
         thread_session_ref: Some(sigil_kernel::SessionRef::new_relative(format!(
             "children/{thread_id}.jsonl"
@@ -81,6 +84,7 @@ fn test_thread(
         unresolved: false,
         profile_snapshot_missing: false,
         profile_snapshot_mismatch: false,
+        batch_identity_incomplete: false,
     })
 }
 
@@ -109,6 +113,92 @@ fn agent_thread_sidebar_item_uses_objective_profile_and_ordinal_fallbacks() -> a
         from_ordinal.detail,
         "started · agent · unknown · result pending"
     );
+    Ok(())
+}
+
+#[test]
+fn agent_sidebar_groups_batch_members_without_shifting_selectable_ordinals() -> anyhow::Result<()> {
+    let batch_id = sigil_kernel::AgentBatchId::new("batch_1")?;
+    let kernel_key = sigil_kernel::AgentRouteId::new("kernel")?;
+    let runtime_key = sigil_kernel::AgentRouteId::new("runtime")?;
+    let mut kernel = test_thread("thread_kernel", "Inspect kernel", Some("explore"))?;
+    kernel.parent_thread_id = Some(AgentThreadId::new("main")?);
+    kernel.batch_id = Some(batch_id.clone());
+    kernel.batch_member_key = Some(kernel_key.clone());
+    kernel.status = AgentThreadStatus::Running;
+    let mut runtime = test_thread("thread_runtime", "Inspect runtime", Some("explore"))?;
+    runtime.parent_thread_id = Some(AgentThreadId::new("main")?);
+    runtime.batch_id = Some(batch_id.clone());
+    runtime.batch_member_key = Some(runtime_key.clone());
+    runtime.status = AgentThreadStatus::Completed;
+    let kernel_thread_id = kernel.thread_id.clone();
+    let runtime_thread_id = runtime.thread_id.clone();
+    let projection = AgentThreadStateProjection {
+        threads: BTreeMap::from([
+            (kernel_thread_id.clone(), kernel),
+            (runtime_thread_id.clone(), runtime),
+        ]),
+        thread_replay_order: vec![kernel_thread_id.clone(), runtime_thread_id.clone()],
+        batches: BTreeMap::from([(
+            batch_id.clone(),
+            sigil_kernel::AgentBatchProjection {
+                batch_id,
+                parent_thread_id: Some(AgentThreadId::new("main")?),
+                member_thread_ids: vec![kernel_thread_id.clone(), runtime_thread_id.clone()],
+                member_keys: BTreeMap::from([
+                    (kernel_key, kernel_thread_id),
+                    (runtime_key, runtime_thread_id),
+                ]),
+                parent_mismatch: false,
+                duplicate_member_keys: 0,
+            },
+        )]),
+        batch_replay_order: vec![sigil_kernel::AgentBatchId::new("batch_1")?],
+        ..AgentThreadStateProjection::default()
+    };
+
+    let child_items = agent_sidebar_child_items_from_projections(
+        &TaskStateProjection::default(),
+        &projection,
+        &AgentResultContinuationProjection::default(),
+    );
+
+    assert_eq!(child_items.len(), 3);
+    assert_eq!(child_items[0].label, "agent batch 1");
+    assert_eq!(child_items[0].detail, "running · 2 agents · 1 active");
+    assert!(child_items[0].target.is_none());
+    assert!(child_items[0].muted);
+    assert_eq!(child_items[1].label, "↳ Inspect kernel");
+    assert_eq!(child_items[2].label, "↳ Inspect runtime");
+
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_root_config());
+    let cache = SessionViewCache {
+        agent_child_items: child_items.clone(),
+        ..SessionViewCache::default()
+    };
+    *app.session_browser.view_cache.borrow_mut() = cache;
+    let compact_rows = crate::view_model::info_rail_agent_row_entries(&app);
+    assert_eq!(
+        compact_rows
+            .iter()
+            .map(|(index, row)| (*index, row.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "main"), (1, "agent batch 1"), (2, "↳ Inspect kernel")]
+    );
+
+    let mut items = vec![AgentSidebarItem {
+        label: "main".to_owned(),
+        detail: "idle".to_owned(),
+        target: Some(AgentView::Main),
+        thread_id: None,
+        muted: false,
+    }];
+    items.extend(child_items);
+    assert_eq!(selectable_agent_indexes(&items), vec![0, 2, 3]);
+    assert_eq!(selectable_agent_ordinal(&items, 0), Some(1));
+    assert_eq!(selectable_agent_ordinal(&items, 1), None);
+    assert_eq!(selectable_agent_ordinal(&items, 2), Some(2));
+    assert_eq!(selectable_agent_ordinal(&items, 3), Some(3));
     Ok(())
 }
 

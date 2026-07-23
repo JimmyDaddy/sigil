@@ -151,6 +151,8 @@ impl AgentToolRuntime {
                     }
                 },
                 parent_depth: 0,
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref,
                 profile_id: parsed.profile_id.clone(),
                 role,
@@ -794,6 +796,8 @@ impl AgentToolRuntime {
                 budget_scope_id: budget_scope_id.clone(),
                 parent_thread_id,
                 parent_depth: 0,
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref,
                 profile_id: request.profile_id.clone(),
                 role,

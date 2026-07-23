@@ -1,12 +1,12 @@
 use anyhow::Result;
 use sigil_kernel::{
-    AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentRunContextSnapshot, AgentThreadId, AgentThreadResult,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
-    ControlEntry, JsonlSessionStore, ModelMessage, SessionLogEntry, SessionRef,
-    WorkspaceRootSnapshot,
+    AgentBatchId, AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry,
+    AgentProfileId, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRouteId,
+    AgentRunContextSnapshot, AgentThreadId, AgentThreadResult, AgentThreadResultRecordedEntry,
+    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ControlEntry, JsonlSessionStore,
+    ModelMessage, SessionLogEntry, SessionRef, WorkspaceRootSnapshot,
 };
 
 use super::{
@@ -53,6 +53,29 @@ fn agent_graph_product_view_treats_unresolved_continuation_as_active() -> Result
 
     assert_eq!(summary.active_agents, 1);
     assert_eq!(summary.terminal_agents, 0);
+    Ok(())
+}
+
+#[test]
+fn agent_graph_product_view_reports_visible_batch_activity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut entries = agent_entries(temp.path(), AgentThreadStatus::Running)?;
+    for entry in &mut entries {
+        if let SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started)) = entry {
+            started.batch_id = Some(AgentBatchId::new("batch_1")?);
+            started.batch_member_key = Some(AgentRouteId::new("kernel")?);
+        }
+    }
+
+    let summary = agent_graph_product_summary_from_entries(&entries)
+        .expect("batch projection should produce summary");
+
+    assert_eq!(summary.total_batches, 1);
+    assert_eq!(summary.active_batches, 1);
+    assert_eq!(
+        summary.display_line(),
+        "graph: 1 agents · 1 active · 1 batch · 1 active batch"
+    );
     Ok(())
 }
 
@@ -142,6 +165,8 @@ fn agent_entries(
         SessionLogEntry::Control(ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
             thread_id: thread_id.clone(),
             parent_thread_id: Some(AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             thread_session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
             profile_id,

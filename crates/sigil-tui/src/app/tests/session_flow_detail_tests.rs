@@ -1313,6 +1313,8 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(parent_thread_id.clone()),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: session_ref.clone(),
                 profile_id: profile_id.clone(),
@@ -1600,6 +1602,8 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
             sigil_kernel::AgentThreadStartedEntry {
                 thread_id: sigil_kernel::AgentThreadId::new("agent_restore_1")?,
                 parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 thread_session_ref: sigil_kernel::SessionRef::new_relative(
                     "children/agents/agent_restore_1.jsonl",

@@ -394,6 +394,8 @@ fn test_agent_thread_started_entry() -> AgentThreadStartedEntry {
     AgentThreadStartedEntry {
         thread_id: test_agent_thread_id(),
         parent_thread_id: None,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: test_session_ref(),
         thread_session_ref: test_agent_thread_session_ref(),
         profile_id: test_agent_profile_id(),

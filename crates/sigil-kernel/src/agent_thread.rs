@@ -55,6 +55,28 @@ impl AgentThreadId {
     }
 }
 
+/// Stable identifier for one host-owned agent batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct AgentBatchId(String);
+
+impl AgentBatchId {
+    /// Creates a path-safe and control-log-safe batch identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is empty, too long, or contains unstable characters.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_stable_id("agent batch id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Stable identifier for an immutable profile snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -866,6 +888,10 @@ pub struct AgentThreadStartedEntry {
     pub thread_id: AgentThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_thread_id: Option<AgentThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<AgentBatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_member_key: Option<AgentRouteId>,
     pub parent_session_ref: SessionRef,
     pub thread_session_ref: SessionRef,
     pub profile_id: AgentProfileId,
@@ -1116,6 +1142,10 @@ pub struct AgentThreadStateProjection {
     pub threads: BTreeMap<AgentThreadId, AgentThreadProjection>,
     pub latest_thread_id: Option<AgentThreadId>,
     pub thread_replay_order: Vec<AgentThreadId>,
+    #[serde(default)]
+    pub batches: BTreeMap<AgentBatchId, AgentBatchProjection>,
+    #[serde(default)]
+    pub batch_replay_order: Vec<AgentBatchId>,
     pub approval_routes: BTreeMap<AgentRouteId, AgentApprovalRouteEntry>,
     pub elicitation_routes: BTreeMap<AgentRouteId, AgentElicitationRouteEntry>,
     pub message_routes: BTreeMap<AgentRouteId, AgentThreadMessageRoutedEntry>,
@@ -1148,6 +1178,7 @@ impl AgentThreadStateProjection {
     pub fn graph_summary(&self) -> AgentGraphSummary {
         let mut summary = AgentGraphSummary {
             total_threads: self.threads.len() as u64,
+            total_batches: self.batches.len() as u64,
             message_routes: self.message_routes.len() as u64,
             mailbox_messages: self.mailbox_messages.len() as u64,
             approval_routes: self.approval_routes.len() as u64,
@@ -1182,6 +1213,15 @@ impl AgentThreadStateProjection {
                 for path in &result.changed_paths {
                     changed_paths.insert(path.clone());
                 }
+            }
+        }
+        for batch in self.batches.values() {
+            let batch_status = batch.status_summary(&self.threads);
+            if batch_status.active_members > 0 {
+                summary.active_batches += 1;
+            }
+            if batch.is_degraded() {
+                summary.degraded_batches += 1;
             }
         }
         summary.changed_path_count = changed_paths.len() as u64;
@@ -1324,12 +1364,17 @@ impl AgentThreadStateProjection {
 
     fn apply_thread_started(&mut self, entry: &AgentThreadStartedEntry) {
         self.record_thread_replay(&entry.thread_id);
+        self.record_batch_member(entry);
         let thread = self
             .threads
             .entry(entry.thread_id.clone())
             .or_insert_with(|| AgentThreadProjection::from_started(entry));
         let was_unresolved = thread.unresolved;
         thread.parent_thread_id = entry.parent_thread_id.clone();
+        thread.batch_id = entry.batch_id.clone();
+        thread.batch_member_key = entry.batch_member_key.clone();
+        thread.batch_identity_incomplete =
+            entry.batch_id.is_some() != entry.batch_member_key.is_some();
         thread.parent_session_ref = Some(entry.parent_session_ref.clone());
         thread.thread_session_ref = Some(entry.thread_session_ref.clone());
         thread.profile_id = Some(entry.profile_id.clone());
@@ -1432,9 +1477,56 @@ impl AgentThreadStateProjection {
         self.thread_replay_order.push(thread_id.clone());
     }
 
+    fn record_batch_member(&mut self, entry: &AgentThreadStartedEntry) {
+        let (Some(batch_id), Some(member_key)) = (&entry.batch_id, &entry.batch_member_key) else {
+            return;
+        };
+        if !self.batches.contains_key(batch_id) {
+            self.batch_replay_order.push(batch_id.clone());
+            self.batches.insert(
+                batch_id.clone(),
+                AgentBatchProjection {
+                    batch_id: batch_id.clone(),
+                    parent_thread_id: entry.parent_thread_id.clone(),
+                    member_thread_ids: Vec::new(),
+                    member_keys: BTreeMap::new(),
+                    parent_mismatch: false,
+                    duplicate_member_keys: 0,
+                },
+            );
+        }
+        let batch = self
+            .batches
+            .get_mut(batch_id)
+            .expect("agent batch was inserted before member projection");
+        if batch.parent_thread_id != entry.parent_thread_id {
+            batch.parent_mismatch = true;
+        }
+        if !batch.member_thread_ids.contains(&entry.thread_id) {
+            batch.member_thread_ids.push(entry.thread_id.clone());
+        }
+        match batch.member_keys.get(member_key) {
+            Some(existing) if existing != &entry.thread_id => {
+                batch.duplicate_member_keys = batch.duplicate_member_keys.saturating_add(1);
+            }
+            None => {
+                batch
+                    .member_keys
+                    .insert(member_key.clone(), entry.thread_id.clone());
+            }
+            Some(_) => {}
+        }
+    }
+
     pub(crate) fn finalize_replay(&mut self) {
         for thread in self.threads.values_mut() {
             if thread.unresolved {
+                continue;
+            }
+            if thread.batch_identity_incomplete {
+                thread.status = AgentThreadStatus::Unavailable;
+                thread.reason =
+                    Some("agent batch identity requires both batch id and member key".to_owned());
                 continue;
             }
             if thread.status.is_terminal() {
@@ -1486,6 +1578,10 @@ impl AgentThreadStateProjection {
 pub struct AgentThreadProjection {
     pub thread_id: AgentThreadId,
     pub parent_thread_id: Option<AgentThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<AgentBatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_member_key: Option<AgentRouteId>,
     pub parent_session_ref: Option<SessionRef>,
     pub thread_session_ref: Option<SessionRef>,
     pub profile_id: Option<AgentProfileId>,
@@ -1514,6 +1610,8 @@ pub struct AgentThreadProjection {
     pub unresolved: bool,
     pub profile_snapshot_missing: bool,
     pub profile_snapshot_mismatch: bool,
+    #[serde(default)]
+    pub batch_identity_incomplete: bool,
 }
 
 impl AgentThreadProjection {
@@ -1521,6 +1619,8 @@ impl AgentThreadProjection {
         Self {
             thread_id: entry.thread_id.clone(),
             parent_thread_id: entry.parent_thread_id.clone(),
+            batch_id: entry.batch_id.clone(),
+            batch_member_key: entry.batch_member_key.clone(),
             parent_session_ref: Some(entry.parent_session_ref.clone()),
             thread_session_ref: Some(entry.thread_session_ref.clone()),
             profile_id: Some(entry.profile_id.clone()),
@@ -1545,6 +1645,7 @@ impl AgentThreadProjection {
             unresolved: false,
             profile_snapshot_missing: false,
             profile_snapshot_mismatch: false,
+            batch_identity_incomplete: entry.batch_id.is_some() != entry.batch_member_key.is_some(),
         }
     }
 
@@ -1552,6 +1653,8 @@ impl AgentThreadProjection {
         Self {
             thread_id,
             parent_thread_id: None,
+            batch_id: None,
+            batch_member_key: None,
             parent_session_ref: None,
             thread_session_ref: None,
             profile_id: None,
@@ -1576,8 +1679,73 @@ impl AgentThreadProjection {
             unresolved: true,
             profile_snapshot_missing: false,
             profile_snapshot_mismatch: false,
+            batch_identity_incomplete: false,
         }
     }
+}
+
+/// Durable grouping projection for one host-owned batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentBatchProjection {
+    pub batch_id: AgentBatchId,
+    pub parent_thread_id: Option<AgentThreadId>,
+    pub member_thread_ids: Vec<AgentThreadId>,
+    pub member_keys: BTreeMap<AgentRouteId, AgentThreadId>,
+    #[serde(default)]
+    pub parent_mismatch: bool,
+    #[serde(default)]
+    pub duplicate_member_keys: usize,
+}
+
+impl AgentBatchProjection {
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.parent_mismatch || self.duplicate_member_keys > 0
+    }
+
+    #[must_use]
+    pub fn status_summary(
+        &self,
+        threads: &BTreeMap<AgentThreadId, AgentThreadProjection>,
+    ) -> AgentBatchStatusSummary {
+        let mut summary = AgentBatchStatusSummary {
+            total_members: self.member_thread_ids.len(),
+            ..AgentBatchStatusSummary::default()
+        };
+        for thread_id in &self.member_thread_ids {
+            let Some(thread) = threads.get(thread_id) else {
+                summary.unavailable_members = summary.unavailable_members.saturating_add(1);
+                continue;
+            };
+            if thread.status.is_terminal() {
+                summary.terminal_members = summary.terminal_members.saturating_add(1);
+            } else {
+                summary.active_members = summary.active_members.saturating_add(1);
+            }
+            if matches!(
+                thread.status,
+                AgentThreadStatus::Failed
+                    | AgentThreadStatus::Cancelled
+                    | AgentThreadStatus::Interrupted
+                    | AgentThreadStatus::Unavailable
+            ) {
+                summary.problem_members = summary.problem_members.saturating_add(1);
+            }
+        }
+        summary
+    }
+}
+
+/// Compact member status counts for one projected batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentBatchStatusSummary {
+    pub total_members: usize,
+    pub active_members: usize,
+    pub terminal_members: usize,
+    pub problem_members: usize,
+    pub unavailable_members: usize,
 }
 
 /// Projection for one provider run attempt.
@@ -1601,6 +1769,12 @@ pub struct AgentGraphSummary {
     pub active_threads: u64,
     pub terminal_threads: u64,
     pub unresolved_threads: u64,
+    #[serde(default)]
+    pub total_batches: u64,
+    #[serde(default)]
+    pub active_batches: u64,
+    #[serde(default)]
+    pub degraded_batches: u64,
     pub foreground_threads: u64,
     pub background_threads: u64,
     pub join_before_final_threads: u64,

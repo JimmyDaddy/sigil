@@ -14,9 +14,9 @@ use crate::{
 };
 use anyhow::Context;
 use sigil_kernel::{
-    AgentResultContinuationProjection, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus, ControlEntry,
-    JsonlSessionStore, SessionLogEntry, TaskRunProjection, TaskStateProjection,
+    AgentBatchProjection, AgentResultContinuationProjection, AgentThreadDisplayNameEntry,
+    AgentThreadId, AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus,
+    ControlEntry, JsonlSessionStore, SessionLogEntry, TaskRunProjection, TaskStateProjection,
     normalize_task_agent_display_name,
 };
 
@@ -59,6 +59,16 @@ impl AppState {
                 detail: item.detail,
                 selected: index == self.agent_panel.selected,
                 muted: item.muted,
+            })
+            .collect()
+    }
+
+    pub(crate) fn agent_sidebar_group_header_indexes(&self) -> Vec<usize> {
+        self.agent_sidebar_items()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (item.target.is_none() && item.thread_id.is_none()).then_some(index)
             })
             .collect()
     }
@@ -142,14 +152,16 @@ impl AppState {
         }
         let query = arg.trim().to_ascii_lowercase();
         let mut entries = Vec::new();
-        for (index, item) in self.agent_sidebar_items().into_iter().enumerate() {
-            let Some(value) = agent_command_value(&item) else {
+        let items = self.agent_sidebar_items();
+        for (index, item) in items.iter().enumerate() {
+            let Some(value) = agent_command_value(item) else {
                 continue;
             };
-            let label = agent_display_label(&item).to_owned();
+            let ordinal = selectable_agent_ordinal(&items, index).unwrap_or_default();
+            let label = agent_display_label(item).to_owned();
             let search = format!(
                 "{} {} {} {} {}",
-                index + 1,
+                ordinal,
                 label.to_ascii_lowercase(),
                 value.to_ascii_lowercase(),
                 item.label.to_ascii_lowercase(),
@@ -191,17 +203,19 @@ impl AppState {
     fn agent_rename_slash_entries(&self, query: &str) -> Vec<SlashSelectorEntry> {
         let query = query.trim().to_ascii_lowercase();
         let mut entries = Vec::new();
-        for (index, item) in self.agent_sidebar_items().into_iter().enumerate() {
-            let Some(value) = agent_command_value(&item) else {
+        let items = self.agent_sidebar_items();
+        for (index, item) in items.iter().enumerate() {
+            let Some(value) = agent_command_value(item) else {
                 continue;
             };
             if value == "main" {
                 continue;
             }
-            let label = agent_display_label(&item).to_owned();
+            let ordinal = selectable_agent_ordinal(&items, index).unwrap_or_default();
+            let label = agent_display_label(item).to_owned();
             let search = format!(
                 "{} {} {} {}",
-                index + 1,
+                ordinal,
                 label.to_ascii_lowercase(),
                 value.to_ascii_lowercase(),
                 item.detail.to_ascii_lowercase()
@@ -447,7 +461,13 @@ impl AppState {
 
     pub(super) fn refresh_active_agent_view_after_parent_sync(&mut self) {
         let items = self.agent_sidebar_items();
-        if self.agent_panel.selected >= items.len() {
+        if let Some(index) = items.iter().position(|item| {
+            item.target
+                .as_ref()
+                .is_some_and(|target| target == &self.agent_panel.active_view)
+        }) {
+            self.agent_panel.selected = index;
+        } else if self.agent_panel.selected >= items.len() {
             self.agent_panel.selected = items.len().saturating_sub(1);
         }
         if !self.composer_agent_panel_available() {
@@ -514,7 +534,7 @@ impl AppState {
         let items = self.agent_sidebar_items();
         let target_index = items.iter().enumerate().find_map(|(index, item)| {
             let command_value = agent_command_value(item)?;
-            let ordinal = (index + 1).to_string();
+            let ordinal = selectable_agent_ordinal(&items, index)?.to_string();
             let label = agent_display_label(item).to_ascii_lowercase();
             (normalized == command_value.to_ascii_lowercase()
                 || normalized == label
@@ -530,6 +550,7 @@ impl AppState {
             self.last_notice = Some("no agent selected".to_owned());
             return false;
         };
+        let display_label = agent_display_label(&item).to_owned();
         let Some(target) = item.target else {
             self.last_notice = Some(format!("agent focus unavailable: {}", item.detail));
             return false;
@@ -543,8 +564,8 @@ impl AppState {
         }
         self.reload_active_agent_child_transcript();
         self.timeline_scroll_back = 0;
-        self.last_notice = Some(format!("agent focus: {} · {}", item.label, item.detail));
-        self.push_event("agent:focus", format!("{} · {}", item.label, item.detail));
+        self.last_notice = Some(format!("agent focus: {display_label} · {}", item.detail));
+        self.push_event("agent:focus", format!("{display_label} · {}", item.detail));
         true
     }
 
@@ -614,19 +635,17 @@ impl AppState {
 
     fn agent_sidebar_item_index_by_value(&self, value: &str) -> Option<usize> {
         let normalized = value.trim().to_ascii_lowercase();
-        self.agent_sidebar_items()
-            .iter()
-            .enumerate()
-            .find_map(|(index, item)| {
-                let command_value = agent_command_value(item)?;
-                let ordinal = (index + 1).to_string();
-                let label = agent_display_label(item).to_ascii_lowercase();
-                (normalized == command_value.to_ascii_lowercase()
-                    || normalized == label
-                    || normalized == item.label.to_ascii_lowercase()
-                    || normalized == ordinal)
-                    .then_some(index)
-            })
+        let items = self.agent_sidebar_items();
+        items.iter().enumerate().find_map(|(index, item)| {
+            let command_value = agent_command_value(item)?;
+            let ordinal = selectable_agent_ordinal(&items, index)?.to_string();
+            let label = agent_display_label(item).to_ascii_lowercase();
+            (normalized == command_value.to_ascii_lowercase()
+                || normalized == label
+                || normalized == item.label.to_ascii_lowercase()
+                || normalized == ordinal)
+                .then_some(index)
+        })
     }
 
     fn agent_thread_id_for_view(&self, view: &AgentView) -> Option<AgentThreadId> {
@@ -924,6 +943,17 @@ fn selectable_agent_indexes(items: &[AgentSidebarItem]) -> Vec<usize> {
         .collect()
 }
 
+fn selectable_agent_ordinal(items: &[AgentSidebarItem], index: usize) -> Option<usize> {
+    items.get(index)?.target.as_ref()?;
+    Some(
+        items
+            .iter()
+            .take(index.saturating_add(1))
+            .filter(|item| item.target.is_some())
+            .count(),
+    )
+}
+
 fn bounded_composer_agent_rows(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRow> {
     if rows.len() <= COMPOSER_AGENT_VISIBLE_ROWS {
         return rows;
@@ -951,31 +981,115 @@ pub(super) fn agent_sidebar_child_items_from_projections(
     continuation_projection: &AgentResultContinuationProjection,
 ) -> Vec<AgentSidebarItem> {
     let latest_task = task_projection.latest_task();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen_threads = std::collections::BTreeSet::new();
+    let mut seen_batches = std::collections::BTreeSet::new();
     let mut child_ordinal = 0usize;
+    let mut batch_ordinal = 0usize;
     let mut items = Vec::new();
     for thread_id in &agent_projection.thread_replay_order {
-        if !seen.insert(thread_id.clone()) {
+        if seen_threads.contains(thread_id) {
             continue;
         }
-        if let Some(thread) = agent_projection.threads.get(thread_id) {
-            if thread.closed || thread.status == AgentThreadStatus::Closed {
-                continue;
+        let Some(thread) = agent_projection.threads.get(thread_id) else {
+            continue;
+        };
+        if let Some(batch) = thread
+            .batch_id
+            .as_ref()
+            .filter(|batch_id| seen_batches.insert((*batch_id).clone()))
+            .and_then(|batch_id| agent_projection.batches.get(batch_id))
+        {
+            let has_visible_member = batch.member_thread_ids.iter().any(|member_thread_id| {
+                agent_projection
+                    .threads
+                    .get(member_thread_id)
+                    .is_some_and(|member| {
+                        !member.closed && member.status != AgentThreadStatus::Closed
+                    })
+            });
+            if has_visible_member {
+                batch_ordinal += 1;
+                items.push(agent_batch_sidebar_item(
+                    batch,
+                    agent_projection,
+                    batch_ordinal,
+                ));
             }
-            child_ordinal += 1;
-            let continuation_unresolved = continuation_projection
-                .statuses
-                .get(thread_id)
-                .is_some_and(|status| status.is_unresolved());
-            items.push(agent_sidebar_item_from_thread(
-                thread,
-                latest_task,
-                child_ordinal,
-                continuation_unresolved,
-            ));
+            for member_thread_id in &batch.member_thread_ids {
+                if !seen_threads.insert(member_thread_id.clone()) {
+                    continue;
+                }
+                let Some(member) = agent_projection.threads.get(member_thread_id) else {
+                    continue;
+                };
+                if member.closed || member.status == AgentThreadStatus::Closed {
+                    continue;
+                }
+                child_ordinal += 1;
+                let continuation_unresolved = continuation_projection
+                    .statuses
+                    .get(member_thread_id)
+                    .is_some_and(|status| status.is_unresolved());
+                items.push(agent_sidebar_item_from_thread(
+                    member,
+                    latest_task,
+                    child_ordinal,
+                    continuation_unresolved,
+                ));
+            }
+            continue;
         }
+        seen_threads.insert(thread_id.clone());
+        if thread.closed || thread.status == AgentThreadStatus::Closed {
+            continue;
+        }
+        child_ordinal += 1;
+        let continuation_unresolved = continuation_projection
+            .statuses
+            .get(thread_id)
+            .is_some_and(|status| status.is_unresolved());
+        items.push(agent_sidebar_item_from_thread(
+            thread,
+            latest_task,
+            child_ordinal,
+            continuation_unresolved,
+        ));
     }
     items
+}
+
+fn agent_batch_sidebar_item(
+    batch: &AgentBatchProjection,
+    projection: &AgentThreadStateProjection,
+    ordinal: usize,
+) -> AgentSidebarItem {
+    let status = batch.status_summary(&projection.threads);
+    let mut detail = if status.problem_members > 0 || status.unavailable_members > 0 {
+        format!(
+            "needs attention · {} agents · {} affected",
+            status.total_members,
+            status
+                .problem_members
+                .saturating_add(status.unavailable_members)
+        )
+    } else if status.active_members > 0 {
+        format!(
+            "running · {} agents · {} active",
+            status.total_members, status.active_members
+        )
+    } else {
+        format!("completed · {} agents", status.total_members)
+    };
+    if batch.is_degraded() {
+        detail.push_str(" · projection degraded");
+    }
+    AgentSidebarItem {
+        label: format!("agent batch {ordinal}"),
+        detail,
+        target: None,
+        thread_id: None,
+        muted: true,
+    }
 }
 
 fn agent_sidebar_item_from_thread(
@@ -985,6 +1099,11 @@ fn agent_sidebar_item_from_thread(
     continuation_unresolved: bool,
 ) -> AgentSidebarItem {
     let label = agent_thread_display_name(thread, ordinal);
+    let label = if thread.batch_id.is_some() {
+        format!("↳ {label}")
+    } else {
+        label
+    };
     let detail = agent_thread_sidebar_detail(thread, latest_task, continuation_unresolved);
     let session_ref = thread.thread_session_ref.clone();
     let command_value = thread.thread_id.as_str().to_owned();
@@ -1145,7 +1264,7 @@ fn agent_command_value(item: &AgentSidebarItem) -> Option<String> {
 }
 
 fn agent_display_label(item: &AgentSidebarItem) -> &str {
-    &item.label
+    item.label.strip_prefix("↳ ").unwrap_or(&item.label)
 }
 
 const COMPOSER_AGENT_VISIBLE_ROWS: usize = 4;

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource,
+    Agent, AgentApprovalRouteEntry, AgentBatchId, AgentInvocationMode, AgentInvocationSource,
     AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentProfileSource,
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRouteId,
     AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,

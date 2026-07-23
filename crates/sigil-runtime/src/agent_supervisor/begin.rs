@@ -28,6 +28,7 @@ impl AgentSupervisor {
     where
         H: EventHandler + Send + ?Sized,
     {
+        validate_batch_identity_pair(start.batch_id.is_some(), start.batch_member_key.is_some())?;
         let profile_id = profile_id_for_role(start.role)?;
         let resolved_profile = self
             .registry
@@ -78,6 +79,8 @@ impl AgentSupervisor {
             ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(start.parent_thread_id.clone()),
+                batch_id: start.batch_id.clone(),
+                batch_member_key: start.batch_member_key.clone(),
                 parent_session_ref: start.parent_session_ref.clone(),
                 thread_session_ref: start.child_session_ref.clone(),
                 profile_id: profile_id.clone(),
@@ -159,6 +162,7 @@ impl AgentSupervisor {
     where
         H: EventHandler + Send + ?Sized,
     {
+        validate_batch_identity_pair(start.batch_id.is_some(), start.batch_member_key.is_some())?;
         let resolved_profile = self.registry.get(&start.profile_id).with_context(|| {
             format!(
                 "agent profile {} is not registered",
@@ -242,6 +246,8 @@ impl AgentSupervisor {
             ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
                 thread_id: thread_id.clone(),
                 parent_thread_id: Some(start.parent_thread_id.clone()),
+                batch_id: start.batch_id.clone(),
+                batch_member_key: start.batch_member_key.clone(),
                 parent_session_ref: start.parent_session_ref.clone(),
                 thread_session_ref: start.child_session_ref.clone(),
                 profile_id: start.profile_id.clone(),
@@ -323,6 +329,13 @@ impl AgentSupervisor {
             mailbox_rx,
         })
     }
+}
+
+fn validate_batch_identity_pair(has_batch_id: bool, has_member_key: bool) -> Result<()> {
+    if has_batch_id != has_member_key {
+        bail!("agent batch identity requires both batch id and member key");
+    }
+    Ok(())
 }
 
 pub(super) fn begin_attempt_id(thread_id: &AgentThreadId) -> Result<AgentRunAttemptId> {

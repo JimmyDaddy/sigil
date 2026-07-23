@@ -85,6 +85,8 @@ pub struct AgentGraphProductSummary {
     pub total_agents: usize,
     pub active_agents: usize,
     pub terminal_agents: usize,
+    pub total_batches: usize,
+    pub active_batches: usize,
     pub open_routes: u64,
     pub total_tokens: u64,
     pub projection_degraded: bool,
@@ -99,6 +101,22 @@ impl AgentGraphProductSummary {
         }
         if self.terminal_agents > 0 {
             parts.push(format!("{} terminal", self.terminal_agents));
+        }
+        if self.total_batches > 0 {
+            let batch_label = if self.total_batches == 1 {
+                "batch"
+            } else {
+                "batches"
+            };
+            parts.push(format!("{} {batch_label}", self.total_batches));
+        }
+        if self.active_batches > 0 {
+            let active_batch_label = if self.active_batches == 1 {
+                "active batch"
+            } else {
+                "active batches"
+            };
+            parts.push(format!("{} {active_batch_label}", self.active_batches));
         }
         if self.open_routes > 0 {
             parts.push(format!("{} open routes", self.open_routes));
@@ -237,13 +255,52 @@ fn agent_graph_product_summary_from_projections(
                 .map(|usage| usage.total_tokens)
                 .unwrap_or_default()
     });
+    let visible_thread_ids = visible_threads
+        .iter()
+        .map(|thread| &thread.thread_id)
+        .collect::<BTreeSet<_>>();
+    let visible_batches = projection
+        .batches
+        .values()
+        .filter(|batch| {
+            batch
+                .member_thread_ids
+                .iter()
+                .any(|thread_id| visible_thread_ids.contains(thread_id))
+        })
+        .collect::<Vec<_>>();
+    let active_batches = visible_batches
+        .iter()
+        .filter(|batch| {
+            batch.member_thread_ids.iter().any(|thread_id| {
+                projection.threads.get(thread_id).is_some_and(|thread| {
+                    visible_thread_ids.contains(&thread.thread_id)
+                        && !agent_thread_effective_status(
+                            thread,
+                            continuation_projection
+                                .statuses
+                                .get(thread_id)
+                                .is_some_and(|status| status.is_unresolved()),
+                        )
+                        .is_terminal()
+                })
+            })
+        })
+        .count();
+    let graph_summary = projection.graph_summary();
     Some(AgentGraphProductSummary {
         total_agents: visible_threads.len(),
         active_agents,
         terminal_agents,
-        open_routes: projection.graph_summary().open_routes,
+        total_batches: visible_batches.len(),
+        active_batches,
+        open_routes: graph_summary.open_routes,
         total_tokens,
-        projection_degraded,
+        projection_degraded: projection_degraded
+            || visible_batches.iter().any(|batch| batch.is_degraded())
+            || visible_threads
+                .iter()
+                .any(|thread| thread.batch_identity_incomplete),
     })
 }
 

@@ -717,6 +717,8 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
         task_id,
         parent_thread_id: AgentThreadId::new("main")?,
         parent_depth: 0,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         plan_version: 1,
         step,
@@ -743,6 +745,8 @@ fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentCh
         budget_scope_id: TaskId::new("chat_1")?,
         parent_thread_id: AgentThreadId::new("main")?,
         parent_depth: 0,
+        batch_id: None,
+        batch_member_key: None,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         profile_id: profile_id.clone(),
         role: AgentRole::SubagentRead,
@@ -816,6 +820,29 @@ fn supervisor_captures_profile_snapshot_before_spawn() -> Result<()> {
             RunEvent::Control(sigil_kernel::ControlEntry::AgentProfileCaptured(_))
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn supervisor_rejects_incomplete_batch_identity_before_control_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = child_start(step("inspect")?, temp.path().to_path_buf())?;
+    start.batch_id = Some(sigil_kernel::AgentBatchId::new("batch_incomplete")?);
+
+    let error = supervisor
+        .begin_task_child_thread(&mut session, &mut handler, start)
+        .expect_err("incomplete batch identity should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires both batch id and member key")
+    );
+    assert!(session.entries().is_empty());
+    assert!(handler.events.is_empty());
     Ok(())
 }
 
@@ -2139,6 +2166,11 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
             .expect("planner discovery result content should be a string"),
     )?;
     assert_eq!(results["type"], "task_discovery_results");
+    assert!(
+        results["batch_id"]
+            .as_str()
+            .is_some_and(|batch_id| batch_id.starts_with("discovery_"))
+    );
     assert_eq!(results["members"][0]["probe_id"], "kernel");
     assert_eq!(results["members"][1]["probe_id"], "runtime");
     assert!(
@@ -2154,6 +2186,31 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
                 result.status == sigil_kernel::AgentThreadTerminalStatus::Completed
             })
     }));
+    let batch = projection
+        .batches
+        .values()
+        .next()
+        .expect("planner discovery batch projection");
+    assert_eq!(results["batch_id"].as_str(), Some(batch.batch_id.as_str()));
+    let parent_thread_id = batch
+        .parent_thread_id
+        .as_ref()
+        .expect("planner discovery batch should retain its planner parent");
+    assert!(
+        projection
+            .threads
+            .get(parent_thread_id)
+            .is_some_and(|thread| thread.batch_id.is_none())
+    );
+    assert_eq!(batch.member_thread_ids.len(), 2);
+    assert_eq!(
+        batch
+            .member_keys
+            .keys()
+            .map(AgentRouteId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["kernel", "runtime"]
+    );
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }
