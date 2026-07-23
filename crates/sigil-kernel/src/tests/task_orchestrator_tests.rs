@@ -33,10 +33,10 @@ use crate::{
     ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
     ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
     VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
-    stable_workspace_id, task_participant_attempt_id, task_participant_input_hash,
-    task_participant_session_ref, write_file_with_mutation,
+    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
+    WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id, task_participant_attempt_id,
+    task_participant_input_hash, task_participant_session_ref, write_file_with_mutation,
 };
 
 use super::{
@@ -331,7 +331,7 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
             ..crate::AgentRunOutcome::default()
         },
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let readiness = task_step_readiness(
         &session,
@@ -400,24 +400,29 @@ impl TaskChildSessionRunner for StaticChangesetChildRunner {
         if let Some(path) = &self.mutate_parent_file {
             std::fs::write(request.options.workspace_root.join(path), b"mutated")?;
         }
-        let changeset_proposal =
-            if request.step.effective_isolation() == crate::TaskIsolationMode::ChangesetOnly {
+        let changeset_proposal = match request.step.effective_isolation() {
+            crate::TaskIsolationMode::ChangesetOnly => {
                 Some(decode_changeset_only_child_output(&self.final_text)?)
-            } else {
-                None
-            };
-        let changeset_only_after_snapshot_id =
-            if let Some(base_snapshot_id) = request.changeset_only_base_snapshot_id.as_deref() {
-                Some(
-                    crate::validate_changeset_only_parent_snapshot_unchanged_for_task(
-                        _parent_session,
-                        &request.task,
-                        request.plan_version,
-                        &request.step,
-                        &request.options,
-                        base_snapshot_id,
-                    )?,
-                )
+            }
+            crate::TaskIsolationMode::Worktree => {
+                let mut proposal = decode_changeset_only_child_output(&self.final_text)?;
+                proposal.source_isolation = WriteIsolationMode::Worktree;
+                proposal.child_snapshot_id =
+                    Some(WorkspaceSnapshotId::from("snapshot-worktree-child"));
+                Some(proposal)
+            }
+            _ => None,
+        };
+        let isolated_parent_snapshot_id =
+            if let Some(base_snapshot_id) = request.isolated_base_snapshot_id.as_deref() {
+                Some(crate::validate_isolated_parent_snapshot_unchanged_for_task(
+                    _parent_session,
+                    &request.task,
+                    request.plan_version,
+                    &request.step,
+                    &request.options,
+                    base_snapshot_id,
+                )?)
             } else {
                 None
             };
@@ -429,7 +434,7 @@ impl TaskChildSessionRunner for StaticChangesetChildRunner {
             final_answer_ref: None,
             artifact_refs: Vec::new(),
             changeset_proposal,
-            changeset_only_after_snapshot_id,
+            isolated_parent_snapshot_id,
         })
     }
 }
@@ -455,7 +460,7 @@ impl TaskChildSessionRunner for WrongIdentityChildRunner {
             final_answer_ref: None,
             artifact_refs: Vec::new(),
             changeset_proposal: None,
-            changeset_only_after_snapshot_id: None,
+            isolated_parent_snapshot_id: None,
         })
     }
 }
@@ -495,7 +500,7 @@ impl TaskChildSessionRunner for RetryingReadChildRunner {
             final_answer_ref: None,
             artifact_refs: Vec::new(),
             changeset_proposal: None,
-            changeset_only_after_snapshot_id: None,
+            isolated_parent_snapshot_id: None,
         })
     }
 
@@ -838,7 +843,7 @@ fn changeset_batch_child_output(
         changeset_proposal: Some(decode_changeset_only_child_output(
             &changeset_only_child_final_text(&change_id),
         )?),
-        changeset_only_after_snapshot_id: request.changeset_only_base_snapshot_id,
+        isolated_parent_snapshot_id: request.isolated_base_snapshot_id,
     })
 }
 
@@ -851,7 +856,7 @@ fn successful_read_child_output(request: TaskChildSessionRunRequest) -> TaskChil
         final_answer_ref: None,
         artifact_refs: Vec::new(),
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     }
 }
 
@@ -863,7 +868,8 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     assert!(prompt.contains("spawn_agents, or wait_agent"));
     assert!(prompt.contains("role executor for ordinary task-participant reads and edits"));
     assert!(prompt.contains("role subagent_read"));
-    assert!(prompt.contains("role subagent_write only for delegated changeset-only"));
+    assert!(prompt.contains("role subagent_write with isolation changeset_only"));
+    assert!(prompt.contains("isolation worktree"));
     assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
 }
 
@@ -3312,6 +3318,67 @@ async fn changeset_only_child_records_proposal_without_parent_mutation() -> Resu
 }
 
 #[tokio::test]
+async fn worktree_child_records_physical_source_and_child_snapshot_without_parent_lease()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let runner = StaticChangesetChildRunner {
+        final_text: changeset_only_child_final_text("change-worktree-note"),
+        outcome: crate::AgentRunOutcome::default(),
+        mutate_parent_file: None,
+    };
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(runner);
+    let mut session = Session::new("planner", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let options = options_for_workspace(temp.path());
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_worktree")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "isolate note change".to_owned(),
+            },
+            worktree_step()?,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                "edit and test note change in a worktree",
+            )]),
+            options.clone(),
+            options,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("note.txt"))?,
+        "old\n"
+    );
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
+        )
+    }));
+    let projection = session.write_isolation_projection();
+    let produced = projection
+        .isolated_changesets
+        .values()
+        .next()
+        .expect("worktree changeset should be durable");
+    assert_eq!(produced.source_isolation, WriteIsolationMode::Worktree);
+    assert_eq!(
+        produced.child_snapshot_id.as_deref(),
+        Some("snapshot-worktree-child")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn changeset_only_child_registry_filters_unsafe_same_name_tools() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(NamedFixtureTool {
@@ -4708,7 +4775,7 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
         outcome,
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let recovered_output = |outcome| StepRunOutput {
         final_answer_ref: None,
@@ -4717,7 +4784,7 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
         outcome,
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     assert_eq!(
@@ -4893,7 +4960,7 @@ fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let session = Session::new("deepseek", "deepseek-v4-flash");
     let temp = tempfile::tempdir()?;
@@ -4968,7 +5035,7 @@ fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<(
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -5047,7 +5114,7 @@ fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -5110,7 +5177,7 @@ fn task_step_readiness_treats_durable_mutation_replay_failure_as_unknown_dirty()
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -5202,7 +5269,7 @@ fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Res
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -5318,7 +5385,7 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let missing = task_step_readiness(
@@ -5936,7 +6003,7 @@ fn task_step_status_completes_when_only_verification_config_is_missing() -> Resu
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -6012,7 +6079,7 @@ fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -6083,7 +6150,7 @@ fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -6181,7 +6248,7 @@ fn task_step_default_policy_uses_only_current_task_scope() -> Result<()> {
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -6260,7 +6327,7 @@ fn task_step_readiness_uses_projected_workspace_trust() -> Result<()> {
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -6323,7 +6390,7 @@ fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
         },
 
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -7129,6 +7196,19 @@ fn changeset_only_step() -> Result<TaskStepSpec> {
         depends_on: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::ChangesetOnly),
+    })
+}
+
+fn worktree_step() -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: TaskStepId::new("worktree_step")?,
+        title: "isolate change".to_owned(),
+        display_name: None,
+        detail: Some("edit and test in a physical worktree".to_owned()),
+        role: crate::AgentRole::SubagentWrite,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::Worktree),
     })
 }
 

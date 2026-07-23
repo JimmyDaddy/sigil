@@ -255,6 +255,7 @@ fn detached_background_runs_block_session_transitions() {
 
 #[test]
 fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
     let temp = tempfile::tempdir()?;
     let current_path = temp.path().join("current.jsonl");
     let target_path = temp.path().join("target.jsonl");
@@ -312,6 +313,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     let message = transition_session(
         SessionTransitionKind::Switch,
         target_path.clone(),
+        &runtime,
         &root_config,
         &provider_capabilities,
         temp.path(),
@@ -337,6 +339,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     transition_session(
         SessionTransitionKind::Switch,
         target_path.clone(),
+        &runtime,
         &root_config,
         &provider_capabilities,
         temp.path(),
@@ -360,6 +363,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         transition_session(
             SessionTransitionKind::Switch,
             invalid_path,
+            &runtime,
             &root_config,
             &provider_capabilities,
             temp.path(),
@@ -375,6 +379,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
 }
 
 fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
     let temp = tempfile::tempdir()?;
     let current_path = temp.path().join("current.jsonl");
     let target_path = temp.path().join("fork.jsonl");
@@ -432,6 +437,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
     transition_session(
         kind,
         target_path.clone(),
+        &runtime,
         &root_config,
         &capabilities,
         temp.path(),
@@ -462,6 +468,7 @@ fn checkpoint_fork_transition_resets_session_scoped_state() -> Result<()> {
 
 #[test]
 fn session_transition_rebinds_agent_trust_and_tool_surface() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
     let temp = tempfile::tempdir()?;
     let agent_dir = temp.path().join(".sigil/agents/scope-canary");
     std::fs::create_dir_all(&agent_dir)?;
@@ -529,6 +536,7 @@ allowed_tools = ["grep"]
     transition_session(
         SessionTransitionKind::Switch,
         trusted_path,
+        &runtime,
         &root_config,
         &capabilities,
         temp.path(),
@@ -559,6 +567,7 @@ allowed_tools = ["grep"]
     transition_session(
         SessionTransitionKind::Switch,
         untrusted_path,
+        &runtime,
         &root_config,
         &capabilities,
         temp.path(),

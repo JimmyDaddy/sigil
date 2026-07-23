@@ -9,23 +9,28 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, MultiAgentMode,
-    ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
-    ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
-    SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
-    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
-    ToolErrorKind, ToolSpec, changeset_only_child_tool_registry,
-    decode_changeset_only_child_output, task_participant_child_task_id,
-    task_participant_input_hash, task_participant_logical_run_id,
+    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IsolatedWorkspaceBackend,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
+    IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, ProviderCapabilities,
+    ProviderPhysicalAttemptOutcome, ProviderRequestRejection, ProviderRouteCooldownError, RunEvent,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SessionStats,
+    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
+    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
+    TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
+    ToolApproval, ToolCall, ToolErrorKind, ToolSpec, WriteIsolationMode,
+    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
+    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
+    task_participant_logical_run_id, task_step_owner_agent_id,
 };
 
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
+    isolated_workspace::{
+        GitWorktreeMaterializationRequest, MaterializedGitWorktree, materialize_git_worktree,
+    },
     provider_pressure::{
         TaskProviderPressure, TaskProviderRouteConsumer, wrap_task_agent_provider,
     },
@@ -185,9 +190,90 @@ impl AgentSupervisorTaskChildRunner {
                 role: AgentRole::Planner,
                 invocation_mode: AgentInvocationMode::Foreground,
                 invocation_source: AgentInvocationSource::Task,
+                isolated_workspace_id: None,
             },
         )?;
         Ok((child_session, child_thread, child_task_id))
+    }
+
+    async fn prepare_task_worktree<H>(
+        &self,
+        parent_session: &mut Session,
+        handler: &mut H,
+        request: &TaskChildSessionRunRequest,
+    ) -> Result<MaterializedGitWorktree>
+    where
+        H: EventHandler + Send,
+    {
+        let base_snapshot_id = request
+            .isolated_base_snapshot_id
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "worktree task child {} is missing its parent base snapshot",
+                    request.step.step_id.as_str()
+                )
+            })?;
+        let isolated_workspace_id = task_worktree_id(request);
+        let parent_workspace_id = stable_workspace_id(&request.options.workspace_root)?;
+        let owner_agent_id =
+            task_step_owner_agent_id(&request.task, request.plan_version, &request.step);
+        let prepared = IsolatedWorkspacePrepared {
+            isolated_workspace_id: isolated_workspace_id.clone(),
+            parent_workspace_id: parent_workspace_id.clone(),
+            owner_agent_id: owner_agent_id.clone(),
+            isolation_mode: WriteIsolationMode::Worktree,
+            base_snapshot_id: base_snapshot_id.to_owned(),
+            backend: IsolatedWorkspaceBackend::GitWorktree,
+        };
+        append_control(
+            parent_session,
+            handler,
+            ControlEntry::IsolatedWorkspacePrepared(prepared),
+        )?;
+        let materialized = match materialize_git_worktree(GitWorktreeMaterializationRequest {
+            parent_workspace_root: request.options.workspace_root.clone(),
+            isolated_workspace_id: isolated_workspace_id.clone(),
+            base_snapshot_id: base_snapshot_id.to_owned(),
+        })
+        .await
+        {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                append_control(
+                    parent_session,
+                    handler,
+                    ControlEntry::IsolatedWorkspaceCleanupRecorded(
+                        IsolatedWorkspaceCleanupRecorded {
+                            isolated_workspace_id,
+                            status: IsolatedWorkspaceCleanupStatus::Failed,
+                        },
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
+        let created = IsolatedWorkspaceCreated {
+            isolated_workspace_id: materialized.isolated_workspace_id().to_owned(),
+            parent_workspace_id,
+            owner_agent_id,
+            isolation_mode: WriteIsolationMode::Worktree,
+            base_snapshot_id: base_snapshot_id.to_owned(),
+            backend: IsolatedWorkspaceBackend::GitWorktree,
+        };
+        if let Err(error) = append_control(
+            parent_session,
+            handler,
+            ControlEntry::IsolatedWorkspaceCreated(created),
+        ) {
+            let cleanup_error =
+                cleanup_task_worktree(parent_session, handler, materialized).await?;
+            return Err(match cleanup_error {
+                Some(cleanup_error) => error.context(cleanup_error),
+                None => error,
+            });
+        }
+        Ok(materialized)
     }
 
     fn agent_for_step(&self, step: &TaskStepSpec) -> Result<Arc<BoxedAgent>> {
@@ -212,7 +298,7 @@ impl AgentSupervisorTaskChildRunner {
     ) -> Result<PreflightParallelTaskChild> {
         ParallelTaskBatchKind::for_step(&request.step)?;
         if request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly
-            && request.changeset_only_base_snapshot_id.is_none()
+            && request.isolated_base_snapshot_id.is_none()
         {
             anyhow::bail!(
                 "parallel changeset-only task child {} is missing its parent base snapshot",
@@ -248,6 +334,7 @@ impl AgentSupervisorTaskChildRunner {
             role: request.step.role,
             invocation_mode: AgentInvocationMode::JoinBeforeFinal,
             invocation_source: AgentInvocationSource::Task,
+            isolated_workspace_id: None,
         };
         Ok(PreflightParallelTaskChild {
             request,
@@ -548,40 +635,39 @@ impl AgentSupervisorTaskChildRunner {
                 return Err(error);
             }
         };
-        let changeset_only_after_snapshot_id = if let Some(base_snapshot_id) =
-            prepared.request.changeset_only_base_snapshot_id.as_deref()
-        {
-            match sigil_kernel::validate_changeset_only_parent_snapshot_unchanged_for_task(
-                parent_session,
-                &prepared.request.task,
-                prepared.request.plan_version,
-                &prepared.request.step,
-                &prepared.request.options,
-                base_snapshot_id,
-            ) {
-                Ok(snapshot_id) => Some(snapshot_id),
-                Err(error) => {
-                    append_task_child_session(
-                        parent_session,
-                        handler,
-                        &prepared.request,
-                        &prepared.child_task_id,
-                        &prepared.child_session_ref,
-                        TaskChildSessionStatus::Failed,
-                        None,
-                    )?;
-                    supervisor.record_task_child_failure(
-                        parent_session,
-                        handler,
-                        &prepared.child_thread,
-                        format!("{error:#}"),
-                    )?;
-                    return Err(error);
+        let isolated_parent_snapshot_id =
+            if let Some(base_snapshot_id) = prepared.request.isolated_base_snapshot_id.as_deref() {
+                match sigil_kernel::validate_isolated_parent_snapshot_unchanged_for_task(
+                    parent_session,
+                    &prepared.request.task,
+                    prepared.request.plan_version,
+                    &prepared.request.step,
+                    &prepared.request.options,
+                    base_snapshot_id,
+                ) {
+                    Ok(snapshot_id) => Some(snapshot_id),
+                    Err(error) => {
+                        append_task_child_session(
+                            parent_session,
+                            handler,
+                            &prepared.request,
+                            &prepared.child_task_id,
+                            &prepared.child_session_ref,
+                            TaskChildSessionStatus::Failed,
+                            None,
+                        )?;
+                        supervisor.record_task_child_failure(
+                            parent_session,
+                            handler,
+                            &prepared.child_thread,
+                            format!("{error:#}"),
+                        )?;
+                        return Err(error);
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let budget_warning = supervisor
             .validate_usage_budget(&prepared.request.task.task_id, &success.usage)
             .err()
@@ -620,7 +706,7 @@ impl AgentSupervisorTaskChildRunner {
             final_answer_ref: success.materialized.final_answer_ref,
             artifact_refs: success.materialized.extra_artifacts,
             changeset_proposal: success.changeset_proposal,
-            changeset_only_after_snapshot_id,
+            isolated_parent_snapshot_id,
         })
     }
 }
@@ -632,6 +718,71 @@ struct PreflightParallelTaskChild {
     agent: Arc<BoxedAgent>,
     start: AgentTaskChildStart,
     child_session: Session,
+}
+
+fn task_worktree_id(request: &TaskChildSessionRunRequest) -> String {
+    let seed = format!(
+        "{}:{}:{}:{}",
+        request.task.task_id.as_str(),
+        request.plan_version,
+        request.step.step_id.as_str(),
+        request.attempt_id.as_str()
+    );
+    format!(
+        "worktree-{}",
+        stable_event_uuid("sigil-task-worktree", &seed)
+    )
+}
+
+fn task_worktree_changeset_id(request: &TaskChildSessionRunRequest) -> Result<ChangeSetId> {
+    let seed = format!(
+        "{}:{}:{}:{}",
+        request.task.task_id.as_str(),
+        request.plan_version,
+        request.step.step_id.as_str(),
+        request.attempt_id.as_str()
+    );
+    ChangeSetId::new(format!(
+        "changeset-{}",
+        stable_event_uuid("sigil-task-worktree-changeset", &seed)
+    ))
+}
+
+async fn cleanup_task_worktree<H>(
+    parent_session: &mut Session,
+    handler: &mut H,
+    materialized: MaterializedGitWorktree,
+) -> Result<Option<String>>
+where
+    H: EventHandler + Send + ?Sized,
+{
+    let isolated_workspace_id = materialized.isolated_workspace_id().to_owned();
+    match materialized.cleanup().await {
+        Ok(receipt) => {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                    isolated_workspace_id,
+                    status: receipt.status,
+                }),
+            )?;
+            Ok(None)
+        }
+        Err(error) => {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                    isolated_workspace_id,
+                    status: IsolatedWorkspaceCleanupStatus::Failed,
+                }),
+            )?;
+            let message = format!("isolated task worktree cleanup incomplete: {error:#}");
+            let _ = handler.handle(RunEvent::Notice(message.clone()));
+            Ok(Some(message))
+        }
+    }
 }
 
 struct PreparedParallelTaskChild {
@@ -882,216 +1033,272 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        let child_task_id =
-            task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
-        let child_session_ref = request.child_session_ref.clone();
-        let agent = match request.step.role {
-            AgentRole::Planner => self
-                .planner
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("task planner role is not configured"))?,
-            AgentRole::Executor => self
-                .executor
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?,
-            AgentRole::SubagentRead => &self.subagent_read,
-            AgentRole::SubagentWrite => &self.subagent_write,
-        };
-        let child_thread = self.supervisor.begin_task_child_thread(
-            parent_session,
-            handler,
-            AgentTaskChildStart {
-                task_id: request.task.task_id.clone(),
-                parent_thread_id: main_thread_id()?,
-                parent_depth: 0,
-                batch_id: None,
-                batch_member_key: None,
-                parent_session_ref: request.task.parent_session_ref.clone(),
-                plan_version: request.plan_version,
-                step: request.step.clone(),
-                child_task_id: child_task_id.clone(),
-                child_session_ref: child_session_ref.clone(),
-                child_input: request.child_input.clone(),
-                objective: request.task.objective.clone(),
-                workspace_root: request.options.workspace_root.clone(),
-                provider_capabilities: child_provider_capabilities(agent),
-                role: request.step.role,
-                invocation_mode: AgentInvocationMode::Foreground,
-                invocation_source: AgentInvocationSource::Task,
-            },
-        )?;
-        let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
-        append_task_child_session(
-            parent_session,
-            handler,
-            &request,
-            &child_task_id,
-            &child_session_ref,
-            TaskChildSessionStatus::Started,
-            None,
-        )?;
-        let mut child_session = match build_child_session(parent_session, &child_session_ref) {
-            Ok(session) => session,
-            Err(error) => {
-                append_task_child_session(
-                    parent_session,
-                    handler,
-                    &request,
-                    &child_task_id,
-                    &child_session_ref,
-                    TaskChildSessionStatus::Failed,
-                    None,
-                )?;
-                self.supervisor.record_task_child_failure(
-                    parent_session,
-                    handler,
-                    &child_thread,
-                    format!("{error:#}"),
-                )?;
-                return Err(error);
-            }
-        };
-        let mut route_handler = SupervisorTaskApprovalRouteHandler {
-            inner: approval_handler,
-            parent_session,
-            task_request: &request,
-            child_session_ref: &child_session_ref,
-            source_thread_id: &child_thread.thread_id,
-        };
-        let child_input = request.child_input.clone();
-        let options = request.options.clone();
-        let child_run = {
-            let mut participant_handler = TaskParticipantEventHandler { inner: handler };
-            run_task_child_agent_for_step(
-                agent,
-                &mut child_session,
-                child_input,
-                options,
-                &request.step,
-                &mut participant_handler,
-                &mut route_handler,
-            )
-            .await
-        };
-        let output = match child_run {
-            Ok(output) => output,
-            Err(error) => {
-                let error = self.retryable_child_error(&request, agent, &child_session, error);
-                append_task_child_session(
-                    route_handler.parent_session,
-                    handler,
-                    &request,
-                    &child_task_id,
-                    &child_session_ref,
-                    TaskChildSessionStatus::Failed,
-                    None,
-                )?;
-                self.supervisor.record_task_child_failure(
-                    route_handler.parent_session,
-                    handler,
-                    &child_thread,
-                    format!("{error:#}"),
-                )?;
-                return Err(error);
-            }
-        };
-        let postprocessed = async {
-            let changeset_proposal = if request.step.effective_isolation()
-                == sigil_kernel::TaskIsolationMode::ChangesetOnly
-            {
-                Some(decode_changeset_only_child_output(
-                    &output.result.final_text,
-                )?)
+        let mut request = request;
+        let parent_options = request.options.clone();
+        let worktree =
+            if request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::Worktree {
+                if request.step.role != AgentRole::SubagentWrite
+                    || request.step.effective_mode() != TaskStepMode::Write
+                {
+                    anyhow::bail!("worktree task child requires a subagent_write write step");
+                }
+                let materialized = self
+                    .prepare_task_worktree(parent_session, handler, &request)
+                    .await?;
+                request.options.workspace_root = materialized.workspace_root().to_path_buf();
+                request.options.permission_context.workspace_root =
+                    materialized.workspace_root().to_path_buf();
+                Some(materialized)
             } else {
                 None
             };
-            let changeset_only_after_snapshot_id = if let Some(base_snapshot_id) =
-                request.changeset_only_base_snapshot_id.as_deref()
-            {
-                Some(
-                    sigil_kernel::validate_changeset_only_parent_snapshot_unchanged_for_task(
-                        route_handler.parent_session,
-                        &request.task,
-                        request.plan_version,
-                        &request.step,
-                        &request.options,
-                        base_snapshot_id,
-                    )?,
-                )
-            } else {
-                None
+        let run_result: Result<TaskChildSessionRunOutput> = async {
+            let child_task_id =
+                task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
+            let child_session_ref = request.child_session_ref.clone();
+            let agent = match request.step.role {
+                AgentRole::Planner => self
+                    .planner
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("task planner role is not configured"))?,
+                AgentRole::Executor => self
+                    .executor
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?,
+                AgentRole::SubagentRead => &self.subagent_read,
+                AgentRole::SubagentWrite => &self.subagent_write,
             };
-            let materialized = materialize_child_agent_final_answer(
-                &mut child_session,
-                &child_session_ref,
-                &child_thread.thread_id,
-                &output.result,
-            )
-            .await?;
-            let outcome = output.outcome;
-            let usage = usage_summary_from_stats(child_session.stats());
-            let budget_warning = self
-                .supervisor
-                .validate_usage_budget(&request.task.task_id, &usage)
-                .err()
-                .map(|error| format!("{error:#}"));
-            let status = task_child_status_from_outcome(&materialized.final_text, &outcome);
+            let child_thread = self.supervisor.begin_task_child_thread(
+                parent_session,
+                handler,
+                AgentTaskChildStart {
+                    task_id: request.task.task_id.clone(),
+                    parent_thread_id: main_thread_id()?,
+                    parent_depth: 0,
+                    batch_id: None,
+                    batch_member_key: None,
+                    parent_session_ref: request.task.parent_session_ref.clone(),
+                    plan_version: request.plan_version,
+                    step: request.step.clone(),
+                    child_task_id: child_task_id.clone(),
+                    child_session_ref: child_session_ref.clone(),
+                    child_input: request.child_input.clone(),
+                    objective: request.task.objective.clone(),
+                    workspace_root: request.options.workspace_root.clone(),
+                    provider_capabilities: child_provider_capabilities(agent),
+                    role: request.step.role,
+                    invocation_mode: AgentInvocationMode::Foreground,
+                    invocation_source: AgentInvocationSource::Task,
+                    isolated_workspace_id: worktree
+                        .as_ref()
+                        .map(|workspace| workspace.isolated_workspace_id().to_owned()),
+                },
+            )?;
+            let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
             append_task_child_session(
-                route_handler.parent_session,
+                parent_session,
                 handler,
                 &request,
                 &child_task_id,
                 &child_session_ref,
-                status,
-                Some(hash_text(&materialized.final_text)),
+                TaskChildSessionStatus::Started,
+                None,
             )?;
-            self.supervisor.record_task_child_result(
-                route_handler.parent_session,
-                handler,
-                &child_thread,
-                child_session_ref.clone(),
-                status,
-                &materialized,
-                &outcome,
-                Some(usage),
-            )?;
-            if let Some(warning) = budget_warning {
-                let _ = handler.handle(RunEvent::Notice(format!(
-                    "agent budget warning after child completion: {warning}"
-                )));
-            }
-            Ok(TaskChildSessionRunOutput {
-                attempt_id: request.attempt_id.clone(),
-                final_text: materialized.final_text,
-                outcome,
-                child_session_ref: child_session_ref.clone(),
-                final_answer_ref: materialized.final_answer_ref,
-                artifact_refs: materialized.extra_artifacts,
-                changeset_proposal,
-                changeset_only_after_snapshot_id,
-            })
-        }
-        .await;
-        match postprocessed {
-            Ok(output) => Ok(output),
-            Err(error) => {
+            let mut child_session = match build_child_session(parent_session, &child_session_ref) {
+                Ok(session) => session,
+                Err(error) => {
+                    append_task_child_session(
+                        parent_session,
+                        handler,
+                        &request,
+                        &child_task_id,
+                        &child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    self.supervisor.record_task_child_failure(
+                        parent_session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    )?;
+                    return Err(error);
+                }
+            };
+            let mut route_handler = SupervisorTaskApprovalRouteHandler {
+                inner: approval_handler,
+                parent_session,
+                task_request: &request,
+                child_session_ref: &child_session_ref,
+                source_thread_id: &child_thread.thread_id,
+            };
+            let child_input = request.child_input.clone();
+            let options = request.options.clone();
+            let child_run = {
+                let mut participant_handler = TaskParticipantEventHandler { inner: handler };
+                run_task_child_agent_for_step(
+                    agent,
+                    &mut child_session,
+                    child_input,
+                    options,
+                    &request.step,
+                    &mut participant_handler,
+                    &mut route_handler,
+                )
+                .await
+            };
+            let output = match child_run {
+                Ok(output) => output,
+                Err(error) => {
+                    let error = self.retryable_child_error(&request, agent, &child_session, error);
+                    append_task_child_session(
+                        route_handler.parent_session,
+                        handler,
+                        &request,
+                        &child_task_id,
+                        &child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    self.supervisor.record_task_child_failure(
+                        route_handler.parent_session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    )?;
+                    return Err(error);
+                }
+            };
+            let postprocessed = async {
+                let changeset_proposal = match request.step.effective_isolation() {
+                    sigil_kernel::TaskIsolationMode::ChangesetOnly => Some(
+                        decode_changeset_only_child_output(&output.result.final_text)?,
+                    ),
+                    sigil_kernel::TaskIsolationMode::Worktree => {
+                        let workspace = worktree.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("worktree task child lost its materialization receipt")
+                        })?;
+                        Some(
+                            workspace
+                                .extract_changeset(
+                                    task_worktree_changeset_id(&request)?,
+                                    request.step.title.clone(),
+                                    format!(
+                                        "Isolated worktree changes for task step {}",
+                                        request.step.step_id.as_str()
+                                    ),
+                                )
+                                .await?,
+                        )
+                    }
+                    _ => None,
+                };
+                let isolated_parent_snapshot_id =
+                    if let Some(base_snapshot_id) = request.isolated_base_snapshot_id.as_deref() {
+                        Some(
+                            sigil_kernel::validate_isolated_parent_snapshot_unchanged_for_task(
+                                route_handler.parent_session,
+                                &request.task,
+                                request.plan_version,
+                                &request.step,
+                                if worktree.is_some() {
+                                    &parent_options
+                                } else {
+                                    &request.options
+                                },
+                                base_snapshot_id,
+                            )?,
+                        )
+                    } else {
+                        None
+                    };
+                let materialized = materialize_child_agent_final_answer(
+                    &mut child_session,
+                    &child_session_ref,
+                    &child_thread.thread_id,
+                    &output.result,
+                )
+                .await?;
+                let outcome = output.outcome;
+                let usage = usage_summary_from_stats(child_session.stats());
+                let budget_warning = self
+                    .supervisor
+                    .validate_usage_budget(&request.task.task_id, &usage)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                let status = task_child_status_from_outcome(&materialized.final_text, &outcome);
                 append_task_child_session(
                     route_handler.parent_session,
                     handler,
                     &request,
                     &child_task_id,
                     &child_session_ref,
-                    TaskChildSessionStatus::Failed,
-                    None,
+                    status,
+                    Some(hash_text(&materialized.final_text)),
                 )?;
-                self.supervisor.record_task_child_failure(
+                self.supervisor.record_task_child_result(
                     route_handler.parent_session,
                     handler,
                     &child_thread,
-                    format!("{error:#}"),
+                    child_session_ref.clone(),
+                    status,
+                    &materialized,
+                    &outcome,
+                    Some(usage),
                 )?;
-                Err(error)
+                if let Some(warning) = budget_warning {
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent budget warning after child completion: {warning}"
+                    )));
+                }
+                let mut parent_outcome = outcome;
+                if worktree.is_some() {
+                    parent_outcome.changed_files.clear();
+                }
+                Ok(TaskChildSessionRunOutput {
+                    attempt_id: request.attempt_id.clone(),
+                    final_text: materialized.final_text,
+                    outcome: parent_outcome,
+                    child_session_ref: child_session_ref.clone(),
+                    final_answer_ref: materialized.final_answer_ref,
+                    artifact_refs: materialized.extra_artifacts,
+                    changeset_proposal,
+                    isolated_parent_snapshot_id,
+                })
             }
+            .await;
+            match postprocessed {
+                Ok(output) => Ok(output),
+                Err(error) => {
+                    append_task_child_session(
+                        route_handler.parent_session,
+                        handler,
+                        &request,
+                        &child_task_id,
+                        &child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    self.supervisor.record_task_child_failure(
+                        route_handler.parent_session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    )?;
+                    Err(error)
+                }
+            }
+        }
+        .await;
+        let cleanup_error = if let Some(worktree) = worktree {
+            cleanup_task_worktree(parent_session, handler, worktree).await?
+        } else {
+            None
+        };
+        match (run_result, cleanup_error) {
+            (Ok(output), _) => Ok(output),
+            (Err(error), Some(cleanup_error)) => Err(error.context(cleanup_error)),
+            (Err(error), None) => Err(error),
         }
     }
 
@@ -1120,7 +1327,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 )));
             }
         };
-        let batch_changeset_base_snapshot_id = requests[0].changeset_only_base_snapshot_id.clone();
+        let batch_changeset_base_snapshot_id = requests[0].isolated_base_snapshot_id.clone();
         let mut attempt_ids = BTreeSet::new();
         for request in &requests {
             if request.task.task_id != batch_task_id || request.plan_version != batch_plan_version {
@@ -1155,7 +1362,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 }
             }
             if batch_kind == ParallelTaskBatchKind::ChangesetOnly
-                && request.changeset_only_base_snapshot_id.as_deref()
+                && request.isolated_base_snapshot_id.as_deref()
                     != batch_changeset_base_snapshot_id.as_deref()
             {
                 return Ok(detached_task_batch_results(rejected_parallel_task_batch(

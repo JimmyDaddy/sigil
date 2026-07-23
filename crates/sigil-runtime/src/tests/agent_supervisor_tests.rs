@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -19,20 +20,22 @@ use sigil_kernel::{
     AgentInvocationSource, AgentRole, AgentRouteId, AgentRunInput, AgentRunOptions,
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
-    ControlEntry, DelegationAuthorityRecord, EventHandler, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, ModelMessage, MultiAgentMode, PermissionConfig, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
-    SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
+    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthorityRecord, EventHandler,
+    InteractionMode, IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole,
+    ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
+    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantPurpose,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanUpdateContext,
-    TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepSpec,
-    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall,
-    ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig,
-    child_session_ref, task_participant_attempt_id, task_participant_logical_run_id,
-    task_participant_session_ref,
+    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptId,
+    TaskParticipantPurpose, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
+    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_workspace_snapshot,
+    child_session_ref, stable_workspace_id, task_participant_attempt_id,
+    task_participant_logical_run_id, task_participant_session_ref,
 };
 
 use super::{
@@ -588,6 +591,8 @@ impl Provider for FailingProvider {
 struct UsageProvider;
 struct ToolCallingChildProvider;
 struct ApprovalRouteTool;
+struct WorktreeWriteProvider;
+struct WorktreeWriteTool;
 
 #[async_trait]
 impl Provider for UsageProvider {
@@ -657,6 +662,93 @@ impl Provider for ToolCallingChildProvider {
             })),
             Ok(ProviderChunk::Done),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for WorktreeWriteProvider {
+    fn name(&self) -> &str {
+        "worktree-write"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool))
+        {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "isolated worktree edit complete".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let args = r#"{"path":"base.txt","content":"isolated edit\n"}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-worktree-write".to_owned(),
+                name: "write_file".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-worktree-write".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-worktree-write".to_owned(),
+                name: "write_file".to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Tool for WorktreeWriteTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write one test file inside the active workspace.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing worktree test path"))?;
+        let content = args
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing worktree test content"))?;
+        fs::write(ctx.workspace_root.join(path), content)?;
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "written",
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -849,6 +941,19 @@ fn changeset_step(id: &str) -> Result<TaskStepSpec> {
     })
 }
 
+fn worktree_step(id: &str) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: TaskStepId::new(id)?,
+        title: format!("isolate {id}"),
+        display_name: Some(id.to_owned()),
+        detail: Some("test physical worktree child step".to_owned()),
+        role: AgentRole::SubagentWrite,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::Worktree),
+    })
+}
+
 fn changeset_output(step_id: &str) -> String {
     json!({
         "change_set": {
@@ -970,6 +1075,7 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
         role: AgentRole::SubagentRead,
         invocation_mode: AgentInvocationMode::Foreground,
         invocation_source: AgentInvocationSource::Task,
+        isolated_workspace_id: None,
     })
 }
 
@@ -2793,7 +2899,7 @@ async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -2862,7 +2968,7 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
                     ModelMessage::user(format!("inspect {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3001,7 +3107,7 @@ async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_prop
                     ModelMessage::user(format!("propose {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: Some(base_snapshot_id.clone()),
+                isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3042,7 +3148,7 @@ async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_prop
     );
     assert!(outputs.iter().all(|output| {
         output.changeset_proposal.is_some()
-            && output.changeset_only_after_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
+            && output.isolated_parent_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
     }));
     assert_eq!(
         std::fs::read_to_string(temp.path().join("base.txt"))?,
@@ -3088,7 +3194,7 @@ async fn task_changeset_batch_rejects_missing_base_snapshot_before_provider_star
                     ModelMessage::user(format!("propose {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3150,7 +3256,7 @@ async fn task_changeset_batch_rejects_mixed_base_snapshots_before_provider_start
                     ModelMessage::user(format!("propose {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: Some(format!("snapshot-{index}")),
+                isolated_base_snapshot_id: Some(format!("snapshot-{index}")),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3226,7 +3332,7 @@ async fn task_read_batch_rejects_capacity_before_any_provider_start() -> Result<
                     ModelMessage::user(format!("inspect {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3300,7 +3406,7 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
                     ModelMessage::user(format!("inspect {step_id}")),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3486,7 +3592,7 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
             )])
             .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
             options: run_options(temp.path().to_path_buf()),
-            changeset_only_base_snapshot_id: None,
+            isolated_base_snapshot_id: None,
         })
     };
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
@@ -3629,7 +3735,7 @@ async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> 
         )])
         .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
         options: run_options(temp.path().to_path_buf()),
-        changeset_only_base_snapshot_id: None,
+        isolated_base_snapshot_id: None,
     };
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", parent_store)?;
@@ -3694,7 +3800,7 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -3718,7 +3824,7 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                     ModelMessage::user("apply skill again"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -3742,7 +3848,7 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                     ModelMessage::user("apply skill after budget"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -3811,7 +3917,7 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
                     ModelMessage::user("inspect only"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -3880,7 +3986,7 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -3946,7 +4052,7 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
                     ModelMessage::user("read through approval"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -4008,7 +4114,7 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
-                changeset_only_base_snapshot_id: None,
+                isolated_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -4027,5 +4133,320 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
             .values()
             .any(|child| child.status == sigil_kernel::TaskChildSessionStatus::Failed)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worktree_child_writes_only_inside_bound_workspace_and_returns_review_artifact()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_repository_root = temp.path().join("source-repository");
+    initialize_worktree_test_repository(&source_repository_root)?;
+    let repository_root = temp.path().join("parent-worktree");
+    let repository_root_text = repository_root
+        .to_str()
+        .ok_or_else(|| anyhow!("temporary worktree path should be UTF-8"))?;
+    run_worktree_test_git(
+        &source_repository_root,
+        &["worktree", "add", "--detach", repository_root_text, "HEAD"],
+    )?;
+    let base_snapshot_id = worktree_test_snapshot_id(&repository_root)?;
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["write_file".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut write_tools = ToolRegistry::new();
+    write_tools.register(Arc::new(WorktreeWriteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(TextProvider {
+                text: "read complete",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(Box::new(WorktreeWriteProvider), write_tools),
+    );
+    let logs_root = temp.path().join("logs");
+    fs::create_dir(&logs_root)?;
+    let store = JsonlSessionStore::new(logs_root.join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let step = worktree_step("isolated_write")?;
+    let output = runner
+        .run_child_session(
+            &mut session,
+            TaskChildSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: TaskId::new("task_worktree")?,
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "edit one file in a physical child worktree".to_owned(),
+                },
+                plan_version: 1,
+                step: step.clone(),
+                attempt_id: task_participant_attempt_id(
+                    &TaskId::new("task_worktree")?,
+                    TaskParticipantPurpose::Step,
+                    Some(1),
+                    Some(&step.step_id),
+                    1,
+                )?,
+                child_session_ref: task_participant_session_ref(
+                    &TaskId::new("task_worktree")?,
+                    &task_participant_attempt_id(
+                        &TaskId::new("task_worktree")?,
+                        TaskParticipantPurpose::Step,
+                        Some(1),
+                        Some(&step.step_id),
+                        1,
+                    )?,
+                )?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("write base.txt in the isolated worktree"),
+                ]),
+                options: run_options(repository_root.clone()),
+                isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(
+        fs::read_to_string(repository_root.join("base.txt"))?,
+        "base\n"
+    );
+    assert!(output.outcome.changed_files.is_empty());
+    assert_eq!(
+        output.isolated_parent_snapshot_id.as_deref(),
+        Some(base_snapshot_id.as_str())
+    );
+    let proposal = output
+        .changeset_proposal
+        .expect("worktree child should return a review artifact");
+    assert_eq!(proposal.source_isolation, WriteIsolationMode::Worktree);
+    assert!(proposal.child_snapshot_id.is_some());
+    assert!(
+        proposal
+            .change_set
+            .files
+            .iter()
+            .any(|file| file.path == "base.txt")
+    );
+    assert!(proposal.artifact.content.contains("isolated edit"));
+
+    let prepared_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(_))
+            )
+        })
+        .expect("worktree preparation should be durable");
+    let created_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(_))
+            )
+        })
+        .expect("worktree creation should be durable");
+    let cleanup_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
+                    cleanup
+                )) if cleanup.status == IsolatedWorkspaceCleanupStatus::Removed
+            )
+        })
+        .expect("worktree cleanup should be durable");
+    assert!(prepared_index < created_index);
+    assert!(created_index < cleanup_index);
+    assert!(
+        session
+            .write_isolation_projection()
+            .isolated_workspace_cleanup_inventory()
+            .is_empty()
+    );
+    assert!(
+        !source_repository_root
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    let thread = session
+        .agent_thread_state_projection()
+        .threads
+        .values()
+        .next()
+        .expect("worktree child thread should be durable")
+        .clone();
+    let child_workspace = thread
+        .run_context
+        .as_ref()
+        .map(|context| context.workspace_root.as_str())
+        .expect("child run context should bind a workspace");
+    assert!(child_workspace.contains("/.git/sigil-isolated-worktrees/worktree-"));
+    assert_ne!(child_workspace, repository_root.display().to_string());
+    assert!(!Path::new(child_workspace).exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_worktree_child_still_records_terminal_cleanup() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let repository_root = temp.path().join("repository");
+    initialize_worktree_test_repository(&repository_root)?;
+    let base_snapshot_id = worktree_test_snapshot_id(&repository_root)?;
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["write_file".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut write_tools = ToolRegistry::new();
+    write_tools.register(Arc::new(WorktreeWriteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(TextProvider {
+                text: "read complete",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(Box::new(WorktreeWriteProvider), write_tools),
+    );
+    let logs_root = temp.path().join("logs");
+    fs::create_dir(&logs_root)?;
+    let store = JsonlSessionStore::new(logs_root.join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let step = worktree_step("cancelled_write")?;
+    let attempt_id = task_participant_attempt_id(
+        &TaskId::new("task_worktree_cancel")?,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        1,
+    )?;
+    let cancellation = RunCancellationOwner::new();
+    assert!(cancellation.request_cancel());
+    let request = TaskChildSessionRunRequest {
+        task: sigil_kernel::SequentialTaskRequest {
+            task_id: TaskId::new("task_worktree_cancel")?,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "cancel after physical worktree preparation".to_owned(),
+        },
+        plan_version: 1,
+        step,
+        attempt_id: attempt_id.clone(),
+        child_session_ref: task_participant_session_ref(
+            &TaskId::new("task_worktree_cancel")?,
+            &attempt_id,
+        )?,
+        child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+            "this run is already cancelled",
+        )])
+        .with_child_cancellation(cancellation.handle()),
+        options: run_options(repository_root.clone()),
+        isolated_base_snapshot_id: Some(base_snapshot_id),
+    };
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_child_session(&mut session, request, &mut handler, &mut approval)
+        .await
+        .expect_err("pre-cancelled worktree child should not dispatch");
+
+    assert!(format!("{error:#}").contains("cancel"), "{error:#}");
+    assert_eq!(
+        fs::read_to_string(repository_root.join("base.txt"))?,
+        "base\n"
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(cleanup))
+            if cleanup.status == IsolatedWorkspaceCleanupStatus::Removed
+    )));
+    assert!(
+        session
+            .write_isolation_projection()
+            .isolated_workspace_cleanup_inventory()
+            .is_empty()
+    );
+    assert!(
+        !repository_root
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    Ok(())
+}
+
+fn initialize_worktree_test_repository(repository_root: &Path) -> Result<()> {
+    fs::create_dir(repository_root)?;
+    run_worktree_test_git(repository_root, &["init", "--quiet"])?;
+    run_worktree_test_git(
+        repository_root,
+        &["config", "user.name", "Sigil Runtime Tests"],
+    )?;
+    run_worktree_test_git(
+        repository_root,
+        &[
+            "config",
+            "user.email",
+            "sigil-runtime-tests@example.invalid",
+        ],
+    )?;
+    fs::write(repository_root.join("base.txt"), "base\n")?;
+    run_worktree_test_git(repository_root, &["add", "base.txt"])?;
+    run_worktree_test_git(repository_root, &["commit", "--quiet", "-m", "base"])?;
+    Ok(())
+}
+
+fn worktree_test_snapshot_id(repository_root: &Path) -> Result<String> {
+    let workspace_id = stable_workspace_id(repository_root)?;
+    build_workspace_snapshot(
+        repository_root,
+        workspace_id,
+        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        0,
+    )?
+    .workspace_snapshot_id
+    .ok_or_else(|| anyhow!("worktree test snapshot should be complete"))
+}
+
+fn run_worktree_test_git(repository_root: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repository_root)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
     Ok(())
 }

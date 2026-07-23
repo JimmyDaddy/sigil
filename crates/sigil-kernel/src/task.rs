@@ -552,7 +552,7 @@ pub struct TaskPlanUpdateContext {
 pub fn task_plan_update_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. Use subagent_write only for delegated changeset-only write proposals."
+        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. Use subagent_write for changeset-only proposals or physically isolated worktree edits."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -583,7 +583,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
-                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. Use subagent_write only with changeset_only isolation for a delegated write proposal."
+                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. Use subagent_write with changeset_only for proposal-only work or worktree for a physically isolated writer."
                             },
                             "depends_on": {
                                 "type": "array",
@@ -601,7 +601,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "isolation": {
                                 "type": "string",
                                 "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
-                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only. Read/review/verify steps always use shared_read_only."
+                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only or worktree. Read/review/verify steps always use shared_read_only."
                             }
                         },
                         "required": ["step_id", "title", "role"],
@@ -812,15 +812,26 @@ fn validate_step_role_isolation(
     role: AgentRole,
     isolation: TaskIsolationMode,
 ) -> Result<()> {
-    if role == AgentRole::SubagentWrite && isolation != TaskIsolationMode::ChangesetOnly {
+    if role == AgentRole::SubagentWrite
+        && !matches!(
+            isolation,
+            TaskIsolationMode::ChangesetOnly | TaskIsolationMode::Worktree
+        )
+    {
         bail!(
-            "subagent_write task step {} requires changeset_only isolation; use executor for sequential_workspace_write edits",
+            "subagent_write task step {} requires changeset_only or worktree isolation; use executor for sequential_workspace_write edits",
             step_id.as_str()
         );
     }
-    if role != AgentRole::SubagentWrite && isolation == TaskIsolationMode::ChangesetOnly {
+    if role != AgentRole::SubagentWrite
+        && matches!(
+            isolation,
+            TaskIsolationMode::ChangesetOnly | TaskIsolationMode::Worktree
+        )
+    {
         bail!(
-            "changeset_only task step {} requires subagent_write role",
+            "{} task step {} requires subagent_write role",
+            isolation.as_str(),
             step_id.as_str()
         );
     }

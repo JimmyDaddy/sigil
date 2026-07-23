@@ -379,7 +379,7 @@ where
                         .steps
                         .first()
                         .ok_or_else(|| anyhow!("parallel changeset batch is unexpectedly empty"))?;
-                    Some(capture_changeset_only_parent_snapshot_id(
+                    Some(capture_isolated_parent_snapshot_id(
                         session,
                         &request,
                         plan_version,
@@ -470,7 +470,7 @@ where
                         step: step.clone(),
                         child_input,
                         options: step_options.clone(),
-                        changeset_only_base_snapshot_id: changeset_batch_base_snapshot_id.clone(),
+                        isolated_base_snapshot_id: changeset_batch_base_snapshot_id.clone(),
                     });
                     batch_contexts.push((
                         step,
@@ -530,11 +530,10 @@ where
                                 final_answer_ref: output.final_answer_ref,
                                 artifact_refs: output.artifact_refs,
                                 changeset_proposal: output.changeset_proposal,
-                                changeset_only_after_snapshot_id: output
-                                    .changeset_only_after_snapshot_id,
+                                isolated_parent_snapshot_id: output.isolated_parent_snapshot_id,
                             };
                             if let Some(base_snapshot_id) = changeset_base_snapshot_id.as_deref() {
-                                record_changeset_only_child_output(
+                                record_isolated_child_output(
                                     session,
                                     handler,
                                     &request,
@@ -1274,20 +1273,22 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        let changeset_only_base_snapshot_id =
-            if step.effective_isolation() == TaskIsolationMode::ChangesetOnly {
-                Some(capture_changeset_only_parent_snapshot_id(
-                    parent_session,
-                    request,
-                    plan_version,
-                    step,
-                    &options,
-                    "base",
-                )?)
-            } else {
-                None
-            };
-        let child_input = if changeset_only_base_snapshot_id.is_some() {
+        let isolated_base_snapshot_id = if matches!(
+            step.effective_isolation(),
+            TaskIsolationMode::ChangesetOnly | TaskIsolationMode::Worktree
+        ) {
+            Some(capture_isolated_parent_snapshot_id(
+                parent_session,
+                request,
+                plan_version,
+                step,
+                &options,
+                "base",
+            )?)
+        } else {
+            None
+        };
+        let child_input = if step.effective_isolation() == TaskIsolationMode::ChangesetOnly {
             with_changeset_only_child_contract(child_input)
         } else {
             child_input
@@ -1311,7 +1312,7 @@ where
                     step: step.clone(),
                     child_input,
                     options: options.clone(),
-                    changeset_only_base_snapshot_id: changeset_only_base_snapshot_id.clone(),
+                    isolated_base_snapshot_id: isolated_base_snapshot_id.clone(),
                 },
                 handler,
                 approval_handler,
@@ -1328,10 +1329,10 @@ where
             final_answer_ref: output.final_answer_ref,
             artifact_refs: output.artifact_refs,
             changeset_proposal: output.changeset_proposal,
-            changeset_only_after_snapshot_id: output.changeset_only_after_snapshot_id,
+            isolated_parent_snapshot_id: output.isolated_parent_snapshot_id,
         };
-        if let Some(base_snapshot_id) = changeset_only_base_snapshot_id {
-            record_changeset_only_child_output(
+        if let Some(base_snapshot_id) = isolated_base_snapshot_id {
+            record_isolated_child_output(
                 parent_session,
                 handler,
                 request,

@@ -175,6 +175,7 @@ where
                 match transition_session(
                     SessionTransitionKind::CheckpointFork,
                     output.destination_path.clone(),
+                    runtime,
                     root_config,
                     provider_capabilities,
                     workspace_root,

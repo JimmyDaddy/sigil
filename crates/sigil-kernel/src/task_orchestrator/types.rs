@@ -257,7 +257,11 @@ pub struct TaskChildSessionRunRequest {
     pub step: TaskStepSpec,
     pub child_input: AgentRunInput,
     pub options: AgentRunOptions,
-    pub changeset_only_base_snapshot_id: Option<String>,
+    /// Parent snapshot frozen before an isolated writer starts.
+    ///
+    /// `ChangesetOnly` uses this to prove the parent stayed unchanged. `Worktree` additionally
+    /// binds physical materialization and artifact extraction to the same immutable base.
+    pub isolated_base_snapshot_id: Option<String>,
 }
 
 /// Output returned by a child-session runner after a terminal child run.
@@ -270,7 +274,7 @@ pub struct TaskChildSessionRunOutput {
     pub final_answer_ref: Option<AgentFinalAnswerRef>,
     pub artifact_refs: Vec<AgentArtifactRef>,
     pub changeset_proposal: Option<TaskChildChangeSetProposal>,
-    pub changeset_only_after_snapshot_id: Option<String>,
+    pub isolated_parent_snapshot_id: Option<String>,
 }
 
 /// Input for the isolated planner transcript owned by one durable participant attempt.
@@ -314,15 +318,17 @@ pub struct TaskSynthesisSessionRunOutput {
     pub artifact_refs: Vec<AgentArtifactRef>,
 }
 
-/// Structured output contract returned by a `ChangesetOnly` child writer.
+/// Structured review proposal returned by an isolated child writer.
 #[derive(Debug, Clone)]
 pub struct TaskChildChangeSetProposal {
     pub change_set: ChangeSet,
     pub artifact_ref: String,
     pub artifact: TaskChildChangeSetArtifact,
+    pub source_isolation: WriteIsolationMode,
+    pub child_snapshot_id: Option<WorkspaceSnapshotId>,
 }
 
-/// Reviewable artifact material emitted by a `ChangesetOnly` child writer.
+/// Reviewable artifact material emitted by an isolated child writer.
 #[derive(Debug, Clone)]
 pub struct TaskChildChangeSetArtifact {
     pub media_type: String,
@@ -337,5 +343,5 @@ pub(super) struct StepRunOutput {
     pub(super) final_answer_ref: Option<AgentFinalAnswerRef>,
     pub(super) artifact_refs: Vec<AgentArtifactRef>,
     pub(super) changeset_proposal: Option<TaskChildChangeSetProposal>,
-    pub(super) changeset_only_after_snapshot_id: Option<String>,
+    pub(super) isolated_parent_snapshot_id: Option<String>,
 }

@@ -74,8 +74,8 @@ mod write_lease;
 
 pub use changeset_only::{
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
-    changeset_only_child_tool_scope, decode_changeset_only_child_output,
-    validate_changeset_only_parent_snapshot_unchanged_for_task,
+    changeset_only_child_tool_scope, decode_changeset_only_child_output, task_step_owner_agent_id,
+    validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use child_session::TaskChildSessionRunner;
 #[cfg(test)]
@@ -91,7 +91,7 @@ pub use types::{
 };
 
 use changeset_only::{
-    capture_changeset_only_parent_snapshot_id, record_changeset_only_child_output,
+    capture_isolated_parent_snapshot_id, record_isolated_child_output,
     with_changeset_only_child_contract,
 };
 use evidence::{

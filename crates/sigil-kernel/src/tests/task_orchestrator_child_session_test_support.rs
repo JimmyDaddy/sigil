@@ -91,7 +91,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             step,
             child_input,
             options,
-            changeset_only_base_snapshot_id,
+            isolated_base_snapshot_id,
         } = request;
         let child_task_id = task_participant_child_task_id(&task.task_id, &attempt_id)?;
         append_child_session(
@@ -168,9 +168,9 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
         } else {
             None
         };
-        let changeset_only_after_snapshot_id =
-            if let Some(base_snapshot_id) = changeset_only_base_snapshot_id.as_deref() {
-                Some(validate_changeset_only_parent_snapshot_unchanged_for_task(
+        let isolated_parent_snapshot_id =
+            if let Some(base_snapshot_id) = isolated_base_snapshot_id.as_deref() {
+                Some(validate_isolated_parent_snapshot_unchanged_for_task(
                     route_handler.parent_session,
                     &task,
                     plan_version,
@@ -188,7 +188,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             final_answer_ref: None,
             artifact_refs: Vec::new(),
             changeset_proposal,
-            changeset_only_after_snapshot_id,
+            isolated_parent_snapshot_id,
         };
         let status = child_status_from_output(&step_output);
         let summary_hash = Some(hash_text(&step_output.final_text));
@@ -217,7 +217,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             final_answer_ref,
             artifact_refs: Vec::new(),
             changeset_proposal: step_output.changeset_proposal,
-            changeset_only_after_snapshot_id: step_output.changeset_only_after_snapshot_id,
+            isolated_parent_snapshot_id: step_output.isolated_parent_snapshot_id,
         })
     }
 

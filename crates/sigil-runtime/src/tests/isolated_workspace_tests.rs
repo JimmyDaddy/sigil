@@ -6,12 +6,17 @@ use std::{
 
 use anyhow::Result;
 use sigil_kernel::{
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, VerificationScope, build_workspace_snapshot,
-    stable_workspace_id,
+    ChangeSetFileAction, ChangeSetId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
+    IsolatedWorkspacePrepared, JsonlSessionStore, Session, VerificationScope, WriteIsolationMode,
+    build_workspace_snapshot, stable_workspace_id,
 };
 use tempfile::TempDir;
 
-use crate::isolated_workspace::{GitWorktreeMaterializationRequest, materialize_git_worktree};
+use crate::isolated_workspace::{
+    GitWorktreeMaterializationRequest, materialize_git_worktree,
+    reconcile_isolated_workspace_cleanup,
+};
 
 #[tokio::test]
 async fn git_worktree_materialization_is_snapshot_bound_confined_and_consumably_cleaned()
@@ -63,12 +68,128 @@ async fn git_worktree_materialization_is_snapshot_bound_confined_and_consumably_
     assert_eq!(cleanup.isolated_workspace_id, "task-1-step-write-a");
     assert_eq!(cleanup.workspace_root, workspace_root);
     assert!(cleanup.isolation_root_removed);
+    assert_eq!(cleanup.status, IsolatedWorkspaceCleanupStatus::Removed);
     assert!(!cleanup.workspace_root.exists());
     assert!(
         repository
             .git(&["worktree", "list", "--porcelain"])?
             .contains(repository.root_text())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_worktree_extracts_bounded_review_artifact_without_mutating_parent() -> Result<()> {
+    let repository = TestRepository::new()?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let materialized = materialize_git_worktree(GitWorktreeMaterializationRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        isolated_workspace_id: "task-1-step-artifact".to_owned(),
+        base_snapshot_id,
+    })
+    .await?;
+    fs::write(
+        materialized.workspace_root().join("base.txt"),
+        "isolated edit\n",
+    )?;
+    fs::write(
+        materialized.workspace_root().join("created.txt"),
+        "created\n",
+    )?;
+
+    let proposal = materialized
+        .extract_changeset(
+            ChangeSetId::new("changeset-worktree-test")?,
+            "Worktree edit",
+            "Review isolated files",
+        )
+        .await?;
+
+    assert_eq!(proposal.source_isolation, WriteIsolationMode::Worktree);
+    assert!(proposal.child_snapshot_id.is_some());
+    assert_eq!(proposal.change_set.files.len(), 2);
+    assert!(
+        proposal
+            .change_set
+            .files
+            .iter()
+            .any(|file| { file.path == "base.txt" && file.action == ChangeSetFileAction::Update })
+    );
+    assert!(
+        proposal.change_set.files.iter().any(|file| {
+            file.path == "created.txt" && file.action == ChangeSetFileAction::Create
+        })
+    );
+    assert!(proposal.artifact.content.contains("isolated edit"));
+    assert!(proposal.artifact.content.contains("created.txt"));
+    assert_eq!(
+        fs::read_to_string(repository.root().join("base.txt"))?,
+        "base\n"
+    );
+    assert!(!repository.root().join("created.txt").exists());
+    materialized.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_reconciliation_removes_durable_created_worktree_once() -> Result<()> {
+    let repository = TestRepository::new()?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let materialized = materialize_git_worktree(GitWorktreeMaterializationRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        isolated_workspace_id: "task-1-step-restart".to_owned(),
+        base_snapshot_id: base_snapshot_id.clone(),
+    })
+    .await?;
+    let workspace_root = materialized.workspace_root().to_path_buf();
+    std::mem::forget(materialized);
+    let parent_workspace_id = stable_workspace_id(repository.root())?;
+    let prepared = IsolatedWorkspacePrepared {
+        isolated_workspace_id: "task-1-step-restart".to_owned(),
+        parent_workspace_id: parent_workspace_id.clone(),
+        owner_agent_id: "task:task-1:v1:write".to_owned(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id: base_snapshot_id.clone(),
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let created = IsolatedWorkspaceCreated {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        parent_workspace_id,
+        owner_agent_id: prepared.owner_agent_id.clone(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id,
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let session_path = repository
+        .root()
+        .parent()
+        .expect("test repository should have a temporary parent")
+        .join("parent.jsonl");
+    let store = JsonlSessionStore::new(session_path.clone())?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    session.append_control(sigil_kernel::ControlEntry::IsolatedWorkspacePrepared(
+        prepared,
+    ))?;
+    session.append_control(sigil_kernel::ControlEntry::IsolatedWorkspaceCreated(
+        created,
+    ))?;
+    drop(session);
+    let store = JsonlSessionStore::new(session_path)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+
+    let first = reconcile_isolated_workspace_cleanup(&mut session, repository.root()).await?;
+    assert_eq!(first.inspected, 1);
+    assert_eq!(first.removed, 1);
+    assert!(!workspace_root.exists());
+    assert!(
+        session
+            .write_isolation_projection()
+            .isolated_workspace_cleanup_inventory()
+            .is_empty()
+    );
+
+    let second = reconcile_isolated_workspace_cleanup(&mut session, repository.root()).await?;
+    assert_eq!(second.inspected, 0);
     Ok(())
 }
 

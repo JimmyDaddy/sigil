@@ -1,11 +1,13 @@
-use std::sync::mpsc;
+use std::{path::Path, process::Command, sync::mpsc};
 
 use anyhow::{Context, Result, bail};
 use sigil_kernel::{
     AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentResultPolicy,
     AgentRole, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
     AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentTrustState, ControlEntry, EventHandler, Session, WorkspaceRootSnapshot,
+    AgentTrustState, ControlEntry, EventHandler, IsolatedWorkspaceBackend, Session,
+    TaskIsolationMode, WorkspaceRootSnapshot, WriteIsolationMode, stable_workspace_id,
+    task_step_owner_agent_id,
 };
 
 use crate::AgentProfileIndexContext;
@@ -34,6 +36,7 @@ impl AgentSupervisor {
             .registry
             .get(&profile_id)
             .with_context(|| format!("agent profile {} is not registered", profile_id.as_str()))?;
+        validate_task_worktree_binding(session, &start)?;
         let snapshot = self.registry.capture_snapshot(&profile_id)?;
         let model_visible_index = self
             .registry
@@ -111,6 +114,7 @@ impl AgentSupervisor {
 
         if start.role == AgentRole::SubagentWrite
             && tool_scope_has_unguarded_write_capability(&resolved_profile.profile.tool_scope)
+            && start.step.effective_isolation() != TaskIsolationMode::Worktree
         {
             let reason =
                 "write-capable agents require guarded changeset-only scope or path lease support"
@@ -329,6 +333,108 @@ impl AgentSupervisor {
             mailbox_rx,
         })
     }
+}
+
+fn validate_task_worktree_binding(session: &Session, start: &AgentTaskChildStart) -> Result<()> {
+    let isolation = start.step.effective_isolation();
+    let Some(isolated_workspace_id) = start.isolated_workspace_id.as_deref() else {
+        if isolation == TaskIsolationMode::Worktree {
+            bail!("worktree task child is missing its durable isolated workspace binding");
+        }
+        return Ok(());
+    };
+    if isolation != TaskIsolationMode::Worktree {
+        bail!("non-worktree task child cannot carry an isolated workspace binding");
+    }
+    let projection = session.write_isolation_projection();
+    let state = projection
+        .isolated_workspace_states
+        .get(isolated_workspace_id)
+        .ok_or_else(|| anyhow::anyhow!("isolated workspace binding is not durable"))?;
+    if !state.is_consistent() {
+        bail!("isolated workspace binding is inconsistent");
+    }
+    let created = state
+        .created
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("isolated workspace binding is not ready"))?;
+    if created.isolation_mode != WriteIsolationMode::Worktree
+        || created.backend != IsolatedWorkspaceBackend::GitWorktree
+        || state
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.status.is_terminal())
+    {
+        bail!("isolated workspace binding is not active");
+    }
+    let expected_owner = task_step_owner_agent_id(
+        &sigil_kernel::SequentialTaskRequest {
+            task_id: start.task_id.clone(),
+            parent_session_ref: start.parent_session_ref.clone(),
+            objective: start.objective.clone(),
+        },
+        start.plan_version,
+        &start.step,
+    );
+    if created.owner_agent_id != expected_owner {
+        bail!("isolated workspace binding owner does not match the task child");
+    }
+    validate_task_worktree_path(
+        &start.workspace_root,
+        isolated_workspace_id,
+        &created.parent_workspace_id,
+    )
+}
+
+fn validate_task_worktree_path(
+    workspace_root: &Path,
+    isolated_workspace_id: &str,
+    parent_workspace_id: &str,
+) -> Result<()> {
+    let workspace_root = std::fs::canonicalize(workspace_root)
+        .context("failed to canonicalize isolated task workspace")?;
+    if workspace_root.file_name().and_then(|name| name.to_str()) != Some(isolated_workspace_id) {
+        bail!("isolated task workspace path does not match its durable identity");
+    }
+    let isolation_root = workspace_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("isolated task workspace has no owned root"))?;
+    if isolation_root.file_name().and_then(|name| name.to_str()) != Some("sigil-isolated-worktrees")
+    {
+        bail!("isolated task workspace is outside the runtime-owned worktree root");
+    }
+    if !git_worktree_inventory_contains_parent(&workspace_root, parent_workspace_id)? {
+        bail!("isolated task workspace parent does not match its durable binding");
+    }
+    Ok(())
+}
+
+fn git_worktree_inventory_contains_parent(
+    isolated_workspace_root: &Path,
+    parent_workspace_id: &str,
+) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(isolated_workspace_root)
+        .output()
+        .context("failed to inspect isolated task worktree inventory")?;
+    if !output.status.success() {
+        bail!("failed to inspect isolated task worktree inventory");
+    }
+    if output.stdout.len() > 256 * 1024 {
+        bail!("isolated task worktree inventory exceeded the output limit");
+    }
+    let inventory = std::str::from_utf8(&output.stdout)
+        .context("isolated task worktree inventory was not UTF-8")?;
+    for field in inventory.split('\0') {
+        let Some(path) = field.strip_prefix("worktree ") else {
+            continue;
+        };
+        if stable_workspace_id(Path::new(path)).ok().as_deref() == Some(parent_workspace_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_batch_identity_pair(has_batch_id: bool, has_member_key: bool) -> Result<()> {

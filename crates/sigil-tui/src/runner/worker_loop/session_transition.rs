@@ -61,6 +61,7 @@ pub(in crate::runner) fn ensure_session_transition_allowed(
 pub(in crate::runner) fn transition_session<P>(
     kind: SessionTransitionKind,
     session_log_path: PathBuf,
+    runtime: &tokio::runtime::Runtime,
     root_config: &RootConfig,
     provider_capabilities: &ProviderCapabilities,
     workspace_root: &Path,
@@ -80,6 +81,23 @@ where
         state.session.current.as_ref(),
     )
     .map_err(|error| format!("{error:#}"))?;
+    let cleanup_report = runtime
+        .block_on(
+            sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                &mut session,
+                workspace_root,
+            ),
+        )
+        .map_err(|error| format!("failed to reconcile isolated task workspaces: {error:#}"))?;
+    if cleanup_report.inspected > 0 {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
+            cleanup_report.inspected,
+            cleanup_report.removed,
+            cleanup_report.already_missing,
+            cleanup_report.failed
+        )));
+    }
     let same_logical_session = state
         .session
         .current

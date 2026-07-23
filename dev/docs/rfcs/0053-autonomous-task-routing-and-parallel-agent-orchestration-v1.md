@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O5b2、O6a、O6b1、O6b2a implemented；O6b2b-O8 deferred
+状态：accepted / O0-O5b2、O6a、O6b1、O6b2a-O6b2b implemented；O6 remainder-O8 deferred
 
 创建日期：2026-07-22
 
@@ -35,7 +35,8 @@ agent harness 有明显差距：
 - 同一模型轮次的 tool calls 顺序执行；`join_before_final` agent call 会在第一个 child 上阻塞后续 fan-out。
 - agent completion 仍围绕 `wait_agent` 和轮询心智，完成后还可能要求模型再次调用 wait，浪费模型轮次。
 - child 权限组合没有被证明是 parent、role、profile 与 invocation policy 的单调收窄。
-- 写 agent 目前只有 changeset-only foreground 路径；物理 worktree 和 conflict-aware integration 尚未闭环。
+- 写 agent 已有 changeset-only foreground 与单 child physical worktree 路径；并行 worktree
+  conflict-aware integration 尚未闭环。
 
 因此，问题不是“模型不知道列 TODO”，而是 Sigil 尚未给同一模型提供一个可靠、可恢复、
 可并发且可审计的 orchestration control plane。
@@ -1282,8 +1283,23 @@ O5b2 coordinator boundary 已完成：
   - projection 从 prepared-only、created 和 failed-cleanup crash window 重建 cleanup
     inventory；只有 terminal cleanup 移出 inventory。
   - duplicate prepared/created binding 不一致时标记 inconsistent，不能静默改写 ownership。
-- O6b2b（未完成）：Task child workspace binding、changeset artifact isolation/extraction、
-  startup cleanup reconciliation 和取消收口。
+- O6b2b（已完成）：Task child physical workspace binding、changeset artifact
+  isolation/extraction、startup cleanup reconciliation 和取消收口。
+  - planner schema 接受 `SubagentWrite + Worktree`；kernel 在 child 启动前冻结 parent
+    snapshot，runtime 先 durable append `Prepared`，物理创建成功后 append `Created`，随后才
+    允许 child thread 绑定 exact owned workspace。
+  - supervisor 会校验 durable owner、backend、active lifecycle、owned-root 路径和 Git
+    worktree inventory；child 的 tool workspace 与 permission workspace 都切到 physical
+    worktree，parent workspace 保持不变。
+  - child terminal 后 runtime 从 exact base commit 提取有界 text diff 与 file hash，拒绝
+    ref drift、symlink/special file、binary/non-UTF8、unsafe path 和预算溢出，并保留独立 child
+    snapshot id；proposal 继续进入既有 merge review，而不会把 child verification 当作 parent
+    verification。
+  - success、failure 与 cancellation 都消费 ownership receipt 并 append terminal cleanup；
+    TUI 启动和 session transition 会从 durable inventory 重试 prepared-only、created 或 failed
+    cleanup crash window，binding 冲突继续 fail closed。
+  - 当前物理路径仍要求 clean、无 submodule 的 Git repository root；并行 Worktree batch 与
+    integration lane 属于 O6 后续。
 - conflict graph、multi-lane integration refs、scoped verification。
 - final promotion CAS、parent verification、stale/conflict UX。
 - shared-workspace direct write 保持 exclusive；path-lease parallel direct write 作为后续 gated slice。

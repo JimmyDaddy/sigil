@@ -101,7 +101,7 @@ Return the proposed edit as structured JSON only. Use a raw JSON object or a fen
 Do not claim the changes were applied. They will be reviewed and applied by the parent session later."#
 }
 
-pub(super) fn capture_changeset_only_parent_snapshot_id(
+pub(super) fn capture_isolated_parent_snapshot_id(
     session: &Session,
     request: &SequentialTaskRequest,
     plan_version: u32,
@@ -111,7 +111,7 @@ pub(super) fn capture_changeset_only_parent_snapshot_id(
 ) -> Result<String> {
     if step.role != AgentRole::SubagentWrite || step.effective_mode() != TaskStepMode::Write {
         bail!(
-            "changeset-only task step {} requires a subagent_write write step",
+            "isolated task step {} requires a subagent_write write step",
             step.step_id.as_str()
         );
     }
@@ -126,8 +126,8 @@ pub(super) fn capture_changeset_only_parent_snapshot_id(
         label
     );
     let source_event_id = format!(
-        "changeset-only-{label}-snapshot-{}",
-        stable_event_uuid("sigil-changeset-only-snapshot", &seed)
+        "isolated-{label}-snapshot-{}",
+        stable_event_uuid("sigil-isolated-task-snapshot", &seed)
     );
     let snapshot = build_workspace_snapshot_for_event(
         &options.workspace_root,
@@ -139,13 +139,13 @@ pub(super) fn capture_changeset_only_parent_snapshot_id(
     )?;
     snapshot.workspace_snapshot_id.ok_or_else(|| {
         anyhow!(
-            "changeset-only task step {} cannot bind {label} parent workspace snapshot",
+            "isolated task step {} cannot bind {label} parent workspace snapshot",
             step.step_id.as_str()
         )
     })
 }
 
-pub fn validate_changeset_only_parent_snapshot_unchanged_for_task(
+pub fn validate_isolated_parent_snapshot_unchanged_for_task(
     session: &Session,
     request: &SequentialTaskRequest,
     plan_version: u32,
@@ -153,7 +153,7 @@ pub fn validate_changeset_only_parent_snapshot_unchanged_for_task(
     options: &AgentRunOptions,
     base_snapshot_id: &str,
 ) -> Result<String> {
-    let after_snapshot_id = capture_changeset_only_parent_snapshot_id(
+    let after_snapshot_id = capture_isolated_parent_snapshot_id(
         session,
         request,
         plan_version,
@@ -163,7 +163,7 @@ pub fn validate_changeset_only_parent_snapshot_unchanged_for_task(
     )?;
     if after_snapshot_id != base_snapshot_id {
         bail!(
-            "changeset-only task step {} changed parent workspace snapshot",
+            "isolated task step {} changed parent workspace snapshot",
             step.step_id.as_str()
         );
     }
@@ -171,7 +171,7 @@ pub fn validate_changeset_only_parent_snapshot_unchanged_for_task(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn record_changeset_only_child_output<H>(
+pub(super) fn record_isolated_child_output<H>(
     session: &mut Session,
     handler: &mut H,
     request: &SequentialTaskRequest,
@@ -183,25 +183,30 @@ pub(super) fn record_changeset_only_child_output<H>(
 where
     H: EventHandler + Send,
 {
-    if !output.outcome.changed_files.is_empty() {
+    if output
+        .changeset_proposal
+        .as_ref()
+        .is_some_and(|proposal| proposal.source_isolation == WriteIsolationMode::ChangesetOnly)
+        && !output.outcome.changed_files.is_empty()
+    {
         bail!(
-            "changeset-only task step {} mutated parent workspace files: {}",
+            "isolated task step {} mutated parent workspace files: {}",
             step.step_id.as_str(),
             output.outcome.changed_files.join(", ")
         );
     }
     let parent_snapshot_id = output
-        .changeset_only_after_snapshot_id
+        .isolated_parent_snapshot_id
         .as_deref()
         .ok_or_else(|| {
             anyhow!(
-                "changeset-only task step {} missing validated parent snapshot",
+                "isolated task step {} missing validated parent snapshot",
                 step.step_id.as_str()
             )
         })?;
     let proposal = output.changeset_proposal.as_ref().ok_or_else(|| {
         anyhow!(
-            "changeset-only task step {} did not return a structured changeset proposal",
+            "isolated task step {} did not return a structured changeset proposal",
             step.step_id.as_str()
         )
     })?;
@@ -218,8 +223,8 @@ where
             changeset_id: proposal.change_set.id.clone(),
             owner_agent_id: task_step_owner_agent_id(request, plan_version, step),
             base_snapshot_id: base_snapshot_id.to_owned(),
-            child_snapshot_id: None,
-            source_isolation: WriteIsolationMode::ChangesetOnly,
+            child_snapshot_id: proposal.child_snapshot_id.clone(),
+            source_isolation: proposal.source_isolation,
             artifact_ref: Some(proposal.artifact_ref.clone()),
             touched_subjects,
         }),
@@ -259,7 +264,7 @@ pub(super) fn changeset_only_merge_review_id(
     ))
 }
 
-pub(super) fn task_step_owner_agent_id(
+pub fn task_step_owner_agent_id(
     request: &SequentialTaskRequest,
     plan_version: u32,
     step: &TaskStepSpec,
@@ -326,6 +331,8 @@ impl TaskChildChangeSetProposalEnvelope {
                 content,
                 content_sha256,
             },
+            source_isolation: WriteIsolationMode::ChangesetOnly,
+            child_snapshot_id: None,
         })
     }
 }

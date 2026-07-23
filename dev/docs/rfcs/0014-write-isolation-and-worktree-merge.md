@@ -1,6 +1,6 @@
 # RFC-0014 Write Isolation and Worktree Merge
 
-状态：draft / E14.1-E14.3、E14.4a-E14.4b1、E14.5-E14.7 implemented / E14.4b2 and E14.8 gated
+状态：draft / E14.1-E14.7 implemented / E14.8 gated
 
 创建日期：2026-06-29
 
@@ -40,17 +40,21 @@
   checkout 后比较 parent/child manifest 内容并生成独立 child snapshot id。Materialization
   receipt 不可 clone，cleanup 按值消费且只通过 `git worktree remove --force` 删除 exact owned
   worktree，不递归删除任意路径。
-- E14.4a 仍未接入 Task admission/session durable ownership，因此不会由产品路径自动创建
-  physical worktree。
 - E14.4b1 已补充 append-only lifecycle：`IsolatedWorkspacePrepared` 在 physical
   materialization 前冻结 parent/owner/mode/base/backend binding；
   `IsolatedWorkspaceCleanupRecorded` 记录 removed/already-missing/retained/failed。Projection
   同时兼容旧 `IsolatedWorkspaceCreated`，可从 prepared-only crash window、created workspace
   和 failed cleanup 重建 cleanup inventory；terminal cleanup 才移出 inventory，prepared/created
   binding 冲突会标记 inconsistent 而不是静默覆盖。
-- E14.4b2 将把 lifecycle 与 materializer 接入 Task child runtime，并补 changeset artifact
-  extraction、startup cleanup reconciliation 和取消收口。并行 `ChangesetOnly` proposal 已由
-  RFC-0053 O6a 解锁，但 physical worktree 写入仍 gated。
+- E14.4b2 已把 lifecycle 与 materializer 接入 Task child runtime：planner 可声明
+  `SubagentWrite + Worktree`；runtime 在 durable `Prepared` / `Created` 后才让 child thread
+  绑定 exact physical root，并同步重写 tool 与 permission workspace。Supervisor 复核 owner、
+  backend、active lifecycle、owned-root confinement 与 Git worktree inventory后才允许 provider
+  dispatch。Child terminal 后提取有界 text changeset/diff 与独立 child snapshot，拒绝 ref
+  drift、symlink/special file、binary/non-UTF8、unsafe path 和预算溢出；parent snapshot 必须
+  仍等于 frozen base。success/failure/cancellation 都 append cleanup outcome；TUI startup 与
+  session transition 会从 durable inventory 重试 crash-window cleanup。当前仍要求 clean、无
+  submodule 的 Git repository root；parallel Worktree integration lane 由 RFC-0053 O6 后续实现。
 
 ## 2. Goals
 

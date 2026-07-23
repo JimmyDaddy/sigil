@@ -378,11 +378,16 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
         spec.description
             .contains("executor for ordinary main-session")
     );
-    assert!(spec.description.contains("changeset-only write proposals"));
+    assert!(spec.description.contains("changeset-only proposals"));
+    assert!(
+        spec.description
+            .contains("physically isolated worktree edits")
+    );
     assert!(spec.input_schema.to_string().contains("display_name"));
     assert!(spec.input_schema.to_string().contains("depends_on"));
     assert!(spec.input_schema.to_string().contains("shared_read_only"));
     assert!(spec.input_schema.to_string().contains("changeset_only"));
+    assert!(spec.input_schema.to_string().contains("worktree"));
     assert!(
         spec.input_schema
             .to_string()
@@ -608,7 +613,17 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
     };
-    validate_task_plan_graph_steps(&[read_step.clone(), write_step.clone()])?;
+    let worktree_step = TaskStepSpec {
+        step_id: step_id("isolated_write")?,
+        title: "isolated write".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentWrite,
+        depends_on: vec![step_id("read")?],
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::Worktree),
+    };
+    validate_task_plan_graph_steps(&[read_step.clone(), write_step.clone(), worktree_step])?;
 
     let mut missing_dependency = write_step.clone();
     missing_dependency.depends_on = vec![step_id("missing")?];

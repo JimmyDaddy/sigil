@@ -45,6 +45,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 )));
                 return;
             }
+            match runtime.block_on(
+                sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                    &mut session,
+                    &workspace_root,
+                ),
+            ) {
+                Ok(report) if report.inspected > 0 => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
+                        report.inspected, report.removed, report.already_missing, report.failed
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to reconcile isolated task workspaces: {error:#}"
+                    )));
+                    return;
+                }
+            }
             mark_stale_dispatching_conversation_queue_items(
                 &mut session,
                 &initial_exact_conversation_prompts,

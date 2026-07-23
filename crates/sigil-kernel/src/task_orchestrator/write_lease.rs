@@ -33,11 +33,13 @@ where
             return Ok(None);
         }
         TaskIsolationMode::Worktree => {
-            bail!(
-                "write task step {} uses unsupported isolation mode {}",
-                step.step_id.as_str(),
-                step.effective_isolation().as_str()
-            );
+            if step.role != AgentRole::SubagentWrite {
+                bail!(
+                    "worktree write task step {} requires a subagent_write role",
+                    step.step_id.as_str()
+                );
+            }
+            return Ok(None);
         }
     }
 

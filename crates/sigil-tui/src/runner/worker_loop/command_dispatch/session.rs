@@ -8,7 +8,7 @@ where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
     let WorkerCommandContext {
-        runtime: _,
+        runtime,
         agent,
         root_config,
         provider_capabilities,
@@ -76,6 +76,7 @@ where
                 match transition_session(
                     SessionTransitionKind::LocalFork,
                     output.destination_path.clone(),
+                    runtime,
                     root_config,
                     provider_capabilities,
                     workspace_root,
@@ -281,6 +282,7 @@ where
                 match transition_session(
                     SessionTransitionKind::Switch,
                     session_log_path,
+                    runtime,
                     root_config,
                     provider_capabilities,
                     workspace_root,
@@ -306,6 +308,7 @@ where
                 match transition_session(
                     SessionTransitionKind::StartNew,
                     session_log_path,
+                    runtime,
                     root_config,
                     provider_capabilities,
                     workspace_root,

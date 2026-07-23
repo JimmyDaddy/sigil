@@ -643,7 +643,7 @@ pub(super) async fn task_step_failure_readiness_nonblocking(
         final_answer_ref: None,
         artifact_refs: Vec::new(),
         changeset_proposal: None,
-        changeset_only_after_snapshot_id: None,
+        isolated_parent_snapshot_id: None,
     };
     task_step_readiness_nonblocking(
         session,

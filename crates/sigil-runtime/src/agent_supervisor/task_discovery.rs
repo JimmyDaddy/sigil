@@ -222,6 +222,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 role: AgentRole::SubagentRead,
                 invocation_mode: AgentInvocationMode::JoinBeforeFinal,
                 invocation_source: AgentInvocationSource::Task,
+                isolated_workspace_id: None,
             };
             prepared.push(PreparedDiscoveryProbe {
                 sequence: u64::try_from(sequence)

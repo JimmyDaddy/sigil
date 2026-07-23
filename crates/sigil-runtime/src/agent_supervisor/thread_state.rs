@@ -59,6 +59,8 @@ pub struct AgentTaskChildStart {
     pub role: AgentRole,
     pub invocation_mode: AgentInvocationMode,
     pub invocation_source: AgentInvocationSource,
+    /// Exact durable worktree identity required before a write-capable Worktree child can start.
+    pub isolated_workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
