@@ -389,9 +389,8 @@ pub(crate) async fn desktop_pick_workspace(
         ])
     })?;
     let display_name = workspace_display_name(&workspace_root)?;
-    let config_path = workspace_root.join("sigil.toml");
     let request = DesktopWorkspaceOpenRequest::new(
-        DesktopLaunchRequest::new(&state.sigil_binary, config_path, &workspace_root),
+        DesktopLaunchRequest::with_implicit_user_config(&state.sigil_binary, &workspace_root),
         display_name,
     );
     let workspace = state
@@ -445,11 +444,7 @@ pub(crate) async fn desktop_open_recent_workspace(
         .lock()
         .await
         .open(DesktopWorkspaceOpenRequest::new(
-            DesktopLaunchRequest::new(
-                &state.sigil_binary,
-                workspace_root.join("sigil.toml"),
-                &workspace_root,
-            ),
+            DesktopLaunchRequest::with_implicit_user_config(&state.sigil_binary, &workspace_root),
             display_name,
         ))
         .await
@@ -1778,7 +1773,7 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
         }
         DesktopWorkspaceManagerError::Launch(_) => DesktopCommandError::new(
             "workspace_server_start_failed",
-            "The workspace server could not be started. Confirm that sigil.toml is present and valid.",
+            "The workspace server could not be started. Check your Sigil configuration and try again.",
         )
         .with_recovery_actions([
             DesktopRecoveryAction::RetryCurrent,

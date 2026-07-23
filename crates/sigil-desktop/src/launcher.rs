@@ -24,14 +24,14 @@ const PIPE_TASK_FINISH_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct DesktopLaunchRequest {
     /// Path to the `sigil` binary bundled with or selected by the native shell.
     pub sigil_binary: PathBuf,
-    /// Path to the configuration loaded by the server child.
-    pub config_path: PathBuf,
+    /// Explicit configuration loaded by the server child, if one was selected.
+    pub config_path: Option<PathBuf>,
     /// Workspace root used as the child working directory.
     pub workspace_root: PathBuf,
 }
 
 impl DesktopLaunchRequest {
-    /// Creates an exact launch request without performing filesystem I/O.
+    /// Creates a launch request with an explicit configuration path.
     #[must_use]
     pub fn new(
         sigil_binary: impl Into<PathBuf>,
@@ -40,7 +40,23 @@ impl DesktopLaunchRequest {
     ) -> Self {
         Self {
             sigil_binary: sigil_binary.into(),
-            config_path: config_path.into(),
+            config_path: Some(config_path.into()),
+            workspace_root: workspace_root.into(),
+        }
+    }
+
+    /// Creates a launch request that lets `sigil` resolve the per-user configuration.
+    ///
+    /// The workspace root remains the child working directory, so a default `"."` workspace
+    /// setting resolves to the folder selected by the desktop user.
+    #[must_use]
+    pub fn with_implicit_user_config(
+        sigil_binary: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            sigil_binary: sigil_binary.into(),
+            config_path: None,
             workspace_root: workspace_root.into(),
         }
     }
@@ -51,7 +67,11 @@ impl DesktopLaunchRequest {
                 "sigil binary is not a file",
             ));
         }
-        if !self.config_path.is_file() {
+        if self
+            .config_path
+            .as_ref()
+            .is_some_and(|config_path| !config_path.is_file())
+        {
             return Err(DesktopLaunchError::InvalidRequest(
                 "configuration is not a file",
             ));
@@ -171,22 +191,7 @@ impl DesktopLauncher {
             .map_err(|_| DesktopLaunchError::HttpClientUnavailable)?;
         let bearer = Arc::new(DesktopBearerToken::generate()?);
 
-        let mut command = Command::new(&request.sigil_binary);
-        command
-            .current_dir(&request.workspace_root)
-            .env("SIGIL_HTTP_TOKEN", bearer.expose())
-            .arg("--config")
-            .arg(&request.config_path)
-            .args([
-                "serve",
-                "--startup-output",
-                "json",
-                "--shutdown-on-stdin-close",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+        let mut command = build_server_command(&request, bearer.expose());
         sigil_process::configure_process_tree(command.as_std_mut());
 
         let mut child = command.spawn().map_err(DesktopLaunchError::Spawn)?;
@@ -356,6 +361,28 @@ impl DesktopLauncher {
             stderr_task: Some(stderr_task),
         })
     }
+}
+
+fn build_server_command(request: &DesktopLaunchRequest, bearer: &str) -> Command {
+    let mut command = Command::new(&request.sigil_binary);
+    command
+        .current_dir(&request.workspace_root)
+        .env("SIGIL_HTTP_TOKEN", bearer);
+    if let Some(config_path) = &request.config_path {
+        command.arg("--config").arg(config_path);
+    }
+    command
+        .args([
+            "serve",
+            "--startup-output",
+            "json",
+            "--shutdown-on-stdin-close",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    command
 }
 
 impl Default for DesktopLauncher {

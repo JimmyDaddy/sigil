@@ -71,6 +71,17 @@ fn incompatible_runtime_projection_is_actionable_and_path_free() {
 }
 
 #[test]
+fn launch_failure_does_not_require_a_workspace_local_config() {
+    let projected = project_manager_error(DesktopWorkspaceManagerError::Launch(
+        DesktopLaunchError::InvalidRequest("configuration is not a file"),
+    ));
+
+    assert_eq!(projected.code, "workspace_server_start_failed");
+    assert!(projected.message.contains("Sigil configuration"));
+    assert!(!projected.message.contains("sigil.toml"));
+}
+
+#[test]
 fn command_error_recovery_actions_are_bounded_deduplicated_and_camel_case() {
     let projected = DesktopCommandError::new("temporary", "Temporary failure")
         .with_recovery_actions([
