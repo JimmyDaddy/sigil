@@ -89,8 +89,9 @@ use crate::{
         VerificationStateProjection, WorkspaceTrustDecisionEntry,
     },
     write_isolation::{
-        IsolatedChangeSetProduced, IsolatedWorkspaceCreated, MergeReviewRequested,
-        MergeReviewResolved, WriteIsolationProjection, WriteLeaseAcquired, WriteLeaseReleased,
+        IsolatedChangeSetProduced, IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCreated,
+        IsolatedWorkspacePrepared, MergeReviewRequested, MergeReviewResolved,
+        WriteIsolationProjection, WriteLeaseAcquired, WriteLeaseReleased,
     },
 };
 

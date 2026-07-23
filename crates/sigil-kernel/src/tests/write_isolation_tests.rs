@@ -4,7 +4,8 @@ use serde_json::json;
 use crate::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResultStatus, ChangeSetId,
     ChangeSetResultStatus, ChangeSetRisk, ControlEntry, DurableEventType, EventClass,
-    IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCreated,
+    IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
+    IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
     JsonlSessionStore, MergeDecision, MergeReviewId, MergeReviewParentMutationRequest,
     MergeReviewRequested, MergeReviewResolved, MutationBatchStatus, MutationSubject, Session,
     SessionLogEntry, StoredEvent, TypedDomainEvent, TypedStoredEventDecode, WriteIsolationMode,
@@ -111,6 +112,12 @@ fn write_isolation_modes_have_stable_labels() {
         IsolatedWorkspaceBackend::GitWorktree.as_str(),
         "git_worktree"
     );
+    assert_eq!(
+        IsolatedWorkspaceCleanupStatus::AlreadyMissing.as_str(),
+        "already_missing"
+    );
+    assert!(IsolatedWorkspaceCleanupStatus::Removed.is_terminal());
+    assert!(!IsolatedWorkspaceCleanupStatus::Failed.is_terminal());
     assert_eq!(MergeDecision::Accepted.as_str(), "accepted");
 }
 
@@ -219,6 +226,111 @@ fn write_isolation_projection_tracks_active_workspace_lease() -> Result<()> {
 }
 
 #[test]
+fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_windows() {
+    let prepared = IsolatedWorkspacePrepared {
+        isolated_workspace_id: "workspace-child".to_owned(),
+        parent_workspace_id: "workspace-parent".to_owned(),
+        owner_agent_id: "agent-child".to_owned(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id: "snapshot-base".to_owned(),
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let created = IsolatedWorkspaceCreated {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        parent_workspace_id: prepared.parent_workspace_id.clone(),
+        owner_agent_id: prepared.owner_agent_id.clone(),
+        isolation_mode: prepared.isolation_mode,
+        base_snapshot_id: prepared.base_snapshot_id.clone(),
+        backend: prepared.backend,
+    };
+    let failed_cleanup = IsolatedWorkspaceCleanupRecorded {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        status: IsolatedWorkspaceCleanupStatus::Failed,
+    };
+    let removed_cleanup = IsolatedWorkspaceCleanupRecorded {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        status: IsolatedWorkspaceCleanupStatus::Removed,
+    };
+
+    let prepared_only = WriteIsolationProjection::from_entries(&[SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspacePrepared(prepared.clone()),
+    )]);
+    assert_eq!(
+        prepared_only.isolated_workspace_cleanup_inventory().len(),
+        1
+    );
+
+    let failed = WriteIsolationProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created.clone())),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
+            failed_cleanup.clone(),
+        )),
+    ]);
+    let state = failed
+        .isolated_workspace_cleanup_inventory()
+        .into_iter()
+        .next()
+        .expect("failed cleanup should stay in recovery inventory");
+    assert_eq!(state.prepared.as_ref(), Some(&prepared));
+    assert_eq!(state.created.as_ref(), Some(&created));
+    assert_eq!(state.cleanup.as_ref(), Some(&failed_cleanup));
+
+    let removed = WriteIsolationProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created)),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
+            failed_cleanup,
+        )),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
+            removed_cleanup.clone(),
+        )),
+    ]);
+    assert!(removed.isolated_workspace_cleanup_inventory().is_empty());
+    assert_eq!(
+        removed
+            .isolated_workspace_states
+            .get(&prepared.isolated_workspace_id)
+            .and_then(|state| state.cleanup.as_ref()),
+        Some(&removed_cleanup)
+    );
+    assert_eq!(removed.replay_order.len(), 4);
+}
+
+#[test]
+fn isolated_workspace_projection_marks_conflicting_materialization_binding() {
+    let prepared = IsolatedWorkspacePrepared {
+        isolated_workspace_id: "workspace-child".to_owned(),
+        parent_workspace_id: "workspace-parent".to_owned(),
+        owner_agent_id: "agent-child".to_owned(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id: "snapshot-base".to_owned(),
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let created = IsolatedWorkspaceCreated {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        parent_workspace_id: prepared.parent_workspace_id.clone(),
+        owner_agent_id: "agent-other".to_owned(),
+        isolation_mode: prepared.isolation_mode,
+        base_snapshot_id: prepared.base_snapshot_id.clone(),
+        backend: prepared.backend,
+    };
+
+    let projection = WriteIsolationProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created)),
+    ]);
+    let state = projection
+        .isolated_workspace_states
+        .get(&prepared.isolated_workspace_id)
+        .expect("workspace state");
+
+    assert!(!state.is_consistent());
+    assert!(state.requires_cleanup());
+    assert_eq!(projection.isolated_workspace_cleanup_inventory().len(), 1);
+}
+
+#[test]
 fn write_lease_admission_rejects_second_active_workspace_writer() -> Result<()> {
     let acquired = acquired_entry();
     let projection = WriteIsolationProjection::from_entries(&[SessionLogEntry::Control(
@@ -274,10 +386,34 @@ fn typed_event_decode_covers_write_isolation_family() {
             if entry == acquired
     ));
 
+    let prepared = IsolatedWorkspacePrepared {
+        isolated_workspace_id: "workspace-child".to_owned(),
+        parent_workspace_id: "workspace-parent".to_owned(),
+        owner_agent_id: "agent-child".to_owned(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id: "snapshot-base".to_owned(),
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let event = stored_control_event(
+        DurableEventType::IsolatedWorkspacePrepared,
+        ControlEntry::IsolatedWorkspacePrepared(prepared.clone()),
+        2,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(event).expect("prepared workspace event should decode")
+    else {
+        panic!("expected typed write isolation event");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::WriteIsolation(ControlEntry::IsolatedWorkspacePrepared(entry))
+            if entry == prepared
+    ));
+
     let bad_event = stored_control_event(
         DurableEventType::WriteLeaseReleased,
         ControlEntry::WriteLeaseAcquired(acquired),
-        2,
+        3,
     );
     let error = decode_typed_stored_event(bad_event)
         .expect_err("mismatched write isolation event should fail closed");
@@ -304,8 +440,26 @@ fn write_isolation_projection_replays_durable_stream_records() -> Result<()> {
         decision: MergeDecision::Rejected,
         reason: Some("conflicts with parent".to_owned()),
     };
+    let prepared = IsolatedWorkspacePrepared {
+        isolated_workspace_id: "workspace-child".to_owned(),
+        parent_workspace_id: acquired.workspace_id.clone(),
+        owner_agent_id: "agent-child".to_owned(),
+        isolation_mode: WriteIsolationMode::Worktree,
+        base_snapshot_id: "snapshot-base".to_owned(),
+        backend: IsolatedWorkspaceBackend::GitWorktree,
+    };
+    let cleanup = IsolatedWorkspaceCleanupRecorded {
+        isolated_workspace_id: prepared.isolated_workspace_id.clone(),
+        status: IsolatedWorkspaceCleanupStatus::Failed,
+    };
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::WriteLeaseAcquired(acquired.clone()),
+    ))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspacePrepared(prepared.clone()),
+    ))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(cleanup.clone()),
     ))?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::MergeReviewRequested(review.clone()),
@@ -324,6 +478,13 @@ fn write_isolation_projection_replays_durable_stream_records() -> Result<()> {
             .active_lease_for_workspace(&acquired.workspace_id)
             .is_some()
     );
+    let workspace = projection
+        .isolated_workspace_cleanup_inventory()
+        .into_iter()
+        .next()
+        .expect("failed cleanup should survive durable replay");
+    assert_eq!(workspace.prepared.as_ref(), Some(&prepared));
+    assert_eq!(workspace.cleanup.as_ref(), Some(&cleanup));
     let review_state = projection
         .merge_reviews
         .get(&review.review_id)

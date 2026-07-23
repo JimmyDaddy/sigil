@@ -229,12 +229,24 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(entry.lease_id.as_str(), 48),
             entry.status.as_str()
         ),
+        ControlEntry::IsolatedWorkspacePrepared(entry) => format!(
+            "[ctl] isolated workspace {} prepared backend={} mode={} base={}",
+            truncate_session_view_text(&entry.isolated_workspace_id, 48),
+            entry.backend.as_str(),
+            entry.isolation_mode.as_str(),
+            truncate_session_view_text(&entry.base_snapshot_id, 16)
+        ),
         ControlEntry::IsolatedWorkspaceCreated(entry) => format!(
             "[ctl] isolated workspace {} backend={} mode={} base={}",
             truncate_session_view_text(&entry.isolated_workspace_id, 48),
             entry.backend.as_str(),
             entry.isolation_mode.as_str(),
             truncate_session_view_text(&entry.base_snapshot_id, 16)
+        ),
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(entry) => format!(
+            "[ctl] isolated workspace {} cleanup={}",
+            truncate_session_view_text(&entry.isolated_workspace_id, 48),
+            entry.status.as_str()
         ),
         ControlEntry::IsolatedChangeSetProduced(entry) => format!(
             "[ctl] isolated changeset {} mode={} subjects={} artifact={}",

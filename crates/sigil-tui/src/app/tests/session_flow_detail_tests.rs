@@ -58,6 +58,35 @@ fn session_model_selection_has_a_stable_audit_line() {
 }
 
 #[test]
+fn isolated_workspace_lifecycle_has_bounded_audit_lines() {
+    let prepared = render_control_entry_line(&ControlEntry::IsolatedWorkspacePrepared(
+        sigil_kernel::IsolatedWorkspacePrepared {
+            isolated_workspace_id: "workspace-child".to_owned(),
+            parent_workspace_id: "workspace-parent".to_owned(),
+            owner_agent_id: "agent-child".to_owned(),
+            isolation_mode: sigil_kernel::WriteIsolationMode::Worktree,
+            base_snapshot_id: "snapshot-base".to_owned(),
+            backend: sigil_kernel::IsolatedWorkspaceBackend::GitWorktree,
+        },
+    ));
+    assert_eq!(
+        prepared,
+        "[ctl] isolated workspace workspace-child prepared backend=git_worktree mode=worktree base=snapshot-base"
+    );
+
+    let cleanup = render_control_entry_line(&ControlEntry::IsolatedWorkspaceCleanupRecorded(
+        sigil_kernel::IsolatedWorkspaceCleanupRecorded {
+            isolated_workspace_id: "workspace-child".to_owned(),
+            status: sigil_kernel::IsolatedWorkspaceCleanupStatus::Failed,
+        },
+    ));
+    assert_eq!(
+        cleanup,
+        "[ctl] isolated workspace workspace-child cleanup=failed"
+    );
+}
+
+#[test]
 fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_audit_result")?;
     let attempt_id = sigil_kernel::task_participant_attempt_id(

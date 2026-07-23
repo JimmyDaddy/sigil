@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O5b2、O6a、O6b1 implemented；O6b2-O8 deferred
+状态：accepted / O0-O5b2、O6a、O6b1、O6b2a implemented；O6b2b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1276,8 +1276,14 @@ O5b2 coordinator boundary 已完成：
     child verification 误当成 parent verification。
   - materialization receipt 不可 clone；cleanup 按值消费，只删除 exact owned Git worktree，
     不使用任意路径递归删除。
-- O6b2（未完成）：append-only workspace ownership、restart inventory、Task child workspace
-  binding、changeset artifact isolation/extraction 和 cleanup outcome durability。
+- O6b2a（已完成）：append-only workspace ownership 与 restart inventory。
+  - `IsolatedWorkspacePrepared` 在 physical materialization 前冻结完整 binding；
+    `IsolatedWorkspaceCleanupRecorded` 记录 removed/already-missing/retained/failed。
+  - projection 从 prepared-only、created 和 failed-cleanup crash window 重建 cleanup
+    inventory；只有 terminal cleanup 移出 inventory。
+  - duplicate prepared/created binding 不一致时标记 inconsistent，不能静默改写 ownership。
+- O6b2b（未完成）：Task child workspace binding、changeset artifact isolation/extraction、
+  startup cleanup reconciliation 和取消收口。
 - conflict graph、multi-lane integration refs、scoped verification。
 - final promotion CAS、parent verification、stale/conflict UX。
 - shared-workspace direct write 保持 exclusive；path-lease parallel direct write 作为后续 gated slice。

@@ -1,6 +1,6 @@
 # RFC-0014 Write Isolation and Worktree Merge
 
-状态：draft / E14.1-E14.3、E14.4a、E14.5-E14.7 implemented / E14.4b and E14.8 gated
+状态：draft / E14.1-E14.3、E14.4a-E14.4b1、E14.5-E14.7 implemented / E14.4b2 and E14.8 gated
 
 创建日期：2026-06-29
 
@@ -41,9 +41,16 @@
   receipt 不可 clone，cleanup 按值消费且只通过 `git worktree remove --force` 删除 exact owned
   worktree，不递归删除任意路径。
 - E14.4a 仍未接入 Task admission/session durable ownership，因此不会由产品路径自动创建
-  physical worktree；E14.4b 将补齐 append-only lifecycle、restart inventory、child runtime
-  workspace binding 和 changeset artifact 提取。并行 `ChangesetOnly` proposal 已由 RFC-0053
-  O6a 解锁，但 physical worktree 写入仍 gated。
+  physical worktree。
+- E14.4b1 已补充 append-only lifecycle：`IsolatedWorkspacePrepared` 在 physical
+  materialization 前冻结 parent/owner/mode/base/backend binding；
+  `IsolatedWorkspaceCleanupRecorded` 记录 removed/already-missing/retained/failed。Projection
+  同时兼容旧 `IsolatedWorkspaceCreated`，可从 prepared-only crash window、created workspace
+  和 failed cleanup 重建 cleanup inventory；terminal cleanup 才移出 inventory，prepared/created
+  binding 冲突会标记 inconsistent 而不是静默覆盖。
+- E14.4b2 将把 lifecycle 与 materializer 接入 Task child runtime，并补 changeset artifact
+  extraction、startup cleanup reconciliation 和取消收口。并行 `ChangesetOnly` proposal 已由
+  RFC-0053 O6a 解锁，但 physical worktree 写入仍 gated。
 
 ## 2. Goals
 

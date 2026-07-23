@@ -892,7 +892,11 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::WorkspaceTrustDecision(_) => DurableEventType::WorkspaceTrustDecision,
         ControlEntry::WriteLeaseAcquired(_) => DurableEventType::WriteLeaseAcquired,
         ControlEntry::WriteLeaseReleased(_) => DurableEventType::WriteLeaseReleased,
+        ControlEntry::IsolatedWorkspacePrepared(_) => DurableEventType::IsolatedWorkspacePrepared,
         ControlEntry::IsolatedWorkspaceCreated(_) => DurableEventType::IsolatedWorkspaceCreated,
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(_) => {
+            DurableEventType::IsolatedWorkspaceCleanupRecorded
+        }
         ControlEntry::IsolatedChangeSetProduced(_) => DurableEventType::IsolatedChangeSetProduced,
         ControlEntry::MergeReviewRequested(_) => DurableEventType::MergeReviewRequested,
         ControlEntry::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,

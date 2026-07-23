@@ -213,6 +213,55 @@ pub struct IsolatedWorkspaceCreated {
     pub backend: IsolatedWorkspaceBackend,
 }
 
+/// Durable intent recorded before physical isolated-workspace materialization begins.
+///
+/// The fields are self-contained so restart recovery can derive the exact owned workspace even
+/// when a crash happens before [`IsolatedWorkspaceCreated`] is appended.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IsolatedWorkspacePrepared {
+    pub isolated_workspace_id: WorkspaceId,
+    pub parent_workspace_id: WorkspaceId,
+    pub owner_agent_id: WriteIsolationAgentId,
+    pub isolation_mode: WriteIsolationMode,
+    pub base_snapshot_id: WorkspaceSnapshotId,
+    pub backend: IsolatedWorkspaceBackend,
+}
+
+/// Bounded cleanup outcome for one prepared or created isolated workspace.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolatedWorkspaceCleanupStatus {
+    Removed,
+    AlreadyMissing,
+    Retained,
+    Failed,
+}
+
+impl IsolatedWorkspaceCleanupStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::AlreadyMissing => "already_missing",
+            Self::Retained => "retained",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Removed | Self::AlreadyMissing)
+    }
+}
+
+/// Durable cleanup result for one isolated workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IsolatedWorkspaceCleanupRecorded {
+    pub isolated_workspace_id: WorkspaceId,
+    pub status: IsolatedWorkspaceCleanupStatus,
+}
+
 /// Durable fact emitted when an isolated writer produces a changeset for parent review.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -438,6 +487,7 @@ pub struct WriteIsolationProjection {
     pub leases: BTreeMap<WriteLeaseId, WriteLeaseState>,
     pub active_leases_by_workspace: BTreeMap<WorkspaceId, WriteLeaseId>,
     pub isolated_workspaces: BTreeMap<WorkspaceId, IsolatedWorkspaceCreated>,
+    pub isolated_workspace_states: BTreeMap<WorkspaceId, IsolatedWorkspaceState>,
     pub isolated_changesets: BTreeMap<ChangeSetId, IsolatedChangeSetProduced>,
     pub merge_reviews: BTreeMap<MergeReviewId, MergeReviewState>,
     pub replay_order: Vec<WriteIsolationRecordRef>,
@@ -462,6 +512,12 @@ impl WriteIsolationProjection {
             ControlEntry::IsolatedWorkspaceCreated(entry) => {
                 self.apply_isolated_workspace_created(entry);
             }
+            ControlEntry::IsolatedWorkspacePrepared(entry) => {
+                self.apply_isolated_workspace_prepared(entry);
+            }
+            ControlEntry::IsolatedWorkspaceCleanupRecorded(entry) => {
+                self.apply_isolated_workspace_cleanup(entry);
+            }
             ControlEntry::IsolatedChangeSetProduced(entry) => {
                 self.apply_isolated_changeset_produced(entry);
             }
@@ -480,6 +536,15 @@ impl WriteIsolationProjection {
     pub fn has_active_write_lease(&self, workspace_id: &str) -> bool {
         self.active_lease_for_workspace(workspace_id)
             .is_some_and(WriteLeaseState::is_active)
+    }
+
+    /// Returns prepared or created workspaces whose cleanup is incomplete or explicitly retained.
+    #[must_use]
+    pub fn isolated_workspace_cleanup_inventory(&self) -> Vec<&IsolatedWorkspaceState> {
+        self.isolated_workspace_states
+            .values()
+            .filter(|state| state.requires_cleanup())
+            .collect()
     }
 
     /// Fails closed when acquiring `entry` would create a second active shared-workspace writer.
@@ -575,6 +640,57 @@ impl WriteIsolationProjection {
             });
         self.isolated_workspaces
             .insert(entry.isolated_workspace_id.clone(), entry.clone());
+        let state = self
+            .isolated_workspace_states
+            .entry(entry.isolated_workspace_id.clone())
+            .or_insert_with(|| IsolatedWorkspaceState::new(entry.isolated_workspace_id.clone()));
+        if state
+            .created
+            .as_ref()
+            .is_some_and(|created| created != entry)
+            || state
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| !prepared_matches_created(prepared, entry))
+        {
+            state.binding_conflict = true;
+        }
+        state.created = Some(entry.clone());
+    }
+
+    fn apply_isolated_workspace_prepared(&mut self, entry: &IsolatedWorkspacePrepared) {
+        self.replay_order
+            .push(WriteIsolationRecordRef::IsolatedWorkspace {
+                workspace_id: entry.isolated_workspace_id.clone(),
+            });
+        let state = self
+            .isolated_workspace_states
+            .entry(entry.isolated_workspace_id.clone())
+            .or_insert_with(|| IsolatedWorkspaceState::new(entry.isolated_workspace_id.clone()));
+        if state
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared != entry)
+            || state
+                .created
+                .as_ref()
+                .is_some_and(|created| !prepared_matches_created(entry, created))
+        {
+            state.binding_conflict = true;
+        }
+        state.prepared = Some(entry.clone());
+    }
+
+    fn apply_isolated_workspace_cleanup(&mut self, entry: &IsolatedWorkspaceCleanupRecorded) {
+        self.replay_order
+            .push(WriteIsolationRecordRef::IsolatedWorkspace {
+                workspace_id: entry.isolated_workspace_id.clone(),
+            });
+        let state = self
+            .isolated_workspace_states
+            .entry(entry.isolated_workspace_id.clone())
+            .or_insert_with(|| IsolatedWorkspaceState::new(entry.isolated_workspace_id.clone()));
+        state.cleanup = Some(entry.clone());
     }
 
     fn apply_isolated_changeset_produced(&mut self, entry: &IsolatedChangeSetProduced) {
@@ -618,6 +734,55 @@ pub struct WriteLeaseState {
     pub lease_id: WriteLeaseId,
     pub acquired: Option<WriteLeaseAcquired>,
     pub released: Option<WriteLeaseReleased>,
+}
+
+/// Latest append-only lifecycle state for one physical isolated workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolatedWorkspaceState {
+    pub isolated_workspace_id: WorkspaceId,
+    pub prepared: Option<IsolatedWorkspacePrepared>,
+    pub created: Option<IsolatedWorkspaceCreated>,
+    pub cleanup: Option<IsolatedWorkspaceCleanupRecorded>,
+    pub binding_conflict: bool,
+}
+
+impl IsolatedWorkspaceState {
+    fn new(isolated_workspace_id: WorkspaceId) -> Self {
+        Self {
+            isolated_workspace_id,
+            prepared: None,
+            created: None,
+            cleanup: None,
+            binding_conflict: false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_consistent(&self) -> bool {
+        !self.binding_conflict
+    }
+
+    #[must_use]
+    pub fn requires_cleanup(&self) -> bool {
+        let has_materialization_authority = self.prepared.is_some() || self.created.is_some();
+        has_materialization_authority
+            && !self
+                .cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.status.is_terminal())
+    }
+}
+
+fn prepared_matches_created(
+    prepared: &IsolatedWorkspacePrepared,
+    created: &IsolatedWorkspaceCreated,
+) -> bool {
+    prepared.isolated_workspace_id == created.isolated_workspace_id
+        && prepared.parent_workspace_id == created.parent_workspace_id
+        && prepared.owner_agent_id == created.owner_agent_id
+        && prepared.isolation_mode == created.isolation_mode
+        && prepared.base_snapshot_id == created.base_snapshot_id
+        && prepared.backend == created.backend
 }
 
 impl WriteLeaseState {

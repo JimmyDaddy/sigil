@@ -206,7 +206,9 @@ durable_event_types! {
     AgentMergeApplied => ("agent_merge_applied", RecoveryCritical, Critical, DirectJson, "agent_merge_applied"),
     WriteLeaseAcquired => ("write_lease_acquired", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     WriteLeaseReleased => ("write_lease_released", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IsolatedWorkspacePrepared => ("isolated_workspace_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IsolatedWorkspaceCreated => ("isolated_workspace_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IsolatedWorkspaceCleanupRecorded => ("isolated_workspace_cleanup_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IsolatedChangeSetProduced => ("isolated_changeset_produced", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MergeReviewRequested => ("merge_review_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MergeReviewResolved => ("merge_review_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -672,7 +674,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         }
         DurableEventType::WriteLeaseAcquired
         | DurableEventType::WriteLeaseReleased
+        | DurableEventType::IsolatedWorkspacePrepared
         | DurableEventType::IsolatedWorkspaceCreated
+        | DurableEventType::IsolatedWorkspaceCleanupRecorded
         | DurableEventType::IsolatedChangeSetProduced
         | DurableEventType::MergeReviewRequested
         | DurableEventType::MergeReviewResolved => {
@@ -729,7 +733,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     }
                     ControlEntry::WriteLeaseAcquired(_)
                     | ControlEntry::WriteLeaseReleased(_)
+                    | ControlEntry::IsolatedWorkspacePrepared(_)
                     | ControlEntry::IsolatedWorkspaceCreated(_)
+                    | ControlEntry::IsolatedWorkspaceCleanupRecorded(_)
                     | ControlEntry::IsolatedChangeSetProduced(_)
                     | ControlEntry::MergeReviewRequested(_)
                     | ControlEntry::MergeReviewResolved(_) => {
@@ -828,8 +834,14 @@ fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {
             Some(DurableEventType::WriteLeaseReleased),
             ControlEntry::WriteLeaseReleased(_)
         ) | (
+            Some(DurableEventType::IsolatedWorkspacePrepared),
+            ControlEntry::IsolatedWorkspacePrepared(_)
+        ) | (
             Some(DurableEventType::IsolatedWorkspaceCreated),
             ControlEntry::IsolatedWorkspaceCreated(_)
+        ) | (
+            Some(DurableEventType::IsolatedWorkspaceCleanupRecorded),
+            ControlEntry::IsolatedWorkspaceCleanupRecorded(_)
         ) | (
             Some(DurableEventType::IsolatedChangeSetProduced),
             ControlEntry::IsolatedChangeSetProduced(_)
@@ -1388,7 +1400,9 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::WorkspaceTrustDecision(_) => "workspace_trust_decision",
         ControlEntry::WriteLeaseAcquired(_) => "write_lease_acquired",
         ControlEntry::WriteLeaseReleased(_) => "write_lease_released",
+        ControlEntry::IsolatedWorkspacePrepared(_) => "isolated_workspace_prepared",
         ControlEntry::IsolatedWorkspaceCreated(_) => "isolated_workspace_created",
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(_) => "isolated_workspace_cleanup_recorded",
         ControlEntry::IsolatedChangeSetProduced(_) => "isolated_changeset_produced",
         ControlEntry::MergeReviewRequested(_) => "merge_review_requested",
         ControlEntry::MergeReviewResolved(_) => "merge_review_resolved",
