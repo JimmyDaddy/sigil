@@ -218,6 +218,10 @@ pub use provider_debug::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, ProviderDebugStream,
     stream_deepseek_fim_debug, stream_deepseek_prefix_debug,
 };
+pub use provider_pressure::{
+    TaskProviderRouteConsumer, TaskProviderRouteConsumerDiagnostics, TaskProviderRouteDiagnostics,
+    TaskProviderRouteDiagnosticsSnapshot,
+};
 pub use provider_status::{
     BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
     fetch_provider_balance_snapshot, fetch_remote_model_ids,

@@ -97,6 +97,61 @@ fn sensitive_prompt_stays_exact_in_action_and_live_history_but_safe_on_tui_surfa
 }
 
 #[test]
+fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "task_1".to_owned(),
+        objective: "inspect routes".to_owned(),
+    })?;
+    app.handle_worker_message(WorkerMessage::TaskProviderRouteDiagnosticsUpdated {
+        snapshot: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot {
+            routes: vec![sigil_runtime::TaskProviderRouteDiagnostics {
+                route_fingerprint: "sha256:route-1".to_owned(),
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                consumers: vec![sigil_runtime::TaskProviderRouteConsumerDiagnostics {
+                    consumer: sigil_runtime::TaskProviderRouteConsumer::Planner,
+                    in_flight: 1,
+                    waiting: 0,
+                }],
+                in_flight: 1,
+                waiting: 0,
+                concurrency_window: 2,
+                max_concurrency: 4,
+                cooldown_remaining_ms: 0,
+                consecutive_rate_limits: 1,
+            }],
+        },
+    })?;
+
+    assert_eq!(app.runtime.task_provider_route_diagnostics.routes.len(), 1);
+    let strip = app
+        .task_strip_view()
+        .expect("live task should render before durable projection arrives");
+    assert_eq!(strip.title, "Task task_1");
+    assert_eq!(strip.detail, "running · awaiting durable projection");
+    assert_eq!(strip.rows[0].label, "inspect routes");
+    assert!(
+        app.task_sidebar_lines()
+            .iter()
+            .any(|line| line.contains("planner → deepseek/deepseek-v4-flash"))
+    );
+
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "task_2".to_owned(),
+        objective: "start clean".to_owned(),
+    })?;
+    assert!(
+        app.runtime
+            .task_provider_route_diagnostics
+            .routes
+            .is_empty(),
+        "a new task must not inherit stale live route attribution"
+    );
+    Ok(())
+}
+
+#[test]
 fn run_notice_filters_status_noise_but_keeps_errors() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 

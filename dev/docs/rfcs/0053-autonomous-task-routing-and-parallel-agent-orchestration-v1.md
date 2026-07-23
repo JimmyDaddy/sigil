@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d2 implemented；O5b2d3-O8 deferred
+状态：accepted / O0-O4b3b、O5a-O5b1、O5b2a-O5b2d3a implemented；O5b2d3b-O8 deferred
 
 创建日期：2026-07-22
 
@@ -989,7 +989,8 @@ allow_write_subagents = true
 本 checkpoint 表示 O4b3a、O4b3b、O5a、O5b1、O5b2a whole-batch admission、O5b2b
 process-local provider route cooldown、O5b2c shared-read-only durable bounded retry、
 O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis retry
-已完成；completion-arrival 进度、实时 route attribution 与完整诊断通道仍属于 O5b2d3-O8。
+以及 O5b2d3a 实时 route attribution/diagnostics 已完成；completion-arrival 进度与
+request-order durable commit 的双序视图仍属于 O5b2d3b-O8。
 
 ### O0: Truth baseline and contract correction
 
@@ -1200,9 +1201,21 @@ O5b2d2 已完成：
 - Planner 和每个 plan version 的 Synthesis 各自最多自动 retry 2 次、累计等待最多 120 秒；
   durable pending schedule 可在重启后消费一次。预算耗尽后分别进入 Failed / Paused。
 
+O5b2d3a 已完成：
+
+- provider pressure registry 在 route lease 生命周期内记录 planner、executor、
+  subagent-read、subagent-write 与 synthesis 的实时 in-flight/waiting 归因，并暴露
+  provider-neutral snapshot、route fingerprint、adaptive window、cooldown 和连续限流次数；
+  被取消的 waiter 通过 guard 立即撤销归因。
+- TUI worker 复用本地 50ms 调度 tick，只有 snapshot 变化时才发送 live-only diagnostics；
+  cooldown 倒计时按 250ms 分桶，避免向 UI 重复灌入等价状态。live task strip 展示紧凑 route
+  状态，info rail 展示短 route id；durable task projection 尚未到达时使用 task-start
+  runtime metadata 生成临时 strip，避免首个 provider request 无可见归因。
+- diagnostics 不追加 session entry、不参与 restart/retry authority；task 结束、取消、切换或新
+  task 开始时清空，避免运行态归因污染 durable timeline。
+
 O5b2 剩余：
 
-- 实时 route attribution/diagnostics。
 - completion-arrival 实时进度与 request-order durable commit 的双序视图。
 - 将 batch coordinator 的 parent borrow 从 trait 调用边界进一步收窄为显式 action/envelope API。
 

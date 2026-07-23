@@ -12,10 +12,54 @@ use sigil_kernel::{
 };
 
 use super::{
-    readiness_reason_summary, required_action_label, task_sidebar_lines, task_step_status_label,
-    task_strip_view, verification_stale_reason_compact_label, verification_verdict_label,
+    readiness_reason_summary, required_action_label, task_provider_route_live_lines,
+    task_provider_route_sidebar_lines, task_sidebar_lines, task_step_status_label, task_strip_view,
+    verification_stale_reason_compact_label, verification_verdict_label,
 };
 use crate::app::task_sidebar::VerificationCardAction;
+
+#[test]
+fn provider_route_diagnostics_format_live_attribution_and_audit_identity() {
+    let snapshot = sigil_runtime::TaskProviderRouteDiagnosticsSnapshot {
+        routes: vec![sigil_runtime::TaskProviderRouteDiagnostics {
+            route_fingerprint: "sha256:1234567890abcdef".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            consumers: vec![
+                sigil_runtime::TaskProviderRouteConsumerDiagnostics {
+                    consumer: sigil_runtime::TaskProviderRouteConsumer::Planner,
+                    in_flight: 1,
+                    waiting: 0,
+                },
+                sigil_runtime::TaskProviderRouteConsumerDiagnostics {
+                    consumer: sigil_runtime::TaskProviderRouteConsumer::SubagentRead,
+                    in_flight: 2,
+                    waiting: 1,
+                },
+            ],
+            in_flight: 3,
+            waiting: 1,
+            concurrency_window: 3,
+            max_concurrency: 4,
+            cooldown_remaining_ms: 1_250,
+            consecutive_rate_limits: 1,
+        }],
+    };
+
+    assert_eq!(
+        task_provider_route_live_lines(&snapshot),
+        vec![
+            "planner + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit"
+        ]
+    );
+    assert_eq!(
+        task_provider_route_sidebar_lines(&snapshot),
+        vec![
+            "provider route: planner + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit",
+            "route id: 1234567890",
+        ]
+    );
+}
 
 #[test]
 fn verification_labels_cover_all_sidebar_variants() {

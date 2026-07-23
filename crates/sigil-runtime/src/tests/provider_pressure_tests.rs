@@ -141,28 +141,104 @@ async fn route_window_gates_excess_requests_until_a_lease_is_released() -> Resul
     let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
     let pressure = pressure_with_clock(clock);
     pressure.set_max_concurrency(2);
-    let (_, first) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
-    let (_, second) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (_, first) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::SubagentRead,
+        )
+        .await?;
+    let (_, second) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::SubagentRead,
+        )
+        .await?;
 
-    let blocked = tokio::time::timeout(
-        Duration::from_millis(20),
-        pressure.acquire("deepseek", "deepseek-v4-flash"),
-    )
+    let waiting_pressure = pressure.clone();
+    let waiting = tokio::spawn(async move {
+        waiting_pressure
+            .acquire(
+                "deepseek",
+                "deepseek-v4-flash",
+                TaskProviderRouteConsumer::Executor,
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    let snapshot = pressure.diagnostics();
+    assert_eq!(snapshot.routes[0].waiting, 1);
+    assert_eq!(
+        snapshot.routes[0].consumers,
+        vec![
+            TaskProviderRouteConsumerDiagnostics {
+                consumer: TaskProviderRouteConsumer::Executor,
+                in_flight: 0,
+                waiting: 1,
+            },
+            TaskProviderRouteConsumerDiagnostics {
+                consumer: TaskProviderRouteConsumer::SubagentRead,
+                in_flight: 2,
+                waiting: 0,
+            },
+        ]
+    );
+    let still_blocked = tokio::time::timeout(Duration::from_millis(20), async {
+        while !waiting.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
     .await;
     assert!(
-        blocked.is_err(),
+        still_blocked.is_err(),
         "third request must wait for route capacity"
     );
 
     drop(first);
-    let (_, third) = tokio::time::timeout(
-        Duration::from_secs(1),
-        pressure.acquire("deepseek", "deepseek-v4-flash"),
-    )
-    .await
-    .expect("released route capacity should wake a waiter")?;
+    let (_, third) = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("released route capacity should wake a waiter")
+        .expect("waiting task should join")?;
+    let snapshot = pressure.diagnostics();
+    assert_eq!(snapshot.routes[0].waiting, 0);
+    assert_eq!(snapshot.routes[0].in_flight, 2);
     drop(second);
     drop(third);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_route_waiter_removes_its_diagnostic_attribution() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(1);
+    let (_, lease) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::SubagentRead,
+        )
+        .await?;
+    let waiting_pressure = pressure.clone();
+    let waiting = tokio::spawn(async move {
+        waiting_pressure
+            .acquire(
+                "deepseek",
+                "deepseek-v4-flash",
+                TaskProviderRouteConsumer::Synthesis,
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(pressure.diagnostics().routes[0].waiting, 1);
+
+    waiting.abort();
+    let _ = waiting.await;
+    assert_eq!(pressure.diagnostics().routes[0].waiting, 0);
+
+    drop(lease);
+    assert!(pressure.diagnostics().routes.is_empty());
     Ok(())
 }
 
@@ -171,10 +247,20 @@ async fn route_windows_are_independent() -> Result<()> {
     let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
     let pressure = pressure_with_clock(clock);
     pressure.set_max_concurrency(1);
-    let (_, flash) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (_, flash) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::Planner,
+        )
+        .await?;
     let (_, pro) = tokio::time::timeout(
         Duration::from_millis(50),
-        pressure.acquire("deepseek", "deepseek-v4-pro"),
+        pressure.acquire(
+            "deepseek",
+            "deepseek-v4-pro",
+            TaskProviderRouteConsumer::Synthesis,
+        ),
     )
     .await
     .expect("a saturated flash route must not block pro")?;
@@ -185,12 +271,109 @@ async fn route_windows_are_independent() -> Result<()> {
 }
 
 #[tokio::test]
+async fn diagnostics_attribute_active_consumers_and_hide_healthy_idle_routes() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(clock);
+    pressure.set_max_concurrency(4);
+    let (_, planner_lease) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::Planner,
+        )
+        .await?;
+    let (_, read_lease) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::SubagentRead,
+        )
+        .await?;
+
+    let snapshot = pressure.diagnostics();
+    let [route] = snapshot.routes.as_slice() else {
+        panic!("one active route should be observable");
+    };
+    assert_eq!(route.provider_name, "deepseek");
+    assert_eq!(route.model_name, "deepseek-v4-flash");
+    assert_eq!(route.in_flight, 2);
+    assert_eq!(route.concurrency_window, 4);
+    assert_eq!(
+        route.consumers,
+        vec![
+            TaskProviderRouteConsumerDiagnostics {
+                consumer: TaskProviderRouteConsumer::Planner,
+                in_flight: 1,
+                waiting: 0,
+            },
+            TaskProviderRouteConsumerDiagnostics {
+                consumer: TaskProviderRouteConsumer::SubagentRead,
+                in_flight: 1,
+                waiting: 0,
+            },
+        ]
+    );
+
+    drop(planner_lease);
+    drop(read_lease);
+    assert!(
+        pressure.diagnostics().routes.is_empty(),
+        "healthy idle routes should not keep the live diagnostic visible"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diagnostics_keep_rate_limited_route_visible_after_lease_release() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let pressure = pressure_with_clock(Arc::clone(&clock));
+    pressure.set_max_concurrency(4);
+    let (admission, lease) = pressure
+        .acquire(
+            "anthropic",
+            "claude-sonnet",
+            TaskProviderRouteConsumer::Synthesis,
+        )
+        .await?;
+
+    pressure.record_rate_limit(&admission, Some(2_000));
+    drop(lease);
+
+    let snapshot = pressure.diagnostics();
+    let [route] = snapshot.routes.as_slice() else {
+        panic!("cooling route should remain observable");
+    };
+    assert_eq!(route.in_flight, 0);
+    assert_eq!(route.waiting, 0);
+    assert!(route.consumers.is_empty());
+    assert_eq!(route.cooldown_remaining_ms, 2_000);
+    assert_eq!(route.concurrency_window, 2);
+    assert_eq!(route.max_concurrency, 4);
+    assert_eq!(route.consecutive_rate_limits, 1);
+
+    clock.advance(Duration::from_millis(2_000));
+    let recovered = pressure.diagnostics();
+    assert_eq!(recovered.routes[0].cooldown_remaining_ms, 0);
+    assert_eq!(
+        recovered.routes[0].concurrency_window, 2,
+        "reduced adaptive window remains observable until successful recovery"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn terminal_stream_chunk_records_success_and_releases_route_capacity() -> Result<()> {
     let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
     let pressure = pressure_with_clock(clock);
     pressure.set_max_concurrency(1);
     let route = provider_route_fingerprint("deepseek", "deepseek-v4-flash");
-    let (admission, lease) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (admission, lease) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::Planner,
+        )
+        .await?;
     let mut stream = PressureAwareTaskStream {
         inner: Box::pin(futures::stream::iter(vec![Ok(ProviderChunk::Done)])),
         pressure: pressure.clone(),
@@ -212,7 +395,13 @@ async fn rate_limited_stream_error_reduces_window_and_releases_route_capacity() 
     let pressure = pressure_with_clock(clock);
     pressure.set_max_concurrency(4);
     let route = provider_route_fingerprint("deepseek", "deepseek-v4-flash");
-    let (admission, lease) = pressure.acquire("deepseek", "deepseek-v4-flash").await?;
+    let (admission, lease) = pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::Executor,
+        )
+        .await?;
     let error =
         sigil_kernel::ProviderRateLimitError::new(anyhow!("provider 429"), Some("1")).into();
     let mut stream = PressureAwareTaskStream {

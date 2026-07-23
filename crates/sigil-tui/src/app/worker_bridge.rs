@@ -23,7 +23,7 @@ use tool_card_lifecycle::{
 };
 
 use super::{
-    AppState, RunPhase, TimelineRole,
+    ActiveTaskRuntimeStatus, AppState, RunPhase, TimelineRole,
     formatting::{format_terminal_task_block_redacted, summarize_error},
 };
 use crate::runner::{WorkerCommand, WorkerMessage};
@@ -247,6 +247,12 @@ impl AppState {
                 );
             }
             WorkerMessage::TaskRunStarted { task_id, objective } => {
+                self.runtime.active_task = Some(ActiveTaskRuntimeStatus {
+                    task_id: task_id.clone(),
+                    objective: objective.clone(),
+                });
+                self.runtime.task_provider_route_diagnostics =
+                    sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
                     format!("planning task {task_id}"),
@@ -259,6 +265,9 @@ impl AppState {
                         sigil_kernel::safe_persistence_text(&objective)
                     ),
                 );
+            }
+            WorkerMessage::TaskProviderRouteDiagnosticsUpdated { snapshot } => {
+                self.runtime.task_provider_route_diagnostics = snapshot;
             }
             WorkerMessage::RunFinished { result, entries } => {
                 self.clear_worker_run_state();

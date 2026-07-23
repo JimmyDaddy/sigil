@@ -93,8 +93,8 @@ pub(crate) use self::runtime_status::{
     diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
 };
 use self::state::{
-    AgentPanelState, ApprovalState, ComposerState, EgressDisclosureState, ReviewState,
-    RuntimeStatusState, SessionBrowserState, TimelineState,
+    ActiveTaskRuntimeStatus, AgentPanelState, ApprovalState, ComposerState, EgressDisclosureState,
+    ReviewState, RuntimeStatusState, SessionBrowserState, TimelineState,
 };
 use self::timeline_render_store::TimelineRenderStore;
 #[cfg(test)]
@@ -611,6 +611,9 @@ impl AppState {
                 pending_worker_commands: Vec::new(),
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,
+                active_task: None,
+                task_provider_route_diagnostics:
+                    sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),
@@ -713,6 +716,9 @@ impl AppState {
                 pending_worker_commands: Vec::new(),
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,
+                active_task: None,
+                task_provider_route_diagnostics:
+                    sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),

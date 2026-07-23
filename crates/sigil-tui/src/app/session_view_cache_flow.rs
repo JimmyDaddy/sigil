@@ -88,11 +88,31 @@ impl AppState {
     }
 
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
-        self.session_view_cache().task_sidebar_lines.clone()
+        let mut lines = self.session_view_cache().task_sidebar_lines.clone();
+        lines.extend(super::task_sidebar::task_provider_route_sidebar_lines(
+            &self.runtime.task_provider_route_diagnostics,
+        ));
+        lines
     }
 
     pub(crate) fn task_strip_view(&self) -> Option<super::task_sidebar::TaskStripView> {
-        let mut view = self.session_view_cache().task_strip_view.clone()?;
+        let durable = self.session_view_cache().task_strip_view.clone();
+        let mut view = match (durable, self.runtime.active_task.as_ref()) {
+            (Some(view), Some(task)) if view.title == format!("Task {}", task.task_id) => view,
+            (Some(view), None) => view,
+            (_, Some(task)) => super::task_sidebar::TaskStripView {
+                title: format!("Task {}", task.task_id),
+                detail: "running · awaiting durable projection".to_owned(),
+                verification: None,
+                rows: vec![super::task_sidebar::TaskStripRow {
+                    kind: crate::ui::StatusKind::Running,
+                    label: task.objective.clone(),
+                    detail: "running".to_owned(),
+                    active: true,
+                }],
+            },
+            (None, None) => return None,
+        };
         if let Some(verification) = view.verification.as_mut()
             && self
                 .review

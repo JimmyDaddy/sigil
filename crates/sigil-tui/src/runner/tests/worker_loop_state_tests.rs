@@ -10,8 +10,8 @@ use super::{
     super::{
         WorkerCommand,
         worker_loop::{
-            SessionTransitionKind, WorkerCommandDomain, WorkerLoopState, classify_worker_command,
-            transition_session,
+            SessionTransitionKind, WorkerCommandDomain, WorkerLoopState,
+            changed_task_provider_route_diagnostics, classify_worker_command, transition_session,
         },
     },
     common::{PlannedProvider, test_root_config},
@@ -76,8 +76,62 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     assert!(state.compaction.pending.is_none());
     assert_eq!(state.compaction.next_request_id, 1);
     assert!(state.refresh.pending_mcp_servers.is_empty());
+    assert!(
+        state
+            .agent
+            .last_task_provider_route_diagnostics
+            .routes
+            .is_empty()
+    );
     assert!(state.processed_worker_command_ids.is_empty());
     Ok(())
+}
+
+#[test]
+fn task_route_diagnostics_emit_only_on_change_and_clear_when_task_stops() {
+    let empty = sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
+    let active = task_route_diagnostics_fixture("route", 1);
+
+    assert_eq!(
+        changed_task_provider_route_diagnostics(true, active.clone(), &empty),
+        Some(active.clone())
+    );
+    assert_eq!(
+        changed_task_provider_route_diagnostics(true, active.clone(), &active),
+        None
+    );
+    assert_eq!(
+        changed_task_provider_route_diagnostics(false, active, &empty),
+        None
+    );
+    assert_eq!(
+        changed_task_provider_route_diagnostics(
+            false,
+            empty.clone(),
+            &task_route_diagnostics_fixture("old", 0),
+        ),
+        Some(empty)
+    );
+}
+
+fn task_route_diagnostics_fixture(
+    route: &str,
+    in_flight: usize,
+) -> sigil_runtime::TaskProviderRouteDiagnosticsSnapshot {
+    sigil_runtime::TaskProviderRouteDiagnosticsSnapshot {
+        routes: vec![sigil_runtime::TaskProviderRouteDiagnostics {
+            route_fingerprint: format!("sha256:{route}"),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            consumers: Vec::new(),
+            in_flight,
+            waiting: 0,
+            concurrency_window: 2,
+            max_concurrency: 4,
+            cooldown_remaining_ms: usize::from(in_flight == 0) as u64,
+            consecutive_rate_limits: u32::from(in_flight == 0),
+        }],
+    }
 }
 
 #[test]

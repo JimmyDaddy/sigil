@@ -23,7 +23,9 @@ use sigil_kernel::{
     task_participant_input_hash, task_participant_logical_run_id,
 };
 
-use crate::provider_pressure::{TaskProviderPressure, wrap_task_agent_provider};
+use crate::provider_pressure::{
+    TaskProviderPressure, TaskProviderRouteConsumer, wrap_task_agent_provider,
+};
 
 use super::{
     AgentSupervisor, AgentTaskChildStart, AgentTaskChildThread, BoxedAgent, append_control,
@@ -61,10 +63,12 @@ impl AgentSupervisorTaskChildRunner {
             subagent_read: Arc::new(wrap_task_agent_provider(
                 subagent_read,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::SubagentRead,
             )),
             subagent_write: Arc::new(wrap_task_agent_provider(
                 subagent_write,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::SubagentWrite,
             )),
             synthesis: None,
             planner_discovery_max_probes: 0,
@@ -86,22 +90,27 @@ impl AgentSupervisorTaskChildRunner {
             planner: Some(Arc::new(wrap_task_agent_provider(
                 planner,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::Planner,
             ))),
             executor: Some(Arc::new(wrap_task_agent_provider(
                 executor,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::Executor,
             ))),
             subagent_read: Arc::new(wrap_task_agent_provider(
                 subagent_read,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::SubagentRead,
             )),
             subagent_write: Arc::new(wrap_task_agent_provider(
                 subagent_write,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::SubagentWrite,
             )),
             synthesis: Some(Arc::new(wrap_task_agent_provider(
                 synthesis,
                 provider_pressure.clone(),
+                TaskProviderRouteConsumer::Synthesis,
             ))),
             planner_discovery_max_probes: 0,
             provider_pressure,

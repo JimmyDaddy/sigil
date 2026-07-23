@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use sigil_kernel::{Agent, AgentUsageSummary, Provider, ProviderCapabilities, TaskId};
 
 use crate::AgentProfileRegistry;
-use crate::provider_pressure::TaskProviderPressure;
+use crate::provider_pressure::{TaskProviderPressure, TaskProviderRouteDiagnosticsSnapshot};
 
 mod batch;
 mod begin;
@@ -77,6 +77,15 @@ impl AgentSupervisor {
 
     pub(crate) fn provider_pressure(&self) -> &TaskProviderPressure {
         &self.provider_pressure
+    }
+
+    /// Returns live task provider-route pressure for user-facing diagnostics.
+    ///
+    /// This process-local snapshot is observational only and must not be persisted or used as
+    /// restart authority.
+    #[must_use]
+    pub fn task_provider_route_diagnostics(&self) -> TaskProviderRouteDiagnosticsSnapshot {
+        self.provider_pressure.diagnostics()
     }
 
     #[must_use]

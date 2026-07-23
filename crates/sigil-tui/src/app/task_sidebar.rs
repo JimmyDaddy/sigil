@@ -48,6 +48,102 @@ pub(crate) struct TaskStripRow {
     pub(crate) active: bool,
 }
 
+pub(crate) fn task_provider_route_live_lines(
+    snapshot: &sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+) -> Vec<String> {
+    snapshot
+        .routes
+        .iter()
+        .map(|route| {
+            let consumers = if route.consumers.is_empty() {
+                "provider route".to_owned()
+            } else {
+                route
+                    .consumers
+                    .iter()
+                    .map(|consumer| {
+                        let label = consumer.consumer.as_str().replace('_', "-");
+                        let attributed = consumer.in_flight.saturating_add(consumer.waiting);
+                        if attributed > 1 {
+                            format!("{label}×{attributed}")
+                        } else {
+                            label
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            };
+            let pressure = if route.cooldown_remaining_ms > 0 {
+                format!(
+                    "cooldown {}",
+                    format_provider_route_duration(route.cooldown_remaining_ms)
+                )
+            } else if route.in_flight >= route.concurrency_window {
+                format!("saturated {}/{}", route.in_flight, route.concurrency_window)
+            } else if route.in_flight > 0 {
+                format!("active {}/{}", route.in_flight, route.concurrency_window)
+            } else {
+                "recovering".to_owned()
+            };
+            let mut line = format!(
+                "{consumers} → {}/{} · {pressure}",
+                route.provider_name, route.model_name
+            );
+            if route.concurrency_window < route.max_concurrency {
+                line.push_str(&format!(
+                    " · adaptive {}/{}",
+                    route.concurrency_window, route.max_concurrency
+                ));
+            }
+            if route.waiting > 0 {
+                line.push_str(&format!(" · {} waiting", route.waiting));
+            }
+            if route.consecutive_rate_limits > 0 {
+                line.push_str(&format!(
+                    " · {} rate limit{}",
+                    route.consecutive_rate_limits,
+                    if route.consecutive_rate_limits == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            line
+        })
+        .collect()
+}
+
+pub(crate) fn task_provider_route_sidebar_lines(
+    snapshot: &sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+) -> Vec<String> {
+    task_provider_route_live_lines(snapshot)
+        .into_iter()
+        .zip(&snapshot.routes)
+        .flat_map(|(line, route)| {
+            let route_id = route
+                .route_fingerprint
+                .strip_prefix("sha256:")
+                .unwrap_or(&route.route_fingerprint)
+                .chars()
+                .take(10)
+                .collect::<String>();
+            [
+                format!("provider route: {line}"),
+                format!("route id: {route_id}"),
+            ]
+        })
+        .collect()
+}
+
+fn format_provider_route_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        format!("{}.{}s", milliseconds / 1_000, (milliseconds % 1_000) / 100)
+    }
+}
+
 pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let terminal_lines = terminal_task_sidebar_lines(entries);
     let projection = TaskStateProjection::from_entries(entries);

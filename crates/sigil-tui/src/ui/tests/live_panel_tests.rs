@@ -179,6 +179,9 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
             verification: None,
             title: "Task task_1".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
+            route_diagnostics: vec![
+                "subagent-read×2 → deepseek/deepseek-v4-pro · active 2/4".to_owned(),
+            ],
             rows: vec![
                 TaskStripRowViewModel {
                     kind: crate::ui::StatusKind::Success,
@@ -194,7 +197,7 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
-    let backend = TestBackend::new(104, 8);
+    let backend = TestBackend::new(104, 11);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
@@ -210,6 +213,8 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
     assert!(rendered.contains("Thinking..."));
     assert!(rendered.contains("Task task_1"));
     assert!(rendered.contains("running · v1 · 1/2 done"));
+    assert!(rendered.contains("Route subagent-read×2"));
+    assert!(rendered.contains("active 2/4"));
     assert!(rendered.contains("✓ 1. inspect layout"));
     assert!(rendered.contains("◇ 2. update status band"));
     assert!(rendered.contains("▌"));
@@ -230,6 +235,7 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
         task_strip: Some(TaskStripViewModel {
             title: "Task task_1".to_owned(),
             detail: "paused · check failed".to_owned(),
+            route_diagnostics: Vec::new(),
             verification: Some(VerificationCardViewModel {
                 status: "check failed".to_owned(),
                 recommended: Some("cargo-test".to_owned()),
@@ -453,6 +459,7 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
             verification: None,
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),
+            route_diagnostics: Vec::new(),
             rows: vec![TaskStripRowViewModel {
                 kind: crate::ui::StatusKind::Running,
                 label: "1. 输出一个冷笑话2、解释一下这个冷笑话为什么好笑".to_owned(),

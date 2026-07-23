@@ -24,6 +24,64 @@ const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 const MAX_FALLBACK_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_DETERMINISTIC_JITTER_MS: u64 = 250;
 const DEFAULT_PROVIDER_ROUTE_CONCURRENCY_LIMIT: usize = 4;
+const DIAGNOSTICS_COOLDOWN_GRANULARITY_MS: u64 = 250;
+
+/// Process-local task participant kind attributed to a provider route.
+///
+/// This type is diagnostic-only and does not grant durable retry or restart authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskProviderRouteConsumer {
+    Planner,
+    Executor,
+    SubagentRead,
+    SubagentWrite,
+    Synthesis,
+}
+
+impl TaskProviderRouteConsumer {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Executor => "executor",
+            Self::SubagentRead => "subagent_read",
+            Self::SubagentWrite => "subagent_write",
+            Self::Synthesis => "synthesis",
+        }
+    }
+}
+
+/// Live in-flight and waiting attribution for one task participant kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProviderRouteConsumerDiagnostics {
+    pub consumer: TaskProviderRouteConsumer,
+    pub in_flight: usize,
+    pub waiting: usize,
+}
+
+/// Process-local pressure diagnostics for one provider/model route.
+///
+/// The snapshot is observational only. It must not be persisted as session state or used as
+/// restart authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProviderRouteDiagnostics {
+    pub route_fingerprint: String,
+    pub provider_name: String,
+    pub model_name: String,
+    pub consumers: Vec<TaskProviderRouteConsumerDiagnostics>,
+    pub in_flight: usize,
+    pub waiting: usize,
+    pub concurrency_window: usize,
+    pub max_concurrency: usize,
+    pub cooldown_remaining_ms: u64,
+    pub consecutive_rate_limits: u32,
+}
+
+/// Deduplicatable process-local snapshot of task provider route pressure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskProviderRouteDiagnosticsSnapshot {
+    pub routes: Vec<TaskProviderRouteDiagnostics>,
+}
 
 #[derive(Clone)]
 pub(crate) struct TaskProviderPressure {
@@ -71,28 +129,49 @@ impl Default for ProviderPressureState {
 }
 
 struct ProviderRoutePressureState {
+    provider_name: String,
+    model_name: String,
     cooldown_until: Instant,
     consecutive_rate_limits: u32,
     epoch: u64,
     concurrency_window: usize,
     in_flight: usize,
+    in_flight_by_consumer: BTreeMap<TaskProviderRouteConsumer, usize>,
+    waiting: usize,
+    waiting_by_consumer: BTreeMap<TaskProviderRouteConsumer, usize>,
     successful_completions: usize,
 }
 
 #[derive(Clone)]
 struct ProviderRouteAdmission {
     fingerprint: String,
+    provider_name: String,
+    model_name: String,
     epoch: u64,
 }
 
 struct ProviderRouteLease {
     pressure: TaskProviderPressure,
     fingerprint: String,
+    consumer: TaskProviderRouteConsumer,
+}
+
+struct ProviderRouteWaiterGuard {
+    pressure: TaskProviderPressure,
+    fingerprint: String,
+    consumer: TaskProviderRouteConsumer,
+}
+
+impl Drop for ProviderRouteWaiterGuard {
+    fn drop(&mut self) {
+        self.pressure
+            .unregister_waiter(&self.fingerprint, self.consumer);
+    }
 }
 
 impl Drop for ProviderRouteLease {
     fn drop(&mut self) {
-        self.pressure.release(&self.fingerprint);
+        self.pressure.release(&self.fingerprint, self.consumer);
     }
 }
 
@@ -152,24 +231,39 @@ impl TaskProviderPressure {
         &self,
         provider_name: &str,
         model_name: &str,
+        consumer: TaskProviderRouteConsumer,
     ) -> Result<(ProviderRouteAdmission, ProviderRouteLease)> {
         let fingerprint = provider_route_fingerprint(provider_name, model_name);
+        let mut waiter = None;
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(admission) = self.try_acquire(&fingerprint)? {
+            if let Some(admission) =
+                self.try_acquire(&fingerprint, provider_name, model_name, consumer)?
+            {
+                drop(waiter);
                 let lease = ProviderRouteLease {
                     pressure: self.clone(),
                     fingerprint,
+                    consumer,
                 };
                 return Ok((admission, lease));
+            }
+            if waiter.is_none() {
+                waiter = Some(self.register_waiter(&fingerprint, consumer)?);
             }
             notified.await;
         }
     }
 
-    fn try_acquire(&self, fingerprint: &str) -> Result<Option<ProviderRouteAdmission>> {
+    fn try_acquire(
+        &self,
+        fingerprint: &str,
+        provider_name: &str,
+        model_name: &str,
+        consumer: TaskProviderRouteConsumer,
+    ) -> Result<Option<ProviderRouteAdmission>> {
         let now = self.clock.now();
         let mut state = self
             .state
@@ -181,11 +275,16 @@ impl TaskProviderPressure {
                 .routes
                 .entry(fingerprint.to_owned())
                 .or_insert(ProviderRoutePressureState {
+                    provider_name: provider_name.trim().to_owned(),
+                    model_name: model_name.trim().to_owned(),
                     cooldown_until: now,
                     consecutive_rate_limits: 0,
                     epoch: 0,
                     concurrency_window: max_concurrency,
                     in_flight: 0,
+                    in_flight_by_consumer: BTreeMap::new(),
+                    waiting: 0,
+                    waiting_by_consumer: BTreeMap::new(),
                     successful_completions: 0,
                 });
         if route.cooldown_until > now {
@@ -200,8 +299,12 @@ impl TaskProviderPressure {
             return Ok(None);
         }
         route.in_flight = route.in_flight.saturating_add(1);
+        let consumer_in_flight = route.in_flight_by_consumer.entry(consumer).or_default();
+        *consumer_in_flight = consumer_in_flight.saturating_add(1);
         Ok(Some(ProviderRouteAdmission {
             fingerprint: fingerprint.to_owned(),
+            provider_name: route.provider_name.clone(),
+            model_name: route.model_name.clone(),
             epoch: route.epoch,
         }))
     }
@@ -227,7 +330,12 @@ impl TaskProviderPressure {
             .routes
             .get(&fingerprint)
             .map_or(0, |route| route.epoch);
-        Ok(ProviderRouteAdmission { fingerprint, epoch })
+        Ok(ProviderRouteAdmission {
+            fingerprint,
+            provider_name: provider_name.trim().to_owned(),
+            model_name: model_name.trim().to_owned(),
+            epoch,
+        })
     }
 
     fn record_rate_limit(&self, admission: &ProviderRouteAdmission, retry_after_ms: Option<u64>) {
@@ -238,11 +346,16 @@ impl TaskProviderPressure {
         let max_concurrency = state.max_concurrency;
         let route = state.routes.entry(admission.fingerprint.clone()).or_insert(
             ProviderRoutePressureState {
+                provider_name: admission.provider_name.clone(),
+                model_name: admission.model_name.clone(),
                 cooldown_until: now,
                 consecutive_rate_limits: 0,
                 epoch: admission.epoch,
                 concurrency_window: max_concurrency,
                 in_flight: 0,
+                in_flight_by_consumer: BTreeMap::new(),
+                waiting: 0,
+                waiting_by_consumer: BTreeMap::new(),
                 successful_completions: 0,
             },
         );
@@ -280,27 +393,134 @@ impl TaskProviderPressure {
         }
     }
 
-    fn release(&self, fingerprint: &str) {
+    fn release(&self, fingerprint: &str, consumer: TaskProviderRouteConsumer) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if let Some(route) = state.routes.get_mut(fingerprint) {
             route.in_flight = route.in_flight.saturating_sub(1);
+            if let Some(in_flight) = route.in_flight_by_consumer.get_mut(&consumer) {
+                *in_flight = in_flight.saturating_sub(1);
+                if *in_flight == 0 {
+                    route.in_flight_by_consumer.remove(&consumer);
+                }
+            }
         }
         drop(state);
         self.notify.notify_one();
+    }
+
+    fn register_waiter(
+        &self,
+        fingerprint: &str,
+        consumer: TaskProviderRouteConsumer,
+    ) -> Result<ProviderRouteWaiterGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("provider pressure state lock poisoned"))?;
+        let route = state
+            .routes
+            .get_mut(fingerprint)
+            .ok_or_else(|| anyhow!("provider pressure route disappeared before waiting"))?;
+        route.waiting = route.waiting.saturating_add(1);
+        let consumer_waiting = route.waiting_by_consumer.entry(consumer).or_default();
+        *consumer_waiting = consumer_waiting.saturating_add(1);
+        Ok(ProviderRouteWaiterGuard {
+            pressure: self.clone(),
+            fingerprint: fingerprint.to_owned(),
+            consumer,
+        })
+    }
+
+    fn unregister_waiter(&self, fingerprint: &str, consumer: TaskProviderRouteConsumer) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(route) = state.routes.get_mut(fingerprint) else {
+            return;
+        };
+        route.waiting = route.waiting.saturating_sub(1);
+        if let Some(waiting) = route.waiting_by_consumer.get_mut(&consumer) {
+            *waiting = waiting.saturating_sub(1);
+            if *waiting == 0 {
+                route.waiting_by_consumer.remove(&consumer);
+            }
+        }
+    }
+
+    pub(crate) fn diagnostics(&self) -> TaskProviderRouteDiagnosticsSnapshot {
+        let now = self.clock.now();
+        let Ok(state) = self.state.lock() else {
+            return TaskProviderRouteDiagnosticsSnapshot::default();
+        };
+        let routes = state
+            .routes
+            .iter()
+            .filter_map(|(route_fingerprint, route)| {
+                let cooldown_remaining_ms = if route.cooldown_until > now {
+                    let milliseconds =
+                        duration_millis_ceil(route.cooldown_until.duration_since(now));
+                    milliseconds
+                        .div_ceil(DIAGNOSTICS_COOLDOWN_GRANULARITY_MS)
+                        .saturating_mul(DIAGNOSTICS_COOLDOWN_GRANULARITY_MS)
+                } else {
+                    0
+                };
+                let observable = route.in_flight > 0
+                    || route.waiting > 0
+                    || cooldown_remaining_ms > 0
+                    || route.concurrency_window < state.max_concurrency
+                    || route.consecutive_rate_limits > 0;
+                observable.then(|| TaskProviderRouteDiagnostics {
+                    route_fingerprint: route_fingerprint.clone(),
+                    provider_name: route.provider_name.clone(),
+                    model_name: route.model_name.clone(),
+                    consumers: route
+                        .in_flight_by_consumer
+                        .keys()
+                        .chain(route.waiting_by_consumer.keys())
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|consumer| TaskProviderRouteConsumerDiagnostics {
+                            consumer,
+                            in_flight: route
+                                .in_flight_by_consumer
+                                .get(&consumer)
+                                .copied()
+                                .unwrap_or(0),
+                            waiting: route
+                                .waiting_by_consumer
+                                .get(&consumer)
+                                .copied()
+                                .unwrap_or(0),
+                        })
+                        .collect(),
+                    in_flight: route.in_flight,
+                    waiting: route.waiting,
+                    concurrency_window: route.concurrency_window,
+                    max_concurrency: state.max_concurrency,
+                    cooldown_remaining_ms,
+                    consecutive_rate_limits: route.consecutive_rate_limits,
+                })
+            })
+            .collect();
+        TaskProviderRouteDiagnosticsSnapshot { routes }
     }
 }
 
 pub(crate) fn wrap_task_agent_provider(
     agent: Agent<Box<dyn Provider>>,
     pressure: TaskProviderPressure,
+    consumer: TaskProviderRouteConsumer,
 ) -> Agent<Box<dyn Provider>> {
     let (provider, tools): (Box<dyn Provider>, ToolRegistry) = agent.into_parts();
     Agent::new(
         Box::new(PressureAwareTaskProvider {
             inner: provider,
             pressure,
+            consumer,
         }),
         tools,
     )
@@ -309,6 +529,7 @@ pub(crate) fn wrap_task_agent_provider(
 struct PressureAwareTaskProvider {
     inner: Box<dyn Provider>,
     pressure: TaskProviderPressure,
+    consumer: TaskProviderRouteConsumer,
 }
 
 #[async_trait]
@@ -356,7 +577,7 @@ impl Provider for PressureAwareTaskProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let (admission, lease) = self
             .pressure
-            .acquire(self.inner.name(), &request.model_name)
+            .acquire(self.inner.name(), &request.model_name, self.consumer)
             .await?;
         let stream = match self.inner.stream(request).await {
             Ok(stream) => stream,

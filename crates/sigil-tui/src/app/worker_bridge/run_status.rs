@@ -18,6 +18,9 @@ impl AppState {
         self.runtime.is_busy = false;
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.mcp_progress = None;
+        self.runtime.active_task = None;
+        self.runtime.task_provider_route_diagnostics =
+            sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
         self.approval.pending = None;
         self.modal_state = None;
         self.runtime.last_phase_marker = None;

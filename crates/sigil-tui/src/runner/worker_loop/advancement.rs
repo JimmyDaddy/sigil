@@ -54,8 +54,11 @@ where
         WorkerAdvancementControl::SkipCommandPoll
     );
     let oauth_advanced = advance_mcp_oauth_results(context.message_tx, context.state);
+    let task_route_diagnostics_advanced =
+        advance_task_provider_route_diagnostics(context.message_tx, context.state);
     if refresh_advanced
         || oauth_advanced
+        || task_route_diagnostics_advanced
         || matches!(
             advance_compaction_results(context.reborrow()),
             WorkerAdvancementControl::SkipCommandPoll
@@ -89,6 +92,46 @@ where
     } else {
         WorkerAdvancementControl::PollCommand
     }
+}
+
+fn advance_task_provider_route_diagnostics(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    state: &mut WorkerLoopState,
+) -> bool {
+    let task_run_active = state.run.active.as_ref().is_some_and(|active| {
+        matches!(
+            &active.cancellation_target,
+            RunCancellationTarget::Task { .. }
+        )
+    });
+    let active_snapshot = if task_run_active {
+        state.agent.supervisor.task_provider_route_diagnostics()
+    } else {
+        sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default()
+    };
+    let Some(snapshot) = changed_task_provider_route_diagnostics(
+        task_run_active,
+        active_snapshot,
+        &state.agent.last_task_provider_route_diagnostics,
+    ) else {
+        return false;
+    };
+    state.agent.last_task_provider_route_diagnostics = snapshot.clone();
+    let _ = message_tx.send(WorkerMessage::TaskProviderRouteDiagnosticsUpdated { snapshot });
+    true
+}
+
+pub(in crate::runner) fn changed_task_provider_route_diagnostics(
+    task_run_active: bool,
+    active_snapshot: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+    previous: &sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+) -> Option<sigil_runtime::TaskProviderRouteDiagnosticsSnapshot> {
+    let snapshot = if task_run_active {
+        active_snapshot
+    } else {
+        sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default()
+    };
+    (snapshot != *previous).then_some(snapshot)
 }
 
 fn advance_pending_task_handoffs<P>(

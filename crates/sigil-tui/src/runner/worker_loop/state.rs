@@ -60,6 +60,8 @@ impl WorkerLoopState {
             agent: AgentWorkerState {
                 supervisor: agent_supervisor,
                 background_runs: background_agent_runs,
+                last_task_provider_route_diagnostics:
+                    sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
             },
             mcp_oauth: McpOAuthWorkerState {
                 result_tx: mcp_oauth_result_tx,
@@ -118,4 +120,6 @@ pub(in crate::runner) struct RefreshWorkerState {
 pub(in crate::runner) struct AgentWorkerState {
     pub(in crate::runner) supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) background_runs: sigil_runtime::AgentToolBackgroundRuns,
+    pub(in crate::runner) last_task_provider_route_diagnostics:
+        sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
 }

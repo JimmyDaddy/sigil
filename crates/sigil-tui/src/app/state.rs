@@ -112,6 +112,14 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) pending_worker_commands: Vec<WorkerCommand>,
     pub(crate) active_balance_refresh_id: Option<u64>,
     pub(in crate::app) active_model_picker_refresh: Option<PendingModelPickerRefresh>,
+    pub(crate) active_task: Option<ActiveTaskRuntimeStatus>,
+    pub(crate) task_provider_route_diagnostics: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveTaskRuntimeStatus {
+    pub(crate) task_id: String,
+    pub(crate) objective: String,
 }
 
 #[derive(Debug)]

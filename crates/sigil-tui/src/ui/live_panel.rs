@@ -29,6 +29,7 @@ pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
+const LIVE_TASK_ROUTE_LIMIT: usize = 3;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
 #[cfg(test)]
@@ -129,6 +130,7 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
         .map(|view| {
             live_task_strip_rows(
                 view.rows.len(),
+                app.runtime.task_provider_route_diagnostics.routes.len(),
                 verification_card_rows(view.verification.as_ref(), app.verification_inspect_open()),
             )
         })
@@ -159,6 +161,7 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
         .map(|view| {
             live_task_strip_rows(
                 view.rows.len(),
+                view.route_diagnostics.len(),
                 verification_card_view_rows(view.verification.as_ref()),
             )
         })
@@ -189,7 +192,11 @@ pub(crate) fn verification_card_area_for_app(live_area: Rect, app: &AppState) ->
             .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
             .max(1),
     );
-    let task_rows = live_task_strip_rows(task_strip.rows.len(), verification_rows);
+    let task_rows = live_task_strip_rows(
+        task_strip.rows.len(),
+        app.runtime.task_provider_route_diagnostics.routes.len(),
+        verification_rows,
+    );
     let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
     let status_top = content_frame
         .y
@@ -215,11 +222,13 @@ fn live_status_rows_with_separator(content_rows: u16) -> u16 {
     content_rows.saturating_add(1)
 }
 
-fn live_task_strip_rows(row_count: usize, verification_rows: u16) -> u16 {
+fn live_task_strip_rows(row_count: usize, route_count: usize, verification_rows: u16) -> u16 {
     if row_count == 0 {
         return 0;
     }
-    1 + verification_rows + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
+    1 + route_count.min(LIVE_TASK_ROUTE_LIMIT) as u16
+        + verification_rows
+        + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
 }
 
 fn verification_card_rows(
@@ -687,8 +696,33 @@ fn render_task_strip_lines(
     if task_strip.rows.is_empty() {
         return Vec::new();
     }
-    let mut lines = Vec::with_capacity(1 + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT));
+    let mut lines = Vec::with_capacity(
+        1 + task_strip.route_diagnostics.len() + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT),
+    );
     lines.push(render_task_strip_header(task_strip, width, theme));
+    lines.extend(
+        task_strip
+            .route_diagnostics
+            .iter()
+            .take(LIVE_TASK_ROUTE_LIMIT)
+            .map(|diagnostic| {
+                Line::from(vec![
+                    Span::styled(
+                        "  Route ",
+                        Style::default()
+                            .fg(theme.palette.accent_info)
+                            .bg(theme.palette.surface_panel_alt)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_display_width(diagnostic, width.saturating_sub(8)),
+                        Style::default()
+                            .fg(theme.palette.text_secondary)
+                            .bg(theme.palette.surface_panel_alt),
+                    ),
+                ])
+            }),
+    );
     if let Some(verification) = &task_strip.verification {
         lines.extend(render_verification_card_lines(verification, width, theme));
     }

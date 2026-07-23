@@ -403,6 +403,7 @@ fn format_attachment_bytes(bytes: u64) -> String {
 pub(crate) struct TaskStripViewModel {
     pub title: String,
     pub detail: String,
+    pub route_diagnostics: Vec<String>,
     pub verification: Option<VerificationCardViewModel>,
     pub rows: Vec<TaskStripRowViewModel>,
 }
@@ -421,6 +422,7 @@ impl TaskStripViewModel {
         Self {
             title: view.title,
             detail: view.detail,
+            route_diagnostics: Vec::new(),
             verification: view.verification.map(|verification| {
                 let action_label = verification.action.as_ref().map(|action| match action {
                     crate::app::task_sidebar::VerificationCardAction::Rerun(_) => "run check",
@@ -1023,11 +1025,16 @@ impl LivePanelViewModel {
                 .pending_plan_approval()
                 .map(PlanApprovalViewModel::from_pending),
             task_strip: app.task_strip_view().map(|view| {
-                TaskStripViewModel::from_task_strip_view_with_state(
+                let mut task_strip = TaskStripViewModel::from_task_strip_view_with_state(
                     view,
                     app.verification_card_focused(),
                     app.verification_inspect_open(),
-                )
+                );
+                task_strip.route_diagnostics =
+                    crate::app::task_sidebar::task_provider_route_live_lines(
+                        &app.runtime.task_provider_route_diagnostics,
+                    );
+                task_strip
             }),
             transcript_lines: app.transcript_lines(transcript_rows),
         }
