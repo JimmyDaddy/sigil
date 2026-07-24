@@ -52,6 +52,7 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) parent_session_ref: SessionRef,
     pub(in crate::runner) objective: String,
     pub(in crate::runner) guidance: Option<String>,
+    pub(in crate::runner) guidance_promotion: Option<TaskGuidancePromotedEntry>,
     pub(in crate::runner) root_config: RootConfig,
     pub(in crate::runner) options: AgentRunOptions,
     pub(in crate::runner) base_registry: ToolRegistry,
@@ -172,6 +173,7 @@ pub(in crate::runner) fn spawn_task_continue(
             parent_session_ref,
             objective,
             guidance,
+            guidance_promotion,
             root_config,
             options,
             base_registry,
@@ -196,6 +198,7 @@ pub(in crate::runner) fn spawn_task_continue(
                 parent_session_ref,
                 objective,
                 guidance,
+                guidance_promotion,
                 root_config,
                 options,
                 base_registry,
@@ -336,6 +339,7 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     parent_session_ref: SessionRef,
     objective: String,
     guidance: Option<String>,
+    guidance_promotion: Option<TaskGuidancePromotedEntry>,
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
@@ -524,6 +528,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         parent_session_ref,
         objective,
         guidance,
+        guidance_promotion,
         root_config,
         options,
         base_registry,
@@ -542,10 +547,10 @@ pub(in crate::runner) async fn continue_task_orchestration(
     )?;
     let TaskRoleRuntime {
         orchestrator,
+        planner_options,
         executor_options,
         subagent_read_options,
         subagent_write_options,
-        ..
     } = build_task_role_runtime(
         &root_config,
         &options,
@@ -555,22 +560,48 @@ pub(in crate::runner) async fn continue_task_orchestration(
     )?;
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-    orchestrator
-        .continue_run(
-            session,
-            SequentialTaskRequest {
-                task_id,
-                parent_session_ref,
-                objective,
-            },
-            executor_options,
-            subagent_read_options,
-            subagent_write_options,
-            guidance,
-            handler,
-            &mut approval_handler,
-        )
-        .await
+    let task_request = SequentialTaskRequest {
+        task_id,
+        parent_session_ref,
+        objective,
+    };
+    let output = match (guidance, guidance_promotion) {
+        (Some(guidance), Some(promotion)) => {
+            orchestrator
+                .continue_run_with_guidance_review(
+                    session,
+                    task_request,
+                    planner_options,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    root_config.task.max_plan_steps,
+                    guidance,
+                    promotion,
+                    handler,
+                    &mut approval_handler,
+                )
+                .await
+        }
+        (guidance, None) => {
+            orchestrator
+                .continue_run(
+                    session,
+                    task_request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    guidance,
+                    handler,
+                    &mut approval_handler,
+                )
+                .await
+        }
+        (None, Some(_)) => Err(anyhow::anyhow!(
+            "task guidance promotion is missing exact prompt material"
+        )),
+    };
+    output
         .map(|output| output.status)
         .map_err(|error| format!("{error:#}"))
 }

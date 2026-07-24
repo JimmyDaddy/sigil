@@ -7,11 +7,11 @@ use sigil_kernel::{
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
     PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
-    Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
-    TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
+    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPlanEntry,
+    TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
     project_conversation_prompt_for_persistence,
 };
 use tempfile::tempdir;
@@ -249,6 +249,24 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let role_provider_builder = planned_role_provider_builder(vec![
         StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "call-task-guidance-apply".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "call-task-guidance-apply".to_owned(),
+                delta: r#"{"reason":"prioritizes_pending_step","target_step_ids":["finish"]}"#
+                    .to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-task-guidance-apply".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                args_json: r#"{"reason":"prioritizes_pending_step","target_step_ids":["finish"]}"#
+                    .to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("guided step completed".to_owned()),
             ProviderChunk::Done,
         ]),
@@ -290,6 +308,13 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
             .count(),
         1
     );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+            if applied.queue_id == queue_id
+                && applied.task_id == task_id
+                && applied.target_step_ids == vec![TaskStepId::new("finish").expect("valid step id")]
+    )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(changed))

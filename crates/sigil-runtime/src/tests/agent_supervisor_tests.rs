@@ -22,28 +22,28 @@ use sigil_kernel::{
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, ChangeSet, ChangeSetFile,
     ChangeSetFileAction, ChangeSetId, ChangeSetRisk, CompactionConfig, CompletionRequest,
-    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthority,
-    DelegationAuthorityRecord, EventHandler, IntegrationBaseRepresentation,
+    ControlEntry, ConversationInputQueueId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    DelegationAuthority, DelegationAuthorityRecord, EventHandler, IntegrationBaseRepresentation,
     IntegrationContentClass, IntegrationEffect, IntegrationObservedEffect, IntegrationPlanId,
     IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
     IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
     MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
     ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
     RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
-    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskIntegrationProposal, TaskIntegrationRunRequest, TaskIsolationMode,
-    TaskParticipantAttemptId, TaskParticipantPurpose, TaskParticipantRetryError,
-    TaskParticipantRetryProof, TaskPlanUpdateContext, TaskPlannerSessionRunRequest,
-    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_integration_plan,
-    build_workspace_snapshot, child_session_ref, decode_changeset_only_child_output,
-    stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
-    task_participant_session_ref,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact,
+    TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
+    TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
+    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
+    build_integration_plan, build_workspace_snapshot, child_session_ref,
+    decode_changeset_only_child_output, stable_workspace_id, task_participant_attempt_id,
+    task_participant_logical_run_id, task_participant_session_ref,
 };
 
 use super::{
@@ -86,6 +86,8 @@ fn participant_session_ref_for(step_id: &str) -> Result<SessionRef> {
 struct TextProvider {
     text: &'static str,
 }
+
+struct GuidanceApplyPlannerProvider;
 
 struct PlannerDiscoveryProvider {
     observed_results: Arc<Mutex<Option<String>>>,
@@ -153,6 +155,40 @@ impl Provider for TextProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta(self.text.to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for GuidanceApplyPlannerProvider {
+    fn name(&self) -> &str {
+        "guidance-apply-planner"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let args = r#"{"reason":"clarifies_existing_step","target_step_ids":["step_1"]}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-guidance-apply".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-guidance-apply".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-guidance-apply".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                args_json: args.to_owned(),
+            })),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -2687,6 +2723,109 @@ async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> 
         child_start(step("slot-reused")?, temp.path().to_path_buf())?,
     )?;
     assert_eq!(supervisor.active_profile_ids().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor,
+        Agent::new(Box::new(GuidanceApplyPlannerProvider), ToolRegistry::new()),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "reader done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_guidance_runtime")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let accepted_plan = TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: step_id.clone(),
+            title: "Inspect runtime guidance".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
+        }],
+        reason: None,
+    };
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "review task guidance".to_owned(),
+                },
+                attempt_id,
+                child_session_ref,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("review this guidance"),
+                ])
+                .with_task_plan_update(TaskPlanUpdateContext {
+                    task_id: task_id.clone(),
+                    max_plan_steps: 4,
+                    max_plan_versions: 2,
+                })
+                .with_task_guidance_assessment(TaskGuidanceAssessmentContext {
+                    queue_id: ConversationInputQueueId::new("queue_runtime_guidance")?,
+                    task_id,
+                    plan_version: 1,
+                    dispatch_run_id: "dispatch_runtime_guidance".to_owned(),
+                    accepted_plan,
+                    eligible_pending_step_ids: vec![step_id],
+                }),
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    let applied = output
+        .guidance_applied
+        .expect("runtime planner output should carry the model guidance decision");
+    assert_eq!(applied.queue_id.as_str(), "queue_runtime_guidance");
+    assert_eq!(applied.plan_version, 1);
+    assert_eq!(applied.target_step_ids[0].as_str(), "step_1");
+    assert_eq!(output.accepted_plan.plan_version, 1);
     Ok(())
 }
 

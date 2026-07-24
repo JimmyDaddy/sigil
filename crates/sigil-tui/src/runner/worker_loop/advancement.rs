@@ -447,7 +447,7 @@ where
                 .exact_prompts
                 .remove(&candidate.promotion.queue_id);
 
-            let task_id = candidate.promotion.task_id;
+            let task_id = candidate.promotion.task_id.clone();
             let task_id_value = task_id.as_str().to_owned();
             let _ = message_tx.send(WorkerMessage::TaskRunStarted {
                 task_id: task_id_value.clone(),
@@ -481,6 +481,7 @@ where
                     parent_session_ref: task.parent_session_ref,
                     objective: task.objective,
                     guidance: Some(candidate.exact_guidance),
+                    guidance_promotion: Some(candidate.promotion),
                     root_config: root_config.clone(),
                     options: options.clone(),
                     base_registry: agent.tool_registry().clone(),

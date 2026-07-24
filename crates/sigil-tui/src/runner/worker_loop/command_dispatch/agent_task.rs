@@ -533,6 +533,7 @@ where
                             parent_session_ref,
                             objective,
                             guidance,
+                            guidance_promotion: None,
                             root_config: root_config.clone(),
                             options: options.clone(),
                             base_registry: agent.tool_registry().clone(),

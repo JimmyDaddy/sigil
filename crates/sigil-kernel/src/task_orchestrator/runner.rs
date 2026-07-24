@@ -241,6 +241,298 @@ where
         }
     }
 
+    /// Reviews promoted natural-language guidance with the planner model before continuing.
+    ///
+    /// The host does not classify prompt content. The isolated planner must call either
+    /// `task_guidance_apply` for selected not-yet-started steps or `task_plan_update` for a new
+    /// accepted plan version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the promotion is stale, the planner decision is inconsistent with
+    /// its host binding, or the resumed task cannot be appended.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn continue_run_with_guidance_review<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        planner_options: AgentRunOptions,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        max_plan_steps: usize,
+        guidance: String,
+        promotion: TaskGuidancePromotedEntry,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        promotion.validate_for_session(session.session_scope_id())?;
+        if !session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(recorded))
+                    if recorded == &promotion
+            )
+        }) {
+            bail!("task guidance review requires its exact durable promotion record");
+        }
+        let guidance = normalize_task_guidance(Some(guidance))
+            .ok_or_else(|| anyhow!("promoted task guidance is empty"))?;
+        let prompt_projection = crate::project_conversation_prompt_for_persistence(&guidance);
+        if prompt_projection.prompt_hash != promotion.prompt_hash
+            || prompt_projection.safe_prompt != promotion.guidance
+            || prompt_projection.exact_prompt_required != promotion.exact_prompt_required
+        {
+            bail!("promoted task guidance no longer matches its exact prompt material");
+        }
+        if promotion.task_id != request.task_id {
+            bail!("promoted task guidance targets a different task");
+        }
+
+        let projection = session.task_state_projection();
+        let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
+            anyhow!(
+                "task {} is not present in session",
+                request.task_id.as_str()
+            )
+        })?;
+        if matches!(
+            task.status,
+            TaskRunStatus::Completed | TaskRunStatus::Cancelled
+        ) {
+            bail!("promoted task guidance cannot revive a completed or cancelled task");
+        }
+        let (plan_version, steps) = latest_executable_plan(task)?;
+        if promotion.plan_version != plan_version {
+            bail!(
+                "promoted task guidance plan v{} is stale against accepted plan v{}",
+                promotion.plan_version,
+                plan_version
+            );
+        }
+        let plan = task
+            .plans
+            .get(&plan_version)
+            .ok_or_else(|| anyhow!("accepted task plan v{plan_version} disappeared"))?;
+        let accepted_plan = TaskPlanEntry {
+            task_id: request.task_id.clone(),
+            plan_version,
+            status: plan.status,
+            steps: plan.steps.clone(),
+            reason: plan.reason.clone(),
+        };
+        let eligible_pending_step_ids = steps
+            .iter()
+            .filter(|step| {
+                task.steps
+                    .get(&(plan_version, step.step_id.clone()))
+                    .is_none_or(|projected| projected.status == TaskStepStatus::Pending)
+            })
+            .map(|step| step.step_id.clone())
+            .collect::<Vec<_>>();
+        let assessment = TaskGuidanceAssessmentContext {
+            queue_id: promotion.queue_id.clone(),
+            task_id: request.task_id.clone(),
+            plan_version,
+            dispatch_run_id: promotion.dispatch_run_id.clone(),
+            accepted_plan: accepted_plan.clone(),
+            eligible_pending_step_ids: eligible_pending_step_ids.clone(),
+        };
+        assessment.validate_shape()?;
+        let assessment_prompt = task_guidance_assessment_prompt(
+            &request.objective,
+            &accepted_plan,
+            &eligible_pending_step_ids,
+            &guidance,
+        );
+
+        loop {
+            let projection = session.task_state_projection();
+            let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
+                anyhow!("task disappeared before guidance-review retry admission")
+            })?;
+            if !await_pending_participant_retry(
+                task,
+                TaskParticipantPurpose::Planner,
+                None,
+                self.cancellation.as_ref(),
+            )
+            .await
+            {
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    TaskRunStatus::Cancelled,
+                    Some("task cancelled during guidance review retry backoff".to_owned()),
+                )?;
+                bail!("task cancelled during guidance review retry backoff");
+            }
+            let attempt = begin_participant_attempt(
+                session,
+                handler,
+                &request,
+                TaskParticipantPurpose::Planner,
+                None,
+                None,
+                AgentRole::Planner,
+            )?;
+            let planner_input = self.bind_cancellation(
+                AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                    assessment_prompt.clone(),
+                )])
+                .with_task_plan_update(TaskPlanUpdateContext {
+                    task_id: request.task_id.clone(),
+                    max_plan_steps,
+                    max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                })
+                .with_task_guidance_assessment(assessment.clone())
+                .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                    task_id: request.task_id.clone(),
+                    attempt_id: Some(attempt.attempt_id.clone()),
+                }))
+                .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
+            );
+            validate_scheduled_retry_input(session, &attempt, &planner_input)?;
+            let planner_output = self
+                .child_runner
+                .run_planner_session(
+                    session,
+                    TaskPlannerSessionRunRequest {
+                        task: request.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        child_session_ref: attempt.child_session_ref.clone(),
+                        child_input: planner_input,
+                        options: planner_options.clone(),
+                        discovery_options: subagent_read_options.clone(),
+                    },
+                    handler,
+                    approval_handler,
+                )
+                .await;
+            let output = match planner_output {
+                Ok(output) => output,
+                Err(error) => {
+                    if schedule_control_participant_retry(
+                        session,
+                        handler,
+                        &request,
+                        TaskParticipantPurpose::Planner,
+                        None,
+                        &attempt,
+                        &error,
+                    )? {
+                        continue;
+                    }
+                    append_participant_terminal(
+                        session,
+                        handler,
+                        &attempt,
+                        TaskParticipantAttemptStatus::Failed,
+                        Some(format!("task guidance review failed: {error:#}")),
+                    )?;
+                    append_task_run(
+                        session,
+                        handler,
+                        &request,
+                        TaskRunStatus::Paused,
+                        Some(
+                            "task guidance review failed; explicit recovery is required".to_owned(),
+                        ),
+                    )?;
+                    return Err(error);
+                }
+            };
+            validate_isolated_planner_output(&request, &attempt, &output)?;
+
+            let (continued_guidance, target_step_ids, summary) = if let Some(applied) =
+                output.guidance_applied.as_ref()
+            {
+                applied.validate_against(&assessment)?;
+                if output.accepted_plan != accepted_plan {
+                    bail!("guidance supplement decision returned a different accepted task plan");
+                }
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskGuidanceApplied(applied.clone()),
+                )?;
+                (
+                    Some(guidance.clone()),
+                    Some(applied.target_step_ids.iter().cloned().collect()),
+                    format!(
+                        "applied queued guidance to {} pending step(s) in task plan v{}",
+                        applied.target_step_ids.len(),
+                        plan_version
+                    ),
+                )
+            } else {
+                validate_guidance_replan(
+                    task,
+                    plan_version,
+                    &accepted_plan,
+                    &output.accepted_plan,
+                )?;
+                let carried_steps = completed_steps_for_replan(
+                    task,
+                    plan_version,
+                    &accepted_plan,
+                    &output.accepted_plan,
+                )?;
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskPlan(output.accepted_plan.clone()),
+                )?;
+                for step in carried_steps {
+                    append_task_control(session, handler, ControlEntry::TaskStep(step))?;
+                }
+                (
+                    None,
+                    None,
+                    format!(
+                        "accepted task guidance replan v{} with {} steps",
+                        output.accepted_plan.plan_version,
+                        output.accepted_plan.steps.len()
+                    ),
+                )
+            };
+            let result = participant_result_entry(
+                &attempt,
+                &summary,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?;
+            append_participant_result_and_terminal(
+                session,
+                handler,
+                &attempt,
+                result,
+                TaskParticipantAttemptStatus::Completed,
+                None,
+            )?;
+            return self
+                .continue_run_scoped(
+                    session,
+                    request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    continued_guidance,
+                    target_step_ids,
+                    handler,
+                    approval_handler,
+                )
+                .await;
+        }
+    }
+
     /// Continues an existing task from the latest durable accepted plan.
     ///
     /// Completed steps are skipped. Pending, running, blocked, failed, cancelled, and interrupted
@@ -258,6 +550,37 @@ where
         subagent_read_options: AgentRunOptions,
         subagent_write_options: AgentRunOptions,
         guidance: Option<String>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        self.continue_run_scoped(
+            session,
+            request,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            guidance,
+            None,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_run_scoped<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        guidance: Option<String>,
+        guidance_target_step_ids: Option<BTreeSet<TaskStepId>>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<SequentialTaskRunOutput>
@@ -426,14 +749,22 @@ where
                             &request.objective,
                             plan_version,
                             &step,
-                            guidance.as_deref(),
+                            guidance_for_step(
+                                guidance.as_deref(),
+                                guidance_target_step_ids.as_ref(),
+                                &step.step_id,
+                            ),
                         )
                     } else {
                         subagent_step_prompt(
                             &request.objective,
                             plan_version,
                             &step,
-                            guidance.as_deref(),
+                            guidance_for_step(
+                                guidance.as_deref(),
+                                guidance_target_step_ids.as_ref(),
+                                &step.step_id,
+                            ),
                         )
                     };
                     let child_input =
@@ -670,7 +1001,11 @@ where
                         plan_version,
                         &step,
                         step_options.clone(),
-                        guidance.as_deref(),
+                        guidance_for_step(
+                            guidance.as_deref(),
+                            guidance_target_step_ids.as_ref(),
+                            &step.step_id,
+                        ),
                         handler,
                         approval_handler,
                     )
@@ -2322,6 +2657,103 @@ fn validate_isolated_planner_output(
     }
     TaskGraphProjection::from_plan_entry(plan)?;
     Ok(())
+}
+
+fn guidance_for_step<'a>(
+    guidance: Option<&'a str>,
+    target_step_ids: Option<&BTreeSet<TaskStepId>>,
+    step_id: &TaskStepId,
+) -> Option<&'a str> {
+    guidance.filter(|_| {
+        target_step_ids
+            .map(|targets| targets.contains(step_id))
+            .unwrap_or(true)
+    })
+}
+
+fn validate_guidance_replan(
+    task: &TaskRunProjection,
+    current_plan_version: u32,
+    current_plan: &TaskPlanEntry,
+    next_plan: &TaskPlanEntry,
+) -> Result<()> {
+    let expected_version = current_plan_version
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("task plan version overflow during guidance replan"))?;
+    if next_plan.task_id != current_plan.task_id {
+        bail!("task guidance replan returned a plan for a different task");
+    }
+    if next_plan.plan_version != expected_version {
+        bail!(
+            "task guidance replan must produce exact next plan version {expected_version}, got {}",
+            next_plan.plan_version
+        );
+    }
+    if task.plans.contains_key(&next_plan.plan_version) {
+        bail!(
+            "task guidance replan version {} already exists",
+            next_plan.plan_version
+        );
+    }
+    Ok(())
+}
+
+fn completed_steps_for_replan(
+    task: &TaskRunProjection,
+    current_plan_version: u32,
+    current_plan: &TaskPlanEntry,
+    next_plan: &TaskPlanEntry,
+) -> Result<Vec<TaskStepEntry>> {
+    let mut carried = Vec::new();
+    for step in &current_plan.steps {
+        let Some(completed) = task
+            .steps
+            .get(&(current_plan_version, step.step_id.clone()))
+            .filter(|projected| projected.status == TaskStepStatus::Completed)
+        else {
+            continue;
+        };
+        let Some(next_step) = next_plan
+            .steps
+            .iter()
+            .find(|candidate| candidate.step_id == step.step_id)
+        else {
+            bail!(
+                "task guidance replan omitted completed step {}",
+                step.step_id.as_str()
+            );
+        };
+        if !task_steps_semantically_equal(next_step, step) {
+            bail!(
+                "task guidance replan changed completed step {}",
+                step.step_id.as_str()
+            );
+        }
+        carried.push(TaskStepEntry {
+            task_id: next_plan.task_id.clone(),
+            plan_version: next_plan.plan_version,
+            step_id: step.step_id.clone(),
+            role: step.role,
+            status: TaskStepStatus::Completed,
+            title: Some(step.title.clone()),
+            summary: completed.summary.clone(),
+            reason: Some(format!(
+                "completion carried forward from accepted plan v{current_plan_version}"
+            )),
+        });
+    }
+    Ok(carried)
+}
+
+fn task_steps_semantically_equal(left: &TaskStepSpec, right: &TaskStepSpec) -> bool {
+    left.step_id == right.step_id
+        && left.title == right.title
+        && left.display_name == right.display_name
+        && left.detail == right.detail
+        && left.role == right.role
+        && left.depends_on == right.depends_on
+        && left.effective_mode() == right.effective_mode()
+        && left.effective_isolation() == right.effective_isolation()
 }
 
 pub(super) fn append_integration_run_output<H>(

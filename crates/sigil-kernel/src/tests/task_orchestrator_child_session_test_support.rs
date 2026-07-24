@@ -65,9 +65,22 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
                 _ => None,
             })
             .ok_or_else(|| anyhow!("isolated planner did not produce an accepted plan"))?;
+        let guidance_applied = child_session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                    if applied.task_id == request.task.task_id =>
+                {
+                    Some(applied.clone())
+                }
+                _ => None,
+            });
         Ok(TaskPlannerSessionRunOutput {
             attempt_id: request.attempt_id,
             accepted_plan,
+            guidance_applied,
             child_session_ref: request.child_session_ref,
         })
     }

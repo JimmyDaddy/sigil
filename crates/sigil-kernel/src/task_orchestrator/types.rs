@@ -303,6 +303,7 @@ pub struct TaskPlannerSessionRunRequest {
 pub struct TaskPlannerSessionRunOutput {
     pub attempt_id: TaskParticipantAttemptId,
     pub accepted_plan: TaskPlanEntry,
+    pub guidance_applied: Option<crate::TaskGuidanceAppliedEntry>,
     pub child_session_ref: SessionRef,
 }
 

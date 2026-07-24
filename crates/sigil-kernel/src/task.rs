@@ -578,9 +578,6 @@ impl TaskGuidanceAssessmentContext {
             bail!("task guidance assessment accepted plan does not match its task binding");
         }
         validate_task_plan_graph_steps(&self.accepted_plan.steps)?;
-        if self.eligible_pending_step_ids.is_empty() {
-            bail!("task guidance assessment requires at least one eligible pending step");
-        }
         let plan_step_ids = self
             .accepted_plan
             .steps

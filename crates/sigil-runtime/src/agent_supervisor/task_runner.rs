@@ -2187,6 +2187,17 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 .ok_or_else(|| {
                     anyhow::anyhow!("isolated planner did not produce an accepted plan")
                 })?;
+            let guidance_applied =
+                child_session
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        sigil_kernel::SessionLogEntry::Control(
+                            ControlEntry::TaskGuidanceApplied(applied),
+                        ) if applied.task_id == request.task.task_id => Some(applied.clone()),
+                        _ => None,
+                    });
             let materialized = super::AgentResultMaterialization::inline(
                 format!("accepted task plan v{}", accepted_plan.plan_version),
                 None,
@@ -2204,6 +2215,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             Ok(TaskPlannerSessionRunOutput {
                 attempt_id: request.attempt_id.clone(),
                 accepted_plan,
+                guidance_applied,
                 child_session_ref: request.child_session_ref.clone(),
             })
         })();

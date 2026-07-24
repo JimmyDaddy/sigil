@@ -343,6 +343,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             task_plan_status_label(plan.status),
             plan.steps.len()
         ),
+        ControlEntry::TaskGuidanceApplied(applied) => format!(
+            "[ctl] task guidance applied task={} plan=v{} targets={} reason={:?}",
+            applied.task_id.as_str(),
+            applied.plan_version,
+            applied.target_step_ids.len(),
+            applied.reason
+        ),
         ControlEntry::TaskStep(step) => format!(
             "[ctl] step {} v{}:{} status={}",
             step.task_id.as_str(),
