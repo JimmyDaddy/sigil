@@ -89,6 +89,41 @@ fn coordinator_binds_stable_host_owned_ids_for_direct_auto_input() -> Result<()>
 }
 
 #[test]
+fn auto_routing_exposes_model_handoff_without_classifying_prompt_text() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+
+    for (index, prompt) in [
+        "你好",
+        "请并行调用多个子 agent 调查并实现这个跨 crate 任务",
+        "Why is the build slow?",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = Session::new("mock", "model");
+        let bound = coordinator.bind_conversation_input(
+            &session,
+            AgentRunInput::user(prompt),
+            parent_ref()?,
+            format!("prompt-agnostic-run-{index}"),
+            None,
+            42,
+        )?;
+        let Some(AgentRunPurpose::Conversation(context)) = bound.purpose else {
+            panic!("coordinator should bind a conversation purpose");
+        };
+
+        assert_eq!(context.routing_policy, TaskRoutingPolicy::Auto);
+        assert!(
+            context.task_handoff.is_some(),
+            "host must expose the typed handoff to the model without classifying prompt text"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn coordinator_uses_the_exact_durable_url_and_attachment_projection() -> Result<()> {
     let session = Session::new("mock", "model");
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
