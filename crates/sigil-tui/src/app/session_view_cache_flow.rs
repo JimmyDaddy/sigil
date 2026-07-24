@@ -143,6 +143,13 @@ impl AppState {
             && self.review.integration_review_request.as_ref() == Some(request)
             && !self.review.integration_review_diff_lines.is_empty()
         {
+            verification.status = "reviewed · exact diff loaded".to_owned();
+            verification.recommended = Some("accept integration".to_owned());
+            verification.why =
+                Some("promotion will revalidate the exact target before any effect".to_owned());
+            verification.action = Some(
+                super::task_sidebar::VerificationCardAction::AcceptIntegration(request.clone()),
+            );
             verification
                 .inspect_lines
                 .push("Exact aggregate diff:".to_owned());

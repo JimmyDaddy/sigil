@@ -563,6 +563,55 @@ impl AppState {
                     self.push_event("integration:review", error);
                 }
             }
+            WorkerMessage::TaskIntegrationAccepted {
+                request,
+                promotion_status,
+                parent_verdict,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                if self.review.integration_review_request.as_ref() != Some(&request) {
+                    self.push_event(
+                        "integration:accept",
+                        format!("ignored stale acceptance response {}", request.request_id),
+                    );
+                } else {
+                    self.sync_current_session_state(entries);
+                    self.clear_integration_review();
+                    let parent = parent_verdict
+                        .map(|verdict| format!(" · parent {verdict:?}"))
+                        .unwrap_or_default();
+                    self.last_notice =
+                        Some(format!("integration {}{parent}", promotion_status.as_str()));
+                    self.push_event(
+                        "integration:accept",
+                        format!(
+                            "{} preview={}",
+                            promotion_status.as_str(),
+                            request.preview_digest
+                        ),
+                    );
+                }
+            }
+            WorkerMessage::TaskIntegrationAcceptanceFailed {
+                request,
+                error,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                if self.review.integration_review_request.as_ref() != Some(&request) {
+                    self.push_event(
+                        "integration:accept",
+                        format!("ignored stale acceptance error {}", request.request_id),
+                    );
+                } else {
+                    if !entries.is_empty() {
+                        self.sync_current_session_state(entries);
+                    }
+                    self.last_notice = Some(format!("integration acceptance failed: {error}"));
+                    self.push_event("integration:accept", error);
+                }
+            }
             WorkerMessage::CheckpointRestoreCompleted {
                 request_id,
                 preview,

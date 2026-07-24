@@ -234,6 +234,18 @@ fn worker_commands_are_routed_to_explicit_domains() {
             WorkerCommandDomain::VerificationCheckpoint,
         ),
         (
+            WorkerCommand::AcceptTaskIntegration {
+                request: sigil_kernel::TaskIntegrationReviewRequest {
+                    request_id: "integration-accept-request".to_owned(),
+                    task_id: sigil_kernel::TaskId::new("task-1").expect("task id"),
+                    plan_id: sigil_kernel::IntegrationPlanId::new("plan-1").expect("plan id"),
+                    plan_version: 1,
+                    preview_digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            },
+            WorkerCommandDomain::VerificationCheckpoint,
+        ),
+        (
             WorkerCommand::CancelProviderModelsRefresh { request_id: 7 },
             WorkerCommandDomain::ProviderMcp,
         ),

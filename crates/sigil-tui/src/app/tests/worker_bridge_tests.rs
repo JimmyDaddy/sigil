@@ -364,6 +364,13 @@ fn plan_actions_map_to_worker_commands() {
         WorkerCommand::ReviewTaskIntegration { request }
             if request == integration_request
     ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::AcceptTaskIntegration {
+            request: integration_request.clone(),
+        }),
+        WorkerCommand::AcceptTaskIntegration { request }
+            if request == integration_request
+    ));
 }
 
 #[test]

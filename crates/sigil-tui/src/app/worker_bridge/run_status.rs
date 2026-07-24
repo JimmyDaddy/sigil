@@ -1,7 +1,7 @@
 use super::super::{AppState, RunPhase};
 
 impl AppState {
-    pub(super) fn start_worker_run_phase(
+    pub(in crate::app) fn start_worker_run_phase(
         &mut self,
         phase: RunPhase,
         notice: impl Into<String>,

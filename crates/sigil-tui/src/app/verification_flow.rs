@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{AppAction, AppState, PaneFocus, TimelineRole};
+use super::{AppAction, AppState, PaneFocus, RunPhase, TimelineRole};
 use crate::app::task_sidebar::VerificationCardAction;
 
 impl AppState {
@@ -86,6 +86,21 @@ impl AppState {
         }
         let card = self.task_strip_view()?.verification?;
         match card.action? {
+            VerificationCardAction::AcceptIntegration(request) => {
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    format!("accepting integration plan v{}", request.plan_version),
+                    format!("integration-accept|{}", request.preview_digest),
+                );
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!(
+                        "Accepting the reviewed integration for plan v{}.",
+                        request.plan_version
+                    ),
+                );
+                Some(AppAction::AcceptTaskIntegration { request })
+            }
             VerificationCardAction::ReviewIntegration(request) => {
                 self.review.integration_review_request = Some(request.clone());
                 self.review.integration_review_diff_lines.clear();

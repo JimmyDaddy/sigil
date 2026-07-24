@@ -399,6 +399,79 @@ where
                     }
                 }
             }
+            VerificationCheckpointCommand::AcceptTaskIntegration { request } => {
+                if state.run.active.is_some() {
+                    let entries = state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.entries().to_vec())
+                        .unwrap_or_default();
+                    let _ = message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
+                        request,
+                        error: "wait for the active run before accepting integration".to_owned(),
+                        entries,
+                    });
+                    continue;
+                }
+                let execution_backend =
+                    match sigil_runtime::build_configured_execution_backend(root_config) {
+                        Ok(backend) => backend,
+                        Err(error) => {
+                            let entries = state
+                                .session
+                                .current
+                                .as_ref()
+                                .map(|session| session.entries().to_vec())
+                                .unwrap_or_default();
+                            let _ =
+                                message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
+                                    request,
+                                    error: format!(
+                                        "failed to build parent verification backend: {error:#}"
+                                    ),
+                                    entries,
+                                });
+                            continue;
+                        }
+                    };
+                let Some(session) = state.session.current.as_mut() else {
+                    let _ = message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
+                        request,
+                        error: "integration acceptance requires an active session".to_owned(),
+                        entries: Vec::new(),
+                    });
+                    continue;
+                };
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                match runtime.block_on(
+                    sigil_runtime::integration_lanes::accept_task_integration_review(
+                        session,
+                        &mut handler,
+                        execution_backend,
+                        &options.workspace_root,
+                        &request,
+                    ),
+                ) {
+                    Ok(output) => {
+                        let _ = message_tx.send(WorkerMessage::TaskIntegrationAccepted {
+                            request,
+                            promotion_status: output.promotion.record.status,
+                            parent_verdict: output
+                                .parent_verification
+                                .map(|parent| parent.record.verdict),
+                            entries: session.entries().to_vec(),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
+                            request,
+                            error: format!("{error:#}"),
+                            entries: session.entries().to_vec(),
+                        });
+                    }
+                }
+            }
         }
     }
     control

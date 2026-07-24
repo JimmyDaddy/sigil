@@ -479,6 +479,9 @@ pub enum AppAction {
     ReviewTaskIntegration {
         request: sigil_kernel::TaskIntegrationReviewRequest,
     },
+    AcceptTaskIntegration {
+        request: sigil_kernel::TaskIntegrationReviewRequest,
+    },
     PreviewCheckpointRestore {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,

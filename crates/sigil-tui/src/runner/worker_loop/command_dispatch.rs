@@ -258,6 +258,9 @@ pub(in crate::runner) enum VerificationCheckpointCommand {
     ReviewTaskIntegration {
         request: TaskIntegrationReviewRequest,
     },
+    AcceptTaskIntegration {
+        request: TaskIntegrationReviewRequest,
+    },
     PreviewCheckpointRestore {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
@@ -587,6 +590,11 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::ReviewTaskIntegration { request } => {
             ClassifiedWorkerCommand::VerificationCheckpoint(
                 VerificationCheckpointCommand::ReviewTaskIntegration { request },
+            )
+        }
+        WorkerCommand::AcceptTaskIntegration { request } => {
+            ClassifiedWorkerCommand::VerificationCheckpoint(
+                VerificationCheckpointCommand::AcceptTaskIntegration { request },
             )
         }
         WorkerCommand::PreviewCheckpointRestore {

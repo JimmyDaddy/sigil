@@ -170,6 +170,9 @@ impl AppState {
             AppAction::ReviewTaskIntegration { request } => {
                 WorkerCommand::ReviewTaskIntegration { request }
             }
+            AppAction::AcceptTaskIntegration { request } => {
+                WorkerCommand::AcceptTaskIntegration { request }
+            }
             AppAction::PreviewCheckpointRestore {
                 request_id,
                 request,

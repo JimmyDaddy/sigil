@@ -39,6 +39,7 @@ pub(crate) struct VerificationCardView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VerificationCardAction {
     ReviewIntegration(TaskIntegrationReviewRequest),
+    AcceptIntegration(TaskIntegrationReviewRequest),
     Rerun(TaskVerificationRerunRequest),
     ReviewApproval { check_spec_id: String },
 }

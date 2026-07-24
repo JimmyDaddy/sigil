@@ -179,6 +179,36 @@ fn integration_review_loads_only_the_exact_current_response() -> anyhow::Result<
             .iter()
             .any(|line| line == "diff --git a/src/lib.rs b/src/lib.rs")
     );
+    let VerificationCardAction::AcceptIntegration(accept_request) =
+        card.action.expect("accept exact reviewed integration")
+    else {
+        panic!("expected integration acceptance action");
+    };
+    assert_eq!(accept_request, request);
+    let accept = app
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        .expect("integration acceptance action");
+    assert!(matches!(
+        accept,
+        AppAction::AcceptTaskIntegration {
+            request: ref activated
+        } if activated == &request
+    ));
+    assert!(app.runtime.is_busy);
+    let current_entries = app.session_browser.current_entries.clone();
+    app.handle_worker_message(
+        crate::runner::WorkerMessage::TaskIntegrationAcceptanceFailed {
+            request: request.clone(),
+            error: "parent drifted".to_owned(),
+            entries: current_entries,
+        },
+    )?;
+    assert!(!app.runtime.is_busy);
+    assert!(
+        app.last_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("parent drifted"))
+    );
 
     app.sync_current_session_state(Vec::new());
     app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationReviewLoaded {

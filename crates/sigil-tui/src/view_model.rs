@@ -430,6 +430,9 @@ impl TaskStripViewModel {
                     crate::app::task_sidebar::VerificationCardAction::ReviewIntegration(_) => {
                         "review diff"
                     }
+                    crate::app::task_sidebar::VerificationCardAction::AcceptIntegration(_) => {
+                        "accept integration"
+                    }
                     crate::app::task_sidebar::VerificationCardAction::Rerun(_) => "run check",
                     crate::app::task_sidebar::VerificationCardAction::ReviewApproval { .. } => {
                         "review approval"

@@ -258,6 +258,9 @@ pub enum WorkerCommand {
     ReviewTaskIntegration {
         request: TaskIntegrationReviewRequest,
     },
+    AcceptTaskIntegration {
+        request: TaskIntegrationReviewRequest,
+    },
     PreviewCheckpointRestore {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
@@ -475,6 +478,17 @@ pub enum WorkerMessage {
     TaskIntegrationReviewFailed {
         request: TaskIntegrationReviewRequest,
         error: String,
+    },
+    TaskIntegrationAccepted {
+        request: TaskIntegrationReviewRequest,
+        promotion_status: sigil_kernel::IntegrationPromotionStatus,
+        parent_verdict: Option<sigil_kernel::VerificationVerdict>,
+        entries: Vec<SessionLogEntry>,
+    },
+    TaskIntegrationAcceptanceFailed {
+        request: TaskIntegrationReviewRequest,
+        error: String,
+        entries: Vec<SessionLogEntry>,
     },
     CheckpointRestoreCompleted {
         request_id: u64,
