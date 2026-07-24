@@ -23,8 +23,8 @@ use sigil_kernel::{
     TaskPromotionPreviewRecorded, TaskStepId, ToolEffect, TrustedCheckSpec,
     VerificationAutoRunPolicy, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationScope, VerificationVerdict, WorkspaceTrust, WorkspaceTrustRequirement,
-    build_integration_plan, build_task_promotion_preview, build_workspace_snapshot,
-    stable_workspace_id,
+    WriteIsolationMode, build_integration_plan, build_task_promotion_preview,
+    build_workspace_snapshot, stable_workspace_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
@@ -34,9 +34,9 @@ use super::{
     IntegrationLaneRuntimeEventRequest, IntegrationPromotionPreparationTarget,
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
     ParentVerificationRunRequest, prepare_git_integration_promotion,
-    reconcile_integration_promotions, run_authoritative_parent_verification,
-    run_git_integration_lanes, run_git_integration_lanes_with_events,
-    run_git_integration_promotion_with_events,
+    prepare_task_integration_review, reconcile_integration_promotions,
+    run_authoritative_parent_verification, run_git_integration_lanes,
+    run_git_integration_lanes_with_events, run_git_integration_promotion_with_events,
 };
 use crate::isolated_workspace::{
     GitWorktreeBaseFreezeRequest, GitWorktreeCleanupRequest, cleanup_git_worktree,
@@ -694,6 +694,135 @@ async fn workspace_promotion_applies_aggregate_batch_after_authority_barrier() -
     assert_eq!(fs::read_to_string(root.join("b.txt"))?, "new-b\n");
     assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head_before);
     assert_promotion_event_sequence(&events, IntegrationPromotionStatus::Promoted);
+    Ok(())
+}
+
+#[tokio::test]
+async fn durable_integration_review_rebuilds_only_the_exact_reviewed_candidate() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let change = change_set("promotion-review-rebuild", "a.txt", "old-a\n", "new-a\n")?;
+    let diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n";
+    let integration_artifact = artifact(change.clone(), diff);
+    let session_store = JsonlSessionStore::new(temp.path().join("review.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(session_store);
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("durable review recorder");
+    let changeset_artifact_ref = recorder.capture_immutable_content_artifact(
+        &stable_workspace_id(&root)?,
+        "review-changeset",
+        Path::new(".sigil-task-artifacts/review.diff"),
+        diff.as_bytes(),
+    )?;
+    let facts = IntegrationProposalFacts::from_changeset(
+        &change,
+        IntegrationBaseRepresentation::CleanCommit {
+            base_commit: base_commit.clone(),
+        },
+        IntegrationContentClass::Text,
+        IntegrationEffect::Files,
+        Vec::new(),
+        changeset_artifact_ref.clone(),
+        Vec::new(),
+    )?;
+    let proposal = IntegrationProposalSpec::from_changeset(
+        &change,
+        TaskStepId::new("step_promotion_review_rebuild")?,
+        base_snapshot_id.clone(),
+        Vec::new(),
+        Vec::new(),
+        IntegrationEffect::Files,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        facts.clone(),
+    )?;
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-promotion-review-rebuild")?,
+        TaskId::new("task_promotion_review_rebuild")?,
+        1,
+        vec![proposal],
+    )?;
+    session.append_control(ControlEntry::ChangeSetProposed(change.clone()))?;
+    session.append_control(ControlEntry::IsolatedChangeSetProduced(
+        sigil_kernel::IsolatedChangeSetProduced {
+            changeset_id: change.id.clone(),
+            owner_agent_id: "agent-promotion-review-rebuild".to_owned(),
+            base_snapshot_id: base_snapshot_id.clone(),
+            child_snapshot_id: None,
+            source_isolation: WriteIsolationMode::Worktree,
+            artifact_ref: Some(changeset_artifact_ref),
+            touched_subjects: Vec::new(),
+            integration_facts: facts,
+        },
+    ))?;
+    let lane_session =
+        ready_lane_session(&root, &plan, std::slice::from_ref(&integration_artifact)).await?;
+    for entry in lane_session.entries() {
+        let SessionLogEntry::Control(control) = entry else {
+            continue;
+        };
+        session.append_control(control.clone())?;
+    }
+    let mut reviewed =
+        prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+            preparation_id: "reviewed-candidate".to_owned(),
+            parent_workspace_root: root.clone(),
+            plan: plan.clone(),
+            artifacts: vec![integration_artifact],
+            frozen_base: None,
+            target: IntegrationPromotionPreparationTarget::WorkspaceApply {
+                expected_snapshot_id: base_snapshot_id,
+                expected_revision: 0,
+            },
+        })
+        .await?;
+    let aggregate_bytes = reviewed.aggregate().artifact.content.as_bytes().to_vec();
+    let aggregate_artifact_ref = recorder.capture_immutable_content_artifact(
+        &stable_workspace_id(&root)?,
+        "review-aggregate",
+        Path::new(".sigil-task-artifacts/review.promotion.diff"),
+        &aggregate_bytes,
+    )?;
+    reviewed.bind_aggregate_artifact_ref(aggregate_artifact_ref)?;
+    let preview = promotion_preview(&session, &plan, &reviewed)?;
+    session.append_control(ControlEntry::TaskPromotionPreviewRecorded(
+        TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        },
+    ))?;
+    reviewed.cleanup().await?;
+    let request = sigil_kernel::task_integration_review_product(session.entries())
+        .expect("current integration review")
+        .request;
+
+    let rebuilt = prepare_task_integration_review(&session, &root, &request).await?;
+    assert_eq!(rebuilt.preview, preview);
+    assert_eq!(
+        rebuilt.prepared.aggregate().artifact.content.as_bytes(),
+        aggregate_bytes
+    );
+    assert_eq!(
+        rebuilt.prepared.aggregate().artifact_ref,
+        rebuilt.preview.aggregate_diff_artifact_ref
+    );
+    rebuilt.prepared.cleanup().await?;
+
+    let changed_policy =
+        VerificationPolicy::no_checks_required("different-parent-verification-scope");
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task(plan.task_id.as_str().to_owned()),
+            changed_policy,
+            "policy-drift-after-review",
+        )?,
+    ))?;
+    let error = prepare_task_integration_review(&session, &root, &request)
+        .await
+        .expect_err("policy drift must invalidate the reviewed candidate");
+    assert!(format!("{error:#}").contains("verification policy changed"));
     Ok(())
 }
 
