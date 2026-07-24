@@ -214,6 +214,95 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
     }
 }
 
+pub(super) fn check_orchestration_route_disablement(
+    report: &mut DoctorReport,
+    session_dir: &Path,
+    guard: &crate::OrchestrationRouteGuard,
+) {
+    let Ok(metadata) = fs::metadata(session_dir) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(mut session_paths) = session_log_paths(session_dir) else {
+        return;
+    };
+    session_paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+
+    for path in session_paths {
+        if session_stream_too_large_for_doctor(&path) {
+            continue;
+        }
+        let Ok(records) = JsonlSessionStore::read_event_records(&path) else {
+            continue;
+        };
+        match route_disablement_from_records(records, guard) {
+            Ok(Some(disabled)) => {
+                report.push_with_remediation(
+                    DoctorStatus::Warn,
+                    "orchestration:route",
+                    format!(
+                        "automatic orchestration disabled route={} build={} invariant={:?} report={}",
+                        disabled.route_fingerprint,
+                        disabled.sigil_build,
+                        disabled.invariant,
+                        disabled.report_handle
+                    ),
+                    Some(
+                        "automatic handoff already falls back to manual; use explicit /task while investigating, then install a newly qualified build instead of editing durable history",
+                    ),
+                );
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                report.push_with_remediation(
+                    DoctorStatus::Error,
+                    "orchestration:route",
+                    format!(
+                        "{} contains an invalid orchestration route disablement: {error:#}",
+                        path.display()
+                    ),
+                    Some(
+                        "preserve the session and inspect the recovery-critical orchestration_route_disabled event before continuing",
+                    ),
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn route_disablement_from_records(
+    records: Vec<SessionStreamRecord>,
+    guard: &crate::OrchestrationRouteGuard,
+) -> anyhow::Result<Option<sigil_kernel::OrchestrationRouteDisabledEntry>> {
+    for record in records {
+        let event = record.stored_event();
+        if event.event_type != DurableEventType::OrchestrationRouteDisabled.as_str() {
+            continue;
+        }
+        let Some(value) = event.payload.get("session_log_entry") else {
+            anyhow::bail!("event payload has no session_log_entry");
+        };
+        let entry = serde_json::from_value::<sigil_kernel::SessionLogEntry>(value.clone())?;
+        let sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::OrchestrationRouteDisabled(disabled),
+        ) = entry
+        else {
+            anyhow::bail!("event payload is not an orchestration route disablement");
+        };
+        disabled.validate()?;
+        if disabled.route_fingerprint == guard.route_fingerprint()
+            && disabled.sigil_build == guard.sigil_build()
+        {
+            return Ok(Some(disabled));
+        }
+    }
+    Ok(None)
+}
+
 fn session_log_paths(session_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut paths = fs::read_dir(session_dir)?
         .filter_map(|entry| entry.ok())
@@ -263,3 +352,7 @@ impl SessionStreamDoctorSummary {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/doctor_orchestration_tests.rs"]
+mod orchestration_tests;

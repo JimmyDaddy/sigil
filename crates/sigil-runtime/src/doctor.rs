@@ -38,7 +38,10 @@ pub use code_intel::build_code_intelligence_checks;
 use code_intel::check_code_intelligence;
 use mcp::{CommandStatus, check_mcp_servers, check_plugin_hooks, command_status};
 use providers::{check_execution_backend, check_provider};
-use session::{check_session_streams, check_storage_paths, check_workspace};
+use session::{
+    check_orchestration_route_disablement, check_session_streams, check_storage_paths,
+    check_workspace,
+};
 use terminal::check_terminal;
 pub use web::{
     WebDoctorBindingState, WebDoctorHostedCapability, WebDoctorSnapshot, append_web_doctor_snapshot,
@@ -201,6 +204,15 @@ pub fn build_doctor_report_with_options(
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
+    check_orchestration_route_disablement(
+        &mut report,
+        &sigil_paths.session_log_dir,
+        &crate::OrchestrationRouteGuard::new(
+            &root_config.agent.provider,
+            &root_config.agent.model,
+            crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+        ),
+    );
     check_provider(&mut report, &root_config, &sigil_paths.cache_root);
     check_mcp_servers(&mut report, &root_config, &workspace_root);
     append_web_doctor_snapshot(
