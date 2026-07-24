@@ -7,10 +7,11 @@ use crate::{
     IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
     IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
     JsonlSessionStore, MergeDecision, MergeReviewId, MergeReviewParentMutationRequest,
-    MergeReviewRequested, MergeReviewResolved, MutationBatchStatus, MutationSubject, Session,
-    SessionLogEntry, StoredEvent, TypedDomainEvent, TypedStoredEventDecode, WriteIsolationMode,
-    WriteIsolationProjection, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
-    WriteLeaseReleased, WriteLeaseScope, bytes_hash, decode_typed_stored_event,
+    MergeReviewRequested, MergeReviewResolved, MutationBatchStatus, MutationSubject,
+    ParentChangeSetMutationRequest, Session, SessionLogEntry, StoredEvent, TypedDomainEvent,
+    TypedStoredEventDecode, WriteIsolationMode, WriteIsolationProjection, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
+    apply_parent_changeset_mutation_batch, bytes_hash, decode_typed_stored_event,
     resolve_merge_review_parent_mutation,
 };
 
@@ -59,6 +60,10 @@ fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
         event_types.push(event.event_type);
     }
     Ok(event_types)
+}
+
+fn artifact_digest(content: &str) -> String {
+    bytes_hash(content.as_bytes())
 }
 
 fn append_merge_review_request(
@@ -614,6 +619,233 @@ fn verification_merge_accepted_review_applies_parent_mutation_batch() -> Result<
     assert!(event_types.contains(&DurableEventType::WriteCommitted.as_str().to_owned()));
     assert!(event_types.contains(&DurableEventType::MutationBatchFinished.as_str().to_owned()));
     assert!(event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
+    Ok(())
+}
+
+#[test]
+fn parent_changeset_mutation_preflights_and_applies_one_aggregate_batch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    std::fs::write(workspace_root.join("other.txt"), b"before\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("mock", "model").with_store(store.clone());
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("durable session recorder");
+    let mut change_set = note_change_set(ChangeSetId::new("aggregate-change")?);
+    change_set.files.push(ChangeSetFile {
+        path: "other.txt".to_owned(),
+        previous_path: None,
+        action: ChangeSetFileAction::Update,
+        risk: ChangeSetRisk::Low,
+        before_hash: Some(bytes_hash(b"before\n")),
+        after_hash: Some(bytes_hash(b"after\n")),
+        diff_hash: None,
+        additions: 1,
+        deletions: 1,
+        validations: Vec::new(),
+    });
+    let artifact = format!(
+        "{}{}",
+        note_diff(),
+        "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-before\n+after\n"
+    );
+    let expected_snapshot_id = super::parent_workspace_snapshot_id(&workspace_root)?;
+
+    let outcome = apply_parent_changeset_mutation_batch(
+        &recorder,
+        ParentChangeSetMutationRequest {
+            operation_key: "promotion-attempt-1".to_owned(),
+            expected_workspace_snapshot_id: expected_snapshot_id.clone(),
+            change_set,
+            artifact_digest: artifact_digest(&artifact),
+            artifact_content: artifact,
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "promotion-call-1".to_owned(),
+        },
+    )?;
+
+    assert!(outcome.is_applied());
+    assert_eq!(
+        outcome.observed_workspace_snapshot_before_id,
+        expected_snapshot_id
+    );
+    assert_ne!(
+        outcome
+            .observed_workspace_snapshot_after_id
+            .as_deref()
+            .expect("post-apply snapshot"),
+        outcome.observed_workspace_snapshot_before_id
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "new\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("other.txt"))?,
+        "after\n"
+    );
+    assert_eq!(outcome.committed_operations.len(), 2);
+    assert!(outcome.failed_operations.is_empty());
+    let event_types = stored_event_types(&store)?;
+    assert!(event_types.contains(&DurableEventType::MutationBatchStarted.as_str().to_owned()));
+    assert!(event_types.contains(&DurableEventType::MutationBatchFinished.as_str().to_owned()));
+    assert!(!event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
+    Ok(())
+}
+
+#[test]
+fn parent_changeset_mutation_snapshot_drift_has_zero_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    let expected_snapshot_id = super::parent_workspace_snapshot_id(&workspace_root)?;
+    std::fs::write(workspace_root.join("unrelated.txt"), b"user drift\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("mock", "model").with_store(store.clone());
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("durable session recorder");
+    let artifact = note_diff();
+
+    let outcome = apply_parent_changeset_mutation_batch(
+        &recorder,
+        ParentChangeSetMutationRequest {
+            operation_key: "promotion-attempt-stale".to_owned(),
+            expected_workspace_snapshot_id: expected_snapshot_id,
+            change_set: note_change_set(ChangeSetId::new("aggregate-stale")?),
+            artifact_digest: artifact_digest(&artifact),
+            artifact_content: artifact,
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "promotion-call-stale".to_owned(),
+        },
+    )?;
+
+    assert!(outcome.conflict_reason.is_some());
+    assert!(outcome.batch_id.is_none());
+    assert!(outcome.committed_operations.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "old\n"
+    );
+    assert!(
+        !stored_event_types(&store)?
+            .contains(&DurableEventType::MutationBatchStarted.as_str().to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn parent_changeset_mutation_digest_drift_has_zero_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    let expected_snapshot_id = super::parent_workspace_snapshot_id(&workspace_root)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("mock", "model").with_store(store.clone());
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("durable session recorder");
+
+    let outcome = apply_parent_changeset_mutation_batch(
+        &recorder,
+        ParentChangeSetMutationRequest {
+            operation_key: "promotion-attempt-digest".to_owned(),
+            expected_workspace_snapshot_id: expected_snapshot_id,
+            change_set: note_change_set(ChangeSetId::new("aggregate-digest")?),
+            artifact_content: note_diff(),
+            artifact_digest: format!("sha256:{}", "0".repeat(64)),
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "promotion-call-digest".to_owned(),
+        },
+    )?;
+
+    assert!(
+        outcome
+            .conflict_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("artifact digest mismatch"))
+    );
+    assert!(outcome.batch_id.is_none());
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "old\n"
+    );
+    assert!(
+        !stored_event_types(&store)?
+            .contains(&DurableEventType::MutationBatchStarted.as_str().to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn parent_changeset_mutation_any_file_preflight_conflict_has_zero_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    std::fs::write(workspace_root.join("conflict.txt"), b"actual\n")?;
+    let expected_snapshot_id = super::parent_workspace_snapshot_id(&workspace_root)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("mock", "model").with_store(store.clone());
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("durable session recorder");
+    let mut change_set = note_change_set(ChangeSetId::new("aggregate-conflict")?);
+    change_set.files.push(ChangeSetFile {
+        path: "conflict.txt".to_owned(),
+        previous_path: None,
+        action: ChangeSetFileAction::Update,
+        risk: ChangeSetRisk::Low,
+        before_hash: Some(bytes_hash(b"expected\n")),
+        after_hash: Some(bytes_hash(b"changed\n")),
+        diff_hash: None,
+        additions: 1,
+        deletions: 1,
+        validations: Vec::new(),
+    });
+    let artifact = format!(
+        "{}{}",
+        note_diff(),
+        "--- a/conflict.txt\n+++ b/conflict.txt\n@@ -1,1 +1,1 @@\n-expected\n+changed\n"
+    );
+
+    let outcome = apply_parent_changeset_mutation_batch(
+        &recorder,
+        ParentChangeSetMutationRequest {
+            operation_key: "promotion-attempt-conflict".to_owned(),
+            expected_workspace_snapshot_id: expected_snapshot_id,
+            change_set,
+            artifact_digest: artifact_digest(&artifact),
+            artifact_content: artifact,
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "promotion-call-conflict".to_owned(),
+        },
+    )?;
+
+    assert!(
+        outcome
+            .conflict_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("preflight conflict"))
+    );
+    assert!(outcome.batch_id.is_none());
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "old\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("conflict.txt"))?,
+        "actual\n"
+    );
+    assert!(
+        !stored_event_types(&store)?
+            .contains(&DurableEventType::MutationBatchStarted.as_str().to_owned())
+    );
     Ok(())
 }
 

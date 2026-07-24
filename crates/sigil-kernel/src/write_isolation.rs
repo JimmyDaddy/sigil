@@ -359,6 +359,160 @@ pub struct MergeReviewParentMutationOutcome {
     pub failed_operations: Vec<OperationId>,
 }
 
+/// Exact aggregate parent-workspace mutation prepared by a higher-level promotion protocol.
+#[derive(Debug, Clone)]
+pub struct ParentChangeSetMutationRequest {
+    pub operation_key: String,
+    pub expected_workspace_snapshot_id: WorkspaceSnapshotId,
+    pub change_set: ChangeSet,
+    pub artifact_content: String,
+    pub artifact_digest: String,
+    pub workspace_root: PathBuf,
+    pub tool_call_id: String,
+}
+
+/// Result of one aggregate parent-workspace mutation attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentChangeSetMutationOutcome {
+    pub observed_workspace_snapshot_before_id: WorkspaceSnapshotId,
+    pub observed_workspace_snapshot_after_id: Option<WorkspaceSnapshotId>,
+    pub conflict_reason: Option<String>,
+    pub batch_id: Option<MutationBatchId>,
+    pub batch_status: Option<MutationBatchStatus>,
+    pub committed_operations: Vec<OperationId>,
+    pub failed_operations: Vec<OperationId>,
+}
+
+impl ParentChangeSetMutationOutcome {
+    /// Whether the complete aggregate changeset was applied through one mutation batch.
+    #[must_use]
+    pub fn is_applied(&self) -> bool {
+        self.conflict_reason.is_none()
+            && self.batch_status == Some(MutationBatchStatus::Applied)
+            && self.failed_operations.is_empty()
+            && self.observed_workspace_snapshot_after_id.is_some()
+    }
+}
+
+/// Applies one content-bound aggregate changeset through the RFC-0002 mutation batch protocol.
+///
+/// The exact parent snapshot, artifact digest, every declared file hash, and the complete unified
+/// diff are validated before `MutationBatchStarted` is appended. A stale snapshot, digest drift,
+/// or any file preflight conflict returns a zero-effect conflict outcome. Once the batch starts,
+/// every committed and failed operation remains explicit in the returned recovery evidence.
+///
+/// # Errors
+///
+/// Returns an error for an invalid operation key or artifact digest, an unavailable workspace,
+/// or failure to append required mutation evidence.
+pub fn apply_parent_changeset_mutation_batch(
+    recorder: &MutationEventRecorder,
+    request: ParentChangeSetMutationRequest,
+) -> Result<ParentChangeSetMutationOutcome> {
+    validate_stable_id(
+        "parent changeset mutation operation key",
+        &request.operation_key,
+    )?;
+    let workspace_root = canonical_workspace_root(&request.workspace_root)?;
+    let observed_before = parent_workspace_snapshot_id(&workspace_root)?;
+    if observed_before != request.expected_workspace_snapshot_id {
+        let reason = format!(
+            "stale parent workspace snapshot: expected {}, observed {}",
+            request.expected_workspace_snapshot_id, observed_before
+        );
+        return Ok(parent_changeset_conflict_outcome(observed_before, reason));
+    }
+
+    let expected_artifact_digest =
+        request
+            .artifact_digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| {
+                anyhow::anyhow!("parent changeset artifact digest must use sha256 prefix")
+            })?;
+    if expected_artifact_digest.len() != 64
+        || !expected_artifact_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("parent changeset artifact digest must contain 64 hexadecimal characters");
+    }
+    let observed_artifact_digest = bytes_hash(request.artifact_content.as_bytes());
+    if !observed_artifact_digest.eq_ignore_ascii_case(&request.artifact_digest) {
+        return Ok(parent_changeset_conflict_outcome(
+            observed_before,
+            format!(
+                "parent changeset artifact digest mismatch: expected {}, observed {}",
+                request.artifact_digest, observed_artifact_digest
+            ),
+        ));
+    }
+
+    let artifact = match UnifiedDiffArtifact::parse(&request.artifact_content) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            return Ok(parent_changeset_conflict_outcome(
+                observed_before,
+                format!("parent changeset artifact preflight conflict: {error:#}"),
+            ));
+        }
+    };
+    let prepared_files =
+        match prepare_changeset_files(&workspace_root, &request.change_set, &artifact) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(parent_changeset_conflict_outcome(
+                    observed_before,
+                    format!("parent changeset preflight conflict: {error:#}"),
+                ));
+            }
+        };
+    let batch_id = parent_changeset_batch_id(&request.operation_key, &request.change_set.id);
+    let batch_operation_id =
+        parent_changeset_operation_id(&request.operation_key, &request.change_set.id);
+    let expected_subjects = changeset_touched_subjects(&request.change_set)?;
+    recorder.append_batch_started(&batch_id, &batch_operation_id, &expected_subjects)?;
+
+    let mut committed_operations = Vec::new();
+    let mut failed_operations = Vec::new();
+    for prepared in prepared_files {
+        let file = prepared.file.clone();
+        match apply_prepared_changeset_file_to_parent(
+            recorder,
+            &workspace_root,
+            &request.tool_call_id,
+            &batch_id,
+            prepared,
+        ) {
+            Ok(applied) => committed_operations.push(applied.operation_id),
+            Err(_) => failed_operations.push(failed_changeset_file_operation_id(
+                &batch_id,
+                &file.path,
+                file.action,
+            )),
+        }
+    }
+    let batch_status = mutation_batch_status(&committed_operations, &failed_operations);
+    recorder.append_batch_finished(
+        &batch_id,
+        batch_status,
+        &committed_operations,
+        &failed_operations,
+    )?;
+    let observed_after = (!committed_operations.is_empty())
+        .then(|| parent_workspace_snapshot_id(&workspace_root))
+        .transpose()?;
+    Ok(ParentChangeSetMutationOutcome {
+        observed_workspace_snapshot_before_id: observed_before,
+        observed_workspace_snapshot_after_id: observed_after,
+        conflict_reason: None,
+        batch_id: Some(batch_id),
+        batch_status: Some(batch_status),
+        committed_operations,
+        failed_operations,
+    })
+}
+
 /// Resolves a merge review and applies accepted changesets through RFC-0002 mutation evidence.
 ///
 /// Rejected, conflicted or cancelled decisions only append `MergeReviewResolved`. An accepted
@@ -973,6 +1127,41 @@ fn changeset_merge_operation_id(review_id: &MergeReviewId, change_set_id: &Chang
             &format!("{}:{}", review_id.as_str(), change_set_id.as_str()),
         )
     )
+}
+
+fn parent_changeset_batch_id(operation_key: &str, change_set_id: &ChangeSetId) -> String {
+    format!(
+        "parent-batch-{}",
+        stable_event_uuid(
+            "sigil-parent-changeset-mutation-batch",
+            &format!("{operation_key}:{}", change_set_id.as_str()),
+        )
+    )
+}
+
+fn parent_changeset_operation_id(operation_key: &str, change_set_id: &ChangeSetId) -> String {
+    format!(
+        "parent-op-{}",
+        stable_event_uuid(
+            "sigil-parent-changeset-mutation-operation",
+            &format!("{operation_key}:{}", change_set_id.as_str()),
+        )
+    )
+}
+
+fn parent_changeset_conflict_outcome(
+    observed_before: WorkspaceSnapshotId,
+    reason: String,
+) -> ParentChangeSetMutationOutcome {
+    ParentChangeSetMutationOutcome {
+        observed_workspace_snapshot_before_id: observed_before,
+        observed_workspace_snapshot_after_id: None,
+        conflict_reason: Some(reason),
+        batch_id: None,
+        batch_status: None,
+        committed_operations: Vec::new(),
+        failed_operations: Vec::new(),
+    }
 }
 
 fn failed_changeset_file_operation_id(

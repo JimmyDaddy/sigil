@@ -570,7 +570,8 @@ pub use write_isolation::{
     IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
     IsolatedWorkspaceState, MergeDecision, MergeReviewId, MergeReviewParentMutationOutcome,
     MergeReviewParentMutationRequest, MergeReviewRequested, MergeReviewResolved, MergeReviewState,
-    WriteIsolationAgentId, WriteIsolationMode, WriteIsolationProjection, WriteIsolationRecordRef,
-    WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
-    WriteLeaseState, resolve_merge_review_parent_mutation,
+    ParentChangeSetMutationOutcome, ParentChangeSetMutationRequest, WriteIsolationAgentId,
+    WriteIsolationMode, WriteIsolationProjection, WriteIsolationRecordRef, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope, WriteLeaseState,
+    apply_parent_changeset_mutation_batch, resolve_merge_review_parent_mutation,
 };
