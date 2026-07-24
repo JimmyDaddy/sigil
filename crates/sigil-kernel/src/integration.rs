@@ -1180,7 +1180,7 @@ impl TaskPromotionPreview {
             "task promotion preview aggregate diff digest",
             &self.aggregate_diff_digest,
         )?;
-        validate_sha256_digest("task promotion preview policy digest", &self.policy_digest)?;
+        validate_policy_digest("task promotion preview policy digest", &self.policy_digest)?;
         validate_sha256_digest("task promotion preview digest", &self.preview_digest)?;
         if self.verification_invalidation.is_empty()
             || self
@@ -1298,7 +1298,7 @@ impl TaskParentVerificationRecorded {
         {
             bail!("task parent verification binding is incomplete");
         }
-        validate_sha256_digest(
+        validate_policy_digest(
             "task parent verification policy digest",
             &self.policy_digest,
         )?;
@@ -1352,7 +1352,7 @@ pub fn build_task_promotion_preview(
         "task promotion aggregate diff digest",
         &input.aggregate_diff_digest,
     )?;
-    validate_sha256_digest("task promotion policy digest", &input.policy_digest)?;
+    validate_policy_digest("task promotion policy digest", &input.policy_digest)?;
     if input.verification_invalidation.is_empty()
         || input
             .verification_invalidation
@@ -2364,6 +2364,17 @@ fn validate_sha256_digest(label: &str, value: &str) -> Result<()> {
     let Some(value) = value.strip_prefix("sha256:") else {
         bail!("{label} must use the sha256 prefix");
     };
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must contain exactly 64 hexadecimal characters");
+    }
+    Ok(())
+}
+
+fn validate_policy_digest(label: &str, value: &str) -> Result<()> {
+    let value = value
+        .strip_prefix("sha256:jcs-v1:")
+        .or_else(|| value.strip_prefix("sha256:"))
+        .ok_or_else(|| anyhow::anyhow!("{label} must use a supported sha256 prefix"))?;
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{label} must contain exactly 64 hexadecimal characters");
     }

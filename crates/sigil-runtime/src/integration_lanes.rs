@@ -36,15 +36,20 @@ use crate::isolated_workspace::{
     run_git_bytes_with_stdin,
 };
 
+mod parent_verification;
 mod promotion;
 
+pub use parent_verification::{
+    ParentVerificationRunOutput, ParentVerificationRunRequest,
+    run_authoritative_parent_verification,
+};
 #[cfg(test)]
 pub(crate) use promotion::run_git_integration_promotion;
 pub use promotion::{
     GitIntegrationPromotionOutput, GitIntegrationPromotionPreparationRequest,
     GitIntegrationPromotionRunRequest, IntegrationPromotionPreparationTarget,
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
-    PreparedGitIntegrationPromotion, prepare_git_integration_promotion,
+    PreparedGitIntegrationPromotion, PromotedVerificationTarget, prepare_git_integration_promotion,
     run_git_integration_promotion_with_events,
 };
 

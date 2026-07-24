@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
+    CandidateCheck, ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
+    CheckCommand, CheckDiscoverySource, CheckPromotion, CompletionCriteria, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt, ExecutionRequest,
     IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
@@ -17,9 +18,11 @@ use sigil_kernel::{
     IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
     IntegrationPromotionAttemptId, IntegrationPromotionEffect, IntegrationPromotionStatus,
     IntegrationProposalFacts, IntegrationProposalSpec, JsonlSessionStore, MutationEventRecorder,
-    Session, TaskId, TaskPromotionAuthority, TaskPromotionPreview, TaskPromotionPreviewInput,
-    TaskStepId, VerificationScope, build_integration_plan, build_task_promotion_preview,
-    build_workspace_snapshot, stable_workspace_id,
+    NoopEventHandler, SandboxProfileRequirement, Session, TaskId, TaskPromotionAuthority,
+    TaskPromotionPreview, TaskPromotionPreviewInput, TaskPromotionPreviewRecorded, TaskStepId,
+    ToolEffect, TrustedCheckSpec, VerificationAutoRunPolicy, VerificationPolicy, VerificationScope,
+    VerificationVerdict, WorkspaceTrust, WorkspaceTrustRequirement, build_integration_plan,
+    build_task_promotion_preview, build_workspace_snapshot, stable_workspace_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
@@ -28,7 +31,8 @@ use super::{
     GitIntegrationRunRequest, IntegrationArtifact, IntegrationLaneRuntimeEvent,
     IntegrationLaneRuntimeEventRequest, IntegrationPromotionPreparationTarget,
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
-    prepare_git_integration_promotion, run_git_integration_lanes,
+    ParentVerificationRunRequest, prepare_git_integration_promotion,
+    run_authoritative_parent_verification, run_git_integration_lanes,
     run_git_integration_lanes_with_events, run_git_integration_promotion_with_events,
 };
 use crate::isolated_workspace::{
@@ -660,6 +664,7 @@ async fn workspace_promotion_applies_aggregate_batch_after_authority_barrier() -
             attempt_id: IntegrationPromotionAttemptId::new("attempt-workspace")?,
             preview,
             authority,
+            verification_policy: promotion_policy(),
             mutation_recorder: MutationEventRecorder::new(mutation_store),
         },
         event_tx,
@@ -735,6 +740,7 @@ async fn workspace_promotion_parent_drift_is_stale_with_zero_promotion_effect() 
         attempt_id: IntegrationPromotionAttemptId::new("attempt-workspace-stale")?,
         preview,
         authority,
+        verification_policy: promotion_policy(),
         mutation_recorder: MutationEventRecorder::new(mutation_store),
     })
     .await?;
@@ -803,6 +809,7 @@ async fn git_ref_promotion_advances_only_unchecked_out_target_by_cas() -> Result
         attempt_id: IntegrationPromotionAttemptId::new("attempt-ref")?,
         preview,
         authority,
+        verification_policy: promotion_policy(),
         mutation_recorder: MutationEventRecorder::new(mutation_store),
     })
     .await?;
@@ -818,6 +825,11 @@ async fn git_ref_promotion_advances_only_unchecked_out_target_by_cas() -> Result
         git(&root, &["show", "refs/heads/review-target:a.txt"])?,
         "new-a"
     );
+    output
+        .verification_target
+        .expect("promoted Git ref must retain its authoritative checkout")
+        .cleanup()
+        .await?;
     Ok(())
 }
 
@@ -868,6 +880,7 @@ async fn git_ref_promotion_rejects_checked_out_target_without_ref_or_workspace_e
         attempt_id: IntegrationPromotionAttemptId::new("attempt-ref-checked-out")?,
         preview,
         authority,
+        verification_policy: promotion_policy(),
         mutation_recorder: MutationEventRecorder::new(mutation_store),
     })
     .await?;
@@ -939,6 +952,7 @@ async fn git_ref_promotion_stale_target_has_zero_ref_or_workspace_effect() -> Re
         attempt_id: IntegrationPromotionAttemptId::new("attempt-ref-stale")?,
         preview,
         authority,
+        verification_policy: promotion_policy(),
         mutation_recorder: MutationEventRecorder::new(mutation_store),
     })
     .await?;
@@ -1010,6 +1024,7 @@ async fn rejected_authority_ack_starts_no_promotion_effect_and_cleans_candidate(
             attempt_id: IntegrationPromotionAttemptId::new("attempt-promotion-ack")?,
             preview,
             authority,
+            verification_policy: promotion_policy(),
             mutation_recorder: MutationEventRecorder::new(mutation_store),
         },
         event_tx,
@@ -1024,6 +1039,392 @@ async fn rejected_authority_ack_starts_no_promotion_effect_and_cleans_candidate(
         !git(&root, &["worktree", "list", "--porcelain"])?.contains(&owned_workspace_id),
         "rejected promotion must clean its private candidate"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoritative_parent_checks_pass_on_exact_promoted_workspace_snapshot() -> Result<()> {
+    let mut fixture = promoted_workspace_fixture("test \"$(cat a.txt)\" = new-a").await?;
+    let promoted_snapshot_id = fixture
+        .promotion
+        .authoritative_snapshot_id
+        .take()
+        .expect("workspace promotion snapshot");
+    let target = fixture
+        .promotion
+        .verification_target
+        .take()
+        .expect("workspace promotion verification target");
+    let mut handler = NoopEventHandler;
+
+    let output = run_authoritative_parent_verification(
+        &mut fixture.session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        ParentVerificationRunRequest {
+            attempt_id: fixture.attempt_id.clone(),
+            plan_id: fixture.plan_id.clone(),
+            preview_digest: fixture.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: fixture.policy.stable_hash()?,
+            policy: fixture.policy,
+            trusted_checks: vec![fixture.trusted_check],
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.record.verdict, VerificationVerdict::Passed);
+    assert_eq!(output.record.receipts.len(), 1);
+    assert!(output.cleanup_error.is_none());
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("integration plan projection");
+    assert!(!state.inconsistent);
+    assert_eq!(state.synthesis_ready_attempt(), Some(&fixture.attempt_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoritative_parent_checks_detect_snapshot_drift_before_execution() -> Result<()> {
+    let mut fixture = promoted_workspace_fixture("exit 91").await?;
+    fs::write(fixture.root.join("user-drift.txt"), "preserve me\n")?;
+    let promoted_snapshot_id = fixture
+        .promotion
+        .authoritative_snapshot_id
+        .take()
+        .expect("workspace promotion snapshot");
+    let target = fixture
+        .promotion
+        .verification_target
+        .take()
+        .expect("workspace promotion verification target");
+    let mut handler = NoopEventHandler;
+
+    let output = run_authoritative_parent_verification(
+        &mut fixture.session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        ParentVerificationRunRequest {
+            attempt_id: fixture.attempt_id.clone(),
+            plan_id: fixture.plan_id.clone(),
+            preview_digest: fixture.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: fixture.policy.stable_hash()?,
+            policy: fixture.policy,
+            trusted_checks: vec![fixture.trusted_check],
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.record.verdict, VerificationVerdict::Stale);
+    assert!(output.record.receipts.is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("user-drift.txt"))?,
+        "preserve me\n"
+    );
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("integration plan projection");
+    assert!(!state.inconsistent);
+    assert!(state.synthesis_ready_attempt().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_authoritative_parent_check_never_opens_synthesis_gate() -> Result<()> {
+    let mut fixture = promoted_workspace_fixture("exit 91").await?;
+    let promoted_snapshot_id = fixture
+        .promotion
+        .authoritative_snapshot_id
+        .take()
+        .expect("workspace promotion snapshot");
+    let target = fixture
+        .promotion
+        .verification_target
+        .take()
+        .expect("workspace promotion verification target");
+    let mut handler = NoopEventHandler;
+
+    let output = run_authoritative_parent_verification(
+        &mut fixture.session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        ParentVerificationRunRequest {
+            attempt_id: fixture.attempt_id.clone(),
+            plan_id: fixture.plan_id.clone(),
+            preview_digest: fixture.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: fixture.policy.stable_hash()?,
+            policy: fixture.policy,
+            trusted_checks: vec![fixture.trusted_check],
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.record.verdict, VerificationVerdict::Failed);
+    assert_eq!(output.record.receipts.len(), 1);
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    assert!(
+        projection
+            .plans
+            .get(&fixture.plan_id)
+            .expect("integration plan projection")
+            .synthesis_ready_attempt()
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_ref_parent_checks_use_retained_authoritative_checkout() -> Result<()> {
+    let mut fixture = promoted_git_ref_fixture("test \"$(cat a.txt)\" = new-a").await?;
+    let promoted_snapshot_id = fixture
+        .promotion
+        .authoritative_snapshot_id
+        .take()
+        .expect("Git ref promotion snapshot");
+    let target = fixture
+        .promotion
+        .verification_target
+        .take()
+        .expect("Git ref promotion verification target");
+    assert_ne!(target.workspace_root(), fixture.root);
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "old-a\n");
+    let owned_workspace_id = target
+        .workspace_root()
+        .file_name()
+        .expect("owned workspace name")
+        .to_string_lossy()
+        .into_owned();
+    let mut handler = NoopEventHandler;
+
+    let output = run_authoritative_parent_verification(
+        &mut fixture.session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        ParentVerificationRunRequest {
+            attempt_id: fixture.attempt_id.clone(),
+            plan_id: fixture.plan_id.clone(),
+            preview_digest: fixture.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: fixture.policy.stable_hash()?,
+            policy: fixture.policy,
+            trusted_checks: vec![fixture.trusted_check],
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.record.verdict, VerificationVerdict::Passed);
+    assert!(output.cleanup_error.is_none());
+    assert!(
+        !git(&fixture.root, &["worktree", "list", "--porcelain"])?.contains(&owned_workspace_id)
+    );
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "old-a\n");
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    assert_eq!(
+        projection
+            .plans
+            .get(&fixture.plan_id)
+            .and_then(|state| state.synthesis_ready_attempt()),
+        Some(&fixture.attempt_id)
+    );
+    Ok(())
+}
+
+struct PromotedWorkspaceFixture {
+    _temp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    session: Session,
+    promotion: super::GitIntegrationPromotionOutput,
+    attempt_id: IntegrationPromotionAttemptId,
+    plan_id: IntegrationPlanId,
+    preview_digest: String,
+    policy: VerificationPolicy,
+    trusted_check: TrustedCheckSpec,
+}
+
+async fn promoted_workspace_fixture(check_script: &str) -> Result<PromotedWorkspaceFixture> {
+    promoted_fixture(check_script, false).await
+}
+
+async fn promoted_git_ref_fixture(check_script: &str) -> Result<PromotedWorkspaceFixture> {
+    promoted_fixture(check_script, true).await
+}
+
+async fn promoted_fixture(
+    check_script: &str,
+    git_ref_target: bool,
+) -> Result<PromotedWorkspaceFixture> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    if git_ref_target {
+        git(&root, &["branch", "parent-check-target", &base_commit])?;
+    }
+    let change = change_set("promotion-parent-check", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-parent-check")?,
+        TaskId::new("task_parent_check")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_parent_check",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let mut session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: if git_ref_target {
+            "parent-check-ref-review".to_owned()
+        } else {
+            "parent-check-review".to_owned()
+        },
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: if git_ref_target {
+            IntegrationPromotionPreparationTarget::GitRefAdvance {
+                target_ref: "refs/heads/parent-check-target".to_owned(),
+                expected_old_oid: base_commit,
+            }
+        } else {
+            IntegrationPromotionPreparationTarget::WorkspaceApply {
+                expected_snapshot_id: base_snapshot_id,
+                expected_revision: 0,
+            }
+        },
+    })
+    .await?;
+    let trusted_check = trusted_parent_check(check_script)?;
+    let policy = parent_verification_policy(&trusted_check);
+    let preview = promotion_preview_with_policy(&session, &plan, &prepared, &policy)?;
+    session.append_control(ControlEntry::TaskPromotionPreviewRecorded(
+        TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        },
+    ))?;
+    let authority = promotion_authority(
+        &preview,
+        if git_ref_target {
+            "parent-check-ref-review"
+        } else {
+            "parent-check-review"
+        },
+    )?;
+    let attempt_id = IntegrationPromotionAttemptId::new(if git_ref_target {
+        "attempt-parent-check-ref"
+    } else {
+        "attempt-parent-check"
+    })?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+    let (event_tx, events) = promotion_event_collector();
+    let promotion = run_git_integration_promotion_with_events(
+        GitIntegrationPromotionRunRequest {
+            prepared,
+            attempt_id: attempt_id.clone(),
+            preview: preview.clone(),
+            authority,
+            verification_policy: policy.clone(),
+            mutation_recorder: MutationEventRecorder::new(mutation_store),
+        },
+        event_tx,
+    )
+    .await?;
+    append_promotion_events(&mut session, events.await?)?;
+    Ok(PromotedWorkspaceFixture {
+        _temp: temp,
+        root,
+        session,
+        promotion,
+        attempt_id,
+        plan_id: plan.plan_id,
+        preview_digest: preview.preview_digest,
+        policy,
+        trusted_check,
+    })
+}
+
+fn trusted_parent_check(script: &str) -> Result<TrustedCheckSpec> {
+    CandidateCheck {
+        source: CheckDiscoverySource::RuntimeStructural,
+        command: CheckCommand {
+            command: "sh".to_owned(),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            cwd: None,
+        },
+        source_event_id: "parent-check-source".to_owned(),
+        workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+    }
+    .promote(
+        "parent-check",
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ToolEffect::ReadOnly,
+        CheckPromotion::GlobalPolicy {
+            policy_event_id: "parent-check-policy".to_owned(),
+        },
+    )
+}
+
+fn parent_verification_policy(trusted_check: &TrustedCheckSpec) -> VerificationPolicy {
+    VerificationPolicy {
+        required_checks: vec![trusted_check.check_spec.clone()],
+        completion_criteria: CompletionCriteria::AllRequiredChecks,
+        verification_scope: VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        sandbox_profile: SandboxProfileRequirement::None,
+        workspace_trust_requirement: WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: Some(10_000),
+        auto_run: VerificationAutoRunPolicy::Manual,
+    }
+}
+
+fn append_promotion_events(
+    session: &mut Session,
+    events: Vec<IntegrationPromotionRuntimeEvent>,
+) -> Result<()> {
+    for event in events {
+        let control = match event {
+            IntegrationPromotionRuntimeEvent::AuthorityConsumed(entry) => {
+                ControlEntry::TaskPromotionAuthorityConsumed(entry)
+            }
+            IntegrationPromotionRuntimeEvent::PromotionRecorded(entry) => {
+                ControlEntry::IntegrationPromotionRecorded(entry)
+            }
+        };
+        session.append_control(control)?;
+    }
     Ok(())
 }
 
@@ -1092,6 +1493,15 @@ fn promotion_preview(
     plan: &IntegrationPlan,
     prepared: &super::PreparedGitIntegrationPromotion,
 ) -> Result<TaskPromotionPreview> {
+    promotion_preview_with_policy(session, plan, prepared, &promotion_policy())
+}
+
+fn promotion_preview_with_policy(
+    session: &Session,
+    plan: &IntegrationPlan,
+    prepared: &super::PreparedGitIntegrationPromotion,
+    policy: &VerificationPolicy,
+) -> Result<TaskPromotionPreview> {
     let projection = IntegrationProjection::from_entries(session.entries());
     let state = projection
         .plans
@@ -1105,12 +1515,16 @@ fn promotion_preview(
             target: prepared.target().clone(),
             verification_invalidation: vec![DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned()],
             intent_binding: None,
-            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            policy_digest: policy.stable_hash()?,
             has_pending_approval: false,
             has_executable_intent_refs: false,
             created_at_unix_ms: test_unix_time_ms(),
         },
     )
+}
+
+fn promotion_policy() -> VerificationPolicy {
+    VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH)
 }
 
 fn promotion_authority(

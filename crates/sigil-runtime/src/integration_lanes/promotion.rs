@@ -10,7 +10,8 @@ use sigil_kernel::{
     IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
     IntegrationPromotionTarget, MutationEventRecorder, ParentChangeSetMutationRequest,
     TaskChildChangeSetProposal, TaskPromotionAuthority, TaskPromotionAuthorityConsumed,
-    TaskPromotionPreview, apply_parent_changeset_mutation_batch, stable_event_uuid,
+    TaskPromotionPreview, VerificationPolicy, apply_parent_changeset_mutation_batch,
+    build_workspace_snapshot, stable_event_uuid, stable_workspace_id,
 };
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -127,14 +128,53 @@ pub struct GitIntegrationPromotionRunRequest {
     pub attempt_id: IntegrationPromotionAttemptId,
     pub preview: TaskPromotionPreview,
     pub authority: TaskPromotionAuthority,
+    pub verification_policy: VerificationPolicy,
     pub mutation_recorder: MutationEventRecorder,
 }
 
-/// Terminal physical promotion result plus the authoritative snapshot used by parent checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Exact promoted target on which authoritative parent checks must run.
+///
+/// A Git-ref target keeps the runtime-owned clean checkout alive until verification consumes it.
+/// This prevents a later checkout path from producing a different workspace-bound snapshot id.
+#[derive(Debug)]
+pub enum PromotedVerificationTarget {
+    WorkspaceApply {
+        workspace_root: PathBuf,
+    },
+    GitRefAdvance {
+        workspace: Box<MaterializedGitWorktree>,
+    },
+}
+
+impl PromotedVerificationTarget {
+    #[must_use]
+    pub fn workspace_root(&self) -> &std::path::Path {
+        match self {
+            Self::WorkspaceApply { workspace_root } => workspace_root,
+            Self::GitRefAdvance { workspace } => workspace.workspace_root(),
+        }
+    }
+
+    /// Releases any runtime-owned checkout after parent verification reaches a terminal result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot remove the exact owned worktree. Workspace-apply targets
+    /// do not own the user workspace and therefore require no cleanup.
+    pub async fn cleanup(self) -> Result<()> {
+        if let Self::GitRefAdvance { workspace } = self {
+            (*workspace).cleanup().await?;
+        }
+        Ok(())
+    }
+}
+
+/// Terminal physical promotion result plus the exact target retained for parent checks.
+#[derive(Debug)]
 pub struct GitIntegrationPromotionOutput {
     pub record: IntegrationPromotionRecorded,
     pub authoritative_snapshot_id: Option<String>,
+    pub verification_target: Option<PromotedVerificationTarget>,
     pub cleanup_error: Option<String>,
 }
 
@@ -391,6 +431,7 @@ async fn run_git_integration_promotion_inner(
         attempt_id,
         preview,
         authority,
+        verification_policy,
         mutation_recorder,
     } = request;
     let physical = match &preview.target {
@@ -453,9 +494,14 @@ async fn run_git_integration_promotion_inner(
                     reason,
                 )
             } else if outcome.is_applied() {
-                let promoted_snapshot_id = outcome
-                    .observed_workspace_snapshot_after_id
-                    .expect("applied mutation owns a post snapshot");
+                let promoted_snapshot_id = authoritative_snapshot_id(
+                    prepared.workspace.parent_workspace_root().to_path_buf(),
+                    verification_policy.verification_scope.clone(),
+                )
+                .await
+                .context(
+                    "workspace promotion effect completed but authoritative snapshot capture failed",
+                )?;
                 PhysicalPromotion {
                     status: IntegrationPromotionStatus::Promoted,
                     effect: Some(IntegrationPromotionEffect::WorkspaceApplied {
@@ -487,12 +533,27 @@ async fn run_git_integration_promotion_inner(
                 target_ref,
                 expected_old_oid,
                 candidate_oid,
-                prepared
-                    .candidate_snapshot_id()
-                    .ok_or_else(|| anyhow!("promotion candidate snapshot is missing"))?,
             )
             .await
         }
+    };
+    let physical = if physical.status == IntegrationPromotionStatus::Promoted
+        && matches!(
+            &preview.target,
+            IntegrationPromotionTarget::GitRefAdvance { .. }
+        ) {
+        let promoted_snapshot_id = authoritative_snapshot_id(
+            prepared.workspace.workspace_root().to_path_buf(),
+            verification_policy.verification_scope,
+        )
+        .await
+        .context("Git ref promotion effect completed but authoritative snapshot capture failed")?;
+        PhysicalPromotion {
+            authoritative_snapshot_id: Some(promoted_snapshot_id),
+            ..physical
+        }
+    } else {
+        physical
     };
     finalize_promotion(
         prepared,
@@ -513,6 +574,8 @@ async fn finalize_promotion(
     physical: PhysicalPromotion,
     event_sender: &Option<UnboundedSender<IntegrationPromotionRuntimeEventRequest>>,
 ) -> Result<GitIntegrationPromotionOutput> {
+    let parent_workspace_root = prepared.workspace.parent_workspace_root().to_path_buf();
+    let target_kind = preview.target.kind();
     let terminal_record = IntegrationPromotionRecorded {
         plan_id: prepared.plan_id.clone(),
         attempt_id: Some(attempt_id),
@@ -529,16 +592,39 @@ async fn finalize_promotion(
         IntegrationPromotionRuntimeEvent::PromotionRecorded(terminal_record.clone()),
     )
     .await;
-    let cleanup_error = prepared
-        .workspace
-        .cleanup()
-        .await
-        .err()
-        .map(|error| format!("{error:#}"));
-    terminal_emit?;
+    if let Err(error) = terminal_emit {
+        let cleanup_error = prepared.workspace.cleanup().await.err();
+        return Err(match cleanup_error {
+            Some(cleanup) => error.context(format!(
+                "promotion terminal acknowledgement failed and candidate cleanup failed: {cleanup:#}"
+            )),
+            None => error,
+        });
+    }
+    let promoted = terminal_record.status == IntegrationPromotionStatus::Promoted;
+    let (verification_target, cleanup_error) = if promoted && target_kind == "git_ref_advance" {
+        (
+            Some(PromotedVerificationTarget::GitRefAdvance {
+                workspace: Box::new(prepared.workspace),
+            }),
+            None,
+        )
+    } else {
+        let cleanup_error = prepared
+            .workspace
+            .cleanup()
+            .await
+            .err()
+            .map(|error| format!("{error:#}"));
+        let verification_target = promoted.then_some(PromotedVerificationTarget::WorkspaceApply {
+            workspace_root: parent_workspace_root,
+        });
+        (verification_target, cleanup_error)
+    };
     Ok(GitIntegrationPromotionOutput {
         record: terminal_record,
         authoritative_snapshot_id: physical.authoritative_snapshot_id,
+        verification_target,
         cleanup_error,
     })
 }
@@ -578,7 +664,6 @@ async fn execute_git_ref_advance(
     target_ref: &str,
     expected_old_oid: &str,
     candidate_oid: &str,
-    candidate_snapshot_id: &str,
 ) -> PhysicalPromotion {
     match git_ref_preflight(
         parent_workspace_root,
@@ -624,7 +709,7 @@ async fn execute_git_ref_advance(
             old_oid: expected_old_oid.to_owned(),
             new_oid: candidate_oid.to_owned(),
         }),
-        authoritative_snapshot_id: Some(candidate_snapshot_id.to_owned()),
+        authoritative_snapshot_id: None,
         reason: None,
     }
 }
@@ -717,6 +802,10 @@ async fn validate_target_ref(root: &std::path::Path, target_ref: &str) -> Result
 
 fn validate_run_request(request: &GitIntegrationPromotionRunRequest) -> Result<()> {
     request.preview.validate()?;
+    let policy_digest = request.verification_policy.stable_hash()?;
+    if policy_digest != request.preview.policy_digest {
+        bail!("promotion verification policy does not match the exact preview");
+    }
     if request.prepared.plan_id != request.preview.plan_id {
         bail!("prepared promotion belongs to another integration plan");
     }
@@ -732,6 +821,20 @@ fn validate_run_request(request: &GitIntegrationPromotionRunRequest) -> Result<(
         .authority
         .validate_for_preview(&request.preview, unix_time_ms())?;
     Ok(())
+}
+
+async fn authoritative_snapshot_id(
+    workspace_root: PathBuf,
+    verification_scope: sigil_kernel::VerificationScope,
+) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let workspace_id = stable_workspace_id(&workspace_root)?;
+        build_workspace_snapshot(&workspace_root, workspace_id, &verification_scope, 0)?
+            .workspace_snapshot_id
+            .ok_or_else(|| anyhow!("authoritative promotion snapshot is incomplete"))
+    })
+    .await
+    .context("authoritative promotion snapshot task failed")?
 }
 
 fn promotion_record(

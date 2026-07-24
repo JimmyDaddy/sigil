@@ -14,8 +14,8 @@ use crate::{
     IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec, ReceiptStatus,
     RedactionState, SessionLogEntry, TaskId, TaskParentVerificationRecorded,
     TaskPromotionAuthority, TaskPromotionAuthorityConsumed, TaskPromotionPreviewInput,
-    TaskPromotionPreviewRecorded, TaskStepId, VerificationBinding, VerificationReceipt,
-    VerificationVerdict, build_integration_plan, build_task_promotion_preview,
+    TaskPromotionPreviewRecorded, TaskStepId, VerificationBinding, VerificationPolicy,
+    VerificationReceipt, VerificationVerdict, build_integration_plan, build_task_promotion_preview,
 };
 
 fn integration_verification_receipt(
@@ -1039,7 +1039,7 @@ fn promotion_preview_requires_ready_lanes_and_rejects_executable_intent_ref_targ
         },
         verification_invalidation: vec!["scope-shared".to_owned()],
         intent_binding: None,
-        policy_digest: format!("sha256:{}", "c".repeat(64)),
+        policy_digest: VerificationPolicy::no_checks_required("scope-shared").stable_hash()?,
         has_pending_approval: false,
         has_executable_intent_refs: false,
         created_at_unix_ms: 10,
@@ -1061,6 +1061,7 @@ fn promotion_preview_requires_ready_lanes_and_rejects_executable_intent_ref_targ
     let preview = build_task_promotion_preview(ready.latest().expect("ready plan"), input.clone())?;
     preview.validate()?;
     assert_eq!(preview.ordered_lane_candidates.len(), 1);
+    assert!(preview.policy_digest.starts_with("sha256:jcs-v1:"));
 
     let mut ref_input = input;
     ref_input.target = IntegrationPromotionTarget::GitRefAdvance {
