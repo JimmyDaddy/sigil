@@ -62,5 +62,6 @@ pub(super) fn queued_prompt_summary_noun(target: &ConversationInputTarget) -> &'
     match target {
         ConversationInputTarget::MainThread => "follow-up",
         ConversationInputTarget::AgentThread { .. } => "agent message",
+        ConversationInputTarget::Task { .. } => "task guidance",
     }
 }

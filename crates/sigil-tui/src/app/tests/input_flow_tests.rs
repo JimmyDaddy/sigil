@@ -1910,6 +1910,35 @@ fn busy_plain_prompt_queues_against_active_agent_view() -> Result<()> {
 }
 
 #[test]
+fn busy_task_prompt_adds_typed_task_guidance() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskRunStarted {
+        task_id: "task_1".to_owned(),
+        objective: "ship the task".to_owned(),
+    })?;
+    app.composer.input = "prioritize the recovery edge".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::TaskGuidance,
+            target: sigil_kernel::ConversationInputTarget::Task { task_id },
+        }) if prompt == "prioritize the recovery edge" && task_id.as_str() == "task_1"
+    ));
+    let rows = app.composer_queue_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].detail, "pending · task task_1 · guidance",
+        "task follow-up must not masquerade as a main-thread chat"
+    );
+    Ok(())
+}
+
+#[test]
 fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.runtime.is_busy = true;

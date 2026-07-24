@@ -1934,6 +1934,7 @@ fn kernel_queue_kind_to_http(kind: ConversationInputKind) -> HttpConversationQue
         ConversationInputKind::PlanPrompt => HttpConversationQueueItemKind::PlanPrompt,
         ConversationInputKind::AgentMention => HttpConversationQueueItemKind::AgentMention,
         ConversationInputKind::AgentMessage => HttpConversationQueueItemKind::AgentMessage,
+        ConversationInputKind::TaskGuidance => HttpConversationQueueItemKind::Unknown,
         ConversationInputKind::Unknown => HttpConversationQueueItemKind::Unknown,
     }
 }

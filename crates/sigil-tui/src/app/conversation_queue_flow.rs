@@ -54,7 +54,14 @@ impl AppState {
 
     pub(super) fn active_conversation_queue_target(&self) -> Option<ConversationInputTarget> {
         match &self.agent_panel.active_view {
-            AgentView::Main => Some(ConversationInputTarget::MainThread),
+            AgentView::Main => self
+                .runtime
+                .active_task
+                .as_ref()
+                .and_then(|task| sigil_kernel::TaskId::new(task.task_id.clone()).ok())
+                .map_or(Some(ConversationInputTarget::MainThread), |task_id| {
+                    Some(ConversationInputTarget::Task { task_id })
+                }),
             AgentView::Child { .. } => self.active_agent_thread_projection().map(|thread| {
                 ConversationInputTarget::AgentThread {
                     thread_id: thread.thread_id,
@@ -72,6 +79,7 @@ impl AppState {
         let kind = match &target {
             ConversationInputTarget::MainThread => ConversationInputKind::Chat,
             ConversationInputTarget::AgentThread { .. } => ConversationInputKind::AgentMessage,
+            ConversationInputTarget::Task { .. } => ConversationInputKind::TaskGuidance,
         };
         (kind, target)
     }
@@ -595,6 +603,9 @@ fn queue_target_label(target: &sigil_kernel::ConversationInputTarget) -> String 
         sigil_kernel::ConversationInputTarget::AgentThread { thread_id } => {
             format!("agent {}", thread_id.as_str())
         }
+        sigil_kernel::ConversationInputTarget::Task { task_id } => {
+            format!("task {}", task_id.as_str())
+        }
     }
 }
 
@@ -604,6 +615,7 @@ fn queue_kind_label(kind: sigil_kernel::ConversationInputKind) -> &'static str {
         sigil_kernel::ConversationInputKind::PlanPrompt => "plan",
         sigil_kernel::ConversationInputKind::AgentMention => "agent",
         sigil_kernel::ConversationInputKind::AgentMessage => "message",
+        sigil_kernel::ConversationInputKind::TaskGuidance => "guidance",
         sigil_kernel::ConversationInputKind::Unknown => "unknown",
     }
 }
@@ -649,6 +661,7 @@ fn queue_summary_noun(item: &ConversationQueueItemProjection) -> &'static str {
     match &item.queued.target {
         sigil_kernel::ConversationInputTarget::MainThread => "follow-up",
         sigil_kernel::ConversationInputTarget::AgentThread { .. } => "agent message",
+        sigil_kernel::ConversationInputTarget::Task { .. } => "task guidance",
     }
 }
 

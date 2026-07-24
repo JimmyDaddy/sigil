@@ -48,6 +48,14 @@ fn spec(access: ToolAccess, network_effect: Option<NetworkEffect>) -> ToolSpec {
     }
 }
 
+#[test]
+fn task_guidance_kind_stays_private_until_http_protocol_supports_it() {
+    assert_eq!(
+        kernel_queue_kind_to_http(sigil_kernel::ConversationInputKind::TaskGuidance),
+        HttpConversationQueueItemKind::Unknown
+    );
+}
+
 struct ControlledPreparation {
     started: Arc<tokio::sync::Semaphore>,
     release: Arc<tokio::sync::Semaphore>,

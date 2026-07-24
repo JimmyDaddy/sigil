@@ -12,6 +12,7 @@ use crate::{
     projection_apply_decision,
     provider::{MessageRole, ModelMessage, ReasoningEffort},
     session::{ControlEntry, SessionLogEntry, SessionStreamRecord},
+    task::TaskId,
 };
 
 /// Durable hash prefix proving that dispatch requires process-local exact prompt material.
@@ -415,6 +416,7 @@ pub fn conversation_promotion_capability_digest(
 pub enum ConversationInputTarget {
     MainThread,
     AgentThread { thread_id: AgentThreadId },
+    Task { task_id: TaskId },
 }
 
 /// Product-level class of one queued input.
@@ -425,6 +427,7 @@ pub enum ConversationInputKind {
     PlanPrompt,
     AgentMention,
     AgentMessage,
+    TaskGuidance,
     Unknown,
 }
 
@@ -590,6 +593,7 @@ impl ConversationQueueDurableProjection {
         match &command.mutation {
             ConversationQueueMutation::Enqueue { entry } => {
                 validate_queue_prompt_projection(&entry.prompt, &entry.prompt_hash)?;
+                validate_queue_input_routing(&entry.target, entry.kind)?;
                 if self.seen_queue_ids.contains(&entry.queue_id) {
                     bail!("conversation queue mutation queue id already exists");
                 }
@@ -852,6 +856,29 @@ fn validate_queue_prompt_projection(prompt: &str, prompt_hash: &str) -> Result<(
         bail!("conversation queue mutation prompt projection is not safe or does not match hash");
     }
     Ok(())
+}
+
+fn validate_queue_input_routing(
+    target: &ConversationInputTarget,
+    kind: ConversationInputKind,
+) -> Result<()> {
+    match (target, kind) {
+        (ConversationInputTarget::Task { .. }, ConversationInputKind::TaskGuidance)
+        | (
+            ConversationInputTarget::MainThread | ConversationInputTarget::AgentThread { .. },
+            ConversationInputKind::Chat
+            | ConversationInputKind::PlanPrompt
+            | ConversationInputKind::AgentMention
+            | ConversationInputKind::AgentMessage
+            | ConversationInputKind::Unknown,
+        ) => Ok(()),
+        (ConversationInputTarget::Task { .. }, _) => {
+            bail!("task-targeted conversation input must use task guidance kind")
+        }
+        (_, ConversationInputKind::TaskGuidance) => {
+            bail!("task guidance conversation input must target a task")
+        }
+    }
 }
 
 fn normalize_queue_prompt_for_projection(prompt: &mut String, prompt_hash: &mut String) {

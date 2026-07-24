@@ -409,6 +409,61 @@ fn conversation_queue_mutation_cas_supports_every_control_operation() -> Result<
 }
 
 #[test]
+fn task_guidance_queue_routing_is_typed_and_fail_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut guidance = durable_queue_entry(
+        ConversationInputQueueId::new("queue_task_guidance")?,
+        "focus on the runtime recovery edge",
+    );
+    guidance.target = ConversationInputTarget::Task {
+        task_id: crate::TaskId::new("task_1")?,
+    };
+    guidance.kind = ConversationInputKind::TaskGuidance;
+    let revision = store
+        .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+            expected_queue_revision: ConversationQueueRevision::initial(),
+            mutation: ConversationQueueMutation::Enqueue { entry: guidance },
+        })?
+        .revision;
+
+    let before_invalid = fs::read(&path)?;
+    let mut invalid = durable_queue_entry(
+        ConversationInputQueueId::new("queue_task_wrong_kind")?,
+        "do not silently reinterpret me",
+    );
+    invalid.target = ConversationInputTarget::Task {
+        task_id: crate::TaskId::new("task_1")?,
+    };
+    assert!(
+        store
+            .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+                expected_queue_revision: revision.clone(),
+                mutation: ConversationQueueMutation::Enqueue { entry: invalid },
+            })
+            .is_err()
+    );
+    assert_eq!(fs::read(&path)?, before_invalid);
+
+    let mut invalid = durable_queue_entry(
+        ConversationInputQueueId::new("queue_guidance_wrong_target")?,
+        "task guidance requires a task target",
+    );
+    invalid.kind = ConversationInputKind::TaskGuidance;
+    assert!(
+        store
+            .append_conversation_queue_mutation(ConversationQueueMutationCommand {
+                expected_queue_revision: revision,
+                mutation: ConversationQueueMutation::Enqueue { entry: invalid },
+            })
+            .is_err()
+    );
+    assert_eq!(fs::read(path)?, before_invalid);
+    Ok(())
+}
+
+#[test]
 fn conversation_queue_mutation_cas_rejects_stale_revision_without_writing() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
