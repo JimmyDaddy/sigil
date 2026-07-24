@@ -606,6 +606,16 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        if !session
+            .task_state_projection()
+            .tasks
+            .contains_key(&request.task_id)
+        {
+            bail!(
+                "task {} is not present in session",
+                request.task_id.as_str()
+            );
+        }
         let integration_projection = IntegrationProjection::from_entries(session.entries());
         reconcile_promoted_integration_steps(
             session,
