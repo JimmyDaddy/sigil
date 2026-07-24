@@ -90,7 +90,7 @@ async fn chat_agent_run_input_with_repo_context_preserves_plan_mode_transience()
 }
 
 #[test]
-fn materialize_task_verification_config_records_specs_policy_and_events() {
+fn tui_materialize_task_verification_wrapper_records_specs_policy_and_events() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         temp.path().join("Cargo.toml"),
