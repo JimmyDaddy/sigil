@@ -728,6 +728,18 @@ pub trait AgentToolDelegate: Send {
     ) {
     }
 
+    /// Binds the exact tool call to the approval that admitted it.
+    ///
+    /// `explicit_user_approval` is true only when the interactive approval handler actually
+    /// resolved an `Ask` decision for this exact call. A policy `Allow`, session grant, automated
+    /// approval handler, or model-authored argument cannot manufacture this fact.
+    fn set_agent_tool_authorization(
+        &mut self,
+        _call: Option<&ToolCall>,
+        _explicit_user_approval: bool,
+    ) {
+    }
+
     /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
     fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
 
@@ -1898,6 +1910,7 @@ struct AuthorizedToolCall {
     execution_subjects: Vec<ToolSubject>,
     prepared_tool_call: Option<PreparedToolCall>,
     explicit_network_approval: bool,
+    explicit_user_approval: bool,
 }
 
 struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
@@ -1945,6 +1958,7 @@ where
         web_task_tree_budget,
     } = context;
     let mut explicit_network_approval = false;
+    let mut explicit_user_approval = false;
     let _tool_effect = begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool)?;
     let mut execution_subjects = Vec::new();
     let mut prepared_tool_call = None;
@@ -2167,6 +2181,7 @@ where
                     && decision.network_policy_decision == ApprovalMode::Ask;
                 match approval {
                     ToolApproval::Approve => {
+                        explicit_user_approval = approval_is_explicit_user_action;
                         explicit_network_approval = approval_is_explicit_network_user_action;
                         append_tool_approval_audit(
                             session,
@@ -2217,6 +2232,7 @@ where
                             record_and_emit_tool_result(session, handler, outcome, result)?;
                             return Ok(());
                         }
+                        explicit_user_approval = approval_is_explicit_user_action;
                         explicit_network_approval = approval_is_explicit_network_user_action;
                         append_tool_approval_audit(
                             session,
@@ -2368,6 +2384,11 @@ where
                             return Ok(());
                         }
                         call = approved_call;
+                        // Argument overrides are a different call than the one the user previewed.
+                        // They may still be safe to execute after the permission scope is
+                        // re-evaluated above, but they cannot mint exact-call authority for an
+                        // agent delegation proposal without a fresh preview and confirmation.
+                        explicit_user_approval = false;
                         execution_subjects = approved_decision.subjects.clone();
                         explicit_network_approval = approval_is_explicit_user_action
                             && approved_decision.network_effect.is_some()
@@ -2488,6 +2509,7 @@ where
         execution_subjects,
         prepared_tool_call,
         explicit_network_approval,
+        explicit_user_approval,
     };
     execute_authorized_tool_call(
         ToolCallProcessingContext {
@@ -2544,6 +2566,7 @@ where
         execution_subjects,
         prepared_tool_call,
         explicit_network_approval,
+        explicit_user_approval,
     } = authorized;
     let tool_is_agent_category = execution_spec
         .as_ref()
@@ -2649,11 +2672,13 @@ where
                 delegate.set_run_cancellation(cancellation.clone());
                 delegate.set_root_logical_run_id(Some(root_logical_run_id));
                 delegate.set_agent_delegation_run_context(agent_delegation_run_context);
+                delegate.set_agent_tool_authorization(Some(&call), explicit_user_approval);
                 delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
-                match delegate
+                let result = delegate
                     .handle_agent_tool_call(session, &call, options, handler, approval_handler)
-                    .await
-                {
+                    .await;
+                delegate.set_agent_tool_authorization(None, false);
+                match result {
                     Ok(Some(result)) => result,
                     Ok(None) => match execute_after_started_audit_with_progress(
                         tools,

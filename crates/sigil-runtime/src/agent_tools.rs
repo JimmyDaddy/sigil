@@ -46,6 +46,7 @@ use crate::{
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 pub const SPAWN_AGENTS_TOOL_NAME: &str = "spawn_agents";
+pub const REQUEST_AGENT_DELEGATION_TOOL_NAME: &str = "request_agent_delegation";
 pub const WAIT_AGENT_TOOL_NAME: &str = "wait_agent";
 pub const READ_AGENT_RESULT_TOOL_NAME: &str = "read_agent_result";
 pub const LIST_AGENTS_TOOL_NAME: &str = "list_agents";
@@ -67,6 +68,10 @@ const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIME
 fn tool_batch_allows_host_join(calls: &[ToolCall]) -> bool {
     !calls.is_empty()
         && calls.iter().all(|call| match call.name.as_str() {
+            REQUEST_AGENT_DELEGATION_TOOL_NAME => serde_json::from_str::<Value>(&call.args_json)
+                .ok()
+                .and_then(|args| RequestAgentDelegationArgs::parse(&args).ok())
+                .is_some_and(|args| args.completion_mode == AgentInvocationMode::JoinBeforeFinal),
             SPAWN_AGENT_TOOL_NAME => serde_json::from_str::<Value>(&call.args_json)
                 .ok()
                 .and_then(|args| SpawnAgentArgs::parse(&args).ok())
@@ -83,6 +88,7 @@ mod background;
 mod batch_spawn;
 mod chat;
 mod completion;
+mod delegation_request;
 mod handlers;
 mod permissions;
 mod result_pages;
@@ -133,7 +139,9 @@ use shared::{
     short_digest, simple_agent_preview, terminal_status_label, thread_id_arg, thread_status_label,
     unix_time_ms, usage_summary_from_stats,
 };
-use surface::{AgentToolKind, ChatAgentRunRequest, SpawnAgentArgs, SpawnAgentsArgs};
+use surface::{
+    AgentToolKind, ChatAgentRunRequest, RequestAgentDelegationArgs, SpawnAgentArgs, SpawnAgentsArgs,
+};
 
 #[cfg(test)]
 #[path = "tests/agent_tools_tests.rs"]

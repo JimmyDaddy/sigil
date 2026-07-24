@@ -1,4 +1,10 @@
+use super::spawn::profile_uses_changeset_only_write;
 use super::*;
+use serde::Deserialize;
+
+const MAX_DELEGATION_OBJECTIVE_CHARS: usize = 1_000;
+const MAX_DELEGATION_PROMPT_CHARS: usize = 8_000;
+const MAX_DELEGATION_DISPLAY_NAME_CHARS: usize = 120;
 
 /// The actual child-thread execution is handled by [`AgentToolRuntime`]. These tool
 /// implementations provide stable schemas, permission subjects, previews, and a safe fallback
@@ -122,6 +128,7 @@ struct AgentToolSurface {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum AgentToolKind {
+    RequestDelegation,
     Spawn,
     SpawnBatch,
     Wait,
@@ -133,7 +140,8 @@ pub(super) enum AgentToolKind {
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
+        Self::RequestDelegation,
         Self::Spawn,
         Self::SpawnBatch,
         Self::Wait,
@@ -146,6 +154,7 @@ impl AgentToolKind {
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
         match name {
+            REQUEST_AGENT_DELEGATION_TOOL_NAME => Some(Self::RequestDelegation),
             SPAWN_AGENT_TOOL_NAME => Some(Self::Spawn),
             SPAWN_AGENTS_TOOL_NAME => Some(Self::SpawnBatch),
             WAIT_AGENT_TOOL_NAME => Some(Self::Wait),
@@ -160,6 +169,7 @@ impl AgentToolKind {
 
     fn name(self) -> &'static str {
         match self {
+            Self::RequestDelegation => REQUEST_AGENT_DELEGATION_TOOL_NAME,
             Self::Spawn => SPAWN_AGENT_TOOL_NAME,
             Self::SpawnBatch => SPAWN_AGENTS_TOOL_NAME,
             Self::Wait => WAIT_AGENT_TOOL_NAME,
@@ -189,7 +199,8 @@ impl Tool for AgentTool {
                 AgentToolKind::Wait | AgentToolKind::ReadResult | AgentToolKind::List => {
                     ToolAccess::Read
                 }
-                AgentToolKind::Spawn
+                AgentToolKind::RequestDelegation
+                | AgentToolKind::Spawn
                 | AgentToolKind::SpawnBatch
                 | AgentToolKind::Cancel
                 | AgentToolKind::Message
@@ -197,7 +208,9 @@ impl Tool for AgentTool {
             },
             network_effect: None,
             preview: match self.kind {
-                AgentToolKind::Spawn | AgentToolKind::SpawnBatch => ToolPreviewCapability::Required,
+                AgentToolKind::RequestDelegation
+                | AgentToolKind::Spawn
+                | AgentToolKind::SpawnBatch => ToolPreviewCapability::Required,
                 AgentToolKind::Wait
                 | AgentToolKind::ReadResult
                 | AgentToolKind::List
@@ -210,6 +223,13 @@ impl Tool for AgentTool {
 
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let subject = match self.kind {
+            AgentToolKind::RequestDelegation => {
+                return Ok(RequestAgentDelegationArgs::parse(args)?
+                    .members
+                    .into_iter()
+                    .map(|member| ToolSubject::agent(member.spawn.profile_id.as_str().to_owned()))
+                    .collect());
+            }
             AgentToolKind::Spawn => ToolSubject::agent(required_string(args, "profile_id")?),
             AgentToolKind::SpawnBatch => {
                 return Ok(SpawnAgentsArgs::parse(args)?
@@ -234,6 +254,12 @@ impl Tool for AgentTool {
         args: &Value,
     ) -> Result<Option<sigil_kernel::ApprovalMode>> {
         Ok(match self.kind {
+            AgentToolKind::RequestDelegation
+                if self.surface.multi_agent_mode == MultiAgentMode::None =>
+            {
+                Some(sigil_kernel::ApprovalMode::Deny)
+            }
+            AgentToolKind::RequestDelegation => Some(sigil_kernel::ApprovalMode::Ask),
             AgentToolKind::Spawn | AgentToolKind::SpawnBatch
                 if self.surface.multi_agent_mode == MultiAgentMode::None =>
             {
@@ -258,6 +284,7 @@ impl Tool for AgentTool {
     }
     async fn preview(&self, _ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
         Ok(match self.kind {
+            AgentToolKind::RequestDelegation => Some(self.delegation_request_preview(&args)?),
             AgentToolKind::Spawn => Some(self.spawn_preview(&args)?),
             AgentToolKind::SpawnBatch => Some(self.spawn_batch_preview(&args)?),
             AgentToolKind::Wait => Some(simple_agent_preview(
@@ -329,6 +356,10 @@ impl AgentTool {
 
     fn description(&self) -> String {
         match self.kind {
+            AgentToolKind::RequestDelegation => format!(
+                "Propose one bounded batch of 1-4 child agents when you infer from the current ordinary conversation that delegation would materially improve the result. You own the intent decision and scope decomposition; the host does not scan prompt keywords. Calling this tool only requests a preview. The host validates the exact profiles, isolation, tool/effect upper bounds, and asks the user once. Children start only after that explicit confirmation. A denial returns control to this conversation with zero child dispatch. Use non-overlapping scopes and completion_mode=join_before_final when the next answer depends on the results.\n{}",
+                self.surface.profile_index_description
+            ),
             AgentToolKind::Spawn => format!(
                 "{}\n{}",
                 spawn_agent_mode_description(self.surface.multi_agent_mode),
@@ -366,6 +397,42 @@ impl AgentTool {
 
     fn input_schema(&self) -> Value {
         match self.kind {
+            AgentToolKind::RequestDelegation => json!({
+                "type": "object",
+                "properties": {
+                    "members": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "request_key": {
+                                    "type": "string",
+                                    "description": "Stable unique id for this proposed member."
+                                },
+                                "profile_id": {
+                                    "type": "string",
+                                    "description": "Stable agent profile id from the model-visible agent index."
+                                },
+                                "objective": { "type": "string" },
+                                "prompt": { "type": "string" },
+                                "display_name_hint": { "type": "string" }
+                            },
+                            "required": ["request_key", "profile_id", "objective", "prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "completion_mode": {
+                        "type": "string",
+                        "enum": ["join_before_final", "background"],
+                        "default": "join_before_final",
+                        "description": "Join the exact confirmed batch before the next model turn, or detach a proven-safe read-only batch."
+                    }
+                },
+                "required": ["members"],
+                "additionalProperties": false
+            }),
             AgentToolKind::Spawn => json!({
                 "type": "object",
                 "properties": {
@@ -532,6 +599,54 @@ impl AgentTool {
         })
     }
 
+    fn delegation_request_preview(&self, args: &Value) -> Result<ToolPreview> {
+        let parsed = RequestAgentDelegationArgs::parse(args)?;
+        let mut rows = Vec::with_capacity(parsed.members.len());
+        for member in &parsed.members {
+            let resolved = self
+                .surface
+                .profile_registry
+                .get(&member.spawn.profile_id)
+                .with_context(|| {
+                    format!(
+                        "agent profile {} is not registered",
+                        member.spawn.profile_id.as_str()
+                    )
+                })?;
+            let isolation = if profile_uses_changeset_only_write(resolved.execution_role, resolved)
+            {
+                "changeset_only"
+            } else {
+                "shared_read_only"
+            };
+            let expected_effect = if isolation == "changeset_only" {
+                "isolated changeset proposal; parent workspace unchanged"
+            } else {
+                "read-only workspace inspection"
+            };
+            rows.push(format!(
+                "{}: profile={} · objective={} · isolation={} · tools={} · effect={} · trust={}",
+                member.request_key.as_str(),
+                member.spawn.profile_id.as_str(),
+                member.spawn.objective,
+                isolation,
+                tool_scope_summary(&resolved.profile.tool_scope),
+                expected_effect,
+                resolved.trust_state_string(),
+            ));
+        }
+        Ok(ToolPreview {
+            title: format!("Delegate to {} agent(s)", parsed.members.len()),
+            summary: format!(
+                "{} · exact batch · user confirmation required",
+                invocation_mode_label(parsed.completion_mode)
+            ),
+            body: rows.join("\n"),
+            changed_files: Vec::new(),
+            file_diffs: Vec::new(),
+        })
+    }
+
     fn spawn_batch_preview(&self, args: &Value) -> Result<ToolPreview> {
         let parsed = SpawnAgentsArgs::parse(args)?;
         let body = parsed
@@ -621,6 +736,30 @@ pub(super) struct SpawnAgentsMemberArgs {
     pub(super) raw_args: Value,
 }
 
+pub(super) struct RequestAgentDelegationArgs {
+    pub(super) completion_mode: AgentInvocationMode,
+    pub(super) members: Vec<SpawnAgentsMemberArgs>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestAgentDelegationWire {
+    members: Vec<RequestAgentDelegationMemberWire>,
+    #[serde(default)]
+    completion_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestAgentDelegationMemberWire {
+    request_key: String,
+    profile_id: String,
+    objective: String,
+    prompt: String,
+    #[serde(default)]
+    display_name_hint: Option<String>,
+}
+
 pub(super) struct ChatAgentRunRequest {
     pub(super) profile_id: AgentProfileId,
     pub(super) objective: String,
@@ -696,4 +835,111 @@ impl SpawnAgentsArgs {
             members: parsed,
         })
     }
+}
+
+impl RequestAgentDelegationArgs {
+    pub(super) fn parse(args: &Value) -> Result<Self> {
+        let wire = serde_json::from_value::<RequestAgentDelegationWire>(args.clone())
+            .context("invalid request_agent_delegation proposal")?;
+        if !(1..=4).contains(&wire.members.len()) {
+            bail!("request_agent_delegation requires between 1 and 4 members");
+        }
+        let completion_mode = wire
+            .completion_mode
+            .as_deref()
+            .map(parse_invocation_mode)
+            .transpose()?
+            .unwrap_or(AgentInvocationMode::JoinBeforeFinal);
+        if !matches!(
+            completion_mode,
+            AgentInvocationMode::JoinBeforeFinal | AgentInvocationMode::Background
+        ) {
+            bail!(
+                "request_agent_delegation completion_mode must be join_before_final or background"
+            );
+        }
+
+        let mut request_keys = BTreeSet::new();
+        let mut members = Vec::with_capacity(wire.members.len());
+        for member in wire.members {
+            let request_key = AgentRouteId::new(member.request_key)?;
+            if !request_keys.insert(request_key.clone()) {
+                bail!(
+                    "request_agent_delegation contains duplicate request_key {}",
+                    request_key.as_str()
+                );
+            }
+            let profile_id = AgentProfileId::new(member.profile_id)?;
+            validate_proposal_text(
+                "objective",
+                &member.objective,
+                MAX_DELEGATION_OBJECTIVE_CHARS,
+            )?;
+            validate_proposal_text("prompt", &member.prompt, MAX_DELEGATION_PROMPT_CHARS)?;
+            if let Some(display_name_hint) = member.display_name_hint.as_deref() {
+                validate_proposal_text(
+                    "display_name_hint",
+                    display_name_hint,
+                    MAX_DELEGATION_DISPLAY_NAME_CHARS,
+                )?;
+            }
+            let raw_args = json!({
+                "request_key": request_key.as_str(),
+                "profile_id": profile_id.as_str(),
+                "objective": member.objective,
+                "prompt": member.prompt,
+                "display_name_hint": member.display_name_hint,
+            });
+            let spawn = SpawnAgentArgs {
+                profile_id,
+                objective: required_string(&raw_args, "objective")?,
+                prompt: required_string(&raw_args, "prompt")?,
+                mode: completion_mode,
+                display_name_hint: optional_string(&raw_args, "display_name_hint"),
+            };
+            members.push(SpawnAgentsMemberArgs {
+                request_key,
+                spawn,
+                raw_args,
+            });
+        }
+        members.sort_by(|left, right| left.request_key.cmp(&right.request_key));
+        Ok(Self {
+            completion_mode,
+            members,
+        })
+    }
+
+    pub(super) fn single_spawn_args(&self) -> Option<Value> {
+        let member = self.members.first()?;
+        (self.members.len() == 1).then(|| {
+            json!({
+                "profile_id": member.spawn.profile_id.as_str(),
+                "objective": member.spawn.objective,
+                "prompt": member.spawn.prompt,
+                "mode": invocation_mode_label(self.completion_mode),
+                "display_name_hint": member.spawn.display_name_hint,
+            })
+        })
+    }
+
+    pub(super) fn batch_spawn_args(&self) -> Value {
+        json!({
+            "completion_mode": invocation_mode_label(self.completion_mode),
+            "members": self.members.iter().map(|member| member.raw_args.clone()).collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn validate_proposal_text(label: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("request_agent_delegation {label} cannot be empty");
+    }
+    if value.chars().count() > max_chars {
+        bail!("request_agent_delegation {label} exceeds {max_chars} characters");
+    }
+    if value.chars().any(char::is_control) {
+        bail!("request_agent_delegation {label} contains control characters");
+    }
+    Ok(())
 }

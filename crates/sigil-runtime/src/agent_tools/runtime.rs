@@ -1,6 +1,23 @@
 use super::*;
 use sigil_kernel::NetworkEffect;
 
+#[derive(Debug, Clone)]
+pub(super) struct AgentToolAuthorization {
+    call_id: String,
+    tool_name: String,
+    args_json: String,
+    explicit_user_approval: bool,
+}
+
+impl AgentToolAuthorization {
+    pub(super) fn matches_explicitly_approved(&self, call: &ToolCall) -> bool {
+        self.explicit_user_approval
+            && self.call_id == call.id
+            && self.tool_name == call.name
+            && self.args_json == call.args_json
+    }
+}
+
 /// Runtime delegate that executes approved agent-thread tool calls.
 pub struct AgentToolRuntime {
     pub(super) supervisor: AgentSupervisor,
@@ -16,6 +33,7 @@ pub struct AgentToolRuntime {
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) root_logical_run_id: Option<String>,
     pub(super) delegation_run_context: Option<AgentDelegationRunContext>,
+    pub(super) agent_tool_authorization: Option<AgentToolAuthorization>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
     #[cfg(test)]
     pub(super) delegation_authority_override: Option<DelegationAuthority>,
@@ -49,6 +67,7 @@ impl AgentToolRuntime {
             run_cancellation: None,
             root_logical_run_id: None,
             delegation_run_context: None,
+            agent_tool_authorization: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -76,6 +95,7 @@ impl AgentToolRuntime {
             run_cancellation: None,
             root_logical_run_id: None,
             delegation_run_context: None,
+            agent_tool_authorization: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -410,6 +430,19 @@ impl AgentToolDelegate for AgentToolRuntime {
         self.delegation_run_context = context.cloned();
     }
 
+    fn set_agent_tool_authorization(
+        &mut self,
+        call: Option<&ToolCall>,
+        explicit_user_approval: bool,
+    ) {
+        self.agent_tool_authorization = call.map(|call| AgentToolAuthorization {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            args_json: call.args_json.clone(),
+            explicit_user_approval,
+        });
+    }
+
     fn set_web_task_tree_budget(&mut self, budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>) {
         self.web_task_tree_budget = budget;
     }
@@ -433,6 +466,17 @@ impl AgentToolDelegate for AgentToolRuntime {
             .await?;
         let args = parse_tool_args(call)?;
         let result = match kind {
+            AgentToolKind::RequestDelegation => {
+                self.request_agent_delegation(
+                    session,
+                    call,
+                    &args,
+                    options,
+                    handler,
+                    approval_handler,
+                )
+                .await
+            }
             AgentToolKind::Spawn => {
                 self.spawn_agent(session, call, &args, options, handler, approval_handler)
                     .await

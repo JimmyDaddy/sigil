@@ -17,17 +17,19 @@ use futures::{Stream, stream};
 use serde_json::json;
 use sha2::Digest;
 use sigil_kernel::{
-    Agent, AgentConfig, AgentInvocationGrant, AgentInvocationGrantBinding,
-    AgentInvocationGrantSource, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
-    AgentProfileTrustEntry, AgentRunAttemptId, AgentRunInput, AgentRunOptions, AgentRunOutcome,
-    AgentThreadId, AgentThreadStatus, AgentToolDelegate, AgentTrustState, ApprovalMode,
-    AutoApproveHandler, CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
-    DelegationAuthority, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
-    MessageRole, MultiAgentMode, NetworkPolicy, PermissionConfig, PermissionEvaluationContext,
-    PermissionMode, PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
-    RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskIsolationMode,
-    TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    Agent, AgentConfig, AgentDelegationRunContext, AgentInvocationGrant,
+    AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentInvocationSource, AgentProfileId,
+    AgentProfilePolicyEntry, AgentProfileTrustEntry, AgentRunAttemptId, AgentRunInput,
+    AgentRunOptions, AgentRunOutcome, AgentRunPurpose, AgentThreadId, AgentThreadStatus,
+    AgentToolDelegate, AgentTrustState, ApprovalHandler, ApprovalMode, AutoApproveHandler,
+    CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
+    ConversationPurposeContext, ConversationTurnRef, DelegationAuthority, EventHandler,
+    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode, NetworkPolicy,
+    PermissionConfig, PermissionEvaluationContext, PermissionMode, PermissionPolicyChain,
+    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
+    SessionLogEntry, SessionRef, TaskId, TaskIsolationMode, TaskRoutingPolicy, TaskStepId, Tool,
+    ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
     ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
     ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
     ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
@@ -38,8 +40,8 @@ use super::{
     AgentToolProviderFactory, AgentToolRuntime, BackgroundChatAgentHandle,
     BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
     LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
-    chat_agent_thread_id_for_call, hash_text, register_agent_tools,
+    REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME,
+    WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call, hash_text, register_agent_tools,
     register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
     tool_batch_allows_host_join,
 };
@@ -1377,6 +1379,61 @@ impl AgentToolProviderFactory for StaticProviderFactory {
     }
 }
 
+struct NaturalLanguageDelegationProvider;
+
+#[async_trait]
+impl Provider for NaturalLanguageDelegationProvider {
+    fn name(&self) -> &str {
+        "natural-language-delegation"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request_contains_tool_result(&request, "call-natural-delegation")
+            || request_contains_user_text(&request, "agent_join_results")
+        {
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::TextDelta(
+                    "conversation continued after the model proposal".to_owned(),
+                ),
+                ProviderChunk::Done,
+            ]));
+        }
+        assert!(
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.name == REQUEST_AGENT_DELEGATION_TOOL_NAME),
+            "ordinary conversation must expose the typed delegation proposal tool to the model"
+        );
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(delegation_proposal_call(
+                "call-natural-delegation",
+                "inspect the runtime",
+            )),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
+struct ExplicitApprovalHandler;
+
+impl ApprovalHandler for ExplicitApprovalHandler {
+    fn approve_tool_call(&mut self, _call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        Ok(ToolApproval::Approve)
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
+    }
+}
+
 struct RejectingProviderFactory;
 
 impl AgentToolProviderFactory for RejectingProviderFactory {
@@ -1420,6 +1477,77 @@ async fn invoke_explore_spawn(
         )
         .await?
         .ok_or_else(|| anyhow::anyhow!("spawn_agent call was not handled"))
+}
+
+fn delegation_proposal_call(call_id: &str, objective: &str) -> ToolCall {
+    ToolCall {
+        id: call_id.to_owned(),
+        name: REQUEST_AGENT_DELEGATION_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "members": [{
+                "request_key": "explore_runtime",
+                "profile_id": "explore",
+                "objective": objective,
+                "prompt": objective
+            }],
+            "completion_mode": "join_before_final"
+        })
+        .to_string(),
+    }
+}
+
+fn bind_model_proposal_context(
+    runtime: &mut AgentToolRuntime,
+    session: &Session,
+    call: &ToolCall,
+    explicit_user_approval: bool,
+) -> Result<RunCancellationOwner> {
+    let logical_run_id = "proposal-root-run";
+    let cancellation_owner = RunCancellationOwner::new();
+    runtime.set_root_logical_run_id(Some(logical_run_id));
+    runtime.set_run_cancellation(Some(cancellation_owner.handle()));
+    runtime.set_agent_delegation_run_context(Some(&AgentDelegationRunContext {
+        source: AgentInvocationGrantSource::Conversation {
+            source_turn: ConversationTurnRef::new(
+                session.session_scope_id(),
+                "proposal-source-message",
+                logical_run_id,
+            )?,
+        },
+        authority: DelegationAuthority::ModelProactive,
+    }));
+    runtime.set_agent_tool_authorization(Some(call), explicit_user_approval);
+    runtime.set_join_batch_eligibility(std::slice::from_ref(call));
+    Ok(cancellation_owner)
+}
+
+fn ordinary_conversation_input(
+    session: &Session,
+    prompt: &str,
+    logical_run_id: &str,
+    cancellation_owner: &RunCancellationOwner,
+) -> Result<AgentRunInput> {
+    let input = AgentRunInput::user(prompt);
+    let source_message_id = input
+        .durable_user_message_projection()?
+        .expect("ordinary conversation input owns one durable user message")
+        .id;
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        source_message_id,
+        logical_run_id,
+    )?;
+    Ok(input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn,
+                routing_policy: TaskRoutingPolicy::Manual,
+                task_handoff: None,
+            },
+        )))
+        .with_cancellation(cancellation_owner.handle()))
 }
 
 struct TextProviderFactory {
@@ -1904,6 +2032,307 @@ async fn explicit_only_rejects_model_proactive_authority_before_provider_build()
     assert!(result.is_error());
     assert!(result.content.contains("requires explicit user"));
     assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[test]
+fn natural_language_delegation_is_a_model_owned_typed_proposal_not_prompt_scanning() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let spec = registry
+        .spec_for(REQUEST_AGENT_DELEGATION_TOOL_NAME)
+        .expect("delegation proposal tool registered");
+    assert!(spec.description.contains("You own the intent decision"));
+    assert!(spec.description.contains("does not scan prompt keywords"));
+    assert!(spec.description.contains("zero child dispatch"));
+
+    let call = delegation_proposal_call("call-proposal-surface", "inspect the runtime");
+    let context = ToolContext::new(std::env::temp_dir(), 30);
+    assert_eq!(
+        registry.permission_default_mode(&context, &call)?,
+        Some(ApprovalMode::Ask)
+    );
+    let preview = futures::executor::block_on(registry.preview(context, call))?
+        .expect("delegation proposal preview");
+    assert!(preview.title.contains("Delegate to 1 agent"));
+    assert!(preview.body.contains("isolation=shared_read_only"));
+    assert!(
+        preview
+            .body
+            .contains("effect=read-only workspace inspection")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_conversation_dispatches_only_after_model_proposal_and_user_confirmation()
+-> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut agent_delegate = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(StaticProviderFactory),
+    );
+    let agent = Agent::new(NaturalLanguageDelegationProvider, registry);
+    let mut session = Session::new("natural-language-confirmed", "mock-model");
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = ordinary_conversation_input(
+        &session,
+        "Please improve the quality of this result.",
+        "natural-language-confirmed-root",
+        &cancellation_owner,
+    )?;
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
+    let mut options = run_options(workspace.path().to_path_buf());
+    options.max_turns = Some(8);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = ExplicitApprovalHandler;
+
+    let output = agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            input,
+            options,
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        )
+        .await?;
+
+    assert_eq!(
+        output.result.final_text,
+        "conversation continued after the model proposal"
+    );
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .latest_thread()
+        .expect("confirmed model proposal dispatches one child");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    let admission = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(entry)) => Some(entry),
+        _ => None,
+    });
+    assert_eq!(
+        admission
+            .expect("confirmed model proposal records admission")
+            .authority,
+        sigil_kernel::DelegationAuthorityRecord::UserExplicit
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn automated_approval_cannot_turn_model_proposal_into_user_authority() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut agent_delegate = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry.clone(),
+        Arc::new(RejectingProviderFactory),
+    );
+    let agent = Agent::new(NaturalLanguageDelegationProvider, registry);
+    let mut session = Session::new("natural-language-automated", "mock-model");
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = ordinary_conversation_input(
+        &session,
+        "Please improve the quality of this result.",
+        "natural-language-automated-root",
+        &cancellation_owner,
+    )?;
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
+    let mut options = run_options(workspace.path().to_path_buf());
+    options.max_turns = Some(8);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            input,
+            options,
+            &mut handler,
+            &mut approval,
+            &mut agent_delegate,
+        )
+        .await?;
+
+    assert_eq!(
+        output.result.final_text,
+        "conversation continued after the model proposal"
+    );
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("explicit user confirmation"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn unconfirmed_natural_language_delegation_has_zero_child_dispatch() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let call = delegation_proposal_call("call-proposal-unconfirmed", "inspect the runtime");
+    let cancellation_owner = bind_model_proposal_context(&mut runtime, &session, &call, false)?;
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &call,
+            &run_options(workspace.path().to_path_buf()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("delegation proposal handled");
+
+    assert!(result.is_error());
+    assert!(result.content.contains("explicit user confirmation"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    drop(cancellation_owner);
+    Ok(())
+}
+
+#[tokio::test]
+async fn confirmed_natural_language_delegation_mints_exact_user_grant() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let call = delegation_proposal_call("call-proposal-confirmed", "inspect the runtime");
+    let cancellation_owner = bind_model_proposal_context(&mut runtime, &session, &call, true)?;
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &call,
+            &run_options(workspace.path().to_path_buf()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("delegation proposal handled");
+
+    assert!(!result.is_error(), "{}", result.content);
+    let admission = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(entry)) => Some(entry),
+        _ => None,
+    });
+    let admission = admission.expect("confirmed proposal records admission");
+    assert_eq!(
+        admission.authority,
+        sigil_kernel::DelegationAuthorityRecord::UserExplicit
+    );
+    let grant = admission
+        .invocation_grant
+        .as_ref()
+        .expect("confirmed proposal records grant evidence");
+    assert!(matches!(
+        grant.source,
+        AgentInvocationGrantSource::Conversation { .. }
+    ));
+    assert_eq!(grant.profile_id.as_str(), "explore");
+    assert_eq!(grant.isolation, TaskIsolationMode::SharedReadOnly);
+    drop(cancellation_owner);
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegation_confirmation_cannot_authorize_modified_proposal() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let approved_call = delegation_proposal_call("call-proposal-bound", "inspect one scope");
+    let cancellation_owner =
+        bind_model_proposal_context(&mut runtime, &session, &approved_call, true)?;
+    let modified_call = delegation_proposal_call("call-proposal-bound", "inspect another scope");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &modified_call,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("delegation proposal handled");
+
+    assert!(result.is_error());
+    assert!(result.content.contains("exact proposal"));
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    drop(cancellation_owner);
     Ok(())
 }
 
@@ -4046,7 +4475,7 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
 }
 
 #[tokio::test]
-async fn join_before_final_agent_returns_running_handle_and_wait_collects_result() -> Result<()> {
+async fn background_agent_returns_running_handle_and_wait_collects_result() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -4070,7 +4499,7 @@ async fn join_before_final_agent_returns_running_handle_and_wait_collects_result
             "profile_id": "explore",
             "objective": "inspect",
             "prompt": "inspect",
-            "mode": "join_before_final"
+            "mode": "background"
         })
         .to_string(),
     };
@@ -4106,8 +4535,8 @@ async fn join_before_final_agent_returns_running_handle_and_wait_collects_result
         Some("agent tool spawned child session")
     );
     assert!(
-        runtime.final_answer_blocker(&mut session)?.is_some(),
-        "join-before-final running handle must still block final"
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "an explicitly backgrounded child must not block the parent final answer"
     );
 
     let mut collected = None;
@@ -4155,7 +4584,7 @@ async fn join_before_final_agent_returns_running_handle_and_wait_collects_result
 }
 
 #[tokio::test]
-async fn join_before_final_spawns_do_not_wait_for_previous_child_completion() -> Result<()> {
+async fn background_spawns_do_not_wait_for_previous_child_completion() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -4182,7 +4611,7 @@ async fn join_before_final_spawns_do_not_wait_for_previous_child_completion() ->
                         "profile_id": "explore",
                         "objective": format!("inspect {call_id}"),
                         "prompt": "inspect",
-                        "mode": "join_before_final"
+                        "mode": "background"
                     })
                     .to_string(),
                 },
@@ -4972,12 +5401,11 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
 }
 
 #[tokio::test]
-async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result<()> {
+async fn background_agent_can_be_collected_by_later_runtime() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let request_supervisor = supervisor.clone();
     let background_runs = AgentToolBackgroundRuns::default();
     let observed_followup = Arc::new(Mutex::new(false));
     let mut runtime = user_authorized_runtime_with_provider_factory(
@@ -4999,29 +5427,22 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
             "profile_id": "explore",
             "objective": "inspect",
             "prompt": "inspect",
-            "mode": "join_before_final"
+            "mode": "background"
         })
         .to_string(),
     };
 
-    let request_background = async {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        request_supervisor.request_foreground_background()
-    };
     let options = run_options(std::env::temp_dir());
-    let (spawn, requested_thread_id) = tokio::join!(
-        runtime.handle_agent_tool_call(
+    let spawn = runtime
+        .handle_agent_tool_call(
             &mut session,
             &spawn_call,
             &options,
             &mut handler,
             &mut approval,
-        ),
-        request_background,
-    );
-    let requested_thread_id = requested_thread_id.map_err(anyhow::Error::msg)?;
-    assert_eq!(requested_thread_id, thread_id);
-    let spawn = spawn?.expect("spawn handled");
+        )
+        .await?;
+    let spawn = spawn.expect("spawn handled");
     assert!(!spawn.is_error());
     assert_eq!(spawn.metadata.details["status"], "running");
     drop(runtime);
@@ -5448,6 +5869,9 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
         Arc::new(StaticProviderFactory),
     );
     let mut session = Session::new("parent", "model");
+    session.append_user_message(sigil_kernel::ModelMessage::user(
+        "draft an implementation plan",
+    ))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -5482,6 +5906,9 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
         Some("plan")
     );
     let mut second_session = Session::new("parent", "model");
+    second_session.append_user_message(sigil_kernel::ModelMessage::user(
+        "draft an implementation plan",
+    ))?;
     let second_invocation = runtime
         .invoke_agent_profile(
             &mut second_session,
@@ -5541,6 +5968,7 @@ async fn worker_changeset_only_invocation_records_merge_review_without_parent_mu
     let readme = temp.path().join("README.md");
     fs::write(&readme, "old\n")?;
     let mut session = Session::new("parent", "model");
+    session.append_user_message(sigil_kernel::ModelMessage::user("update README wording"))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -5716,7 +6144,7 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
             "profile_id": "explore",
             "objective": "inspect",
             "prompt": "inspect",
-            "mode": "join_before_final"
+            "mode": "background"
         })
         .to_string(),
     };
@@ -5812,7 +6240,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
             "profile_id": "explore",
             "objective": "inspect",
             "prompt": "inspect",
-            "mode": "join_before_final"
+            "mode": "background"
         })
         .to_string(),
     };
