@@ -16,6 +16,7 @@ on:
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
+      - "scripts/check-orchestration-deterministic.sh"
       - "scripts/generate-desktop-contract.sh"
       - "scripts/test-check-test-layout.py"
       - "scripts/long-session-evidence.py"
@@ -40,6 +41,7 @@ on:
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
+      - "scripts/check-orchestration-deterministic.sh"
       - "scripts/generate-desktop-contract.sh"
       - "scripts/test-check-test-layout.py"
       - "scripts/long-session-evidence.py"
@@ -186,6 +188,26 @@ jobs:
 
       - name: Enforce documented code-intelligence façade
         run: cargo rustdoc --locked -p sigil-code-intel -- -D missing-docs
+
+  orchestration-acceptance:
+    name: Deterministic orchestration acceptance
+    needs: fmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run deterministic orchestration acceptance
+        run: ./scripts/check-orchestration-deterministic.sh
 
   platform-check:
     name: Platform reliability (${{ matrix.name }})
