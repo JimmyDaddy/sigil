@@ -12,12 +12,15 @@ use crate::{
     MergeReviewRequested, ModelEvalCostConfidence, ModelEvalExecutionStatus,
     ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalTrendEligibility, ModelEvalUsage,
     ModelMessage, MutationBatchStatus, MutationEventRecorder, MutationObservedState,
-    MutationReconciled, MutationResolution, PermissionConfig, PermissionMode, PermissionPolicy,
+    MutationReconciled, MutationResolution, OrchestrationEvalCaseClass,
+    OrchestrationEvalIdentityV1, OrchestrationEvalObservationV1, OrchestrationEvalReportCampaignV1,
+    OrchestrationEvalReportRecordV1, OrchestrationEvalRouteIdentityV1,
+    OrchestrationEvalRouteStatus, PermissionConfig, PermissionMode, PermissionPolicy,
     ProjectionCursor, RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent,
     ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, VerificationScope,
     VerificationVerdict, VisibleCompletionState, WorkspaceTrust, build_workspace_snapshot,
     bytes_hash, resolve_merge_review_parent_mutation, stable_workspace_id,
-    write_eval_report_artifacts, write_model_eval_report_v3,
+    write_eval_report_artifacts, write_model_eval_report_v3, write_orchestration_eval_report_v1,
 };
 
 #[test]
@@ -154,6 +157,233 @@ fn model_eval_report_v3_splits_different_sandbox_identities() -> Result<()> {
             && bucket.smoke_only_reason.is_some()
     }));
     Ok(())
+}
+
+#[test]
+fn orchestration_eval_qualifies_only_a_complete_exact_route_campaign() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let records = orchestration_campaign_records();
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-qualified".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    assert_eq!(manifest.route_gates.len(), 1);
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.status, OrchestrationEvalRouteStatus::Qualified);
+    assert_eq!(gate.eligible_negative_cases, 20);
+    assert_eq!(gate.eligible_positive_cases, 10);
+    assert_eq!(gate.false_positive_rate_ppm, Some(0));
+    assert_eq!(gate.positive_miss_rate_ppm, Some(0));
+    assert_eq!(gate.hard_invariant_violations, 0);
+    assert!(gate.reasons.is_empty());
+    Ok(())
+}
+
+#[test]
+fn orchestration_eval_blocks_a_majority_misrouted_negative_case_below_global_threshold()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut records = orchestration_campaign_records();
+    for record in records.iter_mut().filter(|record| {
+        record.model_eval.result.metadata.case_id == "negative-0"
+            && record.model_eval.repetition < 3
+    }) {
+        record.observation.automatic_task_created = true;
+    }
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-majority-block".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.false_positive_rate_ppm, Some(33_333));
+    assert_eq!(gate.cases_with_majority_misroute, 1);
+    assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
+    assert!(
+        gate.reasons
+            .iter()
+            .any(|reason| reason.contains("majority"))
+    );
+    Ok(())
+}
+
+#[test]
+fn orchestration_eval_blocks_a_majority_missed_positive_case_below_global_threshold() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut records = orchestration_campaign_records();
+    for record in records.iter_mut().filter(|record| {
+        record.model_eval.result.metadata.case_id == "positive-0"
+            && record.model_eval.repetition < 3
+    }) {
+        record.observation.automatic_task_created = false;
+    }
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-positive-majority-block".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.positive_miss_rate_ppm, Some(66_666));
+    assert_eq!(gate.cases_with_majority_misroute, 1);
+    assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
+    Ok(())
+}
+
+#[test]
+fn orchestration_eval_rejects_duplicate_repetition_identity_as_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut records = orchestration_campaign_records();
+    records[1].model_eval.repetition = records[0].model_eval.repetition;
+    records[1].identity.repetition_seed = records[0].identity.repetition_seed;
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-duplicate-repetition".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.cases_with_duplicate_repetition_identity, 1);
+    assert_eq!(gate.eligible_negative_cases, 19);
+    assert_eq!(
+        gate.status,
+        OrchestrationEvalRouteStatus::InsufficientEvidence
+    );
+    Ok(())
+}
+
+#[test]
+fn orchestration_eval_never_combines_different_endpoint_identities() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut records = orchestration_campaign_records();
+    records[0].identity.route.endpoint_family = "responses-v2".to_owned();
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-route-split".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    assert_eq!(manifest.route_gates.len(), 2);
+    assert!(
+        manifest
+            .route_gates
+            .iter()
+            .all(|gate| { gate.status == OrchestrationEvalRouteStatus::InsufficientEvidence })
+    );
+    Ok(())
+}
+
+fn orchestration_campaign_records() -> Vec<OrchestrationEvalReportRecordV1> {
+    let negatives = (0..20).flat_map(|case_index| {
+        (1..=3).map(move |repetition| {
+            orchestration_report_record(
+                &format!("negative-{case_index}"),
+                OrchestrationEvalCaseClass::Negative,
+                repetition,
+                false,
+            )
+        })
+    });
+    let positives = (0..10).flat_map(|case_index| {
+        (1..=3).map(move |repetition| {
+            orchestration_report_record(
+                &format!("positive-{case_index}"),
+                OrchestrationEvalCaseClass::Positive,
+                repetition,
+                true,
+            )
+        })
+    });
+    negatives.chain(positives).collect()
+}
+
+fn orchestration_report_record(
+    case_id: &str,
+    case_class: OrchestrationEvalCaseClass,
+    repetition: u32,
+    automatic_task_created: bool,
+) -> OrchestrationEvalReportRecordV1 {
+    let mut model_eval = model_report_record(repetition, true);
+    model_eval.result.metadata.case_id = case_id.to_owned();
+    model_eval.result.metadata.fixture_id = case_id.to_owned();
+    model_eval.result.metadata.run_id = format!("{case_id}-{repetition}");
+    OrchestrationEvalReportRecordV1 {
+        report_schema_version: 1,
+        identity: OrchestrationEvalIdentityV1 {
+            route: orchestration_route_identity(),
+            repetition_seed: u64::from(repetition),
+        },
+        case_class,
+        observation: OrchestrationEvalObservationV1 {
+            automatic_task_created,
+            ..OrchestrationEvalObservationV1::default()
+        },
+        model_eval,
+    }
+}
+
+fn orchestration_route_identity() -> OrchestrationEvalRouteIdentityV1 {
+    OrchestrationEvalRouteIdentityV1 {
+        provider_adapter: "openai-responses".to_owned(),
+        provider_kind: "openai".to_owned(),
+        endpoint_family: "responses-v1".to_owned(),
+        canonical_model_id: "gpt-5".to_owned(),
+        canonical_model_version: "2026-07-01".to_owned(),
+        route_fingerprint: "sha256:route".to_owned(),
+        routing_prompt_digest: "sha256:routing".to_owned(),
+        planner_prompt_digest: "sha256:planner".to_owned(),
+        system_prompt_digest: "sha256:system".to_owned(),
+        tool_profile_contract_digest: "sha256:tools-profiles".to_owned(),
+        task_config_digest: "sha256:task-config".to_owned(),
+        corpus_version: "orchestration-v1".to_owned(),
+        corpus_digest: "sha256:corpus".to_owned(),
+        sigil_commit: "0123456789abcdef".to_owned(),
+        sigil_build: "sigil-0.0.1-alpha.5".to_owned(),
+    }
 }
 
 fn model_report_record(repetition: u32, accepted: bool) -> ModelEvalReportRecordV3 {

@@ -187,8 +187,15 @@ pub use eval::{
     MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalAssertionResultV3, ModelEvalCostConfidence,
     ModelEvalExecutionStatus, ModelEvalReportArtifactsV3, ModelEvalReportCampaignV3,
     ModelEvalReportManifestV3, ModelEvalReportRecordV3, ModelEvalTrendBucketV3,
-    ModelEvalTrendEligibility, ModelEvalUsage, write_eval_report_artifacts,
-    write_model_eval_report_v3,
+    ModelEvalTrendEligibility, ModelEvalUsage, ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM, ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES,
+    ORCHESTRATION_EVAL_MIN_POSITIVE_CASES, ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE,
+    ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalCaseClass,
+    OrchestrationEvalIdentityV1, OrchestrationEvalObservationV1,
+    OrchestrationEvalReportArtifactsV1, OrchestrationEvalReportCampaignV1,
+    OrchestrationEvalReportManifestV1, OrchestrationEvalReportRecordV1,
+    OrchestrationEvalRouteGateV1, OrchestrationEvalRouteIdentityV1, OrchestrationEvalRouteStatus,
+    write_eval_report_artifacts, write_model_eval_report_v3, write_orchestration_eval_report_v1,
 };
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent,

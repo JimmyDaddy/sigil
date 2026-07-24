@@ -4,7 +4,7 @@
 //! harness helpers. Model-backed runners and product surfaces are separate slices.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -620,6 +620,196 @@ pub struct ModelEvalReportArtifactsV3 {
     pub manifest_path: PathBuf,
 }
 
+/// Current machine-readable schema for RFC-0053 orchestration campaign reports.
+pub const ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION: u16 = 1;
+pub const ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES: usize = 20;
+pub const ORCHESTRATION_EVAL_MIN_POSITIVE_CASES: usize = 10;
+pub const ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE: usize = 3;
+pub const ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM: u32 = 50_000;
+pub const ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM: u32 = 100_000;
+
+/// Exact provider route and product-contract identity eligible for one rollout decision.
+///
+/// Repetition seed is intentionally excluded so homogeneous repetitions can share one gate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalRouteIdentityV1 {
+    pub provider_adapter: String,
+    pub provider_kind: String,
+    pub endpoint_family: String,
+    pub canonical_model_id: String,
+    pub canonical_model_version: String,
+    pub route_fingerprint: String,
+    pub routing_prompt_digest: String,
+    pub planner_prompt_digest: String,
+    pub system_prompt_digest: String,
+    pub tool_profile_contract_digest: String,
+    pub task_config_digest: String,
+    pub corpus_version: String,
+    pub corpus_digest: String,
+    pub sigil_commit: String,
+    pub sigil_build: String,
+}
+
+impl OrchestrationEvalRouteIdentityV1 {
+    fn stale_reason(&self) -> Option<String> {
+        [
+            ("provider_adapter", self.provider_adapter.as_str()),
+            ("provider_kind", self.provider_kind.as_str()),
+            ("endpoint_family", self.endpoint_family.as_str()),
+            ("canonical_model_id", self.canonical_model_id.as_str()),
+            (
+                "canonical_model_version",
+                self.canonical_model_version.as_str(),
+            ),
+            ("route_fingerprint", self.route_fingerprint.as_str()),
+            ("routing_prompt_digest", self.routing_prompt_digest.as_str()),
+            ("planner_prompt_digest", self.planner_prompt_digest.as_str()),
+            ("system_prompt_digest", self.system_prompt_digest.as_str()),
+            (
+                "tool_profile_contract_digest",
+                self.tool_profile_contract_digest.as_str(),
+            ),
+            ("task_config_digest", self.task_config_digest.as_str()),
+            ("corpus_version", self.corpus_version.as_str()),
+            ("corpus_digest", self.corpus_digest.as_str()),
+            ("sigil_commit", self.sigil_commit.as_str()),
+            ("sigil_build", self.sigil_build.as_str()),
+        ]
+        .into_iter()
+        .find_map(|(field, value)| {
+            value
+                .trim()
+                .is_empty()
+                .then(|| format!("orchestration identity is missing {field}"))
+        })
+    }
+}
+
+/// Immutable identity for one orchestration repetition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalIdentityV1 {
+    #[serde(flatten)]
+    pub route: OrchestrationEvalRouteIdentityV1,
+    pub repetition_seed: u64,
+}
+
+/// Expected routing class for one RFC-0053 corpus case.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestrationEvalCaseClass {
+    Negative,
+    Positive,
+}
+
+/// Typed orchestration observations; assistant prose is never used as gate evidence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalObservationV1 {
+    pub automatic_task_created: bool,
+    pub duplicate_handoffs: u32,
+    pub duplicate_spawns: u32,
+    pub duplicate_continuations: u32,
+    pub duplicate_merges: u32,
+    pub duplicate_parent_child_finals: u32,
+    pub permission_monotonicity_violations: u32,
+    pub unknown_effect_replays: u32,
+    pub model_polling_turns: u32,
+}
+
+impl OrchestrationEvalObservationV1 {
+    fn hard_invariant_violations(&self) -> u64 {
+        u64::from(self.duplicate_handoffs)
+            + u64::from(self.duplicate_spawns)
+            + u64::from(self.duplicate_continuations)
+            + u64::from(self.duplicate_merges)
+            + u64::from(self.duplicate_parent_child_finals)
+            + u64::from(self.permission_monotonicity_violations)
+            + u64::from(self.unknown_effect_replays)
+            + u64::from(self.model_polling_turns)
+    }
+}
+
+/// One RFC-0053 repetition composed with the existing model-eval report contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalReportRecordV1 {
+    pub report_schema_version: u16,
+    pub identity: OrchestrationEvalIdentityV1,
+    pub case_class: OrchestrationEvalCaseClass,
+    pub observation: OrchestrationEvalObservationV1,
+    pub model_eval: ModelEvalReportRecordV3,
+}
+
+/// Qualification state for one exact provider route identity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestrationEvalRouteStatus {
+    Qualified,
+    InsufficientEvidence,
+    Blocked,
+    Stale,
+}
+
+/// Frozen rollout gate calculated independently for one exact route identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalRouteGateV1 {
+    pub identity: OrchestrationEvalRouteIdentityV1,
+    pub identity_digest: String,
+    pub status: OrchestrationEvalRouteStatus,
+    pub negative_cases: usize,
+    pub positive_cases: usize,
+    pub eligible_negative_cases: usize,
+    pub eligible_positive_cases: usize,
+    pub provider_admitted_repetitions: usize,
+    pub completed_repetitions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub false_positive_rate_ppm: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positive_miss_rate_ppm: Option<u32>,
+    pub cases_with_majority_misroute: usize,
+    pub cases_with_duplicate_repetition_identity: usize,
+    pub hard_invariant_violations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+/// Campaign-level RFC-0053 orchestration manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalReportManifestV1 {
+    pub report_schema_version: u16,
+    pub campaign_id: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub requested_repetitions: usize,
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub route_gates: Vec<OrchestrationEvalRouteGateV1>,
+}
+
+/// Input required to write one RFC-0053 orchestration campaign report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalReportCampaignV1 {
+    pub campaign_id: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub requested_repetitions: usize,
+    pub records: Vec<OrchestrationEvalReportRecordV1>,
+}
+
+/// Paths written by [`write_orchestration_eval_report_v1`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct OrchestrationEvalReportArtifactsV1 {
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
 /// Writes a provider-backed report without interpreting assistant prose as acceptance evidence.
 pub fn write_model_eval_report_v3(
     output_dir: impl AsRef<Path>,
@@ -824,6 +1014,332 @@ fn render_model_eval_report_summary(campaign: &ModelEvalReportCampaignV3) -> Str
             summary.push_str(&format!(", reason={reason}"));
         }
         summary.push('\n');
+    }
+    summary
+}
+
+/// Writes an RFC-0053 campaign and calculates each exact route gate independently.
+pub fn write_orchestration_eval_report_v1(
+    output_dir: impl AsRef<Path>,
+    campaign: &OrchestrationEvalReportCampaignV1,
+) -> Result<OrchestrationEvalReportArtifactsV1> {
+    let output_dir = output_dir.as_ref();
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    if campaign.records.iter().any(|record| {
+        record.report_schema_version != ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION
+            || record.model_eval.report_schema_version != MODEL_EVAL_REPORT_SCHEMA_VERSION
+    }) {
+        anyhow::bail!("orchestration eval record schema version does not match report contract");
+    }
+    if campaign.requested_repetitions != campaign.records.len() {
+        anyhow::bail!(
+            "orchestration eval campaign must retain one record per requested repetition"
+        );
+    }
+
+    let results_jsonl_path = output_dir.join("results.jsonl");
+    let mut results_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&results_jsonl_path)
+        .with_context(|| format!("failed to create {}", results_jsonl_path.display()))?;
+    for record in &campaign.records {
+        serde_json::to_writer(&mut results_file, record)
+            .context("failed to serialize orchestration eval report record")?;
+        results_file
+            .write_all(b"\n")
+            .context("failed to write orchestration eval report newline")?;
+    }
+    results_file
+        .sync_all()
+        .context("failed to sync orchestration eval results")?;
+
+    let summary_path = output_dir.join("summary.md");
+    let route_gates = orchestration_eval_route_gates(&campaign.records);
+    let summary = render_orchestration_eval_report_summary(campaign, &route_gates);
+    write_new_synced(&summary_path, summary.as_bytes())?;
+
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest = OrchestrationEvalReportManifestV1 {
+        report_schema_version: ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION,
+        campaign_id: campaign.campaign_id.clone(),
+        started_at_unix_ms: campaign.started_at_unix_ms,
+        ended_at_unix_ms: campaign.ended_at_unix_ms,
+        requested_repetitions: campaign.requested_repetitions,
+        results_jsonl_path: results_jsonl_path.clone(),
+        summary_path: summary_path.clone(),
+        route_gates,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("failed to serialize orchestration eval report manifest")?;
+    write_new_synced(&manifest_path, &manifest_bytes)?;
+
+    Ok(OrchestrationEvalReportArtifactsV1 {
+        results_jsonl_path,
+        summary_path,
+        manifest_path,
+    })
+}
+
+fn orchestration_eval_route_gates(
+    records: &[OrchestrationEvalReportRecordV1],
+) -> Vec<OrchestrationEvalRouteGateV1> {
+    let mut grouped =
+        BTreeMap::<OrchestrationEvalRouteIdentityV1, Vec<&OrchestrationEvalReportRecordV1>>::new();
+    for record in records {
+        grouped
+            .entry(record.identity.route.clone())
+            .or_default()
+            .push(record);
+    }
+    grouped
+        .into_iter()
+        .map(|(identity, records)| orchestration_eval_route_gate(identity, &records))
+        .collect()
+}
+
+fn orchestration_eval_route_gate(
+    identity: OrchestrationEvalRouteIdentityV1,
+    records: &[&OrchestrationEvalReportRecordV1],
+) -> OrchestrationEvalRouteGateV1 {
+    let mut cases = BTreeMap::<
+        (OrchestrationEvalCaseClass, String),
+        Vec<&OrchestrationEvalReportRecordV1>,
+    >::new();
+    for record in records {
+        cases
+            .entry((
+                record.case_class,
+                record.model_eval.result.metadata.case_id.clone(),
+            ))
+            .or_default()
+            .push(record);
+    }
+
+    let negative_cases = cases
+        .keys()
+        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::Negative)
+        .count();
+    let positive_cases = cases
+        .keys()
+        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::Positive)
+        .count();
+    let eligible_negative_cases =
+        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::Negative);
+    let eligible_positive_cases =
+        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::Positive);
+    let provider_admitted_repetitions = records
+        .iter()
+        .filter(|record| record.model_eval.execution_status.provider_admitted())
+        .count();
+    let completed_records = records
+        .iter()
+        .filter(|record| record.model_eval.execution_status == ModelEvalExecutionStatus::Completed)
+        .copied()
+        .collect::<Vec<_>>();
+    let completed_repetitions = completed_records.len();
+
+    let negative_completed = completed_records
+        .iter()
+        .filter(|record| record.case_class == OrchestrationEvalCaseClass::Negative)
+        .copied()
+        .collect::<Vec<_>>();
+    let false_positives = negative_completed
+        .iter()
+        .filter(|record| record.observation.automatic_task_created)
+        .count();
+    let false_positive_rate_ppm = rate_ppm(false_positives, negative_completed.len());
+
+    let positive_completed = completed_records
+        .iter()
+        .filter(|record| record.case_class == OrchestrationEvalCaseClass::Positive)
+        .copied()
+        .collect::<Vec<_>>();
+    let positive_misses = positive_completed
+        .iter()
+        .filter(|record| !record.observation.automatic_task_created)
+        .count();
+    let positive_miss_rate_ppm = rate_ppm(positive_misses, positive_completed.len());
+
+    let cases_with_majority_misroute = cases
+        .iter()
+        .filter(|((class, _), case_records)| {
+            let completed = case_records
+                .iter()
+                .filter(|record| {
+                    record.model_eval.execution_status == ModelEvalExecutionStatus::Completed
+                })
+                .collect::<Vec<_>>();
+            let misrouted = completed
+                .iter()
+                .filter(|record| match class {
+                    OrchestrationEvalCaseClass::Negative => {
+                        record.observation.automatic_task_created
+                    }
+                    OrchestrationEvalCaseClass::Positive => {
+                        !record.observation.automatic_task_created
+                    }
+                })
+                .count();
+            !completed.is_empty() && misrouted.saturating_mul(2) > completed.len()
+        })
+        .count();
+    let cases_with_duplicate_repetition_identity = cases
+        .values()
+        .filter(|records| !orchestration_case_repetitions_are_unique(records))
+        .count();
+    let hard_invariant_violations = records
+        .iter()
+        .map(|record| record.observation.hard_invariant_violations())
+        .sum();
+
+    let mut reasons = Vec::new();
+    if eligible_negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES {
+        reasons.push(format!(
+            "requires at least {ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES} negative cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
+        ));
+    }
+    if eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES {
+        reasons.push(format!(
+            "requires at least {ORCHESTRATION_EVAL_MIN_POSITIVE_CASES} positive cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
+        ));
+    }
+    if completed_repetitions != records.len() {
+        reasons.push("all orchestration repetitions must complete".to_owned());
+    }
+    if records
+        .iter()
+        .any(|record| !record.model_eval.acceptance_passed)
+    {
+        reasons.push("one or more base model-eval acceptance assertions failed".to_owned());
+    }
+    if false_positive_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM)
+    {
+        reasons.push("negative automatic-task false-positive rate exceeds 5%".to_owned());
+    }
+    if positive_miss_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM)
+    {
+        reasons.push("positive automatic-task miss rate exceeds 10%".to_owned());
+    }
+    if cases_with_majority_misroute > 0 {
+        reasons.push("a case was misrouted in a majority of repetitions".to_owned());
+    }
+    if cases_with_duplicate_repetition_identity > 0 {
+        reasons.push("case repetition numbers and seeds must be unique".to_owned());
+    }
+    if hard_invariant_violations > 0 {
+        reasons.push("hard orchestration invariant tolerance is zero".to_owned());
+    }
+
+    let stale_reason = identity.stale_reason();
+    if let Some(reason) = &stale_reason {
+        reasons.push(reason.clone());
+    }
+    let insufficient = eligible_negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES
+        || eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES;
+    let status = if stale_reason.is_some() {
+        OrchestrationEvalRouteStatus::Stale
+    } else if insufficient {
+        OrchestrationEvalRouteStatus::InsufficientEvidence
+    } else if reasons.is_empty() {
+        OrchestrationEvalRouteStatus::Qualified
+    } else {
+        OrchestrationEvalRouteStatus::Blocked
+    };
+    let identity_digest = crate::stable_event_hash(
+        serde_json::to_vec(&identity).expect("route identity serialization cannot fail"),
+    );
+
+    OrchestrationEvalRouteGateV1 {
+        identity,
+        identity_digest,
+        status,
+        negative_cases,
+        positive_cases,
+        eligible_negative_cases,
+        eligible_positive_cases,
+        provider_admitted_repetitions,
+        completed_repetitions,
+        false_positive_rate_ppm,
+        positive_miss_rate_ppm,
+        cases_with_majority_misroute,
+        cases_with_duplicate_repetition_identity,
+        hard_invariant_violations,
+        reasons,
+    }
+}
+
+fn eligible_orchestration_case_count(
+    cases: &BTreeMap<(OrchestrationEvalCaseClass, String), Vec<&OrchestrationEvalReportRecordV1>>,
+    target: OrchestrationEvalCaseClass,
+) -> usize {
+    cases
+        .iter()
+        .filter(|((class, _), records)| {
+            *class == target
+                && orchestration_case_repetitions_are_unique(records)
+                && records
+                    .iter()
+                    .filter(|record| record.model_eval.execution_status.provider_admitted())
+                    .count()
+                    >= ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE
+        })
+        .count()
+}
+
+fn orchestration_case_repetitions_are_unique(records: &[&OrchestrationEvalReportRecordV1]) -> bool {
+    let admitted = records
+        .iter()
+        .filter(|record| record.model_eval.execution_status.provider_admitted())
+        .copied()
+        .collect::<Vec<_>>();
+    let repetitions = admitted
+        .iter()
+        .map(|record| record.model_eval.repetition)
+        .collect::<BTreeSet<_>>();
+    let seeds = admitted
+        .iter()
+        .map(|record| record.identity.repetition_seed)
+        .collect::<BTreeSet<_>>();
+    repetitions.len() == admitted.len() && seeds.len() == admitted.len()
+}
+
+fn rate_ppm(numerator: usize, denominator: usize) -> Option<u32> {
+    (denominator > 0).then(|| {
+        let rate = (numerator as u128)
+            .saturating_mul(1_000_000)
+            .checked_div(denominator as u128)
+            .unwrap_or_default();
+        rate.min(u128::from(u32::MAX)) as u32
+    })
+}
+
+fn render_orchestration_eval_report_summary(
+    campaign: &OrchestrationEvalReportCampaignV1,
+    route_gates: &[OrchestrationEvalRouteGateV1],
+) -> String {
+    let mut summary = String::new();
+    summary.push_str("# Sigil Orchestration Evaluation Report\n\n");
+    summary.push_str(&format!("Campaign: `{}`\n\n", campaign.campaign_id));
+    for gate in route_gates {
+        summary.push_str(&format!(
+            "- route `{}`: status=`{:?}`, negative={}/{}, positive={}/{}, false_positive_ppm={:?}, positive_miss_ppm={:?}, invariant_violations={}\n",
+            gate.identity_digest,
+            gate.status,
+            gate.eligible_negative_cases,
+            gate.negative_cases,
+            gate.eligible_positive_cases,
+            gate.positive_cases,
+            gate.false_positive_rate_ppm,
+            gate.positive_miss_rate_ppm,
+            gate.hard_invariant_violations
+        ));
+        for reason in &gate.reasons {
+            summary.push_str(&format!("  - {reason}\n"));
+        }
     }
     summary
 }
