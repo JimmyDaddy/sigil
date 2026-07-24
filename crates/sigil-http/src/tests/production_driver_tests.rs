@@ -113,6 +113,14 @@ fn production_queue_session(temp: &tempfile::TempDir) -> HttpSessionSnapshot {
     production_queue_session_named(temp, "queue-session")
 }
 
+#[tokio::test]
+async fn production_driver_attaches_the_shared_application_task_executor() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "task-executor");
+
+    assert!(driver.services.task_executor_attached());
+}
+
 fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpSessionSnapshot {
     let session_path = temp.path().join(format!("{name}.jsonl"));
     let store = sigil_kernel::JsonlSessionStore::new(&session_path)

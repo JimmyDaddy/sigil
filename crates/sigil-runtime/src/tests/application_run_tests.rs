@@ -1496,6 +1496,7 @@ api_key = "test-secret-key"
 
     let prepared = prepare_application_run(request, &services).await?;
 
+    assert!(!services.task_executor_attached());
     assert!(prepared.execution.task_execution.is_none());
     let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
         panic!("ordinary application request must prepare the main agent");
@@ -1540,6 +1541,7 @@ api_key = "test-secret-key"
 
     let prepared = prepare_application_run(request, &services).await?;
 
+    assert!(services.task_executor_attached());
     assert!(prepared.execution.task_execution.is_some());
     let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
         panic!("ordinary application request must prepare the main agent");

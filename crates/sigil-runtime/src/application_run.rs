@@ -428,6 +428,12 @@ impl ApplicationRunServices {
         self.task_role_provider_builder = Some(builder);
         self
     }
+
+    /// Reports whether this adapter can execute an accepted durable task handoff.
+    #[must_use]
+    pub fn task_executor_attached(&self) -> bool {
+        self.task_role_provider_builder.is_some()
+    }
 }
 
 /// Sink for ordered provider-neutral application events.

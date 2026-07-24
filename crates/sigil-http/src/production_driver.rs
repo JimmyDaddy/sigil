@@ -265,6 +265,9 @@ impl HttpProductionRunDriver {
         }
         let services = ApplicationRunServices::new(Arc::new(
             HttpDurableEgressDisclosurePresenter::new(disclosure_journal),
+        ))
+        .with_task_role_provider_builder(Arc::new(
+            sigil_runtime::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
         ));
         Ok(Self {
             options,
