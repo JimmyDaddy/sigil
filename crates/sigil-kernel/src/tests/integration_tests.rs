@@ -1077,6 +1077,78 @@ fn promotion_preview_requires_ready_lanes_and_rejects_executable_intent_ref_targ
 }
 
 #[test]
+fn integration_review_product_is_exact_and_suppresses_consumed_or_superseded_previews() -> Result<()>
+{
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-review-product")?,
+        TaskId::new("task_review_product")?,
+        1,
+        vec![proposal(
+            "change-review-product",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let (mut entries, _) = clean_ready_lane_entries(&plan)?;
+    let ready = IntegrationProjection::from_entries(&entries);
+    let preview = build_task_promotion_preview(
+        ready.latest().expect("ready review plan"),
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: "artifact-review-product".to_owned(),
+            aggregate_diff_digest: format!("sha256:{}", "a".repeat(64)),
+            target: IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+            verification_invalidation: vec!["scope-shared".to_owned()],
+            intent_binding: None,
+            policy_digest: VerificationPolicy::no_checks_required("scope-shared").stable_hash()?,
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: 10,
+        },
+    )?;
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionPreviewRecorded(TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        }),
+    ));
+
+    let product =
+        crate::task_integration_review_product(&entries).expect("current preview review product");
+    assert_eq!(product.preview, preview);
+    product.request.validate_for_preview(&product.preview)?;
+
+    let authority = TaskPromotionAuthority::from_user_integration_review(
+        &product.preview,
+        product.request.request_id.clone(),
+        100,
+        "nonce-review-product",
+    )?;
+    let mut consumed_entries = entries.clone();
+    consumed_entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionAuthorityConsumed(TaskPromotionAuthorityConsumed {
+            attempt_id: IntegrationPromotionAttemptId::new("attempt-review-product")?,
+            authority,
+            consumed_at_unix_ms: 20,
+        }),
+    ));
+    assert!(crate::task_integration_review_product(&consumed_entries).is_none());
+
+    let mut superseded_entries = entries;
+    let mut superseding = plan.clone();
+    superseding.plan_id = IntegrationPlanId::new("plan-review-product-v2")?;
+    superseding.plan_version = 2;
+    superseded_entries.push(SessionLogEntry::Control(
+        ControlEntry::IntegrationPlanRecorded(IntegrationPlanRecorded { plan: superseding }),
+    ));
+    assert!(crate::task_integration_review_product(&superseded_entries).is_none());
+    Ok(())
+}
+
+#[test]
 fn promotion_authority_replay_and_target_mismatch_are_rejected_before_effect() -> Result<()> {
     let plan = build_integration_plan(
         IntegrationPlanId::new("plan-promotion-authority")?,

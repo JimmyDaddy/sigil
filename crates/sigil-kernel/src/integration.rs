@@ -1027,6 +1027,60 @@ pub struct TaskPromotionPreviewRecorded {
     pub preview: TaskPromotionPreview,
 }
 
+/// Exact product action identity for opening one current promotion review.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskIntegrationReviewRequest {
+    pub request_id: String,
+    pub task_id: TaskId,
+    pub plan_id: IntegrationPlanId,
+    pub plan_version: u32,
+    pub preview_digest: String,
+}
+
+impl TaskIntegrationReviewRequest {
+    /// Binds a UI review action to one exact promotion preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the preview is malformed.
+    pub fn from_preview(preview: &TaskPromotionPreview) -> Result<Self> {
+        preview.validate()?;
+        Ok(Self {
+            request_id: integration_review_request_id(preview),
+            task_id: preview.task_id.clone(),
+            plan_id: preview.plan_id.clone(),
+            plan_version: preview.plan_version,
+            preview_digest: preview.preview_digest.clone(),
+        })
+    }
+
+    /// Rejects a stale or substituted UI action before artifact loading or promotion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any request identity differs from the exact preview.
+    pub fn validate_for_preview(&self, preview: &TaskPromotionPreview) -> Result<()> {
+        preview.validate()?;
+        if self.request_id != integration_review_request_id(preview)
+            || self.task_id != preview.task_id
+            || self.plan_id != preview.plan_id
+            || self.plan_version != preview.plan_version
+            || self.preview_digest != preview.preview_digest
+        {
+            bail!("task integration review request is stale or belongs to another preview");
+        }
+        Ok(())
+    }
+}
+
+/// Current product projection for one pending integration review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskIntegrationReviewProduct {
+    pub request: TaskIntegrationReviewRequest,
+    pub preview: TaskPromotionPreview,
+}
+
 /// Host-owned source that may authorize one exact promotion preview.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1481,6 +1535,57 @@ pub fn build_task_promotion_preview(
     preview.preview_digest = task_promotion_preview_digest(&preview)?;
     preview.validate()?;
     Ok(preview)
+}
+
+/// Projects at most one current, unconsumed promotion review action.
+///
+/// A later task, task-plan version, integration plan, consumed authority or promotion terminal
+/// suppresses the old action. Callers must re-run this projection immediately before reading the
+/// artifact or issuing authority.
+#[must_use]
+pub fn task_integration_review_product(
+    entries: &[SessionLogEntry],
+) -> Option<TaskIntegrationReviewProduct> {
+    let integration = IntegrationProjection::from_entries(entries);
+    let plan_id = integration.latest_plan_id.as_ref()?;
+    let state = integration.plans.get(plan_id)?;
+    if state.inconsistent {
+        return None;
+    }
+    let task_projection = crate::TaskStateProjection::from_entries(entries);
+    if let Some(task) = task_projection.latest_task()
+        && (task.task_id != state.recorded.plan.task_id
+            || task.latest_plan_version != Some(state.recorded.plan.plan_version))
+    {
+        return None;
+    }
+    let preview = entries.iter().rev().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskPromotionPreviewRecorded(recorded))
+            if recorded.preview.plan_id == *plan_id
+                && recorded.preview.task_id == state.recorded.plan.task_id
+                && recorded.preview.plan_version == state.recorded.plan.plan_version =>
+        {
+            Some(recorded.preview.clone())
+        }
+        _ => None,
+    })?;
+    if preview.validate().is_err()
+        || !state
+            .promotion_previews
+            .contains_key(&preview.preview_digest)
+        || state
+            .consumed_promotion_authorities
+            .values()
+            .any(|consumed| consumed.authority.preview_digest == preview.preview_digest)
+        || state
+            .promotions
+            .iter()
+            .any(|promotion| promotion.preview_digest == preview.preview_digest)
+    {
+        return None;
+    }
+    let request = TaskIntegrationReviewRequest::from_preview(&preview).ok()?;
+    Some(TaskIntegrationReviewProduct { request, preview })
 }
 
 /// Latest replayed state for one integration plan.
@@ -2242,6 +2347,22 @@ fn task_promotion_preview_digest(preview: &TaskPromotionPreview) -> Result<Strin
         "sha256:{}",
         sha256_hex(&serde_json::to_vec(&value)?)
     ))
+}
+
+fn integration_review_request_id(preview: &TaskPromotionPreview) -> String {
+    format!(
+        "integration-review-{}",
+        sha256_hex(
+            format!(
+                "{}:{}:{}:{}",
+                preview.task_id.as_str(),
+                preview.plan_id.as_str(),
+                preview.plan_version,
+                preview.preview_digest
+            )
+            .as_bytes()
+        )
+    )
 }
 
 const fn is_zero(value: &u64) -> bool {
