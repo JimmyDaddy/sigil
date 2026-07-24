@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6e implemented；O6f-O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6e implemented；O6f in progress；O6g-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1514,8 +1514,14 @@ O6f 协议检查点（尚不构成 O6f 完成）：
   target/digest/policy mismatch 在 effect 前使 projection inconsistent。
 - `IntegrationPlanState::synthesis_ready_attempt` 只接受 terminal promoted attempt 上的
   parent-scope RFC-0003 `Passed` receipt；child/lane receipt、prepared promotion 或 failed/stale
-  parent check 都不能打开 final synthesis。物理 aggregate apply、Git ref CAS、parent checks 与
-  task runner gate 仍属于后续 O6f 切片。
+  parent check 都不能打开 final synthesis。
+- runtime 已完成物理 promotion substrate：从 exact frozen base 按 lane/member 稳定顺序重建
+  aggregate diff；`WorkspaceApply` 复用 RFC-0002 全量 preflight/mutation batch 且不更新 ref；
+  `GitRefAdvance` 只在 clean repo、目标 ref 未 checkout、expected-old 仍匹配且 candidate 为其后代
+  时执行单次 CAS，不修改用户 worktree。authority consumed 与 Prepared 都要求 durable ack；
+  parent/ref drift、checked-out ref、ack 拒绝和 digest/file preflight mismatch 均在首个目标 effect
+  前 fail closed，private candidate 会清理。parent-check runner、promotion recovery reconciliation
+  与 task runner synthesis gate 仍属于后续 O6f 切片。
 
 O6f：promotion barrier、parent mutation 与 final verification。
 

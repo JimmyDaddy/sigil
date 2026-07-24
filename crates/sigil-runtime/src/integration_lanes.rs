@@ -36,6 +36,18 @@ use crate::isolated_workspace::{
     run_git_bytes_with_stdin,
 };
 
+mod promotion;
+
+#[cfg(test)]
+pub(crate) use promotion::run_git_integration_promotion;
+pub use promotion::{
+    GitIntegrationPromotionOutput, GitIntegrationPromotionPreparationRequest,
+    GitIntegrationPromotionRunRequest, IntegrationPromotionPreparationTarget,
+    IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
+    PreparedGitIntegrationPromotion, prepare_git_integration_promotion,
+    run_git_integration_promotion_with_events,
+};
+
 const ZERO_GIT_OBJECT_ID: &str = "0000000000000000000000000000000000000000";
 const MAX_INTEGRATION_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTEGRATION_GIT_OUTPUT_BYTES: usize = 64 * 1024;

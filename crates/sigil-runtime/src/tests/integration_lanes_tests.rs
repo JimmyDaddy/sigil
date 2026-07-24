@@ -9,21 +9,27 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
+    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt, ExecutionRequest,
     IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
-    IntegrationLaneCandidate, IntegrationLaneCleanupStatus, IntegrationLaneStatus,
-    IntegrationPlanId, IntegrationProposalFacts, IntegrationProposalSpec, JsonlSessionStore,
-    MutationEventRecorder, TaskId, TaskStepId, VerificationScope, build_integration_plan,
+    IntegrationLaneCandidate, IntegrationLaneCleanupStatus, IntegrationLaneStatus, IntegrationPlan,
+    IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
+    IntegrationPromotionAttemptId, IntegrationPromotionEffect, IntegrationPromotionStatus,
+    IntegrationProposalFacts, IntegrationProposalSpec, JsonlSessionStore, MutationEventRecorder,
+    Session, TaskId, TaskPromotionAuthority, TaskPromotionPreview, TaskPromotionPreviewInput,
+    TaskStepId, VerificationScope, build_integration_plan, build_task_promotion_preview,
     build_workspace_snapshot, stable_workspace_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
+    GitIntegrationPromotionPreparationRequest, GitIntegrationPromotionRunRequest,
     GitIntegrationRunRequest, IntegrationArtifact, IntegrationLaneRuntimeEvent,
-    IntegrationLaneRuntimeEventRequest, run_git_integration_lanes,
-    run_git_integration_lanes_with_events,
+    IntegrationLaneRuntimeEventRequest, IntegrationPromotionPreparationTarget,
+    IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
+    prepare_git_integration_promotion, run_git_integration_lanes,
+    run_git_integration_lanes_with_events, run_git_integration_promotion_with_events,
 };
 use crate::isolated_workspace::{
     GitWorktreeBaseFreezeRequest, GitWorktreeCleanupRequest, cleanup_git_worktree,
@@ -589,6 +595,580 @@ async fn snapshot_workspace_lanes_overlap_preserve_overlay_and_emit_recovery_fac
         2
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn workspace_promotion_applies_aggregate_batch_after_authority_barrier() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n"), ("b.txt", "old-b\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let change_a = change_set("promotion-a", "a.txt", "old-a\n", "new-a\n")?;
+    let change_b = change_set("promotion-b", "b.txt", "old-b\n", "new-b\n")?;
+    let artifacts = vec![
+        artifact(
+            change_a.clone(),
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+        ),
+        artifact(
+            change_b.clone(),
+            "--- a/b.txt\n+++ b/b.txt\n@@ -1,1 +1,1 @@\n-old-b\n+new-b\n",
+        ),
+    ];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-workspace-promotion")?,
+        TaskId::new("task_workspace_promotion")?,
+        1,
+        vec![
+            proposal(
+                &change_a,
+                "step_promotion_a",
+                &base_snapshot_id,
+                &base_commit,
+            )?,
+            proposal(
+                &change_b,
+                "step_promotion_b",
+                &base_snapshot_id,
+                &base_commit,
+            )?,
+        ],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "workspace-review".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::WorkspaceApply {
+            expected_snapshot_id: base_snapshot_id,
+            expected_revision: 0,
+        },
+    })
+    .await?;
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "workspace-review")?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+    let (event_tx, events) = promotion_event_collector();
+    let head_before = git(&root, &["rev-parse", "HEAD"])?;
+
+    let output = run_git_integration_promotion_with_events(
+        GitIntegrationPromotionRunRequest {
+            prepared,
+            attempt_id: IntegrationPromotionAttemptId::new("attempt-workspace")?,
+            preview,
+            authority,
+            mutation_recorder: MutationEventRecorder::new(mutation_store),
+        },
+        event_tx,
+    )
+    .await?;
+    let events = events.await?;
+
+    assert_eq!(
+        output.record.status,
+        IntegrationPromotionStatus::Promoted,
+        "promotion failed: {:?}",
+        output.record.reason
+    );
+    assert!(matches!(
+        output.record.effect,
+        Some(IntegrationPromotionEffect::WorkspaceApplied {
+            promoted_revision: 1,
+            ..
+        })
+    ));
+    assert!(output.authoritative_snapshot_id.is_some());
+    assert!(output.cleanup_error.is_none());
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "new-a\n");
+    assert_eq!(fs::read_to_string(root.join("b.txt"))?, "new-b\n");
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head_before);
+    assert_promotion_event_sequence(&events, IntegrationPromotionStatus::Promoted);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_promotion_parent_drift_is_stale_with_zero_promotion_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let change = change_set("promotion-stale", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-workspace-stale")?,
+        TaskId::new("task_workspace_stale")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_workspace_stale",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "workspace-stale".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::WorkspaceApply {
+            expected_snapshot_id: base_snapshot_id,
+            expected_revision: 0,
+        },
+    })
+    .await?;
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "workspace-stale")?;
+    fs::write(root.join("user-drift.txt"), "preserve me\n")?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+
+    let output = super::run_git_integration_promotion(GitIntegrationPromotionRunRequest {
+        prepared,
+        attempt_id: IntegrationPromotionAttemptId::new("attempt-workspace-stale")?,
+        preview,
+        authority,
+        mutation_recorder: MutationEventRecorder::new(mutation_store),
+    })
+    .await?;
+
+    assert_eq!(output.record.status, IntegrationPromotionStatus::Stale);
+    assert!(output.record.effect.is_none());
+    assert!(output.authoritative_snapshot_id.is_none());
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    assert_eq!(
+        fs::read_to_string(root.join("user-drift.txt"))?,
+        "preserve me\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_ref_promotion_advances_only_unchecked_out_target_by_cas() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    git(&root, &["branch", "review-target", &base_commit])?;
+    let change = change_set("promotion-ref", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-ref-promotion")?,
+        TaskId::new("task_ref_promotion")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_ref_promotion",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "ref-review".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::GitRefAdvance {
+            target_ref: "refs/heads/review-target".to_owned(),
+            expected_old_oid: base_commit.clone(),
+        },
+    })
+    .await?;
+    let candidate_oid = match prepared.target() {
+        sigil_kernel::IntegrationPromotionTarget::GitRefAdvance { candidate_oid, .. } => {
+            candidate_oid.clone()
+        }
+        _ => panic!("expected Git ref target"),
+    };
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "ref-review")?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+    let head_before = git(&root, &["rev-parse", "HEAD"])?;
+
+    let output = super::run_git_integration_promotion(GitIntegrationPromotionRunRequest {
+        prepared,
+        attempt_id: IntegrationPromotionAttemptId::new("attempt-ref")?,
+        preview,
+        authority,
+        mutation_recorder: MutationEventRecorder::new(mutation_store),
+    })
+    .await?;
+
+    assert_eq!(output.record.status, IntegrationPromotionStatus::Promoted);
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/review-target"])?,
+        candidate_oid
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head_before);
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    assert_eq!(
+        git(&root, &["show", "refs/heads/review-target:a.txt"])?,
+        "new-a"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_ref_promotion_rejects_checked_out_target_without_ref_or_workspace_effect() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let checked_out_ref = git(&root, &["symbolic-ref", "HEAD"])?;
+    let change = change_set("promotion-checked-out", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-ref-checked-out")?,
+        TaskId::new("task_ref_checked_out")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_ref_checked_out",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "ref-checked-out".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::GitRefAdvance {
+            target_ref: checked_out_ref.clone(),
+            expected_old_oid: base_commit.clone(),
+        },
+    })
+    .await?;
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "ref-checked-out")?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+
+    let output = super::run_git_integration_promotion(GitIntegrationPromotionRunRequest {
+        prepared,
+        attempt_id: IntegrationPromotionAttemptId::new("attempt-ref-checked-out")?,
+        preview,
+        authority,
+        mutation_recorder: MutationEventRecorder::new(mutation_store),
+    })
+    .await?;
+
+    assert_eq!(output.record.status, IntegrationPromotionStatus::Conflict);
+    assert!(output.record.effect.is_none());
+    assert_eq!(git(&root, &["rev-parse", &checked_out_ref])?, base_commit);
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_ref_promotion_stale_target_has_zero_ref_or_workspace_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    git(&root, &["branch", "review-stale", &base_commit])?;
+    let change = change_set("promotion-ref-stale", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-ref-stale")?,
+        TaskId::new("task_ref_stale")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_ref_stale",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "ref-stale".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::GitRefAdvance {
+            target_ref: "refs/heads/review-stale".to_owned(),
+            expected_old_oid: base_commit.clone(),
+        },
+    })
+    .await?;
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "ref-stale")?;
+    let tree = git(&root, &["rev-parse", "HEAD^{tree}"])?;
+    let drift_commit = git(
+        &root,
+        &["commit-tree", &tree, "-p", &base_commit, "-m", "ref drift"],
+    )?;
+    git(
+        &root,
+        &[
+            "update-ref",
+            "refs/heads/review-stale",
+            &drift_commit,
+            &base_commit,
+        ],
+    )?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+
+    let output = super::run_git_integration_promotion(GitIntegrationPromotionRunRequest {
+        prepared,
+        attempt_id: IntegrationPromotionAttemptId::new("attempt-ref-stale")?,
+        preview,
+        authority,
+        mutation_recorder: MutationEventRecorder::new(mutation_store),
+    })
+    .await?;
+
+    assert_eq!(output.record.status, IntegrationPromotionStatus::Stale);
+    assert!(output.record.effect.is_none());
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/review-stale"])?,
+        drift_commit
+    );
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_authority_ack_starts_no_promotion_effect_and_cleans_candidate() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let change = change_set("promotion-ack", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-promotion-ack")?,
+        TaskId::new("task_promotion_ack")?,
+        1,
+        vec![proposal(
+            &change,
+            "step_promotion_ack",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: "promotion-ack".to_owned(),
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: IntegrationPromotionPreparationTarget::WorkspaceApply {
+            expected_snapshot_id: base_snapshot_id,
+            expected_revision: 0,
+        },
+    })
+    .await?;
+    let owned_workspace_id = prepared.owned_workspace_id().to_owned();
+    let preview = promotion_preview(&lane_session, &plan, &prepared)?;
+    let authority = promotion_authority(&preview, "promotion-ack")?;
+    let mutation_store = JsonlSessionStore::new(temp.path().join("promotion.jsonl"))?;
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<IntegrationPromotionRuntimeEventRequest>();
+    let rejector = tokio::spawn(async move {
+        let request = event_rx.recv().await.expect("authority event");
+        assert!(matches!(
+            request.event(),
+            IntegrationPromotionRuntimeEvent::AuthorityConsumed(_)
+        ));
+        request.acknowledge(Err("durable append rejected".to_owned()));
+    });
+
+    let error = run_git_integration_promotion_with_events(
+        GitIntegrationPromotionRunRequest {
+            prepared,
+            attempt_id: IntegrationPromotionAttemptId::new("attempt-promotion-ack")?,
+            preview,
+            authority,
+            mutation_recorder: MutationEventRecorder::new(mutation_store),
+        },
+        event_tx,
+    )
+    .await
+    .expect_err("rejected durable authority ack must stop promotion");
+    rejector.await?;
+
+    assert!(format!("{error:#}").contains("durable event was rejected"));
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    assert!(
+        !git(&root, &["worktree", "list", "--porcelain"])?.contains(&owned_workspace_id),
+        "rejected promotion must clean its private candidate"
+    );
+    Ok(())
+}
+
+async fn ready_lane_session(
+    root: &Path,
+    plan: &IntegrationPlan,
+    artifacts: &[IntegrationArtifact],
+) -> Result<Session> {
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<IntegrationLaneRuntimeEventRequest>();
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(request) = event_rx.recv().await {
+            events.push(request.event().clone());
+            request.acknowledge(Ok(()));
+        }
+        events
+    });
+    let output = run_git_integration_lanes_with_events(
+        GitIntegrationRunRequest {
+            parent_workspace_root: root.to_path_buf(),
+            plan: plan.clone(),
+            artifacts: artifacts.to_vec(),
+            frozen_base: None,
+            verification_backend: None,
+        },
+        Some(event_tx),
+    )
+    .await?;
+    assert!(
+        output
+            .lanes
+            .iter()
+            .all(|lane| lane.status == IntegrationLaneStatus::Ready)
+    );
+    let events = collector.await?;
+    let mut session = Session::new("mock", "model");
+    session.append_control(ControlEntry::IntegrationPlanRecorded(
+        IntegrationPlanRecorded { plan: plan.clone() },
+    ))?;
+    for event in events {
+        let control = match event {
+            IntegrationLaneRuntimeEvent::Prepared { entry, .. } => {
+                ControlEntry::IntegrationLanePrepared(entry)
+            }
+            IntegrationLaneRuntimeEvent::MemberApplied(entry) => {
+                ControlEntry::IntegrationLaneMemberApplied(entry)
+            }
+            IntegrationLaneRuntimeEvent::VerificationLinked(entry) => {
+                ControlEntry::IntegrationLaneVerificationLinked(entry)
+            }
+            IntegrationLaneRuntimeEvent::Terminal(entry) => {
+                ControlEntry::IntegrationLaneTerminal(entry)
+            }
+            IntegrationLaneRuntimeEvent::CleanupRecorded { entry, .. } => {
+                ControlEntry::IntegrationLaneCleanupRecorded(entry)
+            }
+        };
+        session.append_control(control)?;
+    }
+    Ok(session)
+}
+
+fn promotion_preview(
+    session: &Session,
+    plan: &IntegrationPlan,
+    prepared: &super::PreparedGitIntegrationPromotion,
+) -> Result<TaskPromotionPreview> {
+    let projection = IntegrationProjection::from_entries(session.entries());
+    let state = projection
+        .plans
+        .get(&plan.plan_id)
+        .expect("integration plan projection");
+    build_task_promotion_preview(
+        state,
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: prepared.aggregate().artifact_ref.clone(),
+            aggregate_diff_digest: prepared.aggregate_diff_digest(),
+            target: prepared.target().clone(),
+            verification_invalidation: vec![DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned()],
+            intent_binding: None,
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: test_unix_time_ms(),
+        },
+    )
+}
+
+fn promotion_authority(
+    preview: &TaskPromotionPreview,
+    review_id: &str,
+) -> Result<TaskPromotionAuthority> {
+    TaskPromotionAuthority::from_user_integration_review(
+        preview,
+        review_id,
+        preview.created_at_unix_ms.saturating_add(60_000),
+        format!("nonce-{review_id}"),
+    )
+}
+
+fn promotion_event_collector() -> (
+    tokio::sync::mpsc::UnboundedSender<IntegrationPromotionRuntimeEventRequest>,
+    tokio::task::JoinHandle<Vec<IntegrationPromotionRuntimeEvent>>,
+) {
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<IntegrationPromotionRuntimeEventRequest>();
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(request) = event_rx.recv().await {
+            events.push(request.event().clone());
+            request.acknowledge(Ok(()));
+        }
+        events
+    });
+    (event_tx, collector)
+}
+
+fn assert_promotion_event_sequence(
+    events: &[IntegrationPromotionRuntimeEvent],
+    terminal_status: IntegrationPromotionStatus,
+) {
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        events[0],
+        IntegrationPromotionRuntimeEvent::AuthorityConsumed(_)
+    ));
+    assert!(matches!(
+        &events[1],
+        IntegrationPromotionRuntimeEvent::PromotionRecorded(record)
+            if record.status == IntegrationPromotionStatus::Prepared
+    ));
+    assert!(matches!(
+        &events[2],
+        IntegrationPromotionRuntimeEvent::PromotionRecorded(record)
+            if record.status == terminal_status
+    ));
+}
+
+fn test_unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn proposal(

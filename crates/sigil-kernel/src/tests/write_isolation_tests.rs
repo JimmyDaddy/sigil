@@ -640,17 +640,26 @@ fn parent_changeset_mutation_preflights_and_applies_one_aggregate_batch() -> Res
         previous_path: None,
         action: ChangeSetFileAction::Update,
         risk: ChangeSetRisk::Low,
-        before_hash: Some(bytes_hash(b"before\n")),
-        after_hash: Some(bytes_hash(b"after\n")),
+        before_hash: Some(
+            bytes_hash(b"before\n")
+                .trim_start_matches("sha256:")
+                .to_owned(),
+        ),
+        after_hash: Some(
+            bytes_hash(b"after\n")
+                .trim_start_matches("sha256:")
+                .to_owned(),
+        ),
         diff_hash: None,
         additions: 1,
         deletions: 1,
         validations: Vec::new(),
     });
     let artifact = format!(
-        "{}{}",
-        note_diff(),
-        "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-before\n+after\n"
+        "diff --git a/note.txt b/note.txt\nindex 1111111..2222222 100644\n{}\
+diff --git a/other.txt b/other.txt\nindex 3333333..4444444 100644\n\
+--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-before\n+after\n",
+        note_diff()
     );
     let expected_snapshot_id = super::parent_workspace_snapshot_id(&workspace_root)?;
 

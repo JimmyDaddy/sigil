@@ -1310,7 +1310,10 @@ fn validate_declared_before_hash(file: &ChangeSetFile, absolute_path: &Path) -> 
         return Ok(());
     };
     let current = file_content_hash(absolute_path)?;
-    if current.as_deref() != Some(expected) {
+    if !current
+        .as_deref()
+        .is_some_and(|observed| digest_values_equal(observed, expected))
+    {
         bail!(
             "changeset before_hash mismatch for {}: expected {}, observed {}",
             file.path,
@@ -1326,7 +1329,10 @@ fn validate_declared_after_hash(file: &ChangeSetFile, content: Option<&[u8]>) ->
         return Ok(());
     };
     let observed = content.map(bytes_hash);
-    if observed.as_deref() != Some(expected) {
+    if !observed
+        .as_deref()
+        .is_some_and(|observed| digest_values_equal(observed, expected))
+    {
         bail!(
             "changeset after_hash mismatch for {}: expected {}, observed {}",
             file.path,
@@ -1335,6 +1341,12 @@ fn validate_declared_after_hash(file: &ChangeSetFile, content: Option<&[u8]>) ->
         );
     }
     Ok(())
+}
+
+fn digest_values_equal(left: &str, right: &str) -> bool {
+    left.strip_prefix("sha256:")
+        .unwrap_or(left)
+        .eq_ignore_ascii_case(right.strip_prefix("sha256:").unwrap_or(right))
 }
 
 fn mutation_batch_status(
@@ -1418,7 +1430,10 @@ impl UnifiedDiffArtifact {
                     while index < lines.len() {
                         let raw = &lines[index];
                         let marker = raw.chars().next().unwrap_or('\0');
-                        if raw.starts_with("@@") || raw.starts_with("--- ") {
+                        if raw.starts_with("@@")
+                            || raw.starts_with("--- ")
+                            || raw.starts_with("diff --git ")
+                        {
                             break;
                         }
                         match marker {
