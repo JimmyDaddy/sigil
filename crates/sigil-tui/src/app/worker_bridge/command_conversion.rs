@@ -167,6 +167,9 @@ impl AppState {
             AppAction::RerunTaskVerification { request } => {
                 WorkerCommand::RerunTaskVerification { request }
             }
+            AppAction::ReviewTaskIntegration { request } => {
+                WorkerCommand::ReviewTaskIntegration { request }
+            }
             AppAction::PreviewCheckpointRestore {
                 request_id,
                 request,

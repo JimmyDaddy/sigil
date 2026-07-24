@@ -153,3 +153,69 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
     worker.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn exact_integration_review_reads_and_digest_checks_the_bound_artifact() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), "review me\n")?;
+    let workspace_root = std::fs::canonicalize(workspace_root)?;
+    let session_log_path = temp.path().join(".sigil/sessions/integration-review.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let aggregate_diff = b"diff --git a/src/lib.rs b/src/lib.rs\n-old\n+new\n";
+    let recorder = session
+        .mutation_event_recorder()
+        .ok_or_else(|| anyhow!("durable test session must expose mutation artifacts"))?;
+    let artifact_ref = recorder.capture_immutable_content_artifact(
+        &stable_workspace_id(&workspace_root)?,
+        "integration-review-test",
+        &workspace_root.join("integration-review.diff"),
+        aggregate_diff,
+    )?;
+    let digest = format!("sha256:{}", sigil_kernel::sha256_hex(aggregate_diff));
+    let entries = crate::app::tests::common::integration_review_entries(&artifact_ref, &digest)?;
+    let request = sigil_kernel::task_integration_review_product(&entries)
+        .expect("fixture integration review")
+        .request;
+    for entry in entries {
+        let SessionLogEntry::Control(control) = entry else {
+            return Err(anyhow!("integration review fixture must be control-only"));
+        };
+        session.append_control(control)?;
+    }
+    drop(session);
+
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let agent = Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    worker.send(WorkerCommand::ReviewTaskIntegration {
+        request: request.clone(),
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!("timed out waiting for integration review"));
+        }
+        match worker.recv_with_timeout(remaining)? {
+            WorkerMessage::TaskIntegrationReviewLoaded {
+                request: loaded_request,
+                aggregate_diff: loaded_diff,
+            } => {
+                assert_eq!(loaded_request, request);
+                assert_eq!(loaded_diff.as_bytes(), aggregate_diff);
+                break;
+            }
+            WorkerMessage::TaskIntegrationReviewFailed { error, .. }
+            | WorkerMessage::RunFailed(error) => {
+                return Err(anyhow!("integration review worker failed: {error}"));
+            }
+            _ => {}
+        }
+    }
+    worker.shutdown()?;
+    Ok(())
+}

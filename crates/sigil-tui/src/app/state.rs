@@ -6,7 +6,7 @@ use std::{
 use sigil_kernel::{
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest,
     ConversationInputQueueId, ConversationInputQueuedEntry, EvidenceScope, ImageAttachment,
-    ReasoningEffort, SessionLogEntry, SessionStats,
+    ReasoningEffort, SessionLogEntry, SessionStats, TaskIntegrationReviewRequest,
 };
 use sigil_runtime::BalanceSnapshot;
 
@@ -57,6 +57,8 @@ pub(crate) struct ReviewState {
     pub(in crate::app) readiness_sequences_by_scope: BTreeMap<EvidenceScope, u64>,
     pub(in crate::app) verification_card_focused: bool,
     pub(in crate::app) verification_inspect_open: bool,
+    pub(in crate::app) integration_review_request: Option<TaskIntegrationReviewRequest>,
+    pub(in crate::app) integration_review_diff_lines: Vec<String>,
 }
 
 #[derive(Debug)]

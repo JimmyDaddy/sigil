@@ -792,7 +792,7 @@ fn render_verification_card_lines(
     };
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "Verification",
+            card.title.clone(),
             Style::default()
                 .fg(palette.accent_warning)
                 .bg(bg)

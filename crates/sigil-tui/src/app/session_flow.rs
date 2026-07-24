@@ -293,6 +293,7 @@ impl AppState {
         self.runtime.stats = session_stats_from_entries(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.session_browser.current_entries = entries;
+        self.reconcile_integration_review();
         self.mark_current_session_entries_changed_with_review_lines(review_snapshot.lines);
         self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
@@ -476,6 +477,7 @@ impl AppState {
         self.review.checkpoint_expected_request = None;
         self.review.checkpoint_request_id = None;
         self.review.checkpoint_action_pending = false;
+        self.clear_integration_review();
         if self.checkpoint_restore_modal_open() {
             self.modal_state = None;
         }

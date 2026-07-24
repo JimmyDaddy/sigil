@@ -476,6 +476,9 @@ pub enum AppAction {
     RerunTaskVerification {
         request: sigil_kernel::TaskVerificationRerunRequest,
     },
+    ReviewTaskIntegration {
+        request: sigil_kernel::TaskIntegrationReviewRequest,
+    },
     PreviewCheckpointRestore {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
@@ -1267,4 +1270,4 @@ fn has_alt_without_control(key: KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

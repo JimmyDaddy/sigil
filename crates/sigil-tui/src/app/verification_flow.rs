@@ -86,6 +86,15 @@ impl AppState {
         }
         let card = self.task_strip_view()?.verification?;
         match card.action? {
+            VerificationCardAction::ReviewIntegration(request) => {
+                self.review.integration_review_request = Some(request.clone());
+                self.review.integration_review_diff_lines.clear();
+                self.last_notice = Some(format!(
+                    "loading exact integration diff for plan v{}",
+                    request.plan_version
+                ));
+                Some(AppAction::ReviewTaskIntegration { request })
+            }
             VerificationCardAction::Rerun(request) => {
                 let check_spec_id = request.check_spec_id.clone();
                 self.last_notice = Some(format!("running verification check {check_spec_id}"));
@@ -99,6 +108,25 @@ impl AppState {
                 self.last_notice = Some(format!("reviewing verification check {check_spec_id}"));
                 Some(AppAction::ApproveVerificationCheck { check_spec_id })
             }
+        }
+    }
+
+    pub(super) fn clear_integration_review(&mut self) {
+        self.review.integration_review_request = None;
+        self.review.integration_review_diff_lines.clear();
+    }
+
+    pub(super) fn reconcile_integration_review(&mut self) {
+        let Some(expected) = self.review.integration_review_request.as_ref() else {
+            return;
+        };
+        let current =
+            sigil_kernel::task_integration_review_product(&self.session_browser.current_entries);
+        if current
+            .as_ref()
+            .is_none_or(|product| product.request != *expected)
+        {
+            self.clear_integration_review();
         }
     }
 }

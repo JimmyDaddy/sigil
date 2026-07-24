@@ -7,8 +7,8 @@ use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
     PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TaskVerificationRerunRequest,
-    TerminalTaskEntry, V2CompactionPreview,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskRunStatus,
+    TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
@@ -255,6 +255,9 @@ pub enum WorkerCommand {
     RerunTaskVerification {
         request: TaskVerificationRerunRequest,
     },
+    ReviewTaskIntegration {
+        request: TaskIntegrationReviewRequest,
+    },
     PreviewCheckpointRestore {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
@@ -464,6 +467,14 @@ pub enum WorkerMessage {
     CheckpointRestorePreviewed {
         request_id: u64,
         preview: ControlledCheckpointRestorePreview,
+    },
+    TaskIntegrationReviewLoaded {
+        request: TaskIntegrationReviewRequest,
+        aggregate_diff: String,
+    },
+    TaskIntegrationReviewFailed {
+        request: TaskIntegrationReviewRequest,
+        error: String,
     },
     CheckpointRestoreCompleted {
         request_id: u64,

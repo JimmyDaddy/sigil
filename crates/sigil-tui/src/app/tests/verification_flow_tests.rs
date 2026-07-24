@@ -134,6 +134,62 @@ fn checkpoint_restore_marks_existing_verification_card_stale_without_old_action(
     assert!(refreshed.action.is_some());
 }
 
+#[test]
+fn integration_review_loads_only_the_exact_current_response() -> anyhow::Result<()> {
+    let aggregate_diff = "diff --git a/src/lib.rs b/src/lib.rs\n-old\n+new\n";
+    let digest = format!(
+        "sha256:{}",
+        sigil_kernel::sha256_hex(aggregate_diff.as_bytes())
+    );
+    let mut app = AppState::from_root_config(Path::new("config.toml"), &test_config());
+    app.session_browser.current_entries =
+        crate::app::tests::common::integration_review_entries("artifact-review", digest)?;
+    assert!(app.focus_verification_card());
+
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        .expect("integration review action");
+    let AppAction::ReviewTaskIntegration { request } = action else {
+        panic!("expected exact integration review action");
+    };
+    assert_eq!(
+        app.review.integration_review_request.as_ref(),
+        Some(&request)
+    );
+
+    let mut stale_request = request.clone();
+    stale_request.request_id.push_str("-stale");
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationReviewLoaded {
+        request: stale_request,
+        aggregate_diff: "stale diff".to_owned(),
+    })?;
+    assert!(app.review.integration_review_diff_lines.is_empty());
+
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationReviewLoaded {
+        request: request.clone(),
+        aggregate_diff: aggregate_diff.to_owned(),
+    })?;
+    assert!(app.verification_inspect_open());
+    let card = app
+        .task_strip_view()
+        .and_then(|view| view.verification)
+        .expect("loaded integration review");
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "diff --git a/src/lib.rs b/src/lib.rs")
+    );
+
+    app.sync_current_session_state(Vec::new());
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationReviewLoaded {
+        request,
+        aggregate_diff: aggregate_diff.to_owned(),
+    })?;
+    assert!(app.review.integration_review_request.is_none());
+    assert!(app.review.integration_review_diff_lines.is_empty());
+    Ok(())
+}
+
 fn verification_app() -> AppState {
     let mut app = AppState::from_root_config(Path::new("config.toml"), &test_config());
     app.session_browser.current_entries = verification_entries();

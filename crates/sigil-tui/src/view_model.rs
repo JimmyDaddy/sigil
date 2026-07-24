@@ -427,12 +427,16 @@ impl TaskStripViewModel {
             completion_progress: Vec::new(),
             verification: view.verification.map(|verification| {
                 let action_label = verification.action.as_ref().map(|action| match action {
+                    crate::app::task_sidebar::VerificationCardAction::ReviewIntegration(_) => {
+                        "review diff"
+                    }
                     crate::app::task_sidebar::VerificationCardAction::Rerun(_) => "run check",
                     crate::app::task_sidebar::VerificationCardAction::ReviewApproval { .. } => {
                         "review approval"
                     }
                 });
                 VerificationCardViewModel {
+                    title: verification.title,
                     status: verification.status,
                     recommended: verification.recommended,
                     why: verification.why,
@@ -457,6 +461,7 @@ impl TaskStripViewModel {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VerificationCardViewModel {
+    pub title: String,
     pub status: String,
     pub recommended: Option<String>,
     pub why: Option<String>,

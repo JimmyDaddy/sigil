@@ -1,11 +1,12 @@
 use sigil_kernel::{
     ChildVerificationReceiptLinked, EvidenceScope, MergeDecision, MergeReviewState,
     ReadinessEvaluatedEntry, RequiredAction, RunStatus, SessionLogEntry, TaskChildSessionEntry,
-    TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId,
-    TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskProjection,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationProductAction,
-    VerificationProductEvidence, VerificationRecommendationKind, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WriteIsolationProjection, WriteIsolationRecordRef,
+    TaskIntegrationReviewRequest, TaskPlanProjection, TaskRunProjection, TaskRunStatus,
+    TaskStateProjection, TaskStepId, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
+    TerminalTaskProjection, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationProductAction, VerificationProductEvidence, VerificationRecommendationKind,
+    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    WriteIsolationProjection, WriteIsolationRecordRef, task_integration_review_product,
     verification_product_view,
 };
 
@@ -26,6 +27,7 @@ pub(crate) struct TaskStripView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationCardView {
+    pub(crate) title: String,
     pub(crate) scope: EvidenceScope,
     pub(crate) status: String,
     pub(crate) recommended: Option<String>,
@@ -36,6 +38,7 @@ pub(crate) struct VerificationCardView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VerificationCardAction {
+    ReviewIntegration(TaskIntegrationReviewRequest),
     Rerun(TaskVerificationRerunRequest),
     ReviewApproval { check_spec_id: String },
 }
@@ -201,6 +204,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let projection = TaskStateProjection::from_entries(entries);
     let verification_projection = VerificationStateProjection::from_entries(entries);
     let write_projection = WriteIsolationProjection::from_entries(entries);
+    let integration_review = task_integration_review_product(entries);
     let Some(task) = projection.latest_task() else {
         return terminal_lines;
     };
@@ -212,9 +216,19 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let mut step_lines = Vec::new();
     let mut merge_line_rendered = false;
     let mut action_line_rendered = false;
-    if let Some(view) = merge_review_view
-        .as_ref()
-        .filter(|view| view.action_preempts_verification)
+    if let Some(product) = integration_review.as_ref() {
+        lines.push(format!(
+            "integration: {} lane(s) ready · plan v{}",
+            product.preview.ordered_lane_candidates.len(),
+            product.preview.plan_version
+        ));
+        lines.push("action: review aggregate diff".to_owned());
+        action_line_rendered = true;
+    }
+    if integration_review.is_none()
+        && let Some(view) = merge_review_view
+            .as_ref()
+            .filter(|view| view.action_preempts_verification)
     {
         lines.push(format!("merge: {}", view.summary));
         merge_line_rendered = true;
@@ -488,6 +502,50 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
 }
 
 fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCardView> {
+    if let Some(product) = task_integration_review_product(entries) {
+        let receipt_count = product
+            .preview
+            .ordered_lane_candidates
+            .iter()
+            .map(|lane| lane.verification_receipt_ids.len())
+            .sum::<usize>();
+        let target = match &product.preview.target {
+            sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => "workspace apply",
+            sigil_kernel::IntegrationPromotionTarget::GitRefAdvance { .. } => "git ref advance",
+        };
+        let mut inspect_lines = vec![
+            format!("Plan version: {}", product.preview.plan_version),
+            format!(
+                "Aggregate diff: {}",
+                truncate_session_view_text(&product.preview.aggregate_diff_digest, 72)
+            ),
+            format!("Target: {target}"),
+            format!(
+                "Lanes: {} · receipts: {receipt_count}",
+                product.preview.ordered_lane_candidates.len()
+            ),
+        ];
+        if product.preview.verification_invalidation.is_empty() {
+            inspect_lines.push("Parent verification invalidation: none".to_owned());
+        } else {
+            inspect_lines.push(format!(
+                "Parent verification invalidation: {}",
+                product.preview.verification_invalidation.join(", ")
+            ));
+        }
+        return Some(VerificationCardView {
+            title: "Integration review".to_owned(),
+            scope: EvidenceScope::Task(product.preview.task_id.as_str().to_owned()),
+            status: "ready · exact target bound".to_owned(),
+            recommended: Some("review aggregate diff".to_owned()),
+            why: Some(format!(
+                "{} verified lane(s) are ready for one content-bound promotion",
+                product.preview.ordered_lane_candidates.len()
+            )),
+            action: Some(VerificationCardAction::ReviewIntegration(product.request)),
+            inspect_lines,
+        });
+    }
     let product = verification_product_view(entries)?;
     if product.action.is_none()
         && product.evidence.check_run_id.is_none()
@@ -505,6 +563,7 @@ fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCar
         }
     });
     Some(VerificationCardView {
+        title: "Verification".to_owned(),
         scope: product.scope,
         status: product.status,
         recommended: product.recommended_check_spec_id,

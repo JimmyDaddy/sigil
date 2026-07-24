@@ -517,6 +517,52 @@ impl AppState {
             } => {
                 self.apply_checkpoint_restore_preview(request_id, preview);
             }
+            WorkerMessage::TaskIntegrationReviewLoaded {
+                request,
+                aggregate_diff,
+            } => {
+                let expected = self.review.integration_review_request.as_ref() == Some(&request);
+                let current = sigil_kernel::task_integration_review_product(
+                    &self.session_browser.current_entries,
+                )
+                .is_some_and(|product| product.request == request);
+                if !expected || !current {
+                    self.push_event(
+                        "integration:review",
+                        format!("ignored stale review response {}", request.request_id),
+                    );
+                } else {
+                    self.review.integration_review_diff_lines =
+                        aggregate_diff.split('\n').map(str::to_owned).collect();
+                    self.review.verification_inspect_open = true;
+                    self.last_notice = Some(format!(
+                        "integration diff ready for plan v{}",
+                        request.plan_version
+                    ));
+                    self.push_event(
+                        "integration:review",
+                        format!("loaded exact diff {}", request.preview_digest),
+                    );
+                }
+            }
+            WorkerMessage::TaskIntegrationReviewFailed { request, error } => {
+                if self.review.integration_review_request.as_ref() != Some(&request) {
+                    self.push_event(
+                        "integration:review",
+                        format!("ignored stale review error {}", request.request_id),
+                    );
+                } else {
+                    let current = sigil_kernel::task_integration_review_product(
+                        &self.session_browser.current_entries,
+                    )
+                    .is_some_and(|product| product.request == request);
+                    if !current {
+                        self.clear_integration_review();
+                    }
+                    self.last_notice = Some(format!("integration review unavailable: {error}"));
+                    self.push_event("integration:review", error);
+                }
+            }
             WorkerMessage::CheckpointRestoreCompleted {
                 request_id,
                 preview,

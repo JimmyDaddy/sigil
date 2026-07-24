@@ -245,6 +245,7 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
             route_diagnostics: Vec::new(),
             completion_progress: Vec::new(),
             verification: Some(VerificationCardViewModel {
+                title: "Verification".to_owned(),
                 status: "check failed".to_owned(),
                 recommended: Some("cargo-test".to_owned()),
                 why: Some("the latest result failed".to_owned()),

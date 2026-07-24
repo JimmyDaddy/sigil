@@ -1,5 +1,8 @@
 use crate::runner::WorkerCommandEnvelope;
-use sigil_kernel::{ImageAttachment, MutationArtifactCleanupTarget, TaskVerificationRerunRequest};
+use sigil_kernel::{
+    ImageAttachment, MutationArtifactCleanupTarget, TaskIntegrationReviewRequest,
+    TaskVerificationRerunRequest,
+};
 use sigil_runtime::{
     ProviderStatusConfig, SessionDeletePreview, SessionRetentionPolicy, SessionRetentionPreview,
 };
@@ -251,6 +254,9 @@ pub(in crate::runner) enum VerificationCheckpointCommand {
     },
     RerunTaskVerification {
         request: TaskVerificationRerunRequest,
+    },
+    ReviewTaskIntegration {
+        request: TaskIntegrationReviewRequest,
     },
     PreviewCheckpointRestore {
         request_id: u64,
@@ -576,6 +582,11 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::RerunTaskVerification { request } => {
             ClassifiedWorkerCommand::VerificationCheckpoint(
                 VerificationCheckpointCommand::RerunTaskVerification { request },
+            )
+        }
+        WorkerCommand::ReviewTaskIntegration { request } => {
+            ClassifiedWorkerCommand::VerificationCheckpoint(
+                VerificationCheckpointCommand::ReviewTaskIntegration { request },
             )
         }
         WorkerCommand::PreviewCheckpointRestore {

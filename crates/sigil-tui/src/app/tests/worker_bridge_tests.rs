@@ -350,6 +350,20 @@ fn plan_actions_map_to_worker_commands() {
             if request.check_spec_id == "cargo-test"
                 && request.workspace_snapshot_id == "snapshot-1"
     ));
+    let integration_request = sigil_kernel::TaskIntegrationReviewRequest {
+        request_id: "integration-review-request".to_owned(),
+        task_id: sigil_kernel::TaskId::new("task_1").expect("task id"),
+        plan_id: sigil_kernel::IntegrationPlanId::new("plan-1").expect("plan id"),
+        plan_version: 1,
+        preview_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    assert!(matches!(
+        app.into_worker_command(AppAction::ReviewTaskIntegration {
+            request: integration_request.clone(),
+        }),
+        WorkerCommand::ReviewTaskIntegration { request }
+            if request == integration_request
+    ));
 }
 
 #[test]

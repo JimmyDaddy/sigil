@@ -1005,6 +1005,56 @@ fn task_verification_card_stays_hidden_when_verification_is_not_applicable() {
 }
 
 #[test]
+fn task_integration_review_card_preempts_verification_with_one_exact_action() -> anyhow::Result<()>
+{
+    let entries = crate::app::tests::common::integration_review_entries(
+        "artifact-integration-review",
+        format!("sha256:{}", "a".repeat(64)),
+    )?;
+
+    let sidebar = task_sidebar_lines(&entries);
+    assert_eq!(
+        sidebar
+            .iter()
+            .filter(|line| line.starts_with("action:"))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["action: review aggregate diff"]
+    );
+    let card = task_strip_view(&entries)
+        .expect("task strip")
+        .verification
+        .expect("integration review card");
+    assert_eq!(card.title, "Integration review");
+    assert_eq!(card.status, "ready · exact target bound");
+    assert_eq!(card.recommended.as_deref(), Some("review aggregate diff"));
+    let VerificationCardAction::ReviewIntegration(request) =
+        card.action.expect("exact integration review action")
+    else {
+        panic!("expected integration review action");
+    };
+    assert_eq!(request.task_id.as_str(), "task_integration_review");
+    assert_eq!(request.plan_id.as_str(), "plan-integration-review");
+    assert_eq!(request.plan_version, 1);
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Target: workspace apply")
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Lanes: 1 · receipts: 1")
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .all(|line| !line.contains("refs/sigil/"))
+    );
+    Ok(())
+}
+
+#[test]
 fn task_sidebar_does_not_recommend_an_untrusted_run_check() {
     let entries = task_entries_with_custom_readiness(
         TaskRunStatus::Paused,

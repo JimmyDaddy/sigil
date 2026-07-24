@@ -137,6 +137,19 @@ impl AppState {
                 "checkpoint restore is newer than the latest readiness evaluation".to_owned(),
             );
         }
+        if let Some(verification) = view.verification.as_mut()
+            && let Some(super::task_sidebar::VerificationCardAction::ReviewIntegration(request)) =
+                verification.action.as_ref()
+            && self.review.integration_review_request.as_ref() == Some(request)
+            && !self.review.integration_review_diff_lines.is_empty()
+        {
+            verification
+                .inspect_lines
+                .push("Exact aggregate diff:".to_owned());
+            verification
+                .inspect_lines
+                .extend(self.review.integration_review_diff_lines.iter().cloned());
+        }
         Some(view)
     }
 

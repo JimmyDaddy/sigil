@@ -74,6 +74,269 @@ pub(crate) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<Ses
     ]
 }
 
+pub(crate) fn integration_review_entries(
+    artifact_ref: impl Into<String>,
+    aggregate_diff_digest: impl Into<String>,
+) -> Result<Vec<SessionLogEntry>> {
+    use sigil_kernel::{
+        AgentRole, ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
+        EvidenceReceipt, EvidenceScope, ExecutionBackendCapabilities, ExecutionBackendKind,
+        ExecutionNetworkReceipt, IntegrationBaseRepresentation, IntegrationContentClass,
+        IntegrationEffect, IntegrationLaneCandidate, IntegrationLaneCleanupRecorded,
+        IntegrationLaneCleanupStatus, IntegrationLaneMemberApplied, IntegrationLaneMemberEffect,
+        IntegrationLanePrepared, IntegrationLaneStatus, IntegrationLaneTarget,
+        IntegrationLaneTerminal, IntegrationLaneVerificationLinked, IntegrationPlanId,
+        IntegrationPlanRecorded, IntegrationProjection, IntegrationProposalFacts,
+        IntegrationProposalSpec, ReceiptStatus, RedactionState, SessionRef, TaskId, TaskPlanEntry,
+        TaskPlanStatus, TaskPromotionLaneCandidate, TaskPromotionPreviewInput,
+        TaskPromotionPreviewRecorded, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+        TaskStepSpec, TaskStepStatus, VerificationBinding, VerificationPolicy, VerificationReceipt,
+        build_integration_plan, build_task_promotion_preview,
+    };
+
+    let task_id = TaskId::new("task_integration_review")?;
+    let step_id = TaskStepId::new("implement")?;
+    let change_set = ChangeSet {
+        id: ChangeSetId::new("changeset-integration-review")?,
+        title: "integration review".to_owned(),
+        summary: "review exact aggregate diff".to_owned(),
+        risk: ChangeSetRisk::Medium,
+        files: vec![ChangeSetFile {
+            path: "src/lib.rs".to_owned(),
+            previous_path: None,
+            action: ChangeSetFileAction::Update,
+            risk: ChangeSetRisk::Medium,
+            before_hash: Some("before-integration-review".to_owned()),
+            after_hash: Some("after-integration-review".to_owned()),
+            diff_hash: None,
+            additions: 1,
+            deletions: 1,
+            validations: Vec::new(),
+        }],
+        validations: Vec::new(),
+    };
+    let facts = IntegrationProposalFacts::from_changeset(
+        &change_set,
+        IntegrationBaseRepresentation::CleanCommit {
+            base_commit: "b".repeat(40),
+        },
+        IntegrationContentClass::Text,
+        IntegrationEffect::Files,
+        Vec::new(),
+        "artifact-proposal-integration-review",
+        Vec::new(),
+    )?;
+    let proposal = IntegrationProposalSpec::from_changeset(
+        &change_set,
+        step_id.clone(),
+        "snapshot-base".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        IntegrationEffect::Files,
+        "scope-integration-review",
+        facts,
+    )?;
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-integration-review")?,
+        task_id.clone(),
+        1,
+        vec![proposal],
+    )?;
+    let lane = &plan.lanes[0];
+    let candidate = IntegrationLaneCandidate::ManagedRef {
+        private_ref: format!(
+            "refs/sigil/integration/{}/{}",
+            plan.plan_id.as_str(),
+            lane.lane_id.as_str()
+        ),
+        base_commit: "b".repeat(40),
+        candidate_commit: "a".repeat(40),
+        workspace_snapshot_id: "snapshot-lane-ready".to_owned(),
+    };
+    let receipt = VerificationReceipt {
+        receipt: EvidenceReceipt {
+            receipt_id: "receipt-integration-review".to_owned(),
+            source_session_id: "session-integration-review".to_owned(),
+            source_event_id: "event-integration-review".to_owned(),
+            source_event_type: "check_finished".to_owned(),
+            scope: EvidenceScope::Task(task_id.as_str().to_owned()),
+            producer_tool_call: None,
+            workspace_revision: Some(0),
+            workspace_snapshot_id: Some("snapshot-lane-ready".to_owned()),
+            policy_hash: Some("policy-integration-review".to_owned()),
+            changeset_id: None,
+            status: ReceiptStatus::Succeeded,
+            artifact_refs: Vec::new(),
+            redaction_state: RedactionState::None,
+            recorded_at_stream_sequence: 1,
+        },
+        binding: VerificationBinding {
+            workspace_id: "workspace-integration-review".to_owned(),
+            workspace_snapshot_id: "snapshot-lane-ready".to_owned(),
+            verification_scope_hash: lane.verification_scope_hashes[0].clone(),
+            check_spec_hash: "check-integration-review".to_owned(),
+            environment_fingerprint: "environment-integration-review".to_owned(),
+            sandbox_profile_hash: "sandbox-integration-review".to_owned(),
+            execution_backend: Some(ExecutionBackendKind::Local),
+            execution_backend_capabilities: Some(ExecutionBackendCapabilities::default()),
+            execution_network: ExecutionNetworkReceipt::unknown("test local backend"),
+            workspace_trust_snapshot_id: "trust-integration-review".to_owned(),
+            approval_event_id: None,
+            sandbox_decision_id: None,
+        },
+        check_spec_id: "check-integration-review".to_owned(),
+        check_status: ReceiptStatus::Succeeded,
+        failure_reason: None,
+        mutates_verification_scope: false,
+    };
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "Integrate verified changes".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Implement".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Completed,
+            title: Some("Implement".to_owned()),
+            summary: Some("verified candidate ready".to_owned()),
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
+            IntegrationPlanRecorded { plan: plan.clone() },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+            IntegrationLanePrepared {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                target: IntegrationLaneTarget::ManagedRef {
+                    base_commit: "b".repeat(40),
+                    expected_oid: "0".repeat(40),
+                    private_ref: format!(
+                        "refs/sigil/integration/{}/{}",
+                        plan.plan_id.as_str(),
+                        lane.lane_id.as_str()
+                    ),
+                },
+                owned_workspace_id: "workspace-lane-integration-review".to_owned(),
+                ordered_members: lane.proposals.clone(),
+                prepared_at_unix_ms: 1,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(
+            IntegrationLaneMemberApplied {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                change_set_id: lane.proposals[0].clone(),
+                member_index: 0,
+                effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                    expected_old_oid: "0".repeat(40),
+                    new_oid: "a".repeat(40),
+                    candidate_snapshot_id: "snapshot-lane-ready".to_owned(),
+                },
+                applied_at_unix_ms: 2,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneVerificationLinked(
+            IntegrationLaneVerificationLinked {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                candidate: candidate.clone(),
+                verification_check_ids: vec![receipt.check_spec_id.clone()],
+                verification_scope_hashes: lane.verification_scope_hashes.clone(),
+                verification_receipts: vec![receipt],
+                linked_at_unix_ms: 3,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(
+            IntegrationLaneTerminal {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                status: IntegrationLaneStatus::Ready,
+                candidate: Some(candidate.clone()),
+                reason: None,
+                terminal_at_unix_ms: 4,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(
+            IntegrationLaneCleanupRecorded {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                owned_workspace_id: "workspace-lane-integration-review".to_owned(),
+                status: IntegrationLaneCleanupStatus::Removed,
+                recorded_at_unix_ms: 5,
+            },
+        )),
+    ];
+    let projection = IntegrationProjection::from_entries(&entries);
+    let preview = build_task_promotion_preview(
+        projection.latest().expect("ready integration plan"),
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: artifact_ref.into(),
+            aggregate_diff_digest: aggregate_diff_digest.into(),
+            target: sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+            verification_invalidation: vec!["scope-integration-review".to_owned()],
+            intent_binding: None,
+            policy_digest: VerificationPolicy::no_checks_required("scope-integration-review")
+                .stable_hash()?,
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: 10,
+        },
+    )?;
+    assert_eq!(
+        preview.ordered_lane_candidates,
+        vec![TaskPromotionLaneCandidate {
+            lane_id: lane.lane_id.clone(),
+            candidate,
+            verification_receipt_ids: vec!["receipt-integration-review".to_owned()],
+        }]
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionPreviewRecorded(TaskPromotionPreviewRecorded { preview }),
+    ));
+    let projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        projection
+            .latest_task()
+            .map(|task| task.status)
+            .expect("task projection"),
+        TaskRunStatus::Paused
+    );
+    let product = sigil_kernel::task_integration_review_product(&entries)
+        .expect("integration review product");
+    assert_eq!(
+        product.preview.ordered_lane_candidates.len(),
+        1,
+        "fixture must expose one review lane"
+    );
+    Ok(entries)
+}
+
 pub(crate) fn select_root_slash_command(app: &mut AppState, command: &str) -> Result<()> {
     let index = app
         .slash_selector_rows()
