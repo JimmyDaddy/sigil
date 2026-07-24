@@ -20,22 +20,27 @@ use sigil_kernel::{
     AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentInvocationMode,
     AgentInvocationSource, AgentRole, AgentRouteId, AgentRunInput, AgentRunOptions,
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
-    AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
+    AgentUsageSummary, ApprovalMode, AutoApproveHandler, ChangeSet, ChangeSetFile,
+    ChangeSetFileAction, ChangeSetId, ChangeSetRisk, CompactionConfig, CompletionRequest,
     ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthority,
-    DelegationAuthorityRecord, EventHandler, IntegrationEffect, IntegrationObservedEffect,
-    InteractionMode, IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport,
-    RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry,
-    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
-    TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptId,
-    TaskParticipantPurpose, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
-    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
+    DelegationAuthorityRecord, EventHandler, IntegrationBaseRepresentation,
+    IntegrationContentClass, IntegrationEffect, IntegrationObservedEffect, IntegrationPlanId,
+    IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
+    IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
+    MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
+    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
+    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskIntegrationProposal, TaskIntegrationRunRequest, TaskIsolationMode,
+    TaskParticipantAttemptId, TaskParticipantPurpose, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskPlanUpdateContext, TaskPlannerSessionRunRequest,
+    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_integration_plan,
     build_workspace_snapshot, child_session_ref, decode_changeset_only_child_output,
     stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
     task_participant_session_ref,
@@ -4870,6 +4875,181 @@ fn child_terminal_facts_treat_unclassified_shell_as_global() -> Result<()> {
             .observed_effects
             .contains(&IntegrationObservedEffect::UnknownShell)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let repository_root = temp.path().join("integration-parent");
+    initialize_worktree_test_repository(&repository_root)?;
+    let base_snapshot_id = worktree_test_snapshot_id(&repository_root)?;
+    let base_commit_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repository_root)
+        .output()?;
+    let base_commit = String::from_utf8(base_commit_output.stdout)?
+        .trim()
+        .to_owned();
+    let before_hash = format!("{:x}", Sha256::digest(b"base\n"));
+    let after_hash = format!("{:x}", Sha256::digest(b"integrated\n"));
+    let change_set = ChangeSet {
+        id: ChangeSetId::new("changeset-integration-lifecycle")?,
+        title: "integration lifecycle".to_owned(),
+        summary: "integration lifecycle".to_owned(),
+        risk: ChangeSetRisk::Medium,
+        files: vec![ChangeSetFile {
+            path: "base.txt".to_owned(),
+            previous_path: None,
+            action: ChangeSetFileAction::Update,
+            risk: ChangeSetRisk::Medium,
+            before_hash: Some(before_hash),
+            after_hash: Some(after_hash),
+            diff_hash: None,
+            additions: 1,
+            deletions: 1,
+            validations: Vec::new(),
+        }],
+        validations: Vec::new(),
+    };
+    let facts = IntegrationProposalFacts::from_changeset(
+        &change_set,
+        IntegrationBaseRepresentation::CleanCommit {
+            base_commit: base_commit.clone(),
+        },
+        IntegrationContentClass::Text,
+        IntegrationEffect::Files,
+        Vec::new(),
+        "inline:integration-lifecycle",
+        Vec::new(),
+    )?;
+    let step_id = TaskStepId::new("step_integration_lifecycle")?;
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-integration-lifecycle")?,
+        TaskId::new("task_integration_lifecycle")?,
+        1,
+        vec![IntegrationProposalSpec::from_changeset(
+            &change_set,
+            step_id.clone(),
+            base_snapshot_id.clone(),
+            Vec::new(),
+            Vec::new(),
+            IntegrationEffect::Files,
+            DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+            facts.clone(),
+        )?],
+    )?;
+    let patch = "--- a/base.txt\n+++ b/base.txt\n@@ -1,1 +1,1 @@\n-base\n+integrated\n".to_owned();
+    let proposal = TaskIntegrationProposal {
+        step_id,
+        depends_on: Vec::new(),
+        base_snapshot_id,
+        proposal: TaskChildChangeSetProposal {
+            change_set,
+            artifact_ref: "inline:integration-lifecycle".to_owned(),
+            artifact: TaskChildChangeSetArtifact {
+                media_type: "text/x-diff".to_owned(),
+                content_sha256: format!("{:x}", Sha256::digest(patch.as_bytes())),
+                content: patch,
+            },
+            source_isolation: WriteIsolationMode::Worktree,
+            child_snapshot_id: None,
+            integration_facts: facts,
+        },
+    };
+    let config = root_config();
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(TextProvider {
+                text: "read complete",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "write complete",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let store = JsonlSessionStore::new(temp.path().join("integration-parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    session.append_control(ControlEntry::IntegrationPlanRecorded(
+        sigil_kernel::IntegrationPlanRecorded { plan: plan.clone() },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let output = runner
+        .run_integration_lanes(
+            &mut session,
+            TaskIntegrationRunRequest {
+                plan,
+                workspace_root: repository_root.clone(),
+                proposals: vec![proposal],
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.lanes.len(), 1);
+    assert_eq!(
+        output.lanes[0].status,
+        sigil_kernel::IntegrationLaneStatus::Ready
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(_))
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(_))
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneVerificationLinked(_))
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(_))
+    )));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(_))
+    )));
+    let projection = sigil_kernel::IntegrationProjection::from_entries(session.entries());
+    let lifecycle = projection
+        .latest()
+        .and_then(|state| state.lifecycle_lanes.values().next())
+        .expect("replayed integration lifecycle");
+    assert!(!lifecycle.inconsistent);
+    assert_eq!(
+        lifecycle.terminal.as_ref().map(|entry| entry.status),
+        Some(sigil_kernel::IntegrationLaneStatus::Ready)
+    );
+    let verification = lifecycle
+        .verification
+        .as_ref()
+        .expect("lane verification receipt link");
+    assert_eq!(verification.verification_receipts.len(), 1);
+    let receipt = &verification.verification_receipts[0];
+    assert_eq!(
+        receipt.binding.execution_backend,
+        Some(sigil_kernel::ExecutionBackendKind::Local)
+    );
+    assert_eq!(
+        receipt.binding.execution_network.policy,
+        sigil_kernel::ExecutionNetworkPolicy::Unknown
+    );
+    assert_eq!(
+        receipt.binding.verification_scope_hash,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH
+    );
+    assert_eq!(fs::read(repository_root.join("base.txt"))?, b"base\n");
     Ok(())
 }
 

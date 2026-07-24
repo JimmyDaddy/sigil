@@ -208,6 +208,11 @@ impl MaterializedGitWorktree {
     }
 
     #[must_use]
+    pub fn baseline_tree(&self) -> &str {
+        &self.baseline_tree
+    }
+
+    #[must_use]
     pub fn overlay_digest(&self) -> Option<&str> {
         self.overlay_digest.as_deref()
     }

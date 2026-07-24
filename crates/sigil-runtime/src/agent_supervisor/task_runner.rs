@@ -9,31 +9,33 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IntegrationContentClass,
-    IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus, IntegrationObservedEffect,
-    IntegrationProposalFacts, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
-    IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
-    JsonlSessionStore, MultiAgentMode, MutationEventRecorder, ProviderCapabilities,
-    ProviderPhysicalAttemptOutcome, ProviderRequestRejection, ProviderRouteCooldownError, RunEvent,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SessionStats,
-    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
-    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
-    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
-    ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec, WriteIsolationMode,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
-    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
-    task_participant_logical_run_id, task_step_owner_agent_id,
+    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, ExecutionBackend,
+    IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
+    IntegrationObservedEffect, IntegrationProposalFacts, IsolatedWorkspaceBackend,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
+    IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, MutationEventRecorder,
+    ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
+    ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
+    SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskParticipantAttemptId,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlannerSessionRunOutput,
+    TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskSynthesisSessionRunRequest, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus,
+    ToolOperation, ToolSpec, WriteIsolationMode, changeset_only_child_tool_registry,
+    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
+    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
+    task_step_owner_agent_id,
 };
+use sigil_tools_builtin::LocalExecutionBackend;
 
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
     integration_lanes::{
-        GitIntegrationRunRequest, IntegrationArtifact, git_integration_workspace_id,
-        run_git_integration_lanes,
+        GitIntegrationRunRequest, IntegrationArtifact, IntegrationLaneRuntimeEvent,
+        git_integration_workspace_id, run_git_integration_lanes_with_events,
     },
     isolated_workspace::{
         FrozenGitWorktreeBase, GitWorktreeBaseFreezeRequest, MaterializedGitWorktree,
@@ -63,6 +65,7 @@ pub struct AgentSupervisorTaskChildRunner {
     subagent_read: Arc<BoxedAgent>,
     subagent_write: Arc<BoxedAgent>,
     synthesis: Option<Arc<BoxedAgent>>,
+    integration_verification_backend: Arc<dyn ExecutionBackend>,
     planner_discovery_max_probes: usize,
     provider_pressure: TaskProviderPressure,
 }
@@ -89,6 +92,7 @@ impl AgentSupervisorTaskChildRunner {
                 TaskProviderRouteConsumer::SubagentWrite,
             )),
             synthesis: None,
+            integration_verification_backend: Arc::new(LocalExecutionBackend),
             planner_discovery_max_probes: 0,
             provider_pressure,
         }
@@ -130,6 +134,7 @@ impl AgentSupervisorTaskChildRunner {
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::Synthesis,
             ))),
+            integration_verification_backend: Arc::new(LocalExecutionBackend),
             planner_discovery_max_probes: 0,
             provider_pressure,
         }
@@ -155,6 +160,16 @@ impl AgentSupervisorTaskChildRunner {
     pub fn with_provider_route_concurrency_limit(self, max_concurrency: usize) -> Self {
         self.provider_pressure
             .set_max_concurrency(max_concurrency.max(1));
+        self
+    }
+
+    /// Uses the same configured RFC-0003 backend for integration-lane structural checks.
+    #[must_use]
+    pub fn with_integration_verification_backend(
+        mut self,
+        backend: Arc<dyn ExecutionBackend>,
+    ) -> Self {
+        self.integration_verification_backend = backend;
         self
     }
 
@@ -251,6 +266,50 @@ impl AgentSupervisorTaskChildRunner {
         freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
             parent_workspace_root: request.options.workspace_root.clone(),
             base_snapshot_id: base_snapshot_id.to_owned(),
+            operation_id,
+            artifact_recorder: recorder,
+        })
+        .await
+    }
+
+    async fn freeze_integration_worktree_base(
+        &self,
+        parent_session: &Session,
+        request: &TaskIntegrationRunRequest,
+    ) -> Result<FrozenGitWorktreeBase> {
+        let store_path = parent_session.store_path().ok_or_else(|| {
+            anyhow::anyhow!(
+                "snapshot integration plan {} requires a durable parent session store",
+                request.plan.plan_id.as_str()
+            )
+        })?;
+        let operation_seed = format!(
+            "{}:{}:{}",
+            request.plan.plan_id.as_str(),
+            request.plan.plan_version,
+            request.plan.base_snapshot_id
+        );
+        let operation_id = format!(
+            "integration-overlay-{}",
+            stable_event_uuid("sigil-integration-overlay", &operation_seed)
+        );
+        let recorder =
+            MutationEventRecorder::new(JsonlSessionStore::new(store_path.to_path_buf())?);
+        let lease_recorder = recorder.clone();
+        let lease_workspace_root = request.workspace_root.clone();
+        let lease_operation_id = operation_id.clone();
+        let _lease = tokio::task::spawn_blocking(move || {
+            lease_recorder.coordinator_with_workspace_lease(
+                lease_workspace_root,
+                lease_operation_id,
+                None,
+            )
+        })
+        .await
+        .context("snapshot integration mutation lease task failed")??;
+        freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+            parent_workspace_root: request.workspace_root.clone(),
+            base_snapshot_id: request.plan.base_snapshot_id.clone(),
             operation_id,
             artifact_recorder: recorder,
         })
@@ -1441,6 +1500,112 @@ fn participant_control_step(step_id: &str, title: &str, role: AgentRole) -> Resu
     })
 }
 
+fn append_integration_runtime_event<H>(
+    parent_session: &mut Session,
+    handler: &mut H,
+    parent_workspace_id: &str,
+    plan: &sigil_kernel::IntegrationPlan,
+    frozen_base: Option<&FrozenGitWorktreeBase>,
+    event: IntegrationLaneRuntimeEvent,
+) -> Result<Option<String>>
+where
+    H: EventHandler + Send,
+{
+    match event {
+        IntegrationLaneRuntimeEvent::Prepared {
+            entry,
+            materialized_snapshot_id,
+        } => {
+            let base_commit = match &plan.base_representation {
+                sigil_kernel::IntegrationBaseRepresentation::CleanCommit { base_commit }
+                | sigil_kernel::IntegrationBaseRepresentation::SnapshotWorkspace {
+                    base_commit,
+                    ..
+                } => base_commit.clone(),
+                sigil_kernel::IntegrationBaseRepresentation::Unknown => {
+                    anyhow::bail!("integration lane prepared without a complete base");
+                }
+            };
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspaceCreated(IsolatedWorkspaceCreated {
+                    isolated_workspace_id: entry.owned_workspace_id.clone(),
+                    parent_workspace_id: parent_workspace_id.to_owned(),
+                    owner_agent_id: format!(
+                        "integration:{}:{}",
+                        entry.plan_id.as_str(),
+                        entry.lane_id.as_str()
+                    ),
+                    isolation_mode: WriteIsolationMode::Worktree,
+                    base_snapshot_id: plan.base_snapshot_id.clone(),
+                    backend: IsolatedWorkspaceBackend::GitWorktree,
+                    base_commit: Some(base_commit),
+                    overlay_digest: frozen_base.map(|frozen| frozen.overlay_digest().to_owned()),
+                    overlay_artifact_ref: frozen_base
+                        .map(|frozen| frozen.overlay_artifact_ref().clone()),
+                    overlay_content_artifact_refs: frozen_base
+                        .map(FrozenGitWorktreeBase::overlay_content_artifact_refs)
+                        .unwrap_or_default(),
+                    overlay_entry_count: frozen_base
+                        .map_or(0, FrozenGitWorktreeBase::overlay_entry_count),
+                    materialized_snapshot_id: Some(materialized_snapshot_id),
+                }),
+            )?;
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLanePrepared(entry),
+            )?;
+            Ok(None)
+        }
+        IntegrationLaneRuntimeEvent::MemberApplied(entry) => {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLaneMemberApplied(entry),
+            )?;
+            Ok(None)
+        }
+        IntegrationLaneRuntimeEvent::VerificationLinked(entry) => {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLaneVerificationLinked(entry),
+            )?;
+            Ok(None)
+        }
+        IntegrationLaneRuntimeEvent::Terminal(entry) => {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLaneTerminal(entry),
+            )?;
+            Ok(None)
+        }
+        IntegrationLaneRuntimeEvent::CleanupRecorded {
+            entry,
+            workspace_status,
+        } => {
+            let workspace_id = entry.owned_workspace_id.clone();
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLaneCleanupRecorded(entry),
+            )?;
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                    isolated_workspace_id: workspace_id.clone(),
+                    status: workspace_status,
+                }),
+            )?;
+            Ok(Some(workspace_id))
+        }
+    }
+}
+
 #[async_trait]
 impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
     fn supports_integration_lanes(&self) -> bool {
@@ -1457,6 +1622,16 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         H: EventHandler + Send,
     {
         let parent_workspace_id = stable_workspace_id(&request.workspace_root)?;
+        let frozen_base = match &request.plan.base_representation {
+            sigil_kernel::IntegrationBaseRepresentation::CleanCommit { .. } => None,
+            sigil_kernel::IntegrationBaseRepresentation::SnapshotWorkspace { .. } => Some(
+                self.freeze_integration_worktree_base(parent_session, &request)
+                    .await?,
+            ),
+            sigil_kernel::IntegrationBaseRepresentation::Unknown => {
+                anyhow::bail!("integration plan is missing its physical base representation");
+            }
+        };
         for lane in &request.plan.lanes {
             let isolated_workspace_id =
                 git_integration_workspace_id(&request.plan.plan_id, &lane.lane_id);
@@ -1474,11 +1649,29 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     isolation_mode: WriteIsolationMode::Worktree,
                     base_snapshot_id: request.plan.base_snapshot_id.clone(),
                     backend: IsolatedWorkspaceBackend::GitWorktree,
-                    base_commit: None,
-                    overlay_digest: None,
-                    overlay_artifact_ref: None,
-                    overlay_content_artifact_refs: Vec::new(),
-                    overlay_entry_count: 0,
+                    base_commit: Some(match &request.plan.base_representation {
+                        sigil_kernel::IntegrationBaseRepresentation::CleanCommit {
+                            base_commit,
+                        }
+                        | sigil_kernel::IntegrationBaseRepresentation::SnapshotWorkspace {
+                            base_commit,
+                            ..
+                        } => base_commit.clone(),
+                        sigil_kernel::IntegrationBaseRepresentation::Unknown => unreachable!(),
+                    }),
+                    overlay_digest: frozen_base
+                        .as_ref()
+                        .map(|frozen| frozen.overlay_digest().to_owned()),
+                    overlay_artifact_ref: frozen_base
+                        .as_ref()
+                        .map(|frozen| frozen.overlay_artifact_ref().clone()),
+                    overlay_content_artifact_refs: frozen_base
+                        .as_ref()
+                        .map(FrozenGitWorktreeBase::overlay_content_artifact_refs)
+                        .unwrap_or_default(),
+                    overlay_entry_count: frozen_base
+                        .as_ref()
+                        .map_or(0, FrozenGitWorktreeBase::overlay_entry_count),
                 }),
             )?;
             append_control(
@@ -1512,25 +1705,102 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let output = run_git_integration_lanes(GitIntegrationRunRequest {
-            parent_workspace_root: request.workspace_root,
-            plan: request.plan.clone(),
-            artifacts,
-        })
-        .await;
+        let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut physical_run = Box::pin(run_git_integration_lanes_with_events(
+            GitIntegrationRunRequest {
+                parent_workspace_root: request.workspace_root.clone(),
+                plan: request.plan.clone(),
+                artifacts,
+                frozen_base: frozen_base.clone(),
+                verification_backend: Some(self.integration_verification_backend.clone()),
+            },
+            Some(event_sender),
+        ));
+        let mut event_error: Option<String> = None;
+        let mut cleanup_recorded = BTreeSet::new();
+        let output = loop {
+            tokio::select! {
+                request_event = event_receiver.recv() => {
+                    let Some(request_event) = request_event else {
+                        break physical_run.await;
+                    };
+                    if let Some(error) = event_error.as_ref() {
+                        request_event.acknowledge(Err(error.clone()));
+                        continue;
+                    }
+                    let event = request_event.event().clone();
+                    let append_result = append_integration_runtime_event(
+                        parent_session,
+                        handler,
+                        &parent_workspace_id,
+                        &request.plan,
+                        frozen_base.as_ref(),
+                        event,
+                    );
+                    match append_result {
+                        Ok(cleanup_id) => {
+                            if let Some(cleanup_id) = cleanup_id {
+                                cleanup_recorded.insert(cleanup_id);
+                            }
+                            request_event.acknowledge(Ok(()));
+                        }
+                        Err(error) => {
+                            let message = format!("{error:#}");
+                            request_event.acknowledge(Err(message.clone()));
+                            event_error = Some(message);
+                        }
+                    }
+                }
+                result = &mut physical_run => {
+                    while let Ok(request_event) = event_receiver.try_recv() {
+                        if let Some(error) = event_error.as_ref() {
+                            request_event.acknowledge(Err(error.clone()));
+                            continue;
+                        }
+                        let event = request_event.event().clone();
+                        match append_integration_runtime_event(
+                            parent_session,
+                            handler,
+                            &parent_workspace_id,
+                            &request.plan,
+                            frozen_base.as_ref(),
+                            event,
+                        ) {
+                            Ok(cleanup_id) => {
+                                if let Some(cleanup_id) = cleanup_id {
+                                    cleanup_recorded.insert(cleanup_id);
+                                }
+                                request_event.acknowledge(Ok(()));
+                            }
+                            Err(error) => {
+                                let message = format!("{error:#}");
+                                request_event.acknowledge(Err(message.clone()));
+                                event_error = Some(message);
+                            }
+                        }
+                    }
+                    break result;
+                }
+            }
+        };
+        if let Some(error) = event_error {
+            anyhow::bail!("failed to persist integration lane lifecycle: {error}");
+        }
         let output = match output {
             Ok(output) => output,
             Err(error) => {
                 for lane in &request.plan.lanes {
+                    let isolated_workspace_id =
+                        git_integration_workspace_id(&request.plan.plan_id, &lane.lane_id);
+                    if cleanup_recorded.contains(&isolated_workspace_id) {
+                        continue;
+                    }
                     append_control(
                         parent_session,
                         handler,
                         ControlEntry::IsolatedWorkspaceCleanupRecorded(
                             IsolatedWorkspaceCleanupRecorded {
-                                isolated_workspace_id: git_integration_workspace_id(
-                                    &request.plan.plan_id,
-                                    &lane.lane_id,
-                                ),
+                                isolated_workspace_id,
                                 status: IsolatedWorkspaceCleanupStatus::Failed,
                             },
                         ),
@@ -1541,21 +1811,6 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         };
         let mut lanes = Vec::with_capacity(output.lanes.len());
         for lane in output.lanes {
-            append_control(
-                parent_session,
-                handler,
-                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
-                    isolated_workspace_id: git_integration_workspace_id(
-                        &lane.plan_id,
-                        &lane.lane_id,
-                    ),
-                    status: if lane.cleanup_error.is_some() {
-                        IsolatedWorkspaceCleanupStatus::Failed
-                    } else {
-                        IsolatedWorkspaceCleanupStatus::Removed
-                    },
-                }),
-            )?;
             lanes.push(IntegrationLaneChanged {
                 plan_id: lane.plan_id,
                 lane_id: lane.lane_id,

@@ -1080,6 +1080,8 @@ pub(in crate::runner) fn build_task_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
+    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
+        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
         Agent::new(planner_provider, planner_registry),
@@ -1094,9 +1096,8 @@ pub(in crate::runner) fn build_task_role_runtime(
     .with_planner_discovery_policy(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
-    );
-    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
-        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
+    )
+    .with_integration_verification_backend(execution_backend.clone());
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
@@ -1181,6 +1182,8 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
+    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
+        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
         Agent::new(planner_provider, planner_registry),
@@ -1195,9 +1198,8 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     .with_planner_discovery_policy(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
-    );
-    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
-        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
+    )
+    .with_integration_verification_backend(execution_backend.clone());
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))

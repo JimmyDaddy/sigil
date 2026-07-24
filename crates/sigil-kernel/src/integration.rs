@@ -12,7 +12,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    ChangeSet, ChangeSetFileAction, ChangeSetId, TaskId, TaskStepId, WorkspaceSnapshotId,
+    ChangeSet, ChangeSetFileAction, ChangeSetId, ReceiptStatus, TaskId, TaskStepId,
+    VerificationReceipt, WorkspaceSnapshotId,
     session::{ControlEntry, SessionLogEntry},
 };
 
@@ -808,6 +809,7 @@ pub struct IntegrationLaneChanged {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IntegrationLaneTarget {
     ManagedRef {
+        base_commit: String,
         expected_oid: String,
         private_ref: String,
     },
@@ -869,6 +871,7 @@ pub struct IntegrationLaneVerificationLinked {
     pub candidate: IntegrationLaneCandidate,
     pub verification_check_ids: Vec<String>,
     pub verification_scope_hashes: Vec<String>,
+    pub verification_receipts: Vec<VerificationReceipt>,
     pub linked_at_unix_ms: u64,
 }
 
@@ -1188,8 +1191,37 @@ impl IntegrationProjection {
                     .entry(entry.lane_id.clone())
                     .or_insert_with(IntegrationLaneLifecycleState::new);
                 let candidate = latest_lifecycle_candidate(lifecycle);
+                let receipt_check_ids = entry
+                    .verification_receipts
+                    .iter()
+                    .map(|receipt| receipt.check_spec_id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let receipt_scope_hashes = entry
+                    .verification_receipts
+                    .iter()
+                    .map(|receipt| receipt.binding.verification_scope_hash.as_str())
+                    .collect::<BTreeSet<_>>();
+                let expected_check_ids = entry
+                    .verification_check_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                let expected_scope_hashes = entry
+                    .verification_scope_hashes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
                 if entry.verification_check_ids.is_empty()
                     || entry.verification_scope_hashes != spec.verification_scope_hashes
+                    || entry.verification_receipts.is_empty()
+                    || receipt_check_ids != expected_check_ids
+                    || receipt_scope_hashes != expected_scope_hashes
+                    || entry.verification_receipts.iter().any(|receipt| {
+                        receipt.check_status != ReceiptStatus::Succeeded
+                            || receipt.receipt.status != ReceiptStatus::Succeeded
+                            || receipt.mutates_verification_scope
+                            || receipt.binding.execution_backend.is_none()
+                    })
                     || candidate.as_ref() != Some(&entry.candidate)
                     || entry.linked_at_unix_ms == 0
                 {
@@ -1296,10 +1328,15 @@ fn lane_target_matches_plan(plan: &IntegrationPlan, target: &IntegrationLaneTarg
         (
             IntegrationBaseRepresentation::CleanCommit { base_commit },
             IntegrationLaneTarget::ManagedRef {
+                base_commit: target_base_commit,
                 expected_oid,
                 private_ref,
             },
-        ) => base_commit == expected_oid && !private_ref.trim().is_empty(),
+        ) => {
+            base_commit == target_base_commit
+                && validate_git_object_id("integration lane expected oid", expected_oid).is_ok()
+                && !private_ref.trim().is_empty()
+        }
         (
             IntegrationBaseRepresentation::SnapshotWorkspace { overlay_digest, .. },
             IntegrationLaneTarget::SnapshotWorkspace {
@@ -1309,7 +1346,7 @@ fn lane_target_matches_plan(plan: &IntegrationPlan, target: &IntegrationLaneTarg
                 owned_workspace_id,
             },
         ) => {
-            &plan.base_snapshot_id == base_snapshot_id
+            !base_snapshot_id.trim().is_empty()
                 && overlay_digest == target_overlay
                 && *revision == 0
                 && !owned_workspace_id.trim().is_empty()
@@ -1407,7 +1444,8 @@ fn latest_lifecycle_candidate(
     match (&prepared.target, &applied.effect) {
         (
             IntegrationLaneTarget::ManagedRef {
-                expected_oid,
+                base_commit,
+                expected_oid: _,
                 private_ref,
             },
             IntegrationLaneMemberEffect::ManagedRefAdvanced {
@@ -1417,7 +1455,7 @@ fn latest_lifecycle_candidate(
             },
         ) => Some(IntegrationLaneCandidate::ManagedRef {
             private_ref: private_ref.clone(),
-            base_commit: expected_oid.clone(),
+            base_commit: base_commit.clone(),
             candidate_commit: new_oid.clone(),
             workspace_snapshot_id: candidate_snapshot_id.clone(),
         }),

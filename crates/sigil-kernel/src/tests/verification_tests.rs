@@ -470,6 +470,7 @@ fn verification_scope_profiles_apply_language_cache_excludes_without_hiding_skil
 #[test]
 fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
     for (source, requires_promotion) in [
+        (CheckDiscoverySource::RuntimeStructural, false),
         (CheckDiscoverySource::SigilVerificationFile, true),
         (CheckDiscoverySource::UserExplicitConfig, false),
         (CheckDiscoverySource::CiConfig, true),

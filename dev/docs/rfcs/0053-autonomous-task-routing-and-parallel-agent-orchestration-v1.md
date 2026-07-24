@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6d implemented；O6e-O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6e implemented；O6f-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1409,7 +1409,7 @@ unsupported entry 不泄漏；worker 未修改 inherited dirty/untracked entry �
 
 O6d：parallel Worktree batch 与 deterministic conflict graph。
 
-当前实现检查点（O6d 已完成；不构成 O6e 完成）：
+当前实现检查点（O6d、O6e 已完成）：
 
 - clean、无 overlay 的 Git base 已支持 homogeneous Worktree whole-batch：所有 owned worktree
   materialize/Created 与 child Started 完成后才统一放行 provider；provider execution 可真实重叠，
@@ -1419,21 +1419,32 @@ O6d：parallel Worktree batch 与 deterministic conflict graph。
   tree 是唯一 worker delta baseline，inherited bytes 不进入 proposal，runtime state/cache、ignored
   output、secret-like 与 unsupported entry 不会泄漏；durable prepared/created refs 参与 artifact
   retention 与 crash cleanup。
-- kernel 已有 deterministic conflict graph，runtime 已有 clean-base managed-ref integration lane
-  substrate；disjoint lane 的 apply/structural check/private-ref CAS 可重叠，冲突 lane 不创建 ref。
+- kernel 已有 deterministic conflict graph；runtime 同时实现 clean-base managed-ref lane 与
+  dirty-overlay snapshot-workspace lane。不同 lane 的 apply 和 scoped check 可真实重叠，同 lane
+  按 accepted plan 顺序执行；managed ref 使用 expected-old/new-object CAS，snapshot workspace
+  使用 expected snapshot/revision CAS，parent workspace 在此阶段保持不变。
 - child terminal proposal 已携带 content-bound base representation、changed-path、before/after hash、
   rename/content classification、declared/observed effect、artifact 与 verification refs；缺失、
   unknown 或 unsupported fact 一律保留 typed gap 并转 serial/manual review。graph 对 Task DAG、
   path/rename、generated root、package/build/Git/global effect、base 与 verification scope 生成稳定
   edge reason，反向 completion 不改变 plan/lane identity。
 - clean commit 与 O6c snapshot-overlay 已成为互斥 base representation。managed-ref runtime 会在
-  materialization 后复核 exact base commit；overlay 或 mixed/incomplete base 在任何 clean-ref
-  effect 前拒绝，等待 O6e snapshot-workspace lane，不会丢失 inherited bytes。
+  materialization 后复核 exact base commit；snapshot lane 从 frozen post-overlay baseline 独立
+  物化，未被 proposal 修改的 inherited dirty/untracked bytes 不进入 candidate delta。
+- runtime 在每个后续 physical effect 前等待
+  `IntegrationLanePrepared/MemberApplied/VerificationLinked/Terminal/CleanupRecorded` 的 durable
+  acknowledgement。`IntegrationLaneVerificationLinked` 原子携带 RFC-0003 receipt，绑定 exact
+  check spec、scope、backend、network policy 和 candidate；配置的 execution backend 同时用于
+  task final check 与 lane scoped check。
+- active/retained snapshot workspace 的 manifest/content artifacts 会从
+  `IsolatedWorkspacePrepared` 起被 retention pin；只有 `Removed/AlreadyMissing` cleanup 才释放
+  age/quota/workspace cleanup pin。启动恢复可从 append-only projection 重建 prepared、applied、
+  verified、conflicted 与 cleanup inventory，不会把 replay 当成重新 apply/check 的授权。
 - lane candidate 与 final promotion target 已改为 tagged union，不能同时记录 snapshot workspace 与
   managed ref，也不能在一次 promotion 中同时记录 workspace apply 与 Git ref advance。
-- O1e explicit invocation grant、O6c dirty overlay 与 O6d deterministic conflict graph 已完成。
-  snapshot-workspace lane、promotion authority、parent verification、恢复和 O6g 产品面仍未完成，
-  因而本 RFC 顶部状态继续保持 O6e-O8 deferred。
+- O1e explicit invocation grant、O6c dirty overlay、O6d deterministic conflict graph 与 O6e
+  physical/recovery lane contract 已完成。promotion authority、parent mutation/final verification
+  和 O6g 产品面仍未完成，因而本 RFC 顶部状态保持 O6f-O8 deferred。
 
 1. scheduler 只把相互独立的 `SubagentWrite + Worktree` ready step 组成 homogeneous batch；
    coordinator 在启动前冻结同一 O6c base identity，并对 profile、permission、workspace、

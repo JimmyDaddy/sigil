@@ -2,16 +2,61 @@ use anyhow::Result;
 
 use crate::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
-    IntegrationBaseRepresentation, IntegrationConflictReason, IntegrationContentClass,
-    IntegrationEffect, IntegrationFactGap, IntegrationLaneCandidate, IntegrationLaneChanged,
-    IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus, IntegrationLaneMemberApplied,
-    IntegrationLaneMemberEffect, IntegrationLanePrepared, IntegrationLaneStatus,
-    IntegrationLaneTarget, IntegrationLaneTerminal, IntegrationLaneVerificationLinked,
-    IntegrationObservedEffect, IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
-    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
-    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec, SessionLogEntry,
-    TaskId, TaskStepId, build_integration_plan,
+    EvidenceReceipt, EvidenceScope, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionNetworkReceipt, IntegrationBaseRepresentation, IntegrationConflictReason,
+    IntegrationContentClass, IntegrationEffect, IntegrationFactGap, IntegrationLaneCandidate,
+    IntegrationLaneChanged, IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus,
+    IntegrationLaneMemberApplied, IntegrationLaneMemberEffect, IntegrationLanePrepared,
+    IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
+    IntegrationLaneVerificationLinked, IntegrationObservedEffect, IntegrationPlanId,
+    IntegrationPlanRecorded, IntegrationProjection, IntegrationPromotionEffect,
+    IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
+    IntegrationProposalFacts, IntegrationProposalSpec, ReceiptStatus, RedactionState,
+    SessionLogEntry, TaskId, TaskStepId, VerificationBinding, VerificationReceipt,
+    build_integration_plan,
 };
+
+fn integration_verification_receipt(
+    check_spec_id: &str,
+    verification_scope_hash: &str,
+) -> VerificationReceipt {
+    VerificationReceipt {
+        receipt: EvidenceReceipt {
+            receipt_id: format!("receipt-{check_spec_id}"),
+            source_session_id: "session-integration".to_owned(),
+            source_event_id: format!("event-{check_spec_id}"),
+            source_event_type: "check_finished".to_owned(),
+            scope: EvidenceScope::Task("task-integration".to_owned()),
+            producer_tool_call: None,
+            workspace_revision: Some(0),
+            workspace_snapshot_id: Some("snapshot-scope".to_owned()),
+            policy_hash: Some("policy-integration".to_owned()),
+            changeset_id: None,
+            status: ReceiptStatus::Succeeded,
+            artifact_refs: Vec::new(),
+            redaction_state: RedactionState::None,
+            recorded_at_stream_sequence: 1,
+        },
+        binding: VerificationBinding {
+            workspace_id: "workspace-integration".to_owned(),
+            workspace_snapshot_id: "snapshot-scope".to_owned(),
+            verification_scope_hash: verification_scope_hash.to_owned(),
+            check_spec_hash: format!("hash-{check_spec_id}"),
+            environment_fingerprint: "environment-integration".to_owned(),
+            sandbox_profile_hash: "sandbox-integration".to_owned(),
+            execution_backend: Some(ExecutionBackendKind::Local),
+            execution_backend_capabilities: Some(ExecutionBackendCapabilities::default()),
+            execution_network: ExecutionNetworkReceipt::unknown("test local backend"),
+            workspace_trust_snapshot_id: "trust-integration".to_owned(),
+            approval_event_id: None,
+            sandbox_decision_id: None,
+        },
+        check_spec_id: check_spec_id.to_owned(),
+        check_status: ReceiptStatus::Succeeded,
+        failure_reason: None,
+        mutates_verification_scope: false,
+    }
+}
 
 fn change_set(id: &str, paths: &[&str]) -> Result<ChangeSet> {
     Ok(ChangeSet {
@@ -67,6 +112,33 @@ fn proposal(
             .collect::<Result<Vec<_>>>()?,
         generated.iter().map(|path| (*path).to_owned()).collect(),
         effect,
+        "scope-shared",
+        facts,
+    )
+}
+
+fn snapshot_proposal(id: &str, path: &str) -> Result<IntegrationProposalSpec> {
+    let change_set = change_set(id, &[path])?;
+    let base_representation = IntegrationBaseRepresentation::SnapshotWorkspace {
+        base_commit: "b".repeat(40),
+        overlay_digest: format!("sha256:{}", "d".repeat(64)),
+    };
+    let facts = IntegrationProposalFacts::from_changeset(
+        &change_set,
+        base_representation,
+        IntegrationContentClass::Text,
+        IntegrationEffect::Files,
+        Vec::new(),
+        format!("artifact-{id}"),
+        Vec::new(),
+    )?;
+    IntegrationProposalSpec::from_changeset(
+        &change_set,
+        TaskStepId::new(format!("step_{id}"))?,
+        "snapshot-overlay-base".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        IntegrationEffect::Files,
         "scope-shared",
         facts,
     )
@@ -515,6 +587,18 @@ fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<
         candidate_commit: "a".repeat(40),
         workspace_snapshot_id: "snapshot-lane".to_owned(),
     };
+    let verification_receipts = lane
+        .verification_scope_hashes
+        .iter()
+        .enumerate()
+        .map(|(index, scope_hash)| {
+            integration_verification_receipt(&format!("git-diff-check-{index}"), scope_hash)
+        })
+        .collect::<Vec<_>>();
+    let verification_check_ids = verification_receipts
+        .iter()
+        .map(|receipt| receipt.check_spec_id.clone())
+        .collect::<Vec<_>>();
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
             IntegrationPlanRecorded { plan: plan.clone() },
@@ -524,7 +608,8 @@ fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<
                 plan_id: plan.plan_id.clone(),
                 lane_id: lane_id.clone(),
                 target: IntegrationLaneTarget::ManagedRef {
-                    expected_oid: "b".repeat(40),
+                    base_commit: "b".repeat(40),
+                    expected_oid: "0".repeat(40),
                     private_ref: "refs/sigil/integration/plan-lifecycle/lane-1".to_owned(),
                 },
                 owned_workspace_id: "integration-plan-lifecycle-lane-1".to_owned(),
@@ -539,7 +624,7 @@ fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<
                 change_set_id: lane.proposals[0].clone(),
                 member_index: 0,
                 effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
-                    expected_old_oid: "b".repeat(40),
+                    expected_old_oid: "0".repeat(40),
                     new_oid: "a".repeat(40),
                     candidate_snapshot_id: "snapshot-lane".to_owned(),
                 },
@@ -551,8 +636,9 @@ fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<
                 plan_id: plan.plan_id.clone(),
                 lane_id: lane_id.clone(),
                 candidate: candidate.clone(),
-                verification_check_ids: vec!["git-diff-check".to_owned()],
+                verification_check_ids,
                 verification_scope_hashes: lane.verification_scope_hashes.clone(),
+                verification_receipts,
                 linked_at_unix_ms: 3,
             },
         )),
@@ -596,6 +682,177 @@ fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<
 }
 
 #[test]
+fn integration_projection_rebuilds_snapshot_ready_and_conflicted_inventory() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-snapshot-recovery")?,
+        TaskId::new("task_snapshot_recovery")?,
+        1,
+        vec![
+            snapshot_proposal("change-ready", "src/ready.rs")?,
+            snapshot_proposal("change-conflict", "src/conflict.rs")?,
+        ],
+    )?;
+    let ready_lane = plan
+        .lanes
+        .iter()
+        .find(|lane| lane.proposals[0].as_str() == "change-ready")
+        .cloned()
+        .expect("ready lane");
+    let conflict_lane = plan
+        .lanes
+        .iter()
+        .find(|lane| lane.proposals[0].as_str() == "change-conflict")
+        .cloned()
+        .expect("conflict lane");
+    let ready_candidate = IntegrationLaneCandidate::SnapshotWorkspace {
+        owned_workspace_id: "workspace-ready".to_owned(),
+        base_snapshot_id: "snapshot-child-ready".to_owned(),
+        overlay_digest: format!("sha256:{}", "d".repeat(64)),
+        revision: 1,
+        candidate_snapshot_id: "snapshot-ready".to_owned(),
+    };
+    let verification_receipts = ready_lane
+        .verification_scope_hashes
+        .iter()
+        .enumerate()
+        .map(|(index, scope_hash)| {
+            integration_verification_receipt(&format!("snapshot-check-{index}"), scope_hash)
+        })
+        .collect::<Vec<_>>();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
+            IntegrationPlanRecorded { plan: plan.clone() },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+            IntegrationLanePrepared {
+                plan_id: plan.plan_id.clone(),
+                lane_id: ready_lane.lane_id.clone(),
+                target: IntegrationLaneTarget::SnapshotWorkspace {
+                    base_snapshot_id: "snapshot-child-ready".to_owned(),
+                    overlay_digest: format!("sha256:{}", "d".repeat(64)),
+                    revision: 0,
+                    owned_workspace_id: "workspace-ready".to_owned(),
+                },
+                owned_workspace_id: "workspace-ready".to_owned(),
+                ordered_members: ready_lane.proposals.clone(),
+                prepared_at_unix_ms: 1,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(
+            IntegrationLaneMemberApplied {
+                plan_id: plan.plan_id.clone(),
+                lane_id: ready_lane.lane_id.clone(),
+                change_set_id: ready_lane.proposals[0].clone(),
+                member_index: 0,
+                effect: IntegrationLaneMemberEffect::SnapshotWorkspaceApplied {
+                    expected_snapshot_id: "snapshot-child-ready".to_owned(),
+                    expected_revision: 0,
+                    candidate_snapshot_id: "snapshot-ready".to_owned(),
+                    candidate_revision: 1,
+                },
+                applied_at_unix_ms: 2,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneVerificationLinked(
+            IntegrationLaneVerificationLinked {
+                plan_id: plan.plan_id.clone(),
+                lane_id: ready_lane.lane_id.clone(),
+                candidate: ready_candidate.clone(),
+                verification_check_ids: verification_receipts
+                    .iter()
+                    .map(|receipt| receipt.check_spec_id.clone())
+                    .collect(),
+                verification_scope_hashes: ready_lane.verification_scope_hashes.clone(),
+                verification_receipts,
+                linked_at_unix_ms: 3,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(
+            IntegrationLaneTerminal {
+                plan_id: plan.plan_id.clone(),
+                lane_id: ready_lane.lane_id.clone(),
+                status: IntegrationLaneStatus::Ready,
+                candidate: Some(ready_candidate),
+                reason: None,
+                terminal_at_unix_ms: 4,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(
+            IntegrationLaneCleanupRecorded {
+                plan_id: plan.plan_id.clone(),
+                lane_id: ready_lane.lane_id.clone(),
+                owned_workspace_id: "workspace-ready".to_owned(),
+                status: IntegrationLaneCleanupStatus::Retained,
+                recorded_at_unix_ms: 5,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+            IntegrationLanePrepared {
+                plan_id: plan.plan_id.clone(),
+                lane_id: conflict_lane.lane_id.clone(),
+                target: IntegrationLaneTarget::SnapshotWorkspace {
+                    base_snapshot_id: "snapshot-child-conflict".to_owned(),
+                    overlay_digest: format!("sha256:{}", "d".repeat(64)),
+                    revision: 0,
+                    owned_workspace_id: "workspace-conflict".to_owned(),
+                },
+                owned_workspace_id: "workspace-conflict".to_owned(),
+                ordered_members: conflict_lane.proposals.clone(),
+                prepared_at_unix_ms: 6,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(
+            IntegrationLaneTerminal {
+                plan_id: plan.plan_id.clone(),
+                lane_id: conflict_lane.lane_id.clone(),
+                status: IntegrationLaneStatus::Conflict,
+                candidate: None,
+                reason: Some("content conflict".to_owned()),
+                terminal_at_unix_ms: 7,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(
+            IntegrationLaneCleanupRecorded {
+                plan_id: plan.plan_id,
+                lane_id: conflict_lane.lane_id.clone(),
+                owned_workspace_id: "workspace-conflict".to_owned(),
+                status: IntegrationLaneCleanupStatus::Removed,
+                recorded_at_unix_ms: 8,
+            },
+        )),
+    ];
+
+    let projection = IntegrationProjection::from_entries(&entries);
+    let state = projection.latest().expect("snapshot recovery state");
+    assert!(!state.inconsistent);
+    let ready = state
+        .lifecycle_lanes
+        .get(&ready_lane.lane_id)
+        .expect("ready snapshot lifecycle");
+    assert!(!ready.inconsistent);
+    assert!(ready.verification.is_some());
+    assert_eq!(
+        ready.cleanup.as_ref().map(|entry| entry.status),
+        Some(IntegrationLaneCleanupStatus::Retained)
+    );
+    let conflict = state
+        .lifecycle_lanes
+        .get(&conflict_lane.lane_id)
+        .expect("conflicted snapshot lifecycle");
+    assert!(!conflict.inconsistent);
+    assert!(conflict.applied_members.is_empty());
+    assert_eq!(
+        conflict.terminal.as_ref().map(|entry| entry.status),
+        Some(IntegrationLaneStatus::Conflict)
+    );
+    assert_eq!(
+        conflict.cleanup.as_ref().map(|entry| entry.status),
+        Some(IntegrationLaneCleanupStatus::Removed)
+    );
+    Ok(())
+}
+
+#[test]
 fn integration_projection_rejects_out_of_order_lane_member_receipt() -> Result<()> {
     let plan = build_integration_plan(
         IntegrationPlanId::new("plan-member-order")?,
@@ -620,7 +877,8 @@ fn integration_projection_rejects_out_of_order_lane_member_receipt() -> Result<(
                 plan_id: plan.plan_id.clone(),
                 lane_id: lane_id.clone(),
                 target: IntegrationLaneTarget::ManagedRef {
-                    expected_oid: "b".repeat(40),
+                    base_commit: "b".repeat(40),
+                    expected_oid: "0".repeat(40),
                     private_ref: "refs/sigil/integration/plan-member-order/lane-1".to_owned(),
                 },
                 owned_workspace_id: "integration-plan-member-order-lane-1".to_owned(),
@@ -635,7 +893,7 @@ fn integration_projection_rejects_out_of_order_lane_member_receipt() -> Result<(
                 change_set_id: lane.proposals[0].clone(),
                 member_index: 1,
                 effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
-                    expected_old_oid: "b".repeat(40),
+                    expected_old_oid: "0".repeat(40),
                     new_oid: "a".repeat(40),
                     candidate_snapshot_id: "snapshot-lane".to_owned(),
                 },

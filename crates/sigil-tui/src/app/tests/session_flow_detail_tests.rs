@@ -21,6 +21,45 @@ use sigil_kernel::{
     ToolResultMeta, WorkspaceConfig,
 };
 
+fn audit_integration_verification_receipt() -> sigil_kernel::VerificationReceipt {
+    sigil_kernel::VerificationReceipt {
+        receipt: sigil_kernel::EvidenceReceipt {
+            receipt_id: "receipt-git-diff-check".to_owned(),
+            source_session_id: "session-integration".to_owned(),
+            source_event_id: "event-git-diff-check".to_owned(),
+            source_event_type: "check_finished".to_owned(),
+            scope: sigil_kernel::EvidenceScope::Task("task-integration".to_owned()),
+            producer_tool_call: None,
+            workspace_revision: Some(0),
+            workspace_snapshot_id: Some("snapshot-scope".to_owned()),
+            policy_hash: Some("policy-integration".to_owned()),
+            changeset_id: None,
+            status: sigil_kernel::ReceiptStatus::Succeeded,
+            artifact_refs: Vec::new(),
+            redaction_state: sigil_kernel::RedactionState::None,
+            recorded_at_stream_sequence: 1,
+        },
+        binding: sigil_kernel::VerificationBinding {
+            workspace_id: "workspace-integration".to_owned(),
+            workspace_snapshot_id: "snapshot-scope".to_owned(),
+            verification_scope_hash: "scope-audit".to_owned(),
+            check_spec_hash: "hash-git-diff-check".to_owned(),
+            environment_fingerprint: "environment-integration".to_owned(),
+            sandbox_profile_hash: "sandbox-integration".to_owned(),
+            execution_backend: Some(ExecutionBackendKind::Local),
+            execution_backend_capabilities: Some(ExecutionBackendCapabilities::default()),
+            execution_network: ExecutionNetworkReceipt::unknown("test local backend"),
+            workspace_trust_snapshot_id: "trust-integration".to_owned(),
+            approval_event_id: None,
+            sandbox_decision_id: None,
+        },
+        check_spec_id: "git-diff-check".to_owned(),
+        check_status: sigil_kernel::ReceiptStatus::Succeeded,
+        failure_reason: None,
+        mutates_verification_scope: false,
+    }
+}
+
 #[test]
 fn session_labels_and_identifiers_truncate_as_expected() {
     assert_eq!(
@@ -138,7 +177,8 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
             plan_id: plan_id.clone(),
             lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
             target: sigil_kernel::IntegrationLaneTarget::ManagedRef {
-                expected_oid: "b".repeat(40),
+                base_commit: "b".repeat(40),
+                expected_oid: "0".repeat(40),
                 private_ref: "refs/sigil/integration/plan-audit/lane-1".to_owned(),
             },
             owned_workspace_id: "integration-plan-audit-lane-1".to_owned(),
@@ -158,7 +198,7 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
             change_set_id: sigil_kernel::ChangeSetId::new("change-audit")?,
             member_index: 0,
             effect: sigil_kernel::IntegrationLaneMemberEffect::ManagedRefAdvanced {
-                expected_old_oid: "b".repeat(40),
+                expected_old_oid: "0".repeat(40),
                 new_oid: "a".repeat(40),
                 candidate_snapshot_id: "snapshot-lane".to_owned(),
             },
@@ -182,6 +222,7 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
             },
             verification_check_ids: vec!["git-diff-check".to_owned()],
             verification_scope_hashes: vec!["scope-audit".to_owned()],
+            verification_receipts: vec![audit_integration_verification_receipt()],
             linked_at_unix_ms: 3,
         },
     ));
@@ -971,6 +1012,7 @@ fn verification_audit_label_helpers_cover_all_variants() {
         assert_eq!(workspace_trust_label(trust), label);
     }
     for source in [
+        sigil_kernel::CheckDiscoverySource::RuntimeStructural,
         sigil_kernel::CheckDiscoverySource::SigilVerificationFile,
         sigil_kernel::CheckDiscoverySource::UserExplicitConfig,
         sigil_kernel::CheckDiscoverySource::CiConfig,

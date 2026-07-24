@@ -1259,6 +1259,7 @@ pub(super) fn check_discovery_source_label(
     source: sigil_kernel::CheckDiscoverySource,
 ) -> &'static str {
     match source {
+        sigil_kernel::CheckDiscoverySource::RuntimeStructural => "runtime_structural",
         sigil_kernel::CheckDiscoverySource::SigilVerificationFile => "sigil_verification_file",
         sigil_kernel::CheckDiscoverySource::UserExplicitConfig => "user_explicit_config",
         sigil_kernel::CheckDiscoverySource::CiConfig => "ci_config",

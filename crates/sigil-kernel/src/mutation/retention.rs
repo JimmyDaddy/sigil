@@ -416,22 +416,36 @@ fn select_artifacts_for_cleanup(
             .cmp(&right.created_at_ms)
             .then_with(|| left.artifact_id.cmp(&right.artifact_id))
     });
+    let pinned_artifacts = active_isolated_workspace_artifact_ids(session_log_path)?;
 
     match target {
-        MutationArtifactCleanupTarget::Recommended => {
-            Ok(select_recommended_artifacts(groups, policy, now_ms))
-        }
-        MutationArtifactCleanupTarget::Expired => {
-            Ok(select_expired_artifacts(groups, policy, now_ms))
-        }
+        MutationArtifactCleanupTarget::Recommended => Ok(without_pinned_artifacts(
+            select_recommended_artifacts(groups, policy, now_ms),
+            &pinned_artifacts,
+        )),
+        MutationArtifactCleanupTarget::Expired => Ok(without_pinned_artifacts(
+            select_expired_artifacts(groups, policy, now_ms),
+            &pinned_artifacts,
+        )),
         MutationArtifactCleanupTarget::Unavailable => Ok(select_unavailable_artifacts(groups)),
         MutationArtifactCleanupTarget::Unreferenced => {
             select_unreferenced_artifacts(groups, session_log_path)
         }
-        MutationArtifactCleanupTarget::Workspace(workspace_id) => {
-            Ok(select_workspace_artifacts(groups, workspace_id))
-        }
+        MutationArtifactCleanupTarget::Workspace(workspace_id) => Ok(without_pinned_artifacts(
+            select_workspace_artifacts(groups, workspace_id),
+            &pinned_artifacts,
+        )),
     }
+}
+
+fn without_pinned_artifacts(
+    mut selection: MutationArtifactRetentionSelection,
+    pinned_artifacts: &BTreeSet<MutationArtifactId>,
+) -> MutationArtifactRetentionSelection {
+    selection
+        .selected
+        .retain(|candidate| !pinned_artifacts.contains(&candidate.artifact_id));
+    selection
 }
 
 fn select_recommended_artifacts(
@@ -722,6 +736,73 @@ fn referenced_mutation_artifact_ids(
         }
     }
     Ok(artifact_ids)
+}
+
+fn active_isolated_workspace_artifact_ids(
+    session_log_path: &Path,
+) -> Result<BTreeSet<MutationArtifactId>> {
+    #[derive(Default)]
+    struct ActiveWorkspaceArtifacts {
+        artifacts: BTreeSet<MutationArtifactId>,
+        cleanup_terminal: bool,
+    }
+
+    let mut workspaces = BTreeMap::<WorkspaceId, ActiveWorkspaceArtifacts>::new();
+    for record in JsonlSessionStore::read_event_records(session_log_path)? {
+        let event = record.into_stored_event();
+        if event.event_type != DurableEventType::IsolatedWorkspacePrepared.as_str()
+            && event.event_type != DurableEventType::IsolatedWorkspaceCreated.as_str()
+            && event.event_type != DurableEventType::IsolatedWorkspaceCleanupRecorded.as_str()
+        {
+            continue;
+        }
+        let entry = event
+            .payload
+            .get("session_log_entry")
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} event is missing session_log_entry", event.event_type)
+            })
+            .and_then(|value| {
+                serde_json::from_value::<SessionLogEntry>(value)
+                    .context("failed to decode isolated workspace retention pin")
+            })?;
+        match entry {
+            SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(entry)) => {
+                let state = workspaces.entry(entry.isolated_workspace_id).or_default();
+                insert_overlay_artifact_refs(
+                    &mut state.artifacts,
+                    entry.overlay_artifact_ref,
+                    entry.overlay_content_artifact_refs,
+                );
+            }
+            SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(entry)) => {
+                let state = workspaces.entry(entry.isolated_workspace_id).or_default();
+                insert_overlay_artifact_refs(
+                    &mut state.artifacts,
+                    entry.overlay_artifact_ref,
+                    entry.overlay_content_artifact_refs,
+                );
+            }
+            SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(entry)) => {
+                workspaces
+                    .entry(entry.isolated_workspace_id)
+                    .or_default()
+                    .cleanup_terminal = entry.status.is_terminal();
+            }
+            _ => {
+                anyhow::bail!(
+                    "{} event does not contain a matching isolated workspace entry",
+                    event.event_type
+                );
+            }
+        }
+    }
+    Ok(workspaces
+        .into_values()
+        .filter(|workspace| !workspace.cleanup_terminal)
+        .flat_map(|workspace| workspace.artifacts)
+        .collect())
 }
 
 fn insert_overlay_artifact_refs(

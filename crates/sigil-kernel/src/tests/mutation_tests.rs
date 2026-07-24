@@ -7,7 +7,8 @@ use anyhow::Result;
 
 use crate::{
     CheckpointRestored, ControlEntry, DurableEventType, EventClass, IsolatedWorkspaceBackend,
-    IsolatedWorkspacePrepared, JsonlSessionStore, ModelMessage, MutationArtifactCleanupRequested,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspacePrepared,
+    JsonlSessionStore, ModelMessage, MutationArtifactCleanupRequested,
     MutationArtifactCleanupTarget, MutationArtifactLifecycleRecorded,
     MutationArtifactLifecycleStatus, MutationArtifactRetentionPolicy, MutationBatchStatus,
     MutationEventRecorder, MutationObservedState, MutationPrepared, MutationReconciled,
@@ -1097,15 +1098,15 @@ fn isolated_workspace_overlay_artifacts_are_durable_retention_references() -> Re
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::IsolatedWorkspacePrepared(IsolatedWorkspacePrepared {
             isolated_workspace_id: "worktree-overlay-retention".to_owned(),
-            parent_workspace_id: workspace_id,
+            parent_workspace_id: workspace_id.clone(),
             owner_agent_id: "task:overlay".to_owned(),
             isolation_mode: WriteIsolationMode::Worktree,
             base_snapshot_id: "snapshot-overlay".to_owned(),
             backend: IsolatedWorkspaceBackend::GitWorktree,
             base_commit: Some("0123456789012345678901234567890123456789".to_owned()),
             overlay_digest: Some("sha256:overlay".to_owned()),
-            overlay_artifact_ref: Some(manifest_artifact),
-            overlay_content_artifact_refs: vec![content_artifact],
+            overlay_artifact_ref: Some(manifest_artifact.clone()),
+            overlay_content_artifact_refs: vec![content_artifact.clone()],
             overlay_entry_count: 1,
         }),
     ))?;
@@ -1117,6 +1118,50 @@ fn isolated_workspace_overlay_artifacts_are_durable_retention_references() -> Re
 
     assert_eq!(preview.scanned_artifacts, 2);
     assert_eq!(preview.deleted_artifacts, 0);
+    assert_eq!(artifact_files(&artifact_root)?.len(), 4);
+
+    let aggressive_policy = MutationArtifactRetentionPolicy {
+        max_artifacts: Some(0),
+        max_bytes: Some(0),
+        expire_older_than_ms: Some(0),
+    };
+    let recommended = recorder.preview_artifact_retention(&aggressive_policy)?;
+    let expired = recorder
+        .preview_artifact_cleanup(&MutationArtifactCleanupTarget::Expired, &aggressive_policy)?;
+    let workspace_cleanup = recorder.preview_artifact_cleanup(
+        &MutationArtifactCleanupTarget::Workspace(workspace_id.clone()),
+        &aggressive_policy,
+    )?;
+    assert_eq!(recommended.expired_artifacts, 0);
+    assert_eq!(expired.expired_artifacts, 0);
+    assert_eq!(workspace_cleanup.deleted_artifacts, 0);
+
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+            isolated_workspace_id: "worktree-overlay-retention".to_owned(),
+            status: IsolatedWorkspaceCleanupStatus::Retained,
+        }),
+    ))?;
+    assert_eq!(
+        recorder
+            .preview_artifact_retention(&aggressive_policy)?
+            .expired_artifacts,
+        0
+    );
+
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+            isolated_workspace_id: "worktree-overlay-retention".to_owned(),
+            status: IsolatedWorkspaceCleanupStatus::Removed,
+        }),
+    ))?;
+    let released = recorder.preview_artifact_retention(&aggressive_policy)?;
+    assert_eq!(released.expired_artifacts, 2);
+    assert_eq!(
+        released.expired_bytes,
+        b"dirty note".len() as u64 + b"overlay manifest".len() as u64
+    );
+    assert!(released.lifecycle_events.is_empty());
     assert_eq!(artifact_files(&artifact_root)?.len(), 4);
     Ok(())
 }
