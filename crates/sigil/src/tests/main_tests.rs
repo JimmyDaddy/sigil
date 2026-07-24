@@ -95,6 +95,8 @@ fn cli_parses_hidden_model_eval_command_options() -> Result<()> {
         "120",
         "--output-dir",
         "/tmp/model-eval",
+        "--orchestration-route-contract",
+        "/tmp/orchestration-route.toml",
     ])?;
 
     assert!(matches!(
@@ -105,9 +107,12 @@ fn cli_parses_hidden_model_eval_command_options() -> Result<()> {
             max_cost_usd,
             timeout_secs: 120,
             output_dir,
+            orchestration_route_contract,
         }) if cases == ["small-code-edit"]
             && max_cost_usd == "0.50"
             && output_dir == Path::new("/tmp/model-eval")
+            && orchestration_route_contract
+                == Some(PathBuf::from("/tmp/orchestration-route.toml"))
     ));
     Ok(())
 }
@@ -132,6 +137,39 @@ fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
             root.join("dev/evals/model-fixtures/small-doc-edit"),
             root.join("dev/evals/model-fixtures/orchestration/positive/cross-layer"),
         ]
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn model_eval_orchestration_route_contract_loader_is_bounded_and_typed() -> Result<()> {
+    let root = unique_temp_workspace("sigil-model-eval-route-contract")?;
+    let path = root.join("route.toml");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let contract = sigil_runtime::model_eval::ModelEvalOrchestrationRouteContractV1 {
+        schema_version: 1,
+        provider_kind: "deepseek".to_owned(),
+        endpoint_family: "openai-compatible-chat".to_owned(),
+        canonical_model_version: "test-v1".to_owned(),
+        routing_prompt_digest: digest.clone(),
+        planner_prompt_digest: digest.clone(),
+        system_prompt_digest: digest.clone(),
+        tool_profile_contract_digest: digest,
+        sigil_commit: "test-commit".to_owned(),
+        sigil_build: "test-build".to_owned(),
+    };
+    fs::write(&path, toml::to_string(&contract)?)?;
+
+    assert_eq!(
+        super::load_model_eval_orchestration_route_contract(&root, Path::new("route.toml"))?,
+        contract
+    );
+
+    fs::write(&path, vec![b'x'; 64 * 1024 + 1])?;
+    assert!(
+        super::load_model_eval_orchestration_route_contract(&root, Path::new("route.toml"))
+            .is_err()
     );
     fs::remove_dir_all(root)?;
     Ok(())

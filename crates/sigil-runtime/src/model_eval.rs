@@ -26,8 +26,25 @@ pub const MODEL_EVAL_MAX_OUTPUT_TOKENS: u32 = 32 * 1024;
 pub const MODEL_EVAL_MAX_CHECKS: usize = 4;
 pub const MODEL_EVAL_MAX_ASSERTIONS: usize = 8;
 pub const MODEL_EVAL_MAX_CHECK_TIMEOUT_MS: u64 = 60_000;
+pub const MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION: u16 = 1;
 
 const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &["edit_file", "read_file", "write_file"];
+
+/// Candidate-release facts that cannot be inferred safely from a provider alias or assistant text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ModelEvalOrchestrationRouteContractV1 {
+    pub schema_version: u16,
+    pub provider_kind: String,
+    pub endpoint_family: String,
+    pub canonical_model_version: String,
+    pub routing_prompt_digest: String,
+    pub planner_prompt_digest: String,
+    pub system_prompt_digest: String,
+    pub tool_profile_contract_digest: String,
+    pub sigil_commit: String,
+    pub sigil_build: String,
+}
 
 /// Strict, committed definition for one generated model-eval workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

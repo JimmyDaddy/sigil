@@ -18,7 +18,8 @@ use crate::application_run::{
 };
 
 use super::{
-    LoadedModelEvalFixture, MaterializedModelEvalFixture, load_model_eval_fixture,
+    LoadedModelEvalFixture, MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION,
+    MaterializedModelEvalFixture, ModelEvalOrchestrationRouteContractV1, load_model_eval_fixture,
     materialize_model_eval_fixture, sha256_digest, sync_directory,
     verification::ModelEvalVerificationExecution,
 };
@@ -35,6 +36,7 @@ pub const MODEL_EVAL_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ModelEvalCampaignRequest {
     pub config_path: PathBuf,
     pub fixture_roots: Vec<PathBuf>,
+    pub orchestration_route_contract: Option<ModelEvalOrchestrationRouteContractV1>,
     pub repetitions: u32,
     pub max_cost_microusd: u64,
     pub campaign_timeout: Duration,
@@ -141,6 +143,8 @@ pub struct ModelEvalCampaignExecution {
     pub planned_runs: usize,
     pub reservation_microusd_per_run: u64,
     pub charged_microusd: u64,
+    pub orchestration_route_contract: Option<ModelEvalOrchestrationRouteContractV1>,
+    pub orchestration_corpus_digest: Option<String>,
     pub runs: Vec<ModelEvalRunExecution>,
 }
 
@@ -251,7 +255,7 @@ pub async fn run_model_eval_campaign(
     services: &ApplicationRunServices,
 ) -> Result<ModelEvalCampaignExecution> {
     let started_at_unix_ms = unix_time_ms()?;
-    let fixtures = preflight_campaign(&request)?;
+    let (fixtures, orchestration_corpus_digest) = preflight_campaign(&request)?;
     let planned_runs = fixtures
         .len()
         .checked_mul(request.repetitions as usize)
@@ -333,6 +337,8 @@ pub async fn run_model_eval_campaign(
         planned_runs,
         reservation_microusd_per_run,
         charged_microusd,
+        orchestration_route_contract: request.orchestration_route_contract,
+        orchestration_corpus_digest,
         runs,
     };
     super::write_model_eval_campaign_report(&campaign)?;
@@ -368,7 +374,9 @@ pub(crate) fn model_eval_reservation_microusd(
     Ok(reservation)
 }
 
-fn preflight_campaign(request: &ModelEvalCampaignRequest) -> Result<Vec<LoadedModelEvalFixture>> {
+fn preflight_campaign(
+    request: &ModelEvalCampaignRequest,
+) -> Result<(Vec<LoadedModelEvalFixture>, Option<String>)> {
     if request.fixture_roots.is_empty() || request.fixture_roots.len() > MODEL_EVAL_MAX_CASES {
         bail!(
             "model eval campaign must contain between 1 and {} cases",
@@ -401,7 +409,118 @@ fn preflight_campaign(request: &ModelEvalCampaignRequest) -> Result<Vec<LoadedMo
             bail!("model eval campaign contains duplicate fixture ids");
         }
     }
-    Ok(fixtures)
+    let orchestration_cases = fixtures
+        .iter()
+        .filter(|fixture| fixture.manifest.orchestration.is_some())
+        .count();
+    let orchestration_corpus_digest = match (
+        orchestration_cases,
+        request.orchestration_route_contract.as_ref(),
+    ) {
+        (0, None) => None,
+        (0, Some(_)) => {
+            bail!("orchestration route contract requires orchestration fixtures");
+        }
+        (_, None) => {
+            bail!(
+                "orchestration fixtures require an exact route contract before provider dispatch"
+            );
+        }
+        (count, Some(_)) if count != fixtures.len() => {
+            bail!("model eval campaign cannot mix orchestration and ordinary fixtures");
+        }
+        (_, Some(contract)) => {
+            validate_orchestration_route_contract(contract)?;
+            let corpus_versions = fixtures
+                .iter()
+                .filter_map(|fixture| fixture.manifest.orchestration.as_ref())
+                .map(|orchestration| orchestration.corpus_version.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            if corpus_versions.len() != 1 {
+                bail!("orchestration campaign must use one exact corpus version");
+            }
+            Some(orchestration_corpus_digest(&fixtures))
+        }
+    };
+    Ok((fixtures, orchestration_corpus_digest))
+}
+
+fn validate_orchestration_route_contract(
+    contract: &ModelEvalOrchestrationRouteContractV1,
+) -> Result<()> {
+    if contract.schema_version != MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION {
+        bail!(
+            "unsupported orchestration route contract schema version: {}",
+            contract.schema_version
+        );
+    }
+    for (field, value) in [
+        ("provider_kind", contract.provider_kind.as_str()),
+        ("endpoint_family", contract.endpoint_family.as_str()),
+        (
+            "canonical_model_version",
+            contract.canonical_model_version.as_str(),
+        ),
+        ("sigil_commit", contract.sigil_commit.as_str()),
+        ("sigil_build", contract.sigil_build.as_str()),
+    ] {
+        if value.trim().is_empty()
+            || value.chars().count() > 512
+            || value.chars().any(char::is_control)
+        {
+            bail!("orchestration route contract has an invalid {field}");
+        }
+    }
+    for (field, digest) in [
+        (
+            "routing_prompt_digest",
+            contract.routing_prompt_digest.as_str(),
+        ),
+        (
+            "planner_prompt_digest",
+            contract.planner_prompt_digest.as_str(),
+        ),
+        (
+            "system_prompt_digest",
+            contract.system_prompt_digest.as_str(),
+        ),
+        (
+            "tool_profile_contract_digest",
+            contract.tool_profile_contract_digest.as_str(),
+        ),
+    ] {
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("orchestration route contract has an invalid {field}");
+        }
+    }
+    Ok(())
+}
+
+fn orchestration_corpus_digest(fixtures: &[LoadedModelEvalFixture]) -> String {
+    let mut identity = Vec::new();
+    identity.extend_from_slice(b"sigil-orchestration-corpus-v1\0");
+    for fixture in fixtures {
+        let orchestration = fixture
+            .manifest
+            .orchestration
+            .as_ref()
+            .expect("preflight only hashes orchestration fixtures");
+        identity.extend_from_slice(fixture.manifest.id.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(fixture.manifest_digest.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(orchestration.corpus_version.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(match orchestration.case_class {
+            sigil_kernel::OrchestrationEvalCaseClass::Negative => b"negative",
+            sigil_kernel::OrchestrationEvalCaseClass::Positive => b"positive",
+        });
+        identity.push(0);
+    }
+    sha256_digest(&identity)
 }
 
 async fn execute_model_eval_run(

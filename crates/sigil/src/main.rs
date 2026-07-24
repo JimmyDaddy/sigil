@@ -143,6 +143,8 @@ enum Commands {
         timeout_secs: u64,
         #[arg(long = "output-dir")]
         output_dir: PathBuf,
+        #[arg(long = "orchestration-route-contract")]
+        orchestration_route_contract: Option<PathBuf>,
     },
     // Hidden provider-specific developer diagnostics. Keep ordinary users on the
     // TUI, `run`, `doctor`, or explicit provider configuration surfaces.
@@ -326,6 +328,7 @@ async fn run_main() -> Result<u8> {
             max_cost_usd,
             timeout_secs,
             output_dir,
+            orchestration_route_contract,
         } => {
             model_eval_command(
                 &config_path,
@@ -335,6 +338,7 @@ async fn run_main() -> Result<u8> {
                 &max_cost_usd,
                 timeout_secs,
                 output_dir,
+                orchestration_route_contract,
             )
             .await?;
         }
@@ -364,6 +368,7 @@ async fn model_eval_command(
     max_cost_usd: &str,
     timeout_secs: u64,
     output_dir: PathBuf,
+    orchestration_route_contract: Option<PathBuf>,
 ) -> Result<()> {
     let fixture_roots = resolve_model_eval_fixture_roots(launch_cwd, &cases)?;
     let output_dir = if output_dir.is_absolute() {
@@ -371,6 +376,9 @@ async fn model_eval_command(
     } else {
         launch_cwd.join(output_dir)
     };
+    let orchestration_route_contract = orchestration_route_contract
+        .map(|path| load_model_eval_orchestration_route_contract(launch_cwd, &path))
+        .transpose()?;
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
     let services = ApplicationRunServices::new(disclosure_presenter);
@@ -378,6 +386,7 @@ async fn model_eval_command(
         sigil_runtime::model_eval::ModelEvalCampaignRequest {
             config_path: config_path.to_path_buf(),
             fixture_roots,
+            orchestration_route_contract,
             repetitions,
             max_cost_microusd: parse_model_eval_cost_microusd(max_cost_usd)?,
             campaign_timeout: std::time::Duration::from_secs(timeout_secs),
@@ -395,8 +404,39 @@ async fn model_eval_command(
     );
     println!("wrote {}", manifest_path.display());
     println!("wrote {}", campaign.output_dir.join("summary.md").display());
+    if campaign.orchestration_route_contract.is_some() {
+        let orchestration_dir = campaign.output_dir.join("orchestration");
+        println!(
+            "wrote {}",
+            orchestration_dir.join("results.jsonl").display()
+        );
+        println!(
+            "wrote {}",
+            orchestration_dir.join("manifest.json").display()
+        );
+        println!("wrote {}", orchestration_dir.join("summary.md").display());
+    }
     validate_model_eval_manifest(&manifest)?;
     Ok(())
+}
+
+fn load_model_eval_orchestration_route_contract(
+    launch_cwd: &Path,
+    requested_path: &Path,
+) -> Result<sigil_runtime::model_eval::ModelEvalOrchestrationRouteContractV1> {
+    let path = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        launch_cwd.join(requested_path)
+    };
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1024 {
+        anyhow::bail!("orchestration route contract must be a regular file no larger than 64 KiB");
+    }
+    let bytes = std::fs::read(&path)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| anyhow::anyhow!("orchestration route contract is not UTF-8"))?;
+    toml::from_str(text).map_err(|_| anyhow::anyhow!("orchestration route contract is invalid"))
 }
 
 fn validate_model_eval_manifest(manifest: &sigil_kernel::ModelEvalReportManifestV3) -> Result<()> {

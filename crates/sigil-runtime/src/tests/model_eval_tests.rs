@@ -23,10 +23,10 @@ use tokio::{
 use crate::{
     application_run::ApplicationRunServices,
     model_eval::{
-        ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalRunExecutionStatus,
-        load_model_eval_fixture, materialize_model_eval_fixture, model_eval_reservation_microusd,
-        orchestration_eval_observation, run_model_eval_campaign, verify_model_eval_run,
-        write_isolated_model_eval_config,
+        ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalOrchestrationRouteContractV1,
+        ModelEvalRunExecutionStatus, load_model_eval_fixture, materialize_model_eval_fixture,
+        model_eval_reservation_microusd, orchestration_eval_observation, run_model_eval_campaign,
+        verify_model_eval_run, write_isolated_model_eval_config,
     },
 };
 
@@ -46,6 +46,22 @@ fn fixture_root(id: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../dev/evals/model-fixtures")
         .join(id)
+}
+
+fn orchestration_route_contract() -> ModelEvalOrchestrationRouteContractV1 {
+    let digest = format!("sha256:{}", "1".repeat(64));
+    ModelEvalOrchestrationRouteContractV1 {
+        schema_version: 1,
+        provider_kind: "deepseek".to_owned(),
+        endpoint_family: "openai-compatible-chat".to_owned(),
+        canonical_model_version: "test-v1".to_owned(),
+        routing_prompt_digest: digest.clone(),
+        planner_prompt_digest: digest.clone(),
+        system_prompt_digest: digest.clone(),
+        tool_profile_contract_digest: digest,
+        sigil_commit: "test-commit".to_owned(),
+        sigil_build: "test-build".to_owned(),
+    }
 }
 
 #[test]
@@ -423,6 +439,7 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
             ModelEvalCampaignRequest {
                 config_path,
                 fixture_roots: vec![fixture_root("small-code-edit")],
+                orchestration_route_contract: None,
                 repetitions: 2,
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
@@ -505,11 +522,32 @@ corpus_version = "rfc-0053-v1"
         let temp = tempdir().expect("temp dir");
         let config_path = temp.path().join("source.toml");
         write_source_config(&config_path, &base_url, "auto-edit");
+        let missing_contract = run_model_eval_campaign(
+            ModelEvalCampaignRequest {
+                config_path: config_path.clone(),
+                fixture_roots: vec![fixture_temp.path().to_path_buf()],
+                orchestration_route_contract: None,
+                repetitions: 1,
+                max_cost_microusd: 500_000,
+                campaign_timeout: Duration::from_secs(10),
+                output_dir: temp.path().join("missing-contract"),
+            },
+            &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+        )
+        .await
+        .expect_err("orchestration route contract is mandatory");
+        assert!(
+            missing_contract
+                .to_string()
+                .contains("require an exact route contract")
+        );
+        assert!(requests.lock().expect("requests lock").is_empty());
 
         let campaign = run_model_eval_campaign(
             ModelEvalCampaignRequest {
                 config_path,
                 fixture_roots: vec![fixture_temp.path().to_path_buf()],
+                orchestration_route_contract: Some(orchestration_route_contract()),
                 repetitions: 1,
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
@@ -524,6 +562,33 @@ corpus_version = "rfc-0053-v1"
         assert_eq!(
             campaign.runs[0].status,
             ModelEvalRunExecutionStatus::Completed
+        );
+        let orchestration_dir = campaign.output_dir.join("orchestration");
+        assert!(orchestration_dir.join("results.jsonl").is_file());
+        assert!(orchestration_dir.join("manifest.json").is_file());
+        assert!(orchestration_dir.join("summary.md").is_file());
+        let orchestration_manifest: sigil_kernel::OrchestrationEvalReportManifestV1 =
+            serde_json::from_slice(
+                &fs::read(orchestration_dir.join("manifest.json"))
+                    .expect("read orchestration manifest"),
+            )
+            .expect("decode orchestration manifest");
+        assert_eq!(orchestration_manifest.route_gates.len(), 1);
+        assert_eq!(
+            orchestration_manifest.route_gates[0].status,
+            sigil_kernel::OrchestrationEvalRouteStatus::InsufficientEvidence
+        );
+        assert_eq!(
+            orchestration_manifest.route_gates[0]
+                .identity
+                .provider_adapter,
+            "deepseek"
+        );
+        assert_eq!(
+            orchestration_manifest.route_gates[0]
+                .identity
+                .canonical_model_id,
+            "deepseek-v4-flash"
         );
         let requests = requests.lock().expect("requests lock");
         assert_eq!(requests.len(), 1);
@@ -691,6 +756,7 @@ fn all_committed_model_eval_fixtures_satisfy_structured_acceptance() {
                 ModelEvalCampaignRequest {
                     config_path,
                     fixture_roots: vec![fixture_root(case_id)],
+                    orchestration_route_contract: None,
                     repetitions: 1,
                     max_cost_microusd: 500_000,
                     campaign_timeout: Duration::from_secs(30),

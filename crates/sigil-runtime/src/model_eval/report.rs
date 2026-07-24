@@ -11,9 +11,12 @@ use sigil_kernel::{
     IntegrationPromotionStatus, JsonlSessionStore, MODEL_EVAL_REPORT_SCHEMA_VERSION,
     ModelEvalAssertionResultV3, ModelEvalCostConfidence as ReportCostConfidence,
     ModelEvalExecutionStatus, ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage,
-    OrchestrationEvalObservationV1, ProjectionCursor, RunStatus, Session, SessionLogEntry,
-    TaskAdmissionTrigger, TaskHandoffDecision, TaskParticipantAttemptStatus, TaskRunStatus,
-    ToolErrorKind, ToolExecutionStatus, VerificationVerdict, write_model_eval_report_v3,
+    ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalIdentityV1,
+    OrchestrationEvalObservationV1, OrchestrationEvalReportCampaignV1,
+    OrchestrationEvalReportRecordV1, OrchestrationEvalRouteIdentityV1, ProjectionCursor,
+    RootConfig, RunStatus, Session, SessionLogEntry, TaskAdmissionTrigger, TaskHandoffDecision,
+    TaskParticipantAttemptStatus, TaskRunStatus, ToolErrorKind, ToolExecutionStatus,
+    VerificationVerdict, write_model_eval_report_v3, write_orchestration_eval_report_v1,
 };
 
 use crate::application_run::ApplicationRunTerminalStatus;
@@ -34,7 +37,7 @@ pub fn write_model_eval_campaign_report(
         .iter()
         .map(build_model_eval_report_record)
         .collect::<Result<Vec<_>>>()?;
-    write_model_eval_report_v3(
+    let artifacts = write_model_eval_report_v3(
         &campaign.output_dir,
         &ModelEvalReportCampaignV3 {
             campaign_id: campaign.campaign_id.clone(),
@@ -42,9 +45,94 @@ pub fn write_model_eval_campaign_report(
             ended_at_unix_ms: campaign.ended_at_unix_ms,
             requested_repetitions: campaign.planned_runs,
             charged_microusd: campaign.charged_microusd,
-            records,
+            records: records.clone(),
         },
-    )
+    )?;
+    if let Some(contract) = &campaign.orchestration_route_contract {
+        let corpus_digest = campaign
+            .orchestration_corpus_digest
+            .as_ref()
+            .expect("preflight binds a corpus digest to every orchestration contract");
+        let orchestration_records = campaign
+            .runs
+            .iter()
+            .zip(records)
+            .map(|(execution, model_eval)| {
+                build_orchestration_eval_report_record(
+                    execution,
+                    model_eval,
+                    contract,
+                    corpus_digest,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        write_orchestration_eval_report_v1(
+            campaign.output_dir.join("orchestration"),
+            &OrchestrationEvalReportCampaignV1 {
+                campaign_id: campaign.campaign_id.clone(),
+                started_at_unix_ms: campaign.started_at_unix_ms,
+                ended_at_unix_ms: campaign.ended_at_unix_ms,
+                requested_repetitions: orchestration_records.len(),
+                records: orchestration_records,
+            },
+        )?;
+    }
+    Ok(artifacts)
+}
+
+fn build_orchestration_eval_report_record(
+    execution: &ModelEvalRunExecution,
+    model_eval: ModelEvalReportRecordV3,
+    contract: &super::ModelEvalOrchestrationRouteContractV1,
+    corpus_digest: &str,
+) -> Result<OrchestrationEvalReportRecordV1> {
+    let orchestration = execution
+        .materialized_fixture
+        .orchestration
+        .as_ref()
+        .expect("preflight prevents mixed orchestration campaigns");
+    let config = RootConfig::load(&execution.config_path)?;
+    let task_config = toml::to_string(&config.task)?;
+    let task_config_digest = sha256_digest(task_config.as_bytes());
+    let route_fingerprint = sha256_digest(
+        format!(
+            "sigil-orchestration-route-v1\0{}\0{}\0{}\0{}\0{}\0{}",
+            execution.provider,
+            contract.provider_kind,
+            contract.endpoint_family,
+            execution.model,
+            contract.canonical_model_version,
+            execution.config_digest,
+        )
+        .as_bytes(),
+    );
+    let session = load_execution_session(execution)?;
+    Ok(OrchestrationEvalReportRecordV1 {
+        report_schema_version: ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION,
+        identity: OrchestrationEvalIdentityV1 {
+            route: OrchestrationEvalRouteIdentityV1 {
+                provider_adapter: execution.provider.clone(),
+                provider_kind: contract.provider_kind.clone(),
+                endpoint_family: contract.endpoint_family.clone(),
+                canonical_model_id: execution.model.clone(),
+                canonical_model_version: contract.canonical_model_version.clone(),
+                route_fingerprint,
+                routing_prompt_digest: contract.routing_prompt_digest.clone(),
+                planner_prompt_digest: contract.planner_prompt_digest.clone(),
+                system_prompt_digest: contract.system_prompt_digest.clone(),
+                tool_profile_contract_digest: contract.tool_profile_contract_digest.clone(),
+                task_config_digest,
+                corpus_version: orchestration.corpus_version.clone(),
+                corpus_digest: corpus_digest.to_owned(),
+                sigil_commit: contract.sigil_commit.clone(),
+                sigil_build: contract.sigil_build.clone(),
+            },
+            repetition_seed: u64::from(execution.repetition),
+        },
+        case_class: orchestration.case_class,
+        observation: orchestration_eval_observation(&session),
+        model_eval,
+    })
 }
 
 fn build_model_eval_report_record(
