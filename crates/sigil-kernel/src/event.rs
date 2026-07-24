@@ -219,7 +219,10 @@ durable_event_types! {
     IntegrationLaneVerificationLinked => ("integration_lane_verification_linked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationLaneTerminal => ("integration_lane_terminal", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationLaneCleanupRecorded => ("integration_lane_cleanup_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskPromotionPreviewRecorded => ("task_promotion_preview_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskPromotionAuthorityConsumed => ("task_promotion_authority_consumed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskParentVerificationRecorded => ("task_parent_verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseHeartbeatRecorded => ("step_lease_heartbeat_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -754,7 +757,10 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     | ControlEntry::IntegrationLaneVerificationLinked(_)
                     | ControlEntry::IntegrationLaneTerminal(_)
                     | ControlEntry::IntegrationLaneCleanupRecorded(_)
-                    | ControlEntry::IntegrationPromotionRecorded(_) => {
+                    | ControlEntry::TaskPromotionPreviewRecorded(_)
+                    | ControlEntry::TaskPromotionAuthorityConsumed(_)
+                    | ControlEntry::IntegrationPromotionRecorded(_)
+                    | ControlEntry::TaskParentVerificationRecorded(_) => {
                         TypedDomainEvent::WriteIsolation(control)
                     }
                     _ => typed_other_event(event_type, event)?,
@@ -889,8 +895,17 @@ fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {
             Some(DurableEventType::IntegrationLaneCleanupRecorded),
             ControlEntry::IntegrationLaneCleanupRecorded(_)
         ) | (
+            Some(DurableEventType::TaskPromotionPreviewRecorded),
+            ControlEntry::TaskPromotionPreviewRecorded(_)
+        ) | (
+            Some(DurableEventType::TaskPromotionAuthorityConsumed),
+            ControlEntry::TaskPromotionAuthorityConsumed(_)
+        ) | (
             Some(DurableEventType::IntegrationPromotionRecorded),
             ControlEntry::IntegrationPromotionRecorded(_)
+        ) | (
+            Some(DurableEventType::TaskParentVerificationRecorded),
+            ControlEntry::TaskParentVerificationRecorded(_)
         )
     );
     if valid {
@@ -1455,7 +1470,10 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         }
         ControlEntry::IntegrationLaneTerminal(_) => "integration_lane_terminal",
         ControlEntry::IntegrationLaneCleanupRecorded(_) => "integration_lane_cleanup_recorded",
+        ControlEntry::TaskPromotionPreviewRecorded(_) => "task_promotion_preview_recorded",
+        ControlEntry::TaskPromotionAuthorityConsumed(_) => "task_promotion_authority_consumed",
         ControlEntry::IntegrationPromotionRecorded(_) => "integration_promotion_recorded",
+        ControlEntry::TaskParentVerificationRecorded(_) => "task_parent_verification_recorded",
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",
         ControlEntry::AgentProfilePolicyDecision(_) => "agent_profile_policy_decision",

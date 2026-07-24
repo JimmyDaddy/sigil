@@ -1502,6 +1502,21 @@ ref 与 dirty-overlay fixtures 分别只进入正确 target；snapshot lane 未�
 candidate delta 不包含该文件；restart 能重建 prepared/applied/verified/conflicted/cleanup 状态
 且不重放 apply/check。
 
+O6f 协议检查点（尚不构成 O6f 完成）：
+
+- kernel 已增加 content-bound `TaskPromotionPreview`、host-owned
+  `TaskPromotionAuthorityConsumed`、attempt-bound `IntegrationPromotionRecorded` 和
+  `TaskParentVerificationRecorded`。preview 只能从全部 terminal-ready、已有 lane receipt 且
+  cleanup disposition 明确的 lanes 生成；target、aggregate diff、intent binding、policy、
+  expiry 与 single-use nonce 都参与 authority admission。
+- user integration review 是当前唯一可消费的 authority source；RFC-0005 E05.17 尚未启用，
+  因此 `ControlledAutoPostEffect` 即使被构造也 fail closed。duplicate nonce/attempt、stale、
+  target/digest/policy mismatch 在 effect 前使 projection inconsistent。
+- `IntegrationPlanState::synthesis_ready_attempt` 只接受 terminal promoted attempt 上的
+  parent-scope RFC-0003 `Passed` receipt；child/lane receipt、prepared promotion 或 failed/stale
+  parent check 都不能打开 final synthesis。物理 aggregate apply、Git ref CAS、parent checks 与
+  task runner gate 仍属于后续 O6f 切片。
+
 O6f：promotion barrier、parent mutation 与 final verification。
 
 1. coordinator 只有在 required lanes terminal-success、没有 pending approval/conflict/cleanup

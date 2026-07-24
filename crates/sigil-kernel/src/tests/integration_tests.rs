@@ -9,11 +9,13 @@ use crate::{
     IntegrationLaneMemberApplied, IntegrationLaneMemberEffect, IntegrationLanePrepared,
     IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
     IntegrationLaneVerificationLinked, IntegrationObservedEffect, IntegrationPlanId,
-    IntegrationPlanRecorded, IntegrationProjection, IntegrationPromotionEffect,
-    IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
-    IntegrationProposalFacts, IntegrationProposalSpec, ReceiptStatus, RedactionState,
-    SessionLogEntry, TaskId, TaskStepId, VerificationBinding, VerificationReceipt,
-    build_integration_plan,
+    IntegrationPlanRecorded, IntegrationProjection, IntegrationPromotionAttemptId,
+    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
+    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec, ReceiptStatus,
+    RedactionState, SessionLogEntry, TaskId, TaskParentVerificationRecorded,
+    TaskPromotionAuthority, TaskPromotionAuthorityConsumed, TaskPromotionPreviewInput,
+    TaskPromotionPreviewRecorded, TaskStepId, VerificationBinding, VerificationReceipt,
+    VerificationVerdict, build_integration_plan, build_task_promotion_preview,
 };
 
 fn integration_verification_receipt(
@@ -142,6 +144,103 @@ fn snapshot_proposal(id: &str, path: &str) -> Result<IntegrationProposalSpec> {
         "scope-shared",
         facts,
     )
+}
+
+fn clean_ready_lane_entries(
+    plan: &crate::IntegrationPlan,
+) -> Result<(Vec<SessionLogEntry>, IntegrationLaneCandidate)> {
+    let lane = &plan.lanes[0];
+    let candidate = IntegrationLaneCandidate::ManagedRef {
+        private_ref: format!(
+            "refs/sigil/integration/{}/{}",
+            plan.plan_id.as_str(),
+            lane.lane_id.as_str()
+        ),
+        base_commit: "b".repeat(40),
+        candidate_commit: "a".repeat(40),
+        workspace_snapshot_id: "snapshot-lane-ready".to_owned(),
+    };
+    let receipts = lane
+        .verification_scope_hashes
+        .iter()
+        .enumerate()
+        .map(|(index, scope_hash)| {
+            integration_verification_receipt(&format!("promotion-check-{index}"), scope_hash)
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        vec![
+            SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
+                IntegrationPlanRecorded { plan: plan.clone() },
+            )),
+            SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+                IntegrationLanePrepared {
+                    plan_id: plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    target: IntegrationLaneTarget::ManagedRef {
+                        base_commit: "b".repeat(40),
+                        expected_oid: "0".repeat(40),
+                        private_ref: format!(
+                            "refs/sigil/integration/{}/{}",
+                            plan.plan_id.as_str(),
+                            lane.lane_id.as_str()
+                        ),
+                    },
+                    owned_workspace_id: "promotion-lane-workspace".to_owned(),
+                    ordered_members: lane.proposals.clone(),
+                    prepared_at_unix_ms: 1,
+                },
+            )),
+            SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(
+                IntegrationLaneMemberApplied {
+                    plan_id: plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    change_set_id: lane.proposals[0].clone(),
+                    member_index: 0,
+                    effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                        expected_old_oid: "0".repeat(40),
+                        new_oid: "a".repeat(40),
+                        candidate_snapshot_id: "snapshot-lane-ready".to_owned(),
+                    },
+                    applied_at_unix_ms: 2,
+                },
+            )),
+            SessionLogEntry::Control(ControlEntry::IntegrationLaneVerificationLinked(
+                IntegrationLaneVerificationLinked {
+                    plan_id: plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    candidate: candidate.clone(),
+                    verification_check_ids: receipts
+                        .iter()
+                        .map(|receipt| receipt.check_spec_id.clone())
+                        .collect(),
+                    verification_scope_hashes: lane.verification_scope_hashes.clone(),
+                    verification_receipts: receipts,
+                    linked_at_unix_ms: 3,
+                },
+            )),
+            SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(
+                IntegrationLaneTerminal {
+                    plan_id: plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    status: IntegrationLaneStatus::Ready,
+                    candidate: Some(candidate.clone()),
+                    reason: None,
+                    terminal_at_unix_ms: 4,
+                },
+            )),
+            SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(
+                IntegrationLaneCleanupRecorded {
+                    plan_id: plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    owned_workspace_id: "promotion-lane-workspace".to_owned(),
+                    status: IntegrationLaneCleanupStatus::Removed,
+                    recorded_at_unix_ms: 5,
+                },
+            )),
+        ],
+        candidate,
+    ))
 }
 
 #[test]
@@ -536,17 +635,20 @@ fn integration_projection_replays_lane_and_promotion_state() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::IntegrationPromotionRecorded(
             IntegrationPromotionRecorded {
                 plan_id: plan.plan_id.clone(),
+                attempt_id: None,
                 status: IntegrationPromotionStatus::Promoted,
                 preview_digest: "preview-sha256".to_owned(),
                 target: IntegrationPromotionTarget::WorkspaceApply {
                     expected_snapshot_id: "snapshot-base".to_owned(),
                     expected_revision: 3,
                 },
+                authority_nonce: None,
                 effect: Some(IntegrationPromotionEffect::WorkspaceApplied {
                     promoted_snapshot_id: "snapshot-parent-after".to_owned(),
                     promoted_revision: 4,
                 }),
                 reason: None,
+                recorded_at_unix_ms: 0,
             },
         )),
     ];
@@ -911,6 +1013,267 @@ fn integration_projection_rejects_out_of_order_lane_member_receipt() -> Result<(
 }
 
 #[test]
+fn promotion_preview_requires_ready_lanes_and_rejects_executable_intent_ref_target() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-promotion-preview")?,
+        TaskId::new("task_promotion_preview")?,
+        1,
+        vec![proposal(
+            "change-promotion-preview",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let pending_entries = vec![SessionLogEntry::Control(
+        ControlEntry::IntegrationPlanRecorded(IntegrationPlanRecorded { plan: plan.clone() }),
+    )];
+    let pending = IntegrationProjection::from_entries(&pending_entries);
+    let input = TaskPromotionPreviewInput {
+        aggregate_diff_artifact_ref: "artifact-aggregate".to_owned(),
+        aggregate_diff_digest: format!("sha256:{}", "a".repeat(64)),
+        target: IntegrationPromotionTarget::WorkspaceApply {
+            expected_snapshot_id: plan.base_snapshot_id.clone(),
+            expected_revision: 0,
+        },
+        verification_invalidation: vec!["scope-shared".to_owned()],
+        intent_binding: None,
+        policy_digest: format!("sha256:{}", "c".repeat(64)),
+        has_pending_approval: false,
+        has_executable_intent_refs: false,
+        created_at_unix_ms: 10,
+    };
+    assert!(
+        build_task_promotion_preview(pending.latest().expect("pending plan"), input.clone())
+            .is_err()
+    );
+
+    let (ready_entries, _) = clean_ready_lane_entries(&plan)?;
+    let ready = IntegrationProjection::from_entries(&ready_entries);
+    assert!(
+        ready
+            .latest()
+            .expect("ready lanes")
+            .synthesis_ready_attempt()
+            .is_none()
+    );
+    let preview = build_task_promotion_preview(ready.latest().expect("ready plan"), input.clone())?;
+    preview.validate()?;
+    assert_eq!(preview.ordered_lane_candidates.len(), 1);
+
+    let mut ref_input = input;
+    ref_input.target = IntegrationPromotionTarget::GitRefAdvance {
+        target_ref: "refs/heads/integration-target".to_owned(),
+        expected_old_oid: "b".repeat(40),
+        candidate_oid: "a".repeat(40),
+    };
+    ref_input.has_executable_intent_refs = true;
+    assert!(build_task_promotion_preview(ready.latest().expect("ready plan"), ref_input).is_err());
+    Ok(())
+}
+
+#[test]
+fn promotion_authority_replay_and_target_mismatch_are_rejected_before_effect() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-promotion-authority")?,
+        TaskId::new("task_promotion_authority")?,
+        1,
+        vec![proposal(
+            "change-promotion-authority",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let (mut entries, _) = clean_ready_lane_entries(&plan)?;
+    let ready = IntegrationProjection::from_entries(&entries);
+    let preview = build_task_promotion_preview(
+        ready.latest().expect("ready plan"),
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: "artifact-authority".to_owned(),
+            aggregate_diff_digest: format!("sha256:{}", "a".repeat(64)),
+            target: IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+            verification_invalidation: vec!["scope-shared".to_owned()],
+            intent_binding: None,
+            policy_digest: format!("sha256:{}", "c".repeat(64)),
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: 10,
+        },
+    )?;
+    let authority = TaskPromotionAuthority::from_user_integration_review(
+        &preview,
+        "review-authority",
+        100,
+        "nonce-authority",
+    )?;
+    let consumed = TaskPromotionAuthorityConsumed {
+        attempt_id: IntegrationPromotionAttemptId::new("promotion-attempt-authority")?,
+        authority: authority.clone(),
+        consumed_at_unix_ms: 20,
+    };
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionPreviewRecorded(TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        }),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionAuthorityConsumed(consumed.clone()),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionAuthorityConsumed(consumed),
+    ));
+    let replayed = IntegrationProjection::from_entries(&entries);
+    let replayed = replayed.latest().expect("replayed authority");
+    assert!(replayed.inconsistent);
+    assert!(replayed.promotions.is_empty());
+
+    let (mut mismatched_entries, _) = clean_ready_lane_entries(&plan)?;
+    mismatched_entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionPreviewRecorded(TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        }),
+    ));
+    let mut mismatched = authority;
+    mismatched.target = IntegrationPromotionTarget::WorkspaceApply {
+        expected_snapshot_id: plan.base_snapshot_id,
+        expected_revision: 1,
+    };
+    mismatched_entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskPromotionAuthorityConsumed(TaskPromotionAuthorityConsumed {
+            attempt_id: IntegrationPromotionAttemptId::new("promotion-attempt-mismatch")?,
+            authority: mismatched,
+            consumed_at_unix_ms: 20,
+        }),
+    ));
+    let mismatched = IntegrationProjection::from_entries(&mismatched_entries);
+    let mismatched = mismatched.latest().expect("mismatched authority");
+    assert!(mismatched.inconsistent);
+    assert!(mismatched.promotions.is_empty());
+    Ok(())
+}
+
+#[test]
+fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-promotion-protocol")?,
+        TaskId::new("task_promotion_protocol")?,
+        1,
+        vec![proposal(
+            "change-promotion-protocol",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let (mut entries, _) = clean_ready_lane_entries(&plan)?;
+    let ready = IntegrationProjection::from_entries(&entries);
+    let preview = build_task_promotion_preview(
+        ready.latest().expect("ready plan"),
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: "artifact-protocol".to_owned(),
+            aggregate_diff_digest: format!("sha256:{}", "a".repeat(64)),
+            target: IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+            verification_invalidation: vec!["scope-shared".to_owned()],
+            intent_binding: Some("intent-binding".to_owned()),
+            policy_digest: format!("sha256:{}", "c".repeat(64)),
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: 10,
+        },
+    )?;
+    let authority = TaskPromotionAuthority::from_user_integration_review(
+        &preview,
+        "review-protocol",
+        100,
+        "nonce-protocol",
+    )?;
+    let attempt_id = IntegrationPromotionAttemptId::new("promotion-attempt-protocol")?;
+    entries.extend([
+        SessionLogEntry::Control(ControlEntry::TaskPromotionPreviewRecorded(
+            TaskPromotionPreviewRecorded {
+                preview: preview.clone(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskPromotionAuthorityConsumed(
+            TaskPromotionAuthorityConsumed {
+                attempt_id: attempt_id.clone(),
+                authority: authority.clone(),
+                consumed_at_unix_ms: 20,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationPromotionRecorded(
+            IntegrationPromotionRecorded {
+                plan_id: plan.plan_id.clone(),
+                attempt_id: Some(attempt_id.clone()),
+                status: IntegrationPromotionStatus::Prepared,
+                preview_digest: preview.preview_digest.clone(),
+                target: preview.target.clone(),
+                authority_nonce: Some(authority.nonce.clone()),
+                effect: None,
+                reason: None,
+                recorded_at_unix_ms: 21,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationPromotionRecorded(
+            IntegrationPromotionRecorded {
+                plan_id: plan.plan_id.clone(),
+                attempt_id: Some(attempt_id.clone()),
+                status: IntegrationPromotionStatus::Promoted,
+                preview_digest: preview.preview_digest.clone(),
+                target: preview.target.clone(),
+                authority_nonce: Some(authority.nonce),
+                effect: Some(IntegrationPromotionEffect::WorkspaceApplied {
+                    promoted_snapshot_id: "snapshot-parent-promoted".to_owned(),
+                    promoted_revision: 1,
+                }),
+                reason: None,
+                recorded_at_unix_ms: 22,
+            },
+        )),
+    ]);
+    let mut receipt = integration_verification_receipt("parent-check", "scope-parent");
+    receipt.binding.workspace_snapshot_id = "snapshot-parent-promoted".to_owned();
+    receipt.receipt.workspace_snapshot_id = Some("snapshot-parent-promoted".to_owned());
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskParentVerificationRecorded(TaskParentVerificationRecorded {
+            attempt_id: attempt_id.clone(),
+            plan_id: plan.plan_id,
+            preview_digest: preview.preview_digest,
+            promoted_snapshot_id: "snapshot-parent-promoted".to_owned(),
+            policy_digest: preview.policy_digest,
+            verdict: VerificationVerdict::Passed,
+            receipts: vec![receipt],
+            reason: None,
+            recorded_at_unix_ms: 23,
+        }),
+    ));
+
+    let projection = IntegrationProjection::from_entries(&entries);
+    let state = projection.latest().expect("promotion protocol state");
+    assert!(!state.inconsistent);
+    assert_eq!(state.promotions.len(), 2);
+    assert_eq!(
+        state
+            .parent_verifications
+            .get(&attempt_id)
+            .map(|verification| verification.verdict),
+        Some(VerificationVerdict::Passed)
+    );
+    assert_eq!(state.synthesis_ready_attempt(), Some(&attempt_id));
+    Ok(())
+}
+
+#[test]
 fn integration_projection_rejects_mismatched_promotion_effect() -> Result<()> {
     let plan = build_integration_plan(
         IntegrationPlanId::new("plan-mismatched-promotion")?,
@@ -931,17 +1294,20 @@ fn integration_projection_rejects_mismatched_promotion_effect() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::IntegrationPromotionRecorded(
             IntegrationPromotionRecorded {
                 plan_id: plan.plan_id,
+                attempt_id: None,
                 status: IntegrationPromotionStatus::Promoted,
                 preview_digest: "preview-sha256".to_owned(),
                 target: IntegrationPromotionTarget::WorkspaceApply {
                     expected_snapshot_id: "snapshot-base".to_owned(),
                     expected_revision: 3,
                 },
+                authority_nonce: None,
                 effect: Some(IntegrationPromotionEffect::GitRefAdvanced {
                     old_oid: "b".repeat(40),
                     new_oid: "a".repeat(40),
                 }),
                 reason: None,
+                recorded_at_unix_ms: 0,
             },
         )),
     ];

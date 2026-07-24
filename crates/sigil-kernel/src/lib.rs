@@ -250,9 +250,12 @@ pub use integration::{
     IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
     IntegrationLaneVerificationLinked, IntegrationObservedEffect, IntegrationPathFact,
     IntegrationPlan, IntegrationPlanId, IntegrationPlanRecorded, IntegrationPlanState,
-    IntegrationProjection, IntegrationPromotionEffect, IntegrationPromotionRecorded,
-    IntegrationPromotionStatus, IntegrationPromotionTarget, IntegrationProposalFacts,
-    IntegrationProposalSpec, build_integration_plan,
+    IntegrationProjection, IntegrationPromotionAttemptId, IntegrationPromotionEffect,
+    IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
+    IntegrationProposalFacts, IntegrationProposalSpec, TaskParentVerificationRecorded,
+    TaskPromotionAuthority, TaskPromotionAuthorityConsumed, TaskPromotionAuthoritySource,
+    TaskPromotionLaneCandidate, TaskPromotionPreview, TaskPromotionPreviewInput,
+    TaskPromotionPreviewRecorded, build_integration_plan, build_task_promotion_preview,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{

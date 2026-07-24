@@ -13,8 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     ChangeSet, ChangeSetFileAction, ChangeSetId, ReceiptStatus, TaskId, TaskStepId,
-    VerificationReceipt, WorkspaceSnapshotId,
+    VerificationReceipt, VerificationVerdict, WorkspaceSnapshotId,
     session::{ControlEntry, SessionLogEntry},
+    sha256_hex,
 };
 
 /// Stable identifier for one deterministic integration plan.
@@ -70,6 +71,39 @@ impl IntegrationLaneId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Stable identity for one physical promotion attempt.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct IntegrationPromotionAttemptId(String);
+
+impl IntegrationPromotionAttemptId {
+    /// Creates one path-safe promotion attempt identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity is empty or contains unstable characters.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_stable_id("integration promotion attempt id", &value)?;
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegrationPromotionAttemptId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -944,6 +978,106 @@ pub enum IntegrationLaneCandidate {
     },
 }
 
+/// Exact lane candidate and verification provenance included in one promotion preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskPromotionLaneCandidate {
+    pub lane_id: IntegrationLaneId,
+    pub candidate: IntegrationLaneCandidate,
+    pub verification_receipt_ids: Vec<String>,
+}
+
+/// Content-bound input used to generate one promotion preview.
+#[derive(Debug, Clone)]
+pub struct TaskPromotionPreviewInput {
+    pub aggregate_diff_artifact_ref: String,
+    pub aggregate_diff_digest: String,
+    pub target: IntegrationPromotionTarget,
+    pub verification_invalidation: Vec<String>,
+    pub intent_binding: Option<String>,
+    pub policy_digest: String,
+    pub has_pending_approval: bool,
+    pub has_executable_intent_refs: bool,
+    pub created_at_unix_ms: u64,
+}
+
+/// Host-generated review payload for the final promotion barrier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskPromotionPreview {
+    pub task_id: TaskId,
+    pub plan_id: IntegrationPlanId,
+    pub plan_version: u32,
+    pub ordered_lane_candidates: Vec<TaskPromotionLaneCandidate>,
+    pub aggregate_diff_artifact_ref: String,
+    pub aggregate_diff_digest: String,
+    pub target: IntegrationPromotionTarget,
+    pub verification_invalidation: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_binding: Option<String>,
+    pub policy_digest: String,
+    pub preview_digest: String,
+    pub created_at_unix_ms: u64,
+}
+
+/// Append-only record of one exact promotion preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskPromotionPreviewRecorded {
+    pub preview: TaskPromotionPreview,
+}
+
+/// Host-owned source that may authorize one exact promotion preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskPromotionAuthoritySource {
+    UserIntegrationReview { review_id: String },
+    ControlledAutoPostEffect { admission_id: String },
+}
+
+/// Single-use, content-bound authority for one promotion attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskPromotionAuthority {
+    pub source: TaskPromotionAuthoritySource,
+    pub task_id: TaskId,
+    pub plan_id: IntegrationPlanId,
+    pub plan_version: u32,
+    pub preview_digest: String,
+    pub aggregate_diff_digest: String,
+    pub target: IntegrationPromotionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_binding: Option<String>,
+    pub policy_digest: String,
+    pub expires_at_unix_ms: u64,
+    pub nonce: String,
+}
+
+/// Durable consumption barrier recorded before the first promotion effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskPromotionAuthorityConsumed {
+    pub attempt_id: IntegrationPromotionAttemptId,
+    pub authority: TaskPromotionAuthority,
+    pub consumed_at_unix_ms: u64,
+}
+
+/// Parent-scope verification bound to the authoritative promoted snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskParentVerificationRecorded {
+    pub attempt_id: IntegrationPromotionAttemptId,
+    pub plan_id: IntegrationPlanId,
+    pub preview_digest: String,
+    pub promoted_snapshot_id: WorkspaceSnapshotId,
+    pub policy_digest: String,
+    pub verdict: VerificationVerdict,
+    pub receipts: Vec<VerificationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub recorded_at_unix_ms: u64,
+}
+
 /// Result of the final exact parent snapshot/ref promotion barrier.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -985,6 +1119,16 @@ pub enum IntegrationPromotionTarget {
     },
 }
 
+impl IntegrationPromotionTarget {
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkspaceApply { .. } => "workspace_apply",
+            Self::GitRefAdvance { .. } => "git_ref_advance",
+        }
+    }
+}
+
 /// Exact effect observed for a successful promotion target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1004,13 +1148,327 @@ pub enum IntegrationPromotionEffect {
 #[serde(rename_all = "snake_case")]
 pub struct IntegrationPromotionRecorded {
     pub plan_id: IntegrationPlanId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<IntegrationPromotionAttemptId>,
     pub status: IntegrationPromotionStatus,
     pub preview_digest: String,
     pub target: IntegrationPromotionTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<IntegrationPromotionEffect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub recorded_at_unix_ms: u64,
+}
+
+impl TaskPromotionPreview {
+    /// Recomputes and validates the content digest carried by this preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the preview is incomplete or its digest does not bind its content.
+    pub fn validate(&self) -> Result<()> {
+        if self.ordered_lane_candidates.is_empty() {
+            bail!("task promotion preview has no lane candidates");
+        }
+        if self.aggregate_diff_artifact_ref.trim().is_empty() {
+            bail!("task promotion preview aggregate artifact ref must not be empty");
+        }
+        validate_sha256_digest(
+            "task promotion preview aggregate diff digest",
+            &self.aggregate_diff_digest,
+        )?;
+        validate_sha256_digest("task promotion preview policy digest", &self.policy_digest)?;
+        validate_sha256_digest("task promotion preview digest", &self.preview_digest)?;
+        if self.verification_invalidation.is_empty()
+            || self
+                .verification_invalidation
+                .iter()
+                .any(|value| value.trim().is_empty())
+        {
+            bail!("task promotion preview must invalidate explicit verification scopes");
+        }
+        if self.created_at_unix_ms == 0 {
+            bail!("task promotion preview timestamp must not be zero");
+        }
+        let computed = task_promotion_preview_digest(self)?;
+        if self.preview_digest != computed {
+            bail!("task promotion preview digest does not match its content");
+        }
+        Ok(())
+    }
+}
+
+impl TaskPromotionAuthority {
+    /// Issues one user-review authority by copying every security-relevant preview binding.
+    ///
+    /// The runtime must call this only after the host resolves an exact integration review. A
+    /// planner response, task plan, or ordinary tool approval is not a review identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid preview, empty review/nonce, or non-future expiry.
+    pub fn from_user_integration_review(
+        preview: &TaskPromotionPreview,
+        review_id: impl Into<String>,
+        expires_at_unix_ms: u64,
+        nonce: impl Into<String>,
+    ) -> Result<Self> {
+        preview.validate()?;
+        let review_id = review_id.into();
+        let nonce = nonce.into();
+        if review_id.trim().is_empty() {
+            bail!("task promotion review id must not be empty");
+        }
+        validate_stable_id("task promotion authority nonce", &nonce)?;
+        if expires_at_unix_ms <= preview.created_at_unix_ms {
+            bail!("task promotion authority expiry must follow preview creation");
+        }
+        Ok(Self {
+            source: TaskPromotionAuthoritySource::UserIntegrationReview { review_id },
+            task_id: preview.task_id.clone(),
+            plan_id: preview.plan_id.clone(),
+            plan_version: preview.plan_version,
+            preview_digest: preview.preview_digest.clone(),
+            aggregate_diff_digest: preview.aggregate_diff_digest.clone(),
+            target: preview.target.clone(),
+            intent_binding: preview.intent_binding.clone(),
+            policy_digest: preview.policy_digest.clone(),
+            expires_at_unix_ms,
+            nonce,
+        })
+    }
+
+    /// Validates this authority against the exact latest preview at consumption time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for expiry or any task/plan/content/target/policy binding mismatch.
+    pub fn validate_for_preview(
+        &self,
+        preview: &TaskPromotionPreview,
+        consumed_at_unix_ms: u64,
+    ) -> Result<()> {
+        preview.validate()?;
+        validate_stable_id("task promotion authority nonce", &self.nonce)?;
+        match &self.source {
+            TaskPromotionAuthoritySource::UserIntegrationReview { review_id } => {
+                if review_id.trim().is_empty() {
+                    bail!("task promotion user review id must not be empty");
+                }
+            }
+            TaskPromotionAuthoritySource::ControlledAutoPostEffect { admission_id } => {
+                if admission_id.trim().is_empty() {
+                    bail!("controlled-auto promotion admission id must not be empty");
+                }
+                bail!("controlled-auto promotion authority is unavailable until E05.17 is enabled");
+            }
+        }
+        if consumed_at_unix_ms == 0 || consumed_at_unix_ms > self.expires_at_unix_ms {
+            bail!("task promotion authority is expired or has an invalid consumption time");
+        }
+        if self.task_id != preview.task_id
+            || self.plan_id != preview.plan_id
+            || self.plan_version != preview.plan_version
+            || self.preview_digest != preview.preview_digest
+            || self.aggregate_diff_digest != preview.aggregate_diff_digest
+            || self.target != preview.target
+            || self.intent_binding != preview.intent_binding
+            || self.policy_digest != preview.policy_digest
+        {
+            bail!("task promotion authority does not match the exact preview");
+        }
+        Ok(())
+    }
+}
+
+impl TaskParentVerificationRecorded {
+    /// Validates terminal parent-check evidence against the promoted snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verdict is non-terminal, a receipt belongs to another snapshot,
+    /// or a passed verdict lacks complete successful receipts.
+    pub fn validate(&self) -> Result<()> {
+        if self.promoted_snapshot_id.trim().is_empty()
+            || self.preview_digest.trim().is_empty()
+            || self.recorded_at_unix_ms == 0
+        {
+            bail!("task parent verification binding is incomplete");
+        }
+        validate_sha256_digest(
+            "task parent verification policy digest",
+            &self.policy_digest,
+        )?;
+        if !self.verdict.is_terminal() {
+            bail!("task parent verification verdict must be terminal");
+        }
+        if self.receipts.iter().any(|receipt| {
+            receipt.binding.workspace_snapshot_id != self.promoted_snapshot_id
+                || receipt.binding.verification_scope_hash.trim().is_empty()
+        }) {
+            bail!("task parent verification receipt belongs to another snapshot or scope");
+        }
+        if self.verdict == VerificationVerdict::Passed
+            && (self.receipts.is_empty()
+                || self.receipts.iter().any(|receipt| {
+                    receipt.check_status != ReceiptStatus::Succeeded
+                        || receipt.receipt.status != ReceiptStatus::Succeeded
+                        || receipt.mutates_verification_scope
+                        || receipt.binding.execution_backend.is_none()
+                }))
+        {
+            bail!("passed task parent verification requires complete successful receipts");
+        }
+        Ok(())
+    }
+}
+
+/// Builds one promotion preview only after every physical lane is ready and unambiguous.
+///
+/// # Errors
+///
+/// Returns an error for pending approval, incomplete/conflicted lanes, cleanup ambiguity, an
+/// incompatible target, executable-intent ref advancement, or malformed content bindings.
+pub fn build_task_promotion_preview(
+    state: &IntegrationPlanState,
+    input: TaskPromotionPreviewInput,
+) -> Result<TaskPromotionPreview> {
+    if state.inconsistent {
+        bail!("integration plan projection is inconsistent");
+    }
+    if input.has_pending_approval {
+        bail!("integration plan still has a pending approval");
+    }
+    if input.created_at_unix_ms == 0 {
+        bail!("task promotion preview timestamp must not be zero");
+    }
+    if input.aggregate_diff_artifact_ref.trim().is_empty() {
+        bail!("task promotion aggregate diff artifact ref must not be empty");
+    }
+    validate_sha256_digest(
+        "task promotion aggregate diff digest",
+        &input.aggregate_diff_digest,
+    )?;
+    validate_sha256_digest("task promotion policy digest", &input.policy_digest)?;
+    if input.verification_invalidation.is_empty()
+        || input
+            .verification_invalidation
+            .iter()
+            .any(|value| value.trim().is_empty())
+    {
+        bail!("task promotion must invalidate explicit verification scopes");
+    }
+    if input.has_executable_intent_refs
+        && matches!(
+            input.target,
+            IntegrationPromotionTarget::GitRefAdvance { .. }
+        )
+    {
+        bail!("executable intent refs require workspace_apply promotion");
+    }
+    match (&state.recorded.plan.base_representation, &input.target) {
+        (
+            _,
+            IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id,
+                ..
+            },
+        ) if expected_snapshot_id == &state.recorded.plan.base_snapshot_id => {}
+        (
+            IntegrationBaseRepresentation::CleanCommit { base_commit },
+            IntegrationPromotionTarget::GitRefAdvance {
+                target_ref,
+                expected_old_oid,
+                candidate_oid,
+            },
+        ) => {
+            if target_ref.trim().is_empty() {
+                bail!("task promotion target ref must not be empty");
+            }
+            validate_git_object_id("task promotion expected ref oid", expected_old_oid)?;
+            validate_git_object_id("task promotion candidate oid", candidate_oid)?;
+            if expected_old_oid != base_commit {
+                bail!("task promotion ref target does not match the clean integration base");
+            }
+        }
+        (IntegrationBaseRepresentation::SnapshotWorkspace { .. }, _) => {
+            bail!("snapshot-workspace integration can only promote through workspace_apply");
+        }
+        (_, IntegrationPromotionTarget::WorkspaceApply { .. }) => {
+            bail!("task promotion workspace target snapshot does not match the integration base");
+        }
+        (IntegrationBaseRepresentation::Unknown, _) => {
+            bail!("task promotion requires a complete integration base");
+        }
+    }
+
+    let mut ordered_lane_candidates = Vec::with_capacity(state.recorded.plan.lanes.len());
+    for lane in &state.recorded.plan.lanes {
+        let lifecycle = state
+            .lifecycle_lanes
+            .get(&lane.lane_id)
+            .ok_or_else(|| anyhow::anyhow!("integration lane has no physical lifecycle"))?;
+        if lifecycle.inconsistent {
+            bail!("integration lane projection is inconsistent");
+        }
+        let terminal = lifecycle
+            .terminal
+            .as_ref()
+            .filter(|terminal| terminal.status == IntegrationLaneStatus::Ready)
+            .ok_or_else(|| anyhow::anyhow!("integration lane is not terminal-ready"))?;
+        let verification = lifecycle
+            .verification
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("integration lane has no scoped verification"))?;
+        if terminal.candidate.as_ref() != Some(&verification.candidate) {
+            bail!("integration lane terminal candidate does not match verification");
+        }
+        let cleanup = lifecycle
+            .cleanup
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("integration lane cleanup disposition is unknown"))?;
+        if cleanup.status == IntegrationLaneCleanupStatus::Failed {
+            bail!("integration lane cleanup failed");
+        }
+        let verification_receipt_ids = verification
+            .verification_receipts
+            .iter()
+            .map(|receipt| receipt.receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        if verification_receipt_ids.is_empty()
+            || verification_receipt_ids
+                .iter()
+                .any(|receipt_id| receipt_id.trim().is_empty())
+        {
+            bail!("integration lane verification receipt identity is incomplete");
+        }
+        ordered_lane_candidates.push(TaskPromotionLaneCandidate {
+            lane_id: lane.lane_id.clone(),
+            candidate: verification.candidate.clone(),
+            verification_receipt_ids,
+        });
+    }
+
+    let mut preview = TaskPromotionPreview {
+        task_id: state.recorded.plan.task_id.clone(),
+        plan_id: state.recorded.plan.plan_id.clone(),
+        plan_version: state.recorded.plan.plan_version,
+        ordered_lane_candidates,
+        aggregate_diff_artifact_ref: input.aggregate_diff_artifact_ref,
+        aggregate_diff_digest: input.aggregate_diff_digest,
+        target: input.target,
+        verification_invalidation: input.verification_invalidation,
+        intent_binding: input.intent_binding,
+        policy_digest: input.policy_digest,
+        preview_digest: String::new(),
+        created_at_unix_ms: input.created_at_unix_ms,
+    };
+    preview.preview_digest = task_promotion_preview_digest(&preview)?;
+    preview.validate()?;
+    Ok(preview)
 }
 
 /// Latest replayed state for one integration plan.
@@ -1019,8 +1477,37 @@ pub struct IntegrationPlanState {
     pub recorded: IntegrationPlanRecorded,
     pub lanes: BTreeMap<IntegrationLaneId, IntegrationLaneChanged>,
     pub lifecycle_lanes: BTreeMap<IntegrationLaneId, IntegrationLaneLifecycleState>,
+    pub promotion_previews: BTreeMap<String, TaskPromotionPreview>,
+    pub consumed_promotion_authorities: BTreeMap<String, TaskPromotionAuthorityConsumed>,
     pub promotions: Vec<IntegrationPromotionRecorded>,
+    pub parent_verifications:
+        BTreeMap<IntegrationPromotionAttemptId, TaskParentVerificationRecorded>,
     pub inconsistent: bool,
+}
+
+impl IntegrationPlanState {
+    /// Returns the promoted attempt whose parent-scope verification passed.
+    ///
+    /// Child and lane receipts intentionally do not satisfy this gate. The latest physical
+    /// promotion must be terminal-success and bind a passed parent verification record.
+    #[must_use]
+    pub fn synthesis_ready_attempt(&self) -> Option<&IntegrationPromotionAttemptId> {
+        if self.inconsistent {
+            return None;
+        }
+        let promotion = self.promotions.last()?;
+        if promotion.status != IntegrationPromotionStatus::Promoted {
+            return None;
+        }
+        let attempt_id = promotion.attempt_id.as_ref()?;
+        self.parent_verifications
+            .get(attempt_id)
+            .is_some_and(|verification| {
+                verification.verdict == VerificationVerdict::Passed
+                    && verification.preview_digest == promotion.preview_digest
+            })
+            .then_some(attempt_id)
+    }
 }
 
 /// Replayed recovery-critical state for one integration lane.
@@ -1080,7 +1567,10 @@ impl IntegrationProjection {
                                 recorded: entry.clone(),
                                 lanes: BTreeMap::new(),
                                 lifecycle_lanes: BTreeMap::new(),
+                                promotion_previews: BTreeMap::new(),
+                                consumed_promotion_authorities: BTreeMap::new(),
                                 promotions: Vec::new(),
+                                parent_verifications: BTreeMap::new(),
                                 inconsistent: false,
                             },
                         );
@@ -1301,15 +1791,106 @@ impl IntegrationProjection {
                     None => lifecycle.cleanup = Some(entry.clone()),
                 }
             }
+            ControlEntry::TaskPromotionPreviewRecorded(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.preview.plan_id) else {
+                    return;
+                };
+                if entry.preview.validate().is_err()
+                    || !promotion_preview_matches_plan_state(&entry.preview, state)
+                {
+                    state.inconsistent = true;
+                    return;
+                }
+                match state.promotion_previews.get(&entry.preview.preview_digest) {
+                    Some(existing) if existing != &entry.preview => state.inconsistent = true,
+                    Some(_) => {}
+                    None => {
+                        state
+                            .promotion_previews
+                            .insert(entry.preview.preview_digest.clone(), entry.preview.clone());
+                    }
+                }
+            }
+            ControlEntry::TaskPromotionAuthorityConsumed(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.authority.plan_id) else {
+                    return;
+                };
+                let valid = state
+                    .promotion_previews
+                    .get(&entry.authority.preview_digest)
+                    .is_some_and(|preview| {
+                        entry
+                            .authority
+                            .validate_for_preview(preview, entry.consumed_at_unix_ms)
+                            .is_ok()
+                    })
+                    && !state
+                        .consumed_promotion_authorities
+                        .values()
+                        .any(|consumed| consumed.attempt_id == entry.attempt_id);
+                if !valid
+                    || state
+                        .consumed_promotion_authorities
+                        .contains_key(&entry.authority.nonce)
+                {
+                    state.inconsistent = true;
+                    return;
+                }
+                state
+                    .consumed_promotion_authorities
+                    .insert(entry.authority.nonce.clone(), entry.clone());
+            }
             ControlEntry::IntegrationPromotionRecorded(entry) => {
                 let Some(state) = self.plans.get_mut(&entry.plan_id) else {
                     return;
                 };
-                if entry.preview_digest.trim().is_empty() || !promotion_effect_matches_target(entry)
+                let protocol_valid = match (&entry.attempt_id, &entry.authority_nonce) {
+                    (None, None) => true,
+                    (Some(attempt_id), Some(nonce)) => {
+                        protocol_promotion_matches_state(state, entry, attempt_id, nonce)
+                    }
+                    _ => false,
+                };
+                if entry.preview_digest.trim().is_empty()
+                    || !promotion_effect_matches_target(entry)
+                    || !protocol_valid
                 {
                     state.inconsistent = true;
                 }
                 state.promotions.push(entry.clone());
+            }
+            ControlEntry::TaskParentVerificationRecorded(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let promoted = state.promotions.iter().rev().find(|promotion| {
+                    promotion.attempt_id.as_ref() == Some(&entry.attempt_id)
+                        && promotion.status == IntegrationPromotionStatus::Promoted
+                });
+                let valid = entry.validate().is_ok()
+                    && promoted.is_some_and(|promotion| {
+                        promotion.preview_digest == entry.preview_digest
+                            && state
+                                .promotion_previews
+                                .get(&entry.preview_digest)
+                                .is_some_and(|preview| {
+                                    preview.policy_digest == entry.policy_digest
+                                        && preview.target == promotion.target
+                                })
+                    });
+                if !valid {
+                    state.inconsistent = true;
+                    return;
+                }
+                match state.parent_verifications.get(&entry.attempt_id) {
+                    Some(existing) if existing != entry => state.inconsistent = true,
+                    Some(_) => {}
+                    None => {
+                        state
+                            .parent_verifications
+                            .insert(entry.attempt_id.clone(), entry.clone());
+                    }
+                }
             }
             _ => {}
         }
@@ -1482,6 +2063,126 @@ fn latest_lifecycle_candidate(
     }
 }
 
+fn promotion_preview_matches_plan_state(
+    preview: &TaskPromotionPreview,
+    state: &IntegrationPlanState,
+) -> bool {
+    if preview.task_id != state.recorded.plan.task_id
+        || preview.plan_id != state.recorded.plan.plan_id
+        || preview.plan_version != state.recorded.plan.plan_version
+        || preview.ordered_lane_candidates.len() != state.recorded.plan.lanes.len()
+    {
+        return false;
+    }
+    let target_matches = match (&state.recorded.plan.base_representation, &preview.target) {
+        (
+            _,
+            IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id,
+                ..
+            },
+        ) => expected_snapshot_id == &state.recorded.plan.base_snapshot_id,
+        (
+            IntegrationBaseRepresentation::CleanCommit { base_commit },
+            IntegrationPromotionTarget::GitRefAdvance {
+                target_ref,
+                expected_old_oid,
+                candidate_oid,
+            },
+        ) => {
+            !target_ref.trim().is_empty()
+                && expected_old_oid == base_commit
+                && validate_git_object_id("promotion preview expected oid", expected_old_oid)
+                    .is_ok()
+                && validate_git_object_id("promotion preview candidate oid", candidate_oid).is_ok()
+        }
+        _ => false,
+    };
+    target_matches
+        && state
+            .recorded
+            .plan
+            .lanes
+            .iter()
+            .zip(preview.ordered_lane_candidates.iter())
+            .all(|(lane, candidate)| {
+                if lane.lane_id != candidate.lane_id {
+                    return false;
+                }
+                state
+                    .lifecycle_lanes
+                    .get(&lane.lane_id)
+                    .is_some_and(|lifecycle| {
+                        let receipt_ids = lifecycle
+                            .verification
+                            .as_ref()
+                            .map(|verification| {
+                                verification
+                                    .verification_receipts
+                                    .iter()
+                                    .map(|receipt| receipt.receipt.receipt_id.as_str())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        !lifecycle.inconsistent
+                            && lifecycle.terminal.as_ref().is_some_and(|terminal| {
+                                terminal.status == IntegrationLaneStatus::Ready
+                                    && terminal.candidate.as_ref() == Some(&candidate.candidate)
+                            })
+                            && lifecycle.cleanup.as_ref().is_some_and(|cleanup| {
+                                cleanup.status != IntegrationLaneCleanupStatus::Failed
+                            })
+                            && receipt_ids
+                                == candidate
+                                    .verification_receipt_ids
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>()
+                    })
+            })
+}
+
+fn protocol_promotion_matches_state(
+    state: &IntegrationPlanState,
+    entry: &IntegrationPromotionRecorded,
+    attempt_id: &IntegrationPromotionAttemptId,
+    nonce: &str,
+) -> bool {
+    if entry.recorded_at_unix_ms == 0 {
+        return false;
+    }
+    let Some(consumed) = state.consumed_promotion_authorities.get(nonce) else {
+        return false;
+    };
+    if &consumed.attempt_id != attempt_id
+        || consumed.authority.preview_digest != entry.preview_digest
+        || consumed.authority.target != entry.target
+        || entry.recorded_at_unix_ms < consumed.consumed_at_unix_ms
+    {
+        return false;
+    }
+    let prior = state
+        .promotions
+        .iter()
+        .filter(|promotion| promotion.attempt_id.as_ref() == Some(attempt_id))
+        .collect::<Vec<_>>();
+    match prior.as_slice() {
+        [] => {
+            entry.status == IntegrationPromotionStatus::Prepared
+                && entry.effect.is_none()
+                && entry.reason.is_none()
+        }
+        [prepared] => {
+            prepared.status == IntegrationPromotionStatus::Prepared
+                && prepared.preview_digest == entry.preview_digest
+                && prepared.target == entry.target
+                && prepared.authority_nonce.as_deref() == Some(nonce)
+                && entry.status != IntegrationPromotionStatus::Prepared
+        }
+        _ => false,
+    }
+}
+
 fn promotion_effect_matches_target(entry: &IntegrationPromotionRecorded) -> bool {
     match (&entry.target, &entry.effect, entry.status) {
         (
@@ -1497,6 +2198,31 @@ fn promotion_effect_matches_target(entry: &IntegrationPromotionRecorded) -> bool
         (_, None, status) if status != IntegrationPromotionStatus::Promoted => true,
         _ => false,
     }
+}
+
+fn task_promotion_preview_digest(preview: &TaskPromotionPreview) -> Result<String> {
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "task_id": preview.task_id,
+        "plan_id": preview.plan_id,
+        "plan_version": preview.plan_version,
+        "ordered_lane_candidates": preview.ordered_lane_candidates,
+        "aggregate_diff_artifact_ref": preview.aggregate_diff_artifact_ref,
+        "aggregate_diff_digest": preview.aggregate_diff_digest,
+        "target": preview.target,
+        "verification_invalidation": preview.verification_invalidation,
+        "intent_binding": preview.intent_binding,
+        "policy_digest": preview.policy_digest,
+        "created_at_unix_ms": preview.created_at_unix_ms,
+    });
+    Ok(format!(
+        "sha256:{}",
+        sha256_hex(&serde_json::to_vec(&value)?)
+    ))
+}
+
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 fn conflict_reasons(

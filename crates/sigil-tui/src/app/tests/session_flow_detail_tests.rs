@@ -260,22 +260,108 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
         "[ctl] integration lane plan-audit/lane-1 cleanup=removed"
     );
 
+    let preview = sigil_kernel::TaskPromotionPreview {
+        task_id: sigil_kernel::TaskId::new("task_audit")?,
+        plan_id: plan_id.clone(),
+        plan_version: 2,
+        ordered_lane_candidates: vec![sigil_kernel::TaskPromotionLaneCandidate {
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            candidate: sigil_kernel::IntegrationLaneCandidate::ManagedRef {
+                private_ref: "refs/sigil/integration/plan-audit/lane-1".to_owned(),
+                base_commit: "b".repeat(40),
+                candidate_commit: "a".repeat(40),
+                workspace_snapshot_id: "snapshot-lane".to_owned(),
+            },
+            verification_receipt_ids: vec!["receipt-git-diff-check".to_owned()],
+        }],
+        aggregate_diff_artifact_ref: "artifact-aggregate".to_owned(),
+        aggregate_diff_digest: format!("sha256:{}", "a".repeat(64)),
+        target: sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {
+            expected_snapshot_id: "snapshot-base".to_owned(),
+            expected_revision: 3,
+        },
+        verification_invalidation: vec!["scope-audit".to_owned()],
+        intent_binding: None,
+        policy_digest: format!("sha256:{}", "c".repeat(64)),
+        preview_digest: format!("sha256:{}", "d".repeat(64)),
+        created_at_unix_ms: 6,
+    };
+    let preview_line = render_control_entry_line(&ControlEntry::TaskPromotionPreviewRecorded(
+        sigil_kernel::TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        },
+    ));
+    assert_eq!(
+        preview_line,
+        "[ctl] task promotion preview plan-audit target=workspace_apply lanes=1 digest=sha256:ddddddddd..."
+    );
+
+    let attempt_id = sigil_kernel::IntegrationPromotionAttemptId::new("promotion-attempt-audit")?;
+    let authority = sigil_kernel::TaskPromotionAuthority {
+        source: sigil_kernel::TaskPromotionAuthoritySource::UserIntegrationReview {
+            review_id: "review-audit".to_owned(),
+        },
+        task_id: preview.task_id.clone(),
+        plan_id: plan_id.clone(),
+        plan_version: 2,
+        preview_digest: preview.preview_digest.clone(),
+        aggregate_diff_digest: preview.aggregate_diff_digest.clone(),
+        target: preview.target.clone(),
+        intent_binding: None,
+        policy_digest: preview.policy_digest.clone(),
+        expires_at_unix_ms: 100,
+        nonce: "nonce-audit".to_owned(),
+    };
+    let authority_line = render_control_entry_line(&ControlEntry::TaskPromotionAuthorityConsumed(
+        sigil_kernel::TaskPromotionAuthorityConsumed {
+            attempt_id: attempt_id.clone(),
+            authority,
+            consumed_at_unix_ms: 7,
+        },
+    ));
+    assert_eq!(
+        authority_line,
+        "[ctl] task promotion authority attempt=promotion-attempt-audit source=user_review preview=sha256:ddddddddd..."
+    );
+
     let promotion = render_control_entry_line(&ControlEntry::IntegrationPromotionRecorded(
         sigil_kernel::IntegrationPromotionRecorded {
-            plan_id,
+            plan_id: plan_id.clone(),
+            attempt_id: None,
             status: sigil_kernel::IntegrationPromotionStatus::Prepared,
             preview_digest: "preview-sha256".to_owned(),
             target: sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {
                 expected_snapshot_id: "snapshot-base".to_owned(),
                 expected_revision: 3,
             },
+            authority_nonce: None,
             effect: None,
             reason: None,
+            recorded_at_unix_ms: 0,
         },
     ));
     assert_eq!(
         promotion,
         "[ctl] integration promotion plan-audit status=prepared target=workspace_apply effect=none preview=preview-sha256 reason=-"
+    );
+
+    let parent_verification =
+        render_control_entry_line(&ControlEntry::TaskParentVerificationRecorded(
+            sigil_kernel::TaskParentVerificationRecorded {
+                attempt_id,
+                plan_id,
+                preview_digest: preview.preview_digest,
+                promoted_snapshot_id: "snapshot-parent".to_owned(),
+                policy_digest: preview.policy_digest,
+                verdict: sigil_kernel::VerificationVerdict::Passed,
+                receipts: vec![audit_integration_verification_receipt()],
+                reason: None,
+                recorded_at_unix_ms: 8,
+            },
+        ));
+    assert_eq!(
+        parent_verification,
+        "[ctl] task parent verification attempt=promotion-attempt-audit verdict=passed receipts=1 preview=sha256:ddddddddd..."
     );
     Ok(())
 }

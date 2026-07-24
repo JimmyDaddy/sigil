@@ -4,7 +4,8 @@ use crate::{
     integration::{
         IntegrationLaneChanged, IntegrationLaneCleanupRecorded, IntegrationLaneMemberApplied,
         IntegrationLanePrepared, IntegrationLaneTerminal, IntegrationLaneVerificationLinked,
-        IntegrationPlanRecorded, IntegrationPromotionRecorded,
+        IntegrationPlanRecorded, IntegrationPromotionRecorded, TaskParentVerificationRecorded,
+        TaskPromotionAuthorityConsumed, TaskPromotionPreviewRecorded,
     },
 };
 
@@ -248,7 +249,10 @@ pub enum ControlEntry {
     IntegrationLaneVerificationLinked(IntegrationLaneVerificationLinked),
     IntegrationLaneTerminal(IntegrationLaneTerminal),
     IntegrationLaneCleanupRecorded(IntegrationLaneCleanupRecorded),
+    TaskPromotionPreviewRecorded(TaskPromotionPreviewRecorded),
+    TaskPromotionAuthorityConsumed(TaskPromotionAuthorityConsumed),
     IntegrationPromotionRecorded(IntegrationPromotionRecorded),
+    TaskParentVerificationRecorded(TaskParentVerificationRecorded),
     AgentProfileCaptured(AgentProfileCapturedEntry),
     AgentProfileTrustDecision(AgentProfileTrustEntry),
     AgentProfilePolicyDecision(AgentProfilePolicyEntry),

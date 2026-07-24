@@ -913,8 +913,17 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::IntegrationLaneCleanupRecorded(_) => {
             DurableEventType::IntegrationLaneCleanupRecorded
         }
+        ControlEntry::TaskPromotionPreviewRecorded(_) => {
+            DurableEventType::TaskPromotionPreviewRecorded
+        }
+        ControlEntry::TaskPromotionAuthorityConsumed(_) => {
+            DurableEventType::TaskPromotionAuthorityConsumed
+        }
         ControlEntry::IntegrationPromotionRecorded(_) => {
             DurableEventType::IntegrationPromotionRecorded
+        }
+        ControlEntry::TaskParentVerificationRecorded(_) => {
+            DurableEventType::TaskParentVerificationRecorded
         }
         ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,

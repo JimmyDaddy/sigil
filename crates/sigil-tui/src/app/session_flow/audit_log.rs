@@ -696,6 +696,29 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.lane_id.as_str(),
             entry.status.as_str()
         ),
+        ControlEntry::TaskPromotionPreviewRecorded(entry) => format!(
+            "[ctl] task promotion preview {} target={} lanes={} digest={}",
+            entry.preview.plan_id.as_str(),
+            entry.preview.target.kind(),
+            entry.preview.ordered_lane_candidates.len(),
+            truncate_session_view_text(&entry.preview.preview_digest, 16)
+        ),
+        ControlEntry::TaskPromotionAuthorityConsumed(entry) => {
+            let source = match &entry.authority.source {
+                sigil_kernel::TaskPromotionAuthoritySource::UserIntegrationReview { .. } => {
+                    "user_review"
+                }
+                sigil_kernel::TaskPromotionAuthoritySource::ControlledAutoPostEffect { .. } => {
+                    "controlled_auto"
+                }
+            };
+            format!(
+                "[ctl] task promotion authority attempt={} source={} preview={}",
+                entry.attempt_id.as_str(),
+                source,
+                truncate_session_view_text(&entry.authority.preview_digest, 16)
+            )
+        }
         ControlEntry::IntegrationPromotionRecorded(entry) => {
             let target = match &entry.target {
                 sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => {
@@ -722,6 +745,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 96)
             )
         }
+        ControlEntry::TaskParentVerificationRecorded(entry) => format!(
+            "[ctl] task parent verification attempt={} verdict={} receipts={} preview={}",
+            entry.attempt_id.as_str(),
+            verification_verdict_label(entry.verdict),
+            entry.receipts.len(),
+            truncate_session_view_text(&entry.preview_digest, 16)
+        ),
         ControlEntry::ConversationInputQueued(entry) => format!(
             "[ctl] queue {} kind={:?} prompt={}",
             entry.queue_id.as_str(),
