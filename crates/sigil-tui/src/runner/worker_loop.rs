@@ -187,7 +187,9 @@ pub(in crate::runner) use agent_runtime::{
     append_mcp_elicitation_audits, partition_agent_result_continuations,
     pending_agent_result_continuations_from_session, queued_background_ready_transient_context,
 };
-pub(in crate::runner) use task_runtime::{RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder};
+pub(in crate::runner) use sigil_runtime::agent_supervisor::task_role_runtime::{
+    RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, TaskRoleRuntime,
+};
 pub(in crate::runner) use task_runtime::{
     append_cancelled_task_state, append_interrupted_task_state,
 };

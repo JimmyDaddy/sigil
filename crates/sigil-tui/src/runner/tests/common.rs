@@ -282,7 +282,7 @@ impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
-    ) -> std::result::Result<Box<dyn Provider>, String> {
+    ) -> Result<Box<dyn Provider>> {
         Ok(Box::new(PlannedProvider {
             plans: Arc::clone(&self.plans),
             stream_started: None,

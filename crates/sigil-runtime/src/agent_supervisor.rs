@@ -19,6 +19,7 @@ mod ids;
 mod projection;
 mod record;
 mod task_discovery;
+pub mod task_role_runtime;
 mod task_runner;
 mod thread_ops;
 mod thread_state;

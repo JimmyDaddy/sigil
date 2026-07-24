@@ -1,29 +1,5 @@
 use super::*;
 
-pub(in crate::runner) trait TaskRoleProviderBuilder: Send + Sync {
-    fn build(
-        &self,
-        root_config: &RootConfig,
-        role: AgentRole,
-    ) -> std::result::Result<Box<dyn sigil_kernel::Provider>, String>;
-}
-
-/// Default role-provider builder used by product runtime paths.
-///
-/// The trait seam exists so runner tests can exercise task orchestration with deterministic
-/// providers without registering a fake provider in `sigil-runtime`.
-pub(in crate::runner) struct RuntimeTaskRoleProviderBuilder;
-
-impl TaskRoleProviderBuilder for RuntimeTaskRoleProviderBuilder {
-    fn build(
-        &self,
-        root_config: &RootConfig,
-        role: AgentRole,
-    ) -> std::result::Result<Box<dyn sigil_kernel::Provider>, String> {
-        sigil_runtime::build_role_provider(root_config, role).map_err(|error| format!("{error:#}"))
-    }
-}
-
 pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) run_id: u64,
     pub(in crate::runner) session: Session,
@@ -87,15 +63,6 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
-}
-
-pub(in crate::runner) struct TaskRoleRuntime {
-    pub(in crate::runner) orchestrator:
-        SequentialTaskOrchestrator<sigil_runtime::AgentSupervisorTaskChildRunner>,
-    pub(in crate::runner) planner_options: AgentRunOptions,
-    pub(in crate::runner) executor_options: AgentRunOptions,
-    pub(in crate::runner) subagent_read_options: AgentRunOptions,
-    pub(in crate::runner) subagent_write_options: AgentRunOptions,
 }
 
 pub(in crate::runner) fn spawn_task_run(
@@ -1084,83 +1051,14 @@ pub(in crate::runner) fn build_task_role_runtime(
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
-    let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
-    let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
-    let synthesis_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
-    let subagent_read_provider =
-        role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
-    let subagent_write_provider =
-        role_provider_builder.build(root_config, AgentRole::SubagentWrite)?;
-    let planner_registry =
-        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
-            .into_registry();
-    let executor_registry =
-        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
-            .into_registry();
-    let subagent_read_registry = sigil_runtime::build_role_tool_registry(
-        base_registry,
+    sigil_runtime::agent_supervisor::task_role_runtime::build_task_role_runtime(
         root_config,
-        AgentRole::SubagentRead,
-    )
-    .into_registry();
-    let subagent_write_registry = sigil_runtime::build_role_tool_registry(
+        options,
         base_registry,
-        root_config,
-        AgentRole::SubagentWrite,
-    )
-    .into_registry();
-    let workspace_root = options.workspace_root.clone();
-    let interaction_mode = options.interaction_mode;
-    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
-        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
-    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
-        Agent::new(planner_provider, planner_registry),
-        Agent::new(executor_provider, executor_registry),
-        Agent::new(subagent_read_provider, subagent_read_registry),
-        Agent::new(subagent_write_provider, subagent_write_registry),
-        Agent::new(synthesis_provider, ToolRegistry::new()),
+        role_provider_builder,
     )
-    .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
-        &root_config.task,
-    ))
-    .with_planner_discovery_policy(
-        root_config.task.multi_agent_mode,
-        root_config.task.max_planning_research_agents,
-    )
-    .with_integration_verification_backend(execution_backend.clone());
-    Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
-            .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
-            .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
-                &root_config.task,
-            ))
-            .with_execution_backend(execution_backend),
-        planner_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Planner,
-        ),
-        executor_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Executor,
-        ),
-        subagent_read_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::SubagentRead,
-        ),
-        subagent_write_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root,
-            interaction_mode,
-            AgentRole::SubagentWrite,
-        ),
-    })
+    .map_err(|error| format!("{error:#}"))
 }
 
 pub(in crate::runner) fn build_skill_child_role_runtime(
@@ -1172,13 +1070,21 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
-    let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
-    let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
-    let synthesis_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
-    let subagent_read_provider =
-        role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
-    let subagent_write_provider =
-        role_provider_builder.build(root_config, AgentRole::SubagentWrite)?;
+    let planner_provider = role_provider_builder
+        .build(root_config, AgentRole::Planner)
+        .map_err(|error| format!("{error:#}"))?;
+    let executor_provider = role_provider_builder
+        .build(root_config, AgentRole::Executor)
+        .map_err(|error| format!("{error:#}"))?;
+    let synthesis_provider = role_provider_builder
+        .build(root_config, AgentRole::Planner)
+        .map_err(|error| format!("{error:#}"))?;
+    let subagent_read_provider = role_provider_builder
+        .build(root_config, AgentRole::SubagentRead)
+        .map_err(|error| format!("{error:#}"))?;
+    let subagent_write_provider = role_provider_builder
+        .build(root_config, AgentRole::SubagentWrite)
+        .map_err(|error| format!("{error:#}"))?;
     let planner_registry =
         sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
             .into_registry();
