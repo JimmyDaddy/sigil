@@ -179,6 +179,14 @@ where
                         break;
                     }
                     Err(error) => {
+                        if self.abort_participant_failure_for_cancellation(
+                            session,
+                            handler,
+                            &attempt,
+                            "task planner cancelled by the root run owner",
+                        )? {
+                            return Err(error);
+                        }
                         if schedule_control_participant_retry(
                             session,
                             handler,
@@ -227,15 +235,17 @@ where
         {
             Ok(output) => Ok(output),
             Err(error) => {
-                // If the planner never produced an executable plan, preserve the failed task
-                // state before surfacing the orchestration error.
-                append_task_run(
-                    session,
-                    handler,
-                    &request,
-                    TaskRunStatus::Failed,
-                    Some(format!("task orchestration failed: {error:#}")),
-                )?;
+                // Cancellation owns the durable terminal and must observe the task as active.
+                // Other failures still receive a task terminal before surfacing the error.
+                if !self.cancellation_requested() {
+                    append_task_run(
+                        session,
+                        handler,
+                        &request,
+                        TaskRunStatus::Failed,
+                        Some(format!("task orchestration failed: {error:#}")),
+                    )?;
+                }
                 Err(error)
             }
         }
@@ -417,6 +427,14 @@ where
             let output = match planner_output {
                 Ok(output) => output,
                 Err(error) => {
+                    if self.abort_participant_failure_for_cancellation(
+                        session,
+                        handler,
+                        &attempt,
+                        "task guidance review cancelled by the root run owner",
+                    )? {
+                        return Err(error);
+                    }
                     if schedule_control_participant_retry(
                         session,
                         handler,
@@ -1105,6 +1123,14 @@ where
     where
         H: EventHandler + Send,
     {
+        if self.abort_step_failure_for_cancellation(
+            session,
+            handler,
+            attempt,
+            write_lease_id.clone(),
+        )? {
+            bail!("task step cancellation won the terminal-state race: {error:#}");
+        }
         if schedule_participant_retry(
             session,
             handler,
@@ -1158,6 +1184,62 @@ where
             visible_state: readiness.evaluation.visible_state,
             outcome: AgentRunOutcome::default(),
         }))
+    }
+
+    fn abort_step_failure_for_cancellation<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        attempt: &TaskParticipantAttemptEntry,
+        write_lease_id: Option<WriteLeaseId>,
+    ) -> Result<bool>
+    where
+        H: EventHandler + Send,
+    {
+        if !self.cancellation_requested() {
+            return Ok(false);
+        }
+        release_task_write_lease(
+            session,
+            handler,
+            write_lease_id,
+            WriteLeaseReleaseStatus::Cancelled,
+        )?;
+        self.abort_participant_failure_for_cancellation(
+            session,
+            handler,
+            attempt,
+            "task step cancelled by the root run owner",
+        )
+    }
+
+    fn abort_participant_failure_for_cancellation<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        attempt: &TaskParticipantAttemptEntry,
+        reason: &str,
+    ) -> Result<bool>
+    where
+        H: EventHandler + Send,
+    {
+        if !self.cancellation_requested() {
+            return Ok(false);
+        }
+        append_participant_terminal(
+            session,
+            handler,
+            attempt,
+            TaskParticipantAttemptStatus::Cancelled,
+            Some(reason.to_owned()),
+        )?;
+        Ok(true)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(RunCancellationHandle::is_cancel_requested)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1401,6 +1483,14 @@ where
         {
             Ok(output) => output,
             Err(error) => {
+                if self.abort_step_failure_for_cancellation(
+                    session,
+                    handler,
+                    &attempt,
+                    write_lease_id.clone(),
+                )? {
+                    bail!("task step cancellation won the terminal-state race: {error:#}");
+                }
                 release_task_write_lease(
                     session,
                     handler,
@@ -1997,6 +2087,14 @@ where
             let output = match output {
                 Ok(output) => output,
                 Err(error) => {
+                    if self.abort_participant_failure_for_cancellation(
+                        session,
+                        handler,
+                        &attempt,
+                        "task synthesis cancelled by the root run owner",
+                    )? {
+                        return Err(error);
+                    }
                     if schedule_control_participant_retry(
                         session,
                         handler,

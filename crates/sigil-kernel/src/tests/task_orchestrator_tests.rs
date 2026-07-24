@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use serde_json::{Value, json};
 
+use crate::RunCancellationOwner;
 use crate::{
     Agent, AgentFinalAnswerRef, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck,
     CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
@@ -4207,6 +4208,94 @@ async fn planner_provider_error_marks_task_failed() -> Result<()> {
                         .is_some_and(|reason| reason.contains("planner failed"))
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_cancellation_does_not_commit_task_step_failure() -> Result<()> {
+    let owner = RunCancellationOwner::new();
+    let orchestrator = test_orchestrator(
+        boxed_agent(FailingProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    )
+    .with_cancellation(owner.handle());
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Started,
+        vec![read_executor_step(
+            "cancel_in_flight",
+            "cancel in flight",
+            Vec::new(),
+        )?],
+    )?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    assert!(owner.request_cancel());
+
+    let error = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            4,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await
+        .expect_err("root cancellation must retain terminal authority");
+
+    assert!(error.to_string().contains("cancellation won"));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Failed
+        ) || matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.status == TaskStepStatus::Failed
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
+                if attempt.status == TaskParticipantAttemptStatus::Cancelled
+        )
+    }));
+    assert!(matches!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&TaskId::new("task_1")?)
+            .map(|task| task.status),
+        Some(TaskRunStatus::Running)
+    ));
     Ok(())
 }
 
