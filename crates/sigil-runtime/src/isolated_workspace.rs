@@ -59,6 +59,19 @@ pub struct GitWorktreeBaseFreezeRequest {
     pub artifact_recorder: MutationEventRecorder,
 }
 
+/// Durable bindings required to restore one previously frozen dirty/untracked Git baseline.
+#[derive(Debug, Clone)]
+pub struct FrozenGitWorktreeBaseRestoreRequest {
+    pub parent_workspace_root: PathBuf,
+    pub base_snapshot_id: String,
+    pub base_commit: String,
+    pub overlay_digest: String,
+    pub overlay_artifact_ref: MutationArtifactId,
+    pub overlay_content_artifact_refs: Vec<MutationArtifactId>,
+    pub overlay_entry_count: usize,
+    pub artifact_recorder: MutationEventRecorder,
+}
+
 /// Immutable, content-addressed parent baseline reusable by independent child worktrees.
 #[derive(Debug, Clone)]
 pub struct FrozenGitWorktreeBase {
@@ -363,6 +376,104 @@ pub async fn freeze_git_worktree_base(
         overlay_manifest,
         overlay_digest,
         overlay_artifact_ref,
+        artifact_recorder: request.artifact_recorder,
+    })
+}
+
+/// Restores a frozen Git baseline from durable, content-addressed overlay bindings.
+///
+/// The current parent must still match the original snapshot and commit. The manifest digest,
+/// entry count and referenced content artifact set must exactly match the durable record before a
+/// reusable frozen base is returned.
+///
+/// # Errors
+///
+/// Returns an error for parent drift, missing or substituted artifacts, malformed manifests,
+/// unsafe paths or inconsistent durable bindings.
+pub async fn restore_frozen_git_worktree_base(
+    request: FrozenGitWorktreeBaseRestoreRequest,
+) -> Result<FrozenGitWorktreeBase> {
+    if request.base_snapshot_id.trim().is_empty()
+        || request.base_commit.trim().is_empty()
+        || request.overlay_digest.trim().is_empty()
+        || request.overlay_artifact_ref.trim().is_empty()
+        || request.overlay_entry_count == 0
+    {
+        bail!("frozen Git worktree restore binding is incomplete");
+    }
+    let parent_workspace_root = canonical_directory(&request.parent_workspace_root)
+        .await
+        .context("failed to resolve parent workspace root for frozen Git baseline restore")?;
+    validate_git_repository_root(&parent_workspace_root).await?;
+    validate_no_submodules(&parent_workspace_root).await?;
+    let base_snapshot =
+        validate_parent_snapshot(&parent_workspace_root, &request.base_snapshot_id).await?;
+    let observed_commit = resolve_base_commit(&parent_workspace_root).await?;
+    if observed_commit != request.base_commit {
+        bail!("parent Git HEAD drifted from the durable frozen base commit");
+    }
+    let manifest_bytes = read_immutable_overlay_artifact(
+        request.artifact_recorder.clone(),
+        request.overlay_artifact_ref.clone(),
+    )
+    .await?;
+    let observed_digest = format!("sha256:{}", bytes_sha256(&manifest_bytes));
+    if observed_digest != request.overlay_digest {
+        bail!("durable frozen Git overlay manifest digest mismatch");
+    }
+    let overlay_manifest = serde_json::from_slice::<GitWorktreeOverlayManifest>(&manifest_bytes)
+        .context("failed to decode durable frozen Git overlay manifest")?;
+    if overlay_manifest.version != OVERLAY_MANIFEST_VERSION
+        || overlay_manifest.base_commit != request.base_commit
+        || overlay_manifest.parent_snapshot_id != request.base_snapshot_id
+        || overlay_manifest.entries.len() != request.overlay_entry_count
+    {
+        bail!("durable frozen Git overlay manifest binding mismatch");
+    }
+    let mut referenced_artifacts = BTreeSet::new();
+    for entry in &overlay_manifest.entries {
+        let relative_path = validate_relative_path(&entry.relative_path)?;
+        validate_overlay_path(&relative_path)?;
+        match entry.action {
+            GitWorktreeOverlayAction::Delete => {
+                if entry.content_artifact_ref.is_some() || entry.content_sha256.is_some() {
+                    bail!(
+                        "deleted frozen overlay path {} unexpectedly carries content",
+                        relative_path.display()
+                    );
+                }
+            }
+            GitWorktreeOverlayAction::Upsert => {
+                let artifact_ref = entry.content_artifact_ref.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "frozen overlay path {} is missing content artifact",
+                        relative_path.display()
+                    )
+                })?;
+                if entry.content_sha256.as_deref().is_none_or(str::is_empty) {
+                    bail!(
+                        "frozen overlay path {} is missing content digest",
+                        relative_path.display()
+                    );
+                }
+                referenced_artifacts.insert(artifact_ref.clone());
+            }
+        }
+    }
+    let expected_artifacts = request
+        .overlay_content_artifact_refs
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if referenced_artifacts != expected_artifacts {
+        bail!("durable frozen Git overlay content artifact set mismatch");
+    }
+    Ok(FrozenGitWorktreeBase {
+        parent_workspace_root,
+        base_snapshot,
+        base_commit: request.base_commit,
+        overlay_manifest,
+        overlay_digest: request.overlay_digest,
+        overlay_artifact_ref: request.overlay_artifact_ref,
         artifact_recorder: request.artifact_recorder,
     })
 }

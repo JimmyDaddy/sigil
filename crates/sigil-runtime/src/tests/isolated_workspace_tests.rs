@@ -16,9 +16,10 @@ use sigil_kernel::{
 use tempfile::TempDir;
 
 use crate::isolated_workspace::{
-    GitWorktreeBaseFreezeRequest, GitWorktreeMaterializationRequest, freeze_git_worktree_base,
-    materialize_git_worktree, materialize_git_worktree_from_frozen_base,
-    reconcile_isolated_workspace_cleanup,
+    FrozenGitWorktreeBaseRestoreRequest, GitWorktreeBaseFreezeRequest,
+    GitWorktreeMaterializationRequest, freeze_git_worktree_base, materialize_git_worktree,
+    materialize_git_worktree_from_frozen_base, reconcile_isolated_workspace_cleanup,
+    restore_frozen_git_worktree_base,
 };
 
 #[tokio::test]
@@ -261,6 +262,52 @@ async fn frozen_dirty_overlay_is_shared_by_value_and_becomes_the_delta_baseline(
     );
     first.cleanup().await?;
     second.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_dirty_overlay_restores_from_exact_durable_artifact_bindings() -> Result<()> {
+    let repository = TestRepository::new()?;
+    fs::write(repository.root().join("base.txt"), "durable user edit\n")?;
+    fs::write(repository.root().join("notes.txt"), "durable notes\n")?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let recorder = repository.mutation_recorder()?;
+    let frozen = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id: base_snapshot_id.clone(),
+        operation_id: "overlay-durable-restore".to_owned(),
+        artifact_recorder: recorder.clone(),
+    })
+    .await?;
+    let request = FrozenGitWorktreeBaseRestoreRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id,
+        base_commit: frozen.base_commit().to_owned(),
+        overlay_digest: frozen.overlay_digest().to_owned(),
+        overlay_artifact_ref: frozen.overlay_artifact_ref().clone(),
+        overlay_content_artifact_refs: frozen.overlay_content_artifact_refs(),
+        overlay_entry_count: frozen.overlay_entry_count(),
+        artifact_recorder: recorder,
+    };
+    let restored = restore_frozen_git_worktree_base(request.clone()).await?;
+    let materialized =
+        materialize_git_worktree_from_frozen_base(&restored, "dirty-restored-child").await?;
+    assert_eq!(
+        fs::read_to_string(materialized.workspace_root().join("base.txt"))?,
+        "durable user edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(materialized.workspace_root().join("notes.txt"))?,
+        "durable notes\n"
+    );
+    materialized.cleanup().await?;
+
+    let mut substituted = request;
+    substituted.overlay_content_artifact_refs.clear();
+    let error = restore_frozen_git_worktree_base(substituted)
+        .await
+        .expect_err("substituted durable artifact inventory must fail closed");
+    assert!(format!("{error:#}").contains("content artifact set mismatch"));
     Ok(())
 }
 
