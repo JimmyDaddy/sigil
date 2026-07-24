@@ -47,6 +47,8 @@ export interface LiveEventState {
   controlEvents: ReadonlyMap<string, TimelineEvent>;
   /** Exact per-call high-water marks, including resolved and fail-closed tombstones. */
   approvalLifecycles: ReadonlyMap<string, ApprovalLifecycle>;
+  /** Latest typed task event for each exact task/entity slot. */
+  taskEvents: ReadonlyMap<string, TimelineEvent>;
   terminalSignals: ReadonlyMap<string, LiveTerminalSignal>;
 }
 
@@ -63,6 +65,7 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     deltaBuffers: new Map(),
     controlEvents: new Map(),
     approvalLifecycles: new Map(),
+    taskEvents: new Map(),
     terminalSignals: new Map(),
   };
 }
@@ -128,6 +131,10 @@ export function selectTerminalSignals(state: LiveEventState): LiveTerminalSignal
     const sequence = compareRunSequence(left.runSequence, right.runSequence);
     return sequence !== 0 ? sequence : left.runId.localeCompare(right.runId);
   });
+}
+
+export function selectTaskEvents(state: LiveEventState): TimelineEvent[] {
+  return [...state.taskEvents.values()].sort(compareTimelineEvents);
 }
 
 export function semanticLiveItemFromTimelineEvent(
@@ -264,7 +271,7 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   if (event.sessionId !== state.sessionId || !isDecimalSequence(event.runSequence)) return state;
 
   const controlUpdate = updateControlEvents(state, event);
-  let next = controlUpdate.state;
+  let next = updateTaskEvents(controlUpdate.state, event);
   const terminalSignal = terminalSignalFromTimelineEvent(event);
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(next, terminalSignal);
@@ -291,6 +298,34 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   return item === undefined || !controlUpdate.applySemantic
     ? next
     : receiveSemanticItem(next, item);
+}
+
+function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  const key = taskEventKey(event);
+  if (key === undefined) return state;
+  const existing = state.taskEvents.get(key);
+  if (
+    existing !== undefined
+    && compareRunSequence(event.runSequence, existing.runSequence) <= 0
+  ) return state;
+  const taskEvents = new Map(state.taskEvents);
+  taskEvents.set(key, event);
+  return { ...state, taskEvents };
+}
+
+function taskEventKey(event: TimelineEvent): string | undefined {
+  const task = event.task;
+  if (task === undefined) return undefined;
+  const taskIdentity = task.taskId ?? (
+    task.handoffId === undefined ? undefined : `handoff:${task.handoffId}`
+  );
+  if (taskIdentity === undefined) return undefined;
+  const entityIdentity = task.stepId
+    ?? task.laneId
+    ?? task.batchId
+    ?? task.handoffId
+    ?? "task";
+  return `${event.runId}:${taskIdentity}:${event.kind}:${entityIdentity}`;
 }
 
 function receiveSemanticItem(
@@ -482,6 +517,7 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     state.approvalLifecycles,
     (lifecycle) => lifecycle.runId !== runId,
   );
+  const taskEvents = filterMap(state.taskEvents, (event) => event.runId !== runId);
   const terminalSignals = new Map(state.terminalSignals);
   terminalSignals.delete(runId);
   if (
@@ -489,6 +525,7 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     && deltaBuffers.size === state.deltaBuffers.size
     && controlEvents.size === state.controlEvents.size
     && approvalLifecycles.size === state.approvalLifecycles.size
+    && taskEvents.size === state.taskEvents.size
     && terminalSignals.size === state.terminalSignals.size
   ) return state;
   return {
@@ -497,6 +534,7 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     deltaBuffers,
     controlEvents,
     approvalLifecycles,
+    taskEvents,
     terminalSignals,
   };
 }

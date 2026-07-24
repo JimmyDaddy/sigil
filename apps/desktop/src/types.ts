@@ -860,6 +860,14 @@ export interface VerificationSummary {
 
 export type TimelineEventKind =
   | "run_started"
+  | "task_run_started"
+  | "task_run_finished"
+  | "task_routing_changed"
+  | "task_phase_changed"
+  | "task_plan_updated"
+  | "task_batch_changed"
+  | "task_step_changed"
+  | "integration_lane_changed"
   | "assistant_delta"
   | "reasoning_delta"
   | "assistant_message"
@@ -894,6 +902,41 @@ export interface TimelineApproval {
   previewBody?: string;
 }
 
+export type TimelineTaskPhase =
+  | "routing"
+  | "planning"
+  | "execution"
+  | "integration"
+  | "synthesis"
+  | "terminal";
+
+export interface TimelineTaskPlanStep {
+  stepId: string;
+  title: string;
+  role: string;
+  dependsOn: string[];
+  mode: string;
+  isolation: string;
+}
+
+export interface TimelineTask {
+  taskId?: string;
+  objective?: string;
+  handoffId?: string;
+  phase?: TimelineTaskPhase;
+  planVersion?: number;
+  batchId?: string;
+  stepId?: string;
+  attemptId?: string;
+  planId?: string;
+  laneId?: string;
+  active?: number;
+  completed?: number;
+  failed?: number;
+  steps?: TimelineTaskPlanStep[];
+  conflicts?: string[];
+}
+
 export interface TimelineEvent {
   workspaceId: string;
   sessionId: string;
@@ -912,6 +955,7 @@ export interface TimelineEvent {
   assistantKind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
   toolInput?: string;
   approval?: TimelineApproval;
+  task?: TimelineTask;
 }
 
 export type ApprovalAction = "approve_once" | "approve_session" | "deny";

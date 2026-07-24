@@ -282,7 +282,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "text/event-stream": string;
+                        "text/event-stream": components["schemas"]["ProtocolEvent"];
                     };
                 };
                 400: components["responses"]["BadRequest"];
@@ -1676,6 +1676,40 @@ export interface components {
             reason?: string | null;
             tool_call_hash: string;
         };
+        ApprovalRequestedEvent: {
+            call: components["schemas"]["PublicToolCall"];
+            command_permission_matches?: Record<string, never>[];
+            confirmation?: Record<string, never>;
+            local_policy_decision?: string;
+            network_effect?: string;
+            network_policy_decision?: string;
+            operation?: string;
+            preview?: components["schemas"]["PublicToolPreview"] | null;
+            risk?: string;
+            snapshot_required: boolean;
+            source_policy_decision?: string;
+            spec?: Record<string, never>;
+            subject_zones?: string[];
+            subjects?: Record<string, never>[];
+            /** @constant */
+            type: "approval_requested";
+        } & {
+            [key: string]: unknown;
+        };
+        ApprovalResolvedEvent: {
+            approved: boolean;
+            call_id: string;
+            reason: string | null;
+            /** @constant */
+            type: "approval_resolved";
+        };
+        AssistantMessageEvent: {
+            message: components["schemas"]["PublicAssistantMessage"];
+            /** @constant */
+            type: "assistant_message";
+        } & {
+            [key: string]: unknown;
+        };
         /** @enum {string} */
         CheckpointFileAvailability: "restorable" | "sensitive" | "unsupported" | "unavailable";
         CheckpointFileView: {
@@ -1796,8 +1830,25 @@ export interface components {
             /** Format: uint64 */
             retained_event_count: number;
         };
+        ContinuationStateEvent: {
+            state: Record<string, never>;
+            /** @constant */
+            type: "continuation_state";
+        } & {
+            [key: string]: unknown;
+        };
         /** @enum {string} */
         ContinuityRecoveryAction: "retry_current" | "open_another_workspace" | "open_diagnostics" | "show_details" | "continue_read_only";
+        ControlEvent: {
+            control: {
+                kind: string;
+                payload?: unknown;
+            };
+            /** @constant */
+            type: "control";
+        } & {
+            [key: string]: unknown;
+        };
         ConversationDisplayContent: {
             /** @enum {string|null} */
             assistant_phase?: "tool_preamble" | "progress" | "final_answer" | null;
@@ -2093,8 +2144,113 @@ export interface components {
             /** @constant */
             status: "ok";
         };
+        IntegrationLaneChangedEvent: {
+            conflicts: string[];
+            lane_id: string;
+            plan_id: string;
+            /** Format: uint32 */
+            plan_version: number;
+            status: string;
+            task_id: string;
+            /** @constant */
+            type: "integration_lane_changed";
+        };
+        NoticeEvent: {
+            message: string;
+            /** @constant */
+            type: "notice";
+        };
+        PendingApproval: {
+            approval_request_id: string;
+            call_id: string;
+            /** Format: uint64 */
+            expires_at_ms: number;
+            policy_version: string;
+            session_grant_available: boolean;
+            tool_call_hash: string;
+            tool_name: string;
+        };
         /** @enum {string} */
         PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
+        ProtocolEvent: {
+            approval_request?: components["schemas"]["PendingApproval"];
+            /** @enum {string} */
+            event_class: "durable" | "transient";
+            provisional_id?: string;
+            replay_id?: string;
+            run_event: components["schemas"]["PublicRunEvent"];
+            /** @constant */
+            schema_version: 2;
+        };
+        PublicAssistantMessage: {
+            /** @enum {string} */
+            assistant_kind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
+            content: string | null;
+            id: string;
+            tool_calls: components["schemas"]["PublicToolCall"][];
+        };
+        PublicRunEvent: {
+            event: components["schemas"]["PublicRunEventPayload"];
+            run_id: string;
+            /** @constant */
+            schema_version: 1;
+            /** Format: uint64 */
+            sequence: number;
+            session_id: string;
+        };
+        PublicRunEventPayload: components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        /** @enum {string} */
+        PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "synthesis" | "terminal";
+        PublicTaskPlanStep: {
+            depends_on: string[];
+            isolation: string;
+            mode: string;
+            role: string;
+            step_id: string;
+            title: string;
+        };
+        PublicToolCall: {
+            args_json: string;
+            id: string;
+            name: string;
+        };
+        PublicToolPreview: {
+            body: string;
+            changed_files: string[];
+            file_diffs: Record<string, never>[];
+            summary: string;
+            title: string;
+        };
+        PublicToolProgress: {
+            call_id: string;
+            details: unknown;
+            execution_id: string;
+            message?: string;
+            output_log_ref?: string;
+            output_preview?: string;
+            /** Format: uint64 */
+            sequence: number;
+            status: string;
+            tool_name: string;
+            /** Format: uint64 */
+            total_bytes?: number;
+            /** Format: uint64 */
+            updated_at_ms?: number;
+        };
+        PublicToolResult: {
+            call_id: string;
+            content: string;
+            metadata: Record<string, never>;
+            status: "ok" | {
+                error: Record<string, never>;
+            };
+            tool_name: string;
+        };
+        ReasoningDeltaEvent: {
+            text: string;
+            /** @constant */
+            type: "reasoning_delta";
+        };
         /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
@@ -2112,6 +2268,10 @@ export interface components {
         };
         RunCancelRequest: {
             reason?: string | null;
+        };
+        RunCancelledEvent: {
+            /** @constant */
+            type: "run_cancelled";
         };
         RunContextView: {
             available_models: string[];
@@ -2133,6 +2293,16 @@ export interface components {
             model_selection_binding: string;
             provider_name: string;
             reasoning_effort_binding?: string | null;
+        };
+        RunFailedEvent: {
+            error: string;
+            /** @constant */
+            type: "run_failed";
+        };
+        RunFinishedEvent: {
+            final_text: string;
+            /** @constant */
+            type: "run_finished";
         };
         RunSnapshot: {
             id: string;
@@ -2168,6 +2338,11 @@ export interface components {
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             reasoning_effort_binding?: string | null;
             skill_binding?: components["schemas"]["ApplicationSkillBinding"] | null;
+        };
+        RunStartedEvent: {
+            prompt: string;
+            /** @constant */
+            type: "run_started";
         };
         /** @enum {string} */
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";
@@ -2439,6 +2614,111 @@ export interface components {
             overall_status: components["schemas"]["SupportStatus"];
             /** Format: uint64 */
             warn: number;
+        };
+        TaskBatchChangedEvent: {
+            /** Format: uint32 */
+            active: number;
+            batch_id: string;
+            /** Format: uint32 */
+            completed: number;
+            /** Format: uint32 */
+            failed: number;
+            /** Format: uint32 */
+            plan_version: number;
+            task_id: string;
+            /** @constant */
+            type: "task_batch_changed";
+        };
+        TaskPhaseChangedEvent: {
+            phase: components["schemas"]["PublicTaskPhase"];
+            status: string;
+            task_id: string | null;
+            /** @constant */
+            type: "task_phase_changed";
+        };
+        TaskPlanUpdatedEvent: {
+            /** Format: uint32 */
+            plan_version: number;
+            status: string;
+            steps: components["schemas"]["PublicTaskPlanStep"][];
+            task_id: string;
+            /** @constant */
+            type: "task_plan_updated";
+        };
+        TaskRoutingChangedEvent: {
+            handoff_id: string;
+            status: string;
+            task_id: string | null;
+            /** @constant */
+            type: "task_routing_changed";
+        };
+        TaskRunFinishedEvent: {
+            status: string;
+            task_id: string;
+            /** @constant */
+            type: "task_run_finished";
+        };
+        TaskRunStartedEvent: {
+            objective: string;
+            task_id: string;
+            /** @constant */
+            type: "task_run_started";
+        };
+        TaskStepChangedEvent: {
+            attempt_id: string | null;
+            /** Format: uint32 */
+            plan_version: number;
+            status: string;
+            step_id: string;
+            task_id: string;
+            /** @constant */
+            type: "task_step_changed";
+        };
+        TextDeltaEvent: {
+            text: string;
+            /** @constant */
+            type: "text_delta";
+        };
+        ToolCallArgsDeltaEvent: {
+            delta: string;
+            id: string;
+            /** @constant */
+            type: "tool_call_args_delta";
+        };
+        ToolCallCompletedEvent: {
+            call: components["schemas"]["PublicToolCall"];
+            /** @constant */
+            type: "tool_call_completed";
+        } & {
+            [key: string]: unknown;
+        };
+        ToolCallStartedEvent: {
+            call: components["schemas"]["PublicToolCall"];
+            /** @constant */
+            type: "tool_call_started";
+        } & {
+            [key: string]: unknown;
+        };
+        ToolProgressEvent: {
+            progress: components["schemas"]["PublicToolProgress"];
+            /** @constant */
+            type: "tool_progress";
+        } & {
+            [key: string]: unknown;
+        };
+        ToolResultEvent: {
+            result: components["schemas"]["PublicToolResult"];
+            /** @constant */
+            type: "tool_result";
+        } & {
+            [key: string]: unknown;
+        };
+        UsageEvent: {
+            /** @constant */
+            type: "usage";
+            usage: Record<string, never>;
+        } & {
+            [key: string]: unknown;
         };
         VerificationEvidence: {
             changeset_apply_event_id: string | null;

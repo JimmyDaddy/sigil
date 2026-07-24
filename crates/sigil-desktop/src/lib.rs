@@ -72,7 +72,11 @@ pub use dto::{
 pub use events::{
     DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION, DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
     DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError,
-    DesktopPublicRunEvent, DesktopTimelineApproval, DesktopTimelineEvent, DesktopTimelineEventKind,
+    DesktopPublicAssistantMessage, DesktopPublicControlEvent, DesktopPublicRunEvent,
+    DesktopPublicRunEventKind, DesktopPublicTaskPhase, DesktopPublicTaskPlanStep,
+    DesktopPublicToolCall, DesktopPublicToolPreview, DesktopPublicToolProgress,
+    DesktopPublicToolResult, DesktopTimelineApproval, DesktopTimelineEvent,
+    DesktopTimelineEventKind, DesktopTimelineTask, DesktopTimelineTaskPlanStep,
 };
 pub use launcher::{
     DesktopLaunchError, DesktopLaunchRequest, DesktopLauncher, DesktopServerProcess,

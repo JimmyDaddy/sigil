@@ -2273,6 +2273,40 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["paths"]["/runs/{run_id}/events"]["get"]["summary"],
         "Replay durable run events then follow live events"
     );
+    assert_eq!(
+        document["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]
+            ["schema"]["$ref"],
+        "#/components/schemas/ProtocolEvent"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProtocolEvent"]["properties"]["run_event"]["$ref"],
+        "#/components/schemas/PublicRunEvent"
+    );
+    let public_event_variants = document["components"]["schemas"]["PublicRunEventPayload"]["oneOf"]
+        .as_array()
+        .expect("public event payload should be a typed union");
+    for component in [
+        "TaskRunStartedEvent",
+        "TaskRunFinishedEvent",
+        "TaskRoutingChangedEvent",
+        "TaskPhaseChangedEvent",
+        "TaskPlanUpdatedEvent",
+        "TaskBatchChangedEvent",
+        "TaskStepChangedEvent",
+        "IntegrationLaneChangedEvent",
+    ] {
+        let reference = format!("#/components/schemas/{component}");
+        assert!(
+            public_event_variants
+                .iter()
+                .any(|variant| variant["$ref"] == reference),
+            "missing typed public event schema {component}"
+        );
+        assert_eq!(
+            document["components"]["schemas"][component]["additionalProperties"],
+            false
+        );
+    }
     assert!(
         document["paths"]["/runs/{run_id}/approvals/{call_id}"]["post"]["responses"]["409"]
             .is_object()

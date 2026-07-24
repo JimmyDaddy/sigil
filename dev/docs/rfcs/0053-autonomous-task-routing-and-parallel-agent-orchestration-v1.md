@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8b public protocol slice implemented，O8a、application parity、O8c-O8d deferred
 
 创建日期：2026-07-22
 
@@ -1667,6 +1667,23 @@ O8b：typed public protocol 与 application parity。
 - DTO 不暴露 bearer、absolute/private worktree path、private Git ref、raw prompt/transcript 或
   mutation authority。generated schema drift、真实 `sigil serve` contract 和 Desktop interaction
   test 是完成门。
+
+2026-07-25 已完成 O8b 的 public protocol slice：
+
+- `/runs/{run_id}/events` 的 SSE response 在 OpenAPI 中绑定 versioned `ProtocolEvent` /
+  `PublicRunEvent` discriminated union；task run、routing、phase、plan、batch、step 与 integration
+  lane 均有独立 schema，生成的 TypeScript contract 不再把事件流声明为普通字符串。
+- native Desktop client 不再用 `serde_json::Value` 读取已知 run event 或从 opaque
+  `Control.payload` 猜 task 状态；它以 provider-neutral typed DTO 解码全部当前 public event，
+  只把 bounded task identity、plan version、计数、冲突与安全 plan step 投影给 renderer。未知
+  future event 只能降级为 `Other`，raw payload 不穿过 IPC。
+- renderer reducer 为 exact task/entity slot 保留单调 high-watermark，并在 run discard 时同步
+  清理；OpenAPI snapshot/generated schema、HTTP、native Desktop、Tauri 与 renderer tests 共同
+  形成 drift gate。
+
+这不代表 O8b application parity 完成：HTTP/Desktop 尚未同时拥有与 TUI 等价的
+coordinator/executor/synthesis/recovery 产品流，继续强制 manual；本 slice 也不授权 O8d 默认
+切换。
 
 O8c：deterministic、real-model 与 chaos acceptance。
 

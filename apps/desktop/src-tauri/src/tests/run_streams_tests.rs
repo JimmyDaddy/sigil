@@ -30,6 +30,7 @@ fn only_server_terminal_events_finish_a_stream() {
         assistant_kind: None,
         tool_input: None,
         approval: None,
+        task: None,
     };
     assert!(!timeline_is_terminal(&event(
         DesktopTimelineEventKind::AssistantMessage
@@ -156,5 +157,6 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         assistant_kind: None,
         tool_input: None,
         approval: None,
+        task: None,
     }
 }

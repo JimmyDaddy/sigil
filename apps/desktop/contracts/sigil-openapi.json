@@ -670,6 +670,124 @@
         ],
         "type": "object"
       },
+      "ApprovalRequestedEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/PublicToolCall"
+          },
+          "command_permission_matches": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "confirmation": {
+            "type": "object"
+          },
+          "local_policy_decision": {
+            "type": "string"
+          },
+          "network_effect": {
+            "type": "string"
+          },
+          "network_policy_decision": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "preview": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PublicToolPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "risk": {
+            "type": "string"
+          },
+          "snapshot_required": {
+            "type": "boolean"
+          },
+          "source_policy_decision": {
+            "type": "string"
+          },
+          "spec": {
+            "type": "object"
+          },
+          "subject_zones": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "subjects": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "approval_requested",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "snapshot_required"
+        ],
+        "type": "object"
+      },
+      "ApprovalResolvedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "approved": {
+            "type": "boolean"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "approval_resolved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call_id",
+          "approved",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "AssistantMessageEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/PublicAssistantMessage"
+          },
+          "type": {
+            "const": "assistant_message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "type": "object"
+      },
       "CheckpointFileAvailability": {
         "enum": [
           "restorable",
@@ -1164,6 +1282,23 @@
         ],
         "type": "object"
       },
+      "ContinuationStateEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "state": {
+            "type": "object"
+          },
+          "type": {
+            "const": "continuation_state",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "state"
+        ],
+        "type": "object"
+      },
       "ContinuityRecoveryAction": {
         "enum": [
           "retry_current",
@@ -1173,6 +1308,32 @@
           "continue_read_only"
         ],
         "type": "string"
+      },
+      "ControlEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "control": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "payload": {}
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "const": "control",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "control"
+        ],
+        "type": "object"
       },
       "ConversationDisplayContent": {
         "oneOf": [
@@ -2532,6 +2693,105 @@
         ],
         "type": "object"
       },
+      "IntegrationLaneChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "lane_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "plan_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "integration_lane_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "plan_version",
+          "plan_id",
+          "lane_id",
+          "status",
+          "conflicts"
+        ],
+        "type": "object"
+      },
+      "NoticeEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "type": {
+            "const": "notice",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "type": "object"
+      },
+      "PendingApproval": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_request_id": {
+            "type": "string"
+          },
+          "call_id": {
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "session_grant_available": {
+            "type": "boolean"
+          },
+          "tool_call_hash": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool_name",
+          "approval_request_id",
+          "tool_call_hash",
+          "policy_version",
+          "expires_at_ms",
+          "session_grant_available"
+        ],
+        "type": "object"
+      },
       "PermissionMode": {
         "enum": [
           "read-only",
@@ -2540,6 +2800,401 @@
           "danger-full-access"
         ],
         "type": "string"
+      },
+      "ProtocolEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_request": {
+            "$ref": "#/components/schemas/PendingApproval"
+          },
+          "event_class": {
+            "enum": [
+              "durable",
+              "transient"
+            ],
+            "type": "string"
+          },
+          "provisional_id": {
+            "pattern": "^live-v1:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "replay_id": {
+            "type": "string"
+          },
+          "run_event": {
+            "$ref": "#/components/schemas/PublicRunEvent"
+          },
+          "schema_version": {
+            "const": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "event_class",
+          "run_event"
+        ],
+        "type": "object"
+      },
+      "PublicAssistantMessage": {
+        "properties": {
+          "assistant_kind": {
+            "enum": [
+              "tool_preamble",
+              "progress",
+              "reasoning_trace",
+              "final_answer"
+            ],
+            "type": "string"
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/PublicToolCall"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "tool_calls"
+        ],
+        "type": "object"
+      },
+      "PublicRunEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/PublicRunEventPayload"
+          },
+          "run_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "run_id",
+          "sequence",
+          "event"
+        ],
+        "type": "object"
+      },
+      "PublicRunEventPayload": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RunStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskRunStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunFinishedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskRunFinishedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskRoutingChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskPhaseChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskPlanUpdatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskBatchChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskStepChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/IntegrationLaneChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunFailedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunCancelledEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TextDeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ReasoningDeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCallStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCallArgsDeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCallCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalRequestedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalResolvedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolResultEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolProgressEvent"
+          },
+          {
+            "$ref": "#/components/schemas/UsageEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ContinuationStateEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlEvent"
+          },
+          {
+            "$ref": "#/components/schemas/AssistantMessageEvent"
+          },
+          {
+            "$ref": "#/components/schemas/NoticeEvent"
+          }
+        ]
+      },
+      "PublicTaskPhase": {
+        "enum": [
+          "routing",
+          "planning",
+          "execution",
+          "integration",
+          "synthesis",
+          "terminal"
+        ],
+        "type": "string"
+      },
+      "PublicTaskPlanStep": {
+        "additionalProperties": false,
+        "properties": {
+          "depends_on": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "isolation": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "mode": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "role": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "step_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 131072,
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "title",
+          "role",
+          "depends_on",
+          "mode",
+          "isolation"
+        ],
+        "type": "object"
+      },
+      "PublicToolCall": {
+        "properties": {
+          "args_json": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args_json"
+        ],
+        "type": "object"
+      },
+      "PublicToolPreview": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "changed_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file_diffs": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "summary",
+          "body",
+          "changed_files",
+          "file_diffs"
+        ],
+        "type": "object"
+      },
+      "PublicToolProgress": {
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "details": {},
+          "execution_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "output_log_ref": {
+            "type": "string"
+          },
+          "output_preview": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "updated_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "execution_id",
+          "call_id",
+          "tool_name",
+          "sequence",
+          "status",
+          "details"
+        ],
+        "type": "object"
+      },
+      "PublicToolResult": {
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "const": "ok",
+                "type": "string"
+              },
+              {
+                "properties": {
+                  "error": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "tool_name",
+          "content",
+          "status",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "ReasoningDeltaEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "reasoning_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
       },
       "ReasoningEffort": {
         "enum": [
@@ -2617,6 +3272,19 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "RunCancelledEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "run_cancelled",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
         "type": "object"
       },
       "RunContextView": {
@@ -2724,6 +3392,40 @@
           "available_reasoning_efforts",
           "context_window_source",
           "extension_catalog"
+        ],
+        "type": "object"
+      },
+      "RunFailedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "error"
+        ],
+        "type": "object"
+      },
+      "RunFinishedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "final_text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_finished",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "final_text"
         ],
         "type": "object"
       },
@@ -2904,6 +3606,23 @@
         "required": [
           "prompt",
           "permission_mode"
+        ],
+        "type": "object"
+      },
+      "RunStartedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "prompt"
         ],
         "type": "object"
       },
@@ -3993,6 +4712,355 @@
         ],
         "type": "object"
       },
+      "TaskBatchChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "batch_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "completed": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "failed": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_batch_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "plan_version",
+          "batch_id",
+          "active",
+          "completed",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "TaskPhaseChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "$ref": "#/components/schemas/PublicTaskPhase"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "task_phase_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "phase",
+          "status"
+        ],
+        "type": "object"
+      },
+      "TaskPlanUpdatedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PublicTaskPlanStep"
+            },
+            "type": "array"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_plan_updated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "plan_version",
+          "status",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "TaskRoutingChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "handoff_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "task_routing_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "handoff_id",
+          "status",
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "TaskRunFinishedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_run_finished",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "TaskRunStartedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "maxLength": 131072,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_run_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "objective"
+        ],
+        "type": "object"
+      },
+      "TaskStepChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "step_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_step_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "plan_version",
+          "step_id",
+          "attempt_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "TextDeltaEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "text_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      "ToolCallArgsDeltaEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "delta": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_call_args_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "delta"
+        ],
+        "type": "object"
+      },
+      "ToolCallCompletedEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/PublicToolCall"
+          },
+          "type": {
+            "const": "tool_call_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call"
+        ],
+        "type": "object"
+      },
+      "ToolCallStartedEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/PublicToolCall"
+          },
+          "type": {
+            "const": "tool_call_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call"
+        ],
+        "type": "object"
+      },
+      "ToolProgressEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "progress": {
+            "$ref": "#/components/schemas/PublicToolProgress"
+          },
+          "type": {
+            "const": "tool_progress",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "progress"
+        ],
+        "type": "object"
+      },
+      "ToolResultEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/PublicToolResult"
+          },
+          "type": {
+            "const": "tool_result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "result"
+        ],
+        "type": "object"
+      },
+      "UsageEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "const": "usage",
+            "type": "string"
+          },
+          "usage": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "type",
+          "usage"
+        ],
+        "type": "object"
+      },
       "VerificationEvidence": {
         "properties": {
           "changeset_apply_event_id": {
@@ -4547,7 +5615,7 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ProtocolEvent"
                 }
               }
             },

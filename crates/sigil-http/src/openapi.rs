@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION, HTTP_MAX_CONVERSATION_QUEUE_ITEMS,
@@ -13,7 +13,7 @@ pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
 /// The document intentionally covers only routes implemented by this crate.
 #[must_use]
 pub fn http_openapi_document() -> Value {
-    json!({
+    let mut document = json!({
         "openapi": HTTP_OPENAPI_VERSION,
         "info": {
             "title": "Sigil Local App Server API",
@@ -719,7 +719,7 @@ pub fn http_openapi_document() -> Value {
                             "description": "Continuous text/event-stream until terminal, disconnect, lag, or shutdown",
                             "content": {
                                 "text/event-stream": {
-                                    "schema": { "type": "string" }
+                                    "schema": { "$ref": "#/components/schemas/ProtocolEvent" }
                                 }
                             }
                         },
@@ -2338,5 +2338,547 @@ pub fn http_openapi_document() -> Value {
                 }
             }
         }
+    });
+    document["components"]["schemas"]
+        .as_object_mut()
+        .expect("OpenAPI schemas must be an object")
+        .extend(public_event_schemas());
+    document
+}
+
+fn public_event_schemas() -> Map<String, Value> {
+    let mut schemas = Map::new();
+    schemas.insert(
+        "ProtocolEvent".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "event_class", "run_event"],
+            "properties": {
+                "schema_version": { "type": "integer", "const": crate::HTTP_PROTOCOL_EVENT_SCHEMA_VERSION },
+                "event_class": { "type": "string", "enum": ["durable", "transient"] },
+                "replay_id": { "type": "string" },
+                "approval_request": { "$ref": "#/components/schemas/PendingApproval" },
+                "provisional_id": { "type": "string", "pattern": "^live-v1:[0-9a-f]{64}$" },
+                "run_event": { "$ref": "#/components/schemas/PublicRunEvent" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PendingApproval".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["call_id", "tool_name", "approval_request_id", "tool_call_hash", "policy_version", "expires_at_ms", "session_grant_available"],
+            "properties": {
+                "call_id": { "type": "string" },
+                "tool_name": { "type": "string" },
+                "approval_request_id": { "type": "string" },
+                "tool_call_hash": { "type": "string" },
+                "policy_version": { "type": "string" },
+                "expires_at_ms": { "type": "integer", "format": "uint64" },
+                "session_grant_available": { "type": "boolean" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicRunEvent".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "session_id", "run_id", "sequence", "event"],
+            "properties": {
+                "schema_version": { "type": "integer", "const": sigil_kernel::PUBLIC_RUN_EVENT_SCHEMA_VERSION },
+                "session_id": { "type": "string", "maxLength": 512 },
+                "run_id": { "type": "string", "maxLength": 512 },
+                "sequence": { "type": "integer", "format": "uint64", "minimum": 1 },
+                "event": { "$ref": "#/components/schemas/PublicRunEventPayload" }
+            }
+        }),
+    );
+    let event_variants = public_event_variants();
+    schemas.insert(
+        "PublicRunEventPayload".to_owned(),
+        json!({
+            "oneOf": event_variants
+                .iter()
+                .map(|(name, _)| name)
+                .map(|name| json!({ "$ref": format!("#/components/schemas/{name}") }))
+                .collect::<Vec<_>>()
+        }),
+    );
+    schemas.insert(
+        "PublicTaskPhase".to_owned(),
+        json!({
+            "type": "string",
+            "enum": ["routing", "planning", "execution", "integration", "synthesis", "terminal"]
+        }),
+    );
+    schemas.insert(
+        "PublicTaskPlanStep".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step_id", "title", "role", "depends_on", "mode", "isolation"],
+            "properties": {
+                "step_id": { "type": "string", "maxLength": 512 },
+                "title": { "type": "string", "maxLength": 131072 },
+                "role": { "type": "string", "maxLength": 512 },
+                "depends_on": { "type": "array", "items": { "type": "string", "maxLength": 512 } },
+                "mode": { "type": "string", "maxLength": 512 },
+                "isolation": { "type": "string", "maxLength": 512 }
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicToolCall".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["id", "name", "args_json"],
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "args_json": { "type": "string" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicToolPreview".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["title", "summary", "body", "changed_files", "file_diffs"],
+            "properties": {
+                "title": { "type": "string" },
+                "summary": { "type": "string" },
+                "body": { "type": "string" },
+                "changed_files": { "type": "array", "items": { "type": "string" } },
+                "file_diffs": { "type": "array", "items": { "type": "object" } }
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicToolResult".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["call_id", "tool_name", "content", "status", "metadata"],
+            "properties": {
+                "call_id": { "type": "string" },
+                "tool_name": { "type": "string" },
+                "content": { "type": "string" },
+                "status": {
+                    "oneOf": [
+                        { "type": "string", "const": "ok" },
+                        {
+                            "type": "object",
+                            "required": ["error"],
+                            "properties": { "error": { "type": "object" } }
+                        }
+                    ]
+                },
+                "metadata": { "type": "object" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicToolProgress".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["execution_id", "call_id", "tool_name", "sequence", "status", "details"],
+            "properties": {
+                "execution_id": { "type": "string" },
+                "call_id": { "type": "string" },
+                "tool_name": { "type": "string" },
+                "sequence": { "type": "integer", "format": "uint64" },
+                "status": { "type": "string" },
+                "message": { "type": "string" },
+                "output_preview": { "type": "string" },
+                "output_log_ref": { "type": "string" },
+                "total_bytes": { "type": "integer", "format": "uint64" },
+                "updated_at_ms": { "type": "integer", "format": "uint64" },
+                "details": {}
+            }
+        }),
+    );
+    schemas.insert(
+        "PublicAssistantMessage".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["id", "content", "tool_calls"],
+            "properties": {
+                "id": { "type": "string" },
+                "content": { "type": ["string", "null"] },
+                "tool_calls": { "type": "array", "items": { "$ref": "#/components/schemas/PublicToolCall" } },
+                "assistant_kind": { "type": "string", "enum": ["tool_preamble", "progress", "reasoning_trace", "final_answer"] }
+            }
+        }),
+    );
+
+    for (name, schema) in event_variants {
+        schemas.insert(name.to_owned(), schema);
+    }
+    schemas
+}
+
+fn public_event_variants() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "RunStartedEvent",
+            public_event_variant(
+                "run_started",
+                &["prompt"],
+                json_properties(json!({ "prompt": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "TaskRunStartedEvent",
+            public_event_variant(
+                "task_run_started",
+                &["task_id", "objective"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "objective": { "type": "string", "maxLength": 131072 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "RunFinishedEvent",
+            public_event_variant(
+                "run_finished",
+                &["final_text"],
+                json_properties(json!({ "final_text": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "TaskRunFinishedEvent",
+            public_event_variant(
+                "task_run_finished",
+                &["task_id", "status"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "status": { "type": "string", "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskRoutingChangedEvent",
+            public_event_variant(
+                "task_routing_changed",
+                &["handoff_id", "status", "task_id"],
+                json_properties(json!({
+                    "handoff_id": { "type": "string", "maxLength": 512 },
+                    "status": { "type": "string", "maxLength": 512 },
+                    "task_id": { "type": ["string", "null"], "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskPhaseChangedEvent",
+            public_event_variant(
+                "task_phase_changed",
+                &["task_id", "phase", "status"],
+                json_properties(json!({
+                    "task_id": { "type": ["string", "null"], "maxLength": 512 },
+                    "phase": { "$ref": "#/components/schemas/PublicTaskPhase" },
+                    "status": { "type": "string", "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskPlanUpdatedEvent",
+            public_event_variant(
+                "task_plan_updated",
+                &["task_id", "plan_version", "status", "steps"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "plan_version": { "type": "integer", "format": "uint32" },
+                    "status": { "type": "string", "maxLength": 512 },
+                    "steps": { "type": "array", "items": { "$ref": "#/components/schemas/PublicTaskPlanStep" } }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskBatchChangedEvent",
+            public_event_variant(
+                "task_batch_changed",
+                &[
+                    "task_id",
+                    "plan_version",
+                    "batch_id",
+                    "active",
+                    "completed",
+                    "failed",
+                ],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "plan_version": { "type": "integer", "format": "uint32" },
+                    "batch_id": { "type": "string", "maxLength": 512 },
+                    "active": { "type": "integer", "format": "uint32" },
+                    "completed": { "type": "integer", "format": "uint32" },
+                    "failed": { "type": "integer", "format": "uint32" }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskStepChangedEvent",
+            public_event_variant(
+                "task_step_changed",
+                &["task_id", "plan_version", "step_id", "attempt_id", "status"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "plan_version": { "type": "integer", "format": "uint32" },
+                    "step_id": { "type": "string", "maxLength": 512 },
+                    "attempt_id": { "type": ["string", "null"], "maxLength": 512 },
+                    "status": { "type": "string", "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "IntegrationLaneChangedEvent",
+            public_event_variant(
+                "integration_lane_changed",
+                &[
+                    "task_id",
+                    "plan_version",
+                    "plan_id",
+                    "lane_id",
+                    "status",
+                    "conflicts",
+                ],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "plan_version": { "type": "integer", "format": "uint32" },
+                    "plan_id": { "type": "string", "maxLength": 512 },
+                    "lane_id": { "type": "string", "maxLength": 512 },
+                    "status": { "type": "string", "maxLength": 512 },
+                    "conflicts": { "type": "array", "items": { "type": "string" } }
+                })),
+                true,
+            ),
+        ),
+        (
+            "RunFailedEvent",
+            public_event_variant(
+                "run_failed",
+                &["error"],
+                json_properties(json!({ "error": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "RunCancelledEvent",
+            public_event_variant("run_cancelled", &[], Map::new(), true),
+        ),
+        (
+            "TextDeltaEvent",
+            public_event_variant(
+                "text_delta",
+                &["text"],
+                json_properties(json!({ "text": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "ReasoningDeltaEvent",
+            public_event_variant(
+                "reasoning_delta",
+                &["text"],
+                json_properties(json!({ "text": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "ToolCallStartedEvent",
+            public_event_variant(
+                "tool_call_started",
+                &["call"],
+                json_properties(
+                    json!({ "call": { "$ref": "#/components/schemas/PublicToolCall" } }),
+                ),
+                false,
+            ),
+        ),
+        (
+            "ToolCallArgsDeltaEvent",
+            public_event_variant(
+                "tool_call_args_delta",
+                &["id", "delta"],
+                json_properties(json!({
+                    "id": { "type": "string" },
+                    "delta": { "type": "string" }
+                })),
+                true,
+            ),
+        ),
+        (
+            "ToolCallCompletedEvent",
+            public_event_variant(
+                "tool_call_completed",
+                &["call"],
+                json_properties(
+                    json!({ "call": { "$ref": "#/components/schemas/PublicToolCall" } }),
+                ),
+                false,
+            ),
+        ),
+        (
+            "ApprovalRequestedEvent",
+            public_event_variant(
+                "approval_requested",
+                &["call", "snapshot_required"],
+                json_properties(json!({
+                    "call": { "$ref": "#/components/schemas/PublicToolCall" },
+                    "spec": { "type": "object" },
+                    "subjects": { "type": "array", "items": { "type": "object" } },
+                    "network_effect": { "type": "string" },
+                    "local_policy_decision": { "type": "string" },
+                    "network_policy_decision": { "type": "string" },
+                    "source_policy_decision": { "type": "string" },
+                    "operation": { "type": "string" },
+                    "risk": { "type": "string" },
+                    "subject_zones": { "type": "array", "items": { "type": "string" } },
+                    "confirmation": { "type": "object" },
+                    "snapshot_required": { "type": "boolean" },
+                    "command_permission_matches": { "type": "array", "items": { "type": "object" } },
+                    "preview": {
+                        "oneOf": [
+                            { "$ref": "#/components/schemas/PublicToolPreview" },
+                            { "type": "null" }
+                        ]
+                    }
+                })),
+                false,
+            ),
+        ),
+        (
+            "ApprovalResolvedEvent",
+            public_event_variant(
+                "approval_resolved",
+                &["call_id", "approved", "reason"],
+                json_properties(json!({
+                    "call_id": { "type": "string" },
+                    "approved": { "type": "boolean" },
+                    "reason": { "type": ["string", "null"] }
+                })),
+                true,
+            ),
+        ),
+        (
+            "ToolResultEvent",
+            public_event_variant(
+                "tool_result",
+                &["result"],
+                json_properties(
+                    json!({ "result": { "$ref": "#/components/schemas/PublicToolResult" } }),
+                ),
+                false,
+            ),
+        ),
+        (
+            "ToolProgressEvent",
+            public_event_variant(
+                "tool_progress",
+                &["progress"],
+                json_properties(
+                    json!({ "progress": { "$ref": "#/components/schemas/PublicToolProgress" } }),
+                ),
+                false,
+            ),
+        ),
+        (
+            "UsageEvent",
+            public_event_variant(
+                "usage",
+                &["usage"],
+                json_properties(json!({ "usage": { "type": "object" } })),
+                false,
+            ),
+        ),
+        (
+            "ContinuationStateEvent",
+            public_event_variant(
+                "continuation_state",
+                &["state"],
+                json_properties(json!({ "state": { "type": "object" } })),
+                false,
+            ),
+        ),
+        (
+            "ControlEvent",
+            public_event_variant(
+                "control",
+                &["control"],
+                json_properties(json!({
+                    "control": {
+                        "type": "object",
+                        "required": ["kind"],
+                        "properties": {
+                            "kind": { "type": "string" },
+                            "payload": {}
+                        }
+                    }
+                })),
+                false,
+            ),
+        ),
+        (
+            "AssistantMessageEvent",
+            public_event_variant(
+                "assistant_message",
+                &["message"],
+                json_properties(json!({
+                    "message": { "$ref": "#/components/schemas/PublicAssistantMessage" }
+                })),
+                false,
+            ),
+        ),
+        (
+            "NoticeEvent",
+            public_event_variant(
+                "notice",
+                &["message"],
+                json_properties(json!({ "message": { "type": "string" } })),
+                true,
+            ),
+        ),
+    ]
+}
+
+fn public_event_variant(
+    event_type: &str,
+    required_fields: &[&str],
+    mut properties: Map<String, Value>,
+    exact: bool,
+) -> Value {
+    properties.insert(
+        "type".to_owned(),
+        json!({ "type": "string", "const": event_type }),
+    );
+    let mut required = vec![Value::String("type".to_owned())];
+    required.extend(
+        required_fields
+            .iter()
+            .map(|field| Value::String((*field).to_owned())),
+    );
+    json!({
+        "type": "object",
+        "additionalProperties": !exact,
+        "required": required,
+        "properties": properties
     })
+}
+
+fn json_properties(value: Value) -> Map<String, Value> {
+    value
+        .as_object()
+        .cloned()
+        .expect("event properties must be an object")
 }

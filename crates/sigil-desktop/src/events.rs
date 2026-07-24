@@ -35,7 +35,7 @@ pub struct DesktopProtocolEvent {
     pub run_event: DesktopPublicRunEvent,
 }
 
-/// Typed public run envelope. The payload remains provider-neutral JSON and is narrowed before IPC.
+/// Typed public run envelope consumed by the native client.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopPublicRunEvent {
@@ -43,7 +43,217 @@ pub struct DesktopPublicRunEvent {
     pub session_id: String,
     pub run_id: String,
     pub sequence: u64,
-    pub event: Value,
+    pub event: DesktopPublicRunEventKind,
+}
+
+/// Provider-neutral public task phase mirrored from the versioned HTTP contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPublicTaskPhase {
+    Routing,
+    Planning,
+    Execution,
+    Integration,
+    Synthesis,
+    Terminal,
+}
+
+/// Bounded task-plan step safe to forward to the renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicTaskPlanStep {
+    pub step_id: String,
+    pub title: String,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub mode: String,
+    pub isolation: String,
+}
+
+/// Renderer-facing task-plan step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineTaskPlanStep {
+    pub step_id: String,
+    pub title: String,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub mode: String,
+    pub isolation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolCall {
+    pub id: String,
+    pub name: String,
+    pub args_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolProgress {
+    pub call_id: String,
+    pub tool_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolResult {
+    pub call_id: String,
+    pub tool_name: String,
+    pub content: String,
+    #[serde(deserialize_with = "deserialize_tool_result_status")]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicAssistantMessage {
+    pub id: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub assistant_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolPreview {
+    pub title: String,
+    pub summary: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicControlEvent {
+    pub kind: String,
+}
+
+/// Typed public event payload.
+///
+/// Every event currently emitted by the HTTP adapter has an explicit variant. Unknown future
+/// non-breaking event types remain attachable and project to `other` without exposing their raw
+/// payload to the renderer.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DesktopPublicRunEventKind {
+    RunStarted {
+        prompt: String,
+    },
+    TaskRunStarted {
+        task_id: String,
+        objective: String,
+    },
+    RunFinished {
+        final_text: String,
+    },
+    TaskRunFinished {
+        task_id: String,
+        status: String,
+    },
+    TaskRoutingChanged {
+        handoff_id: String,
+        status: String,
+        #[serde(default)]
+        task_id: Option<String>,
+    },
+    TaskPhaseChanged {
+        #[serde(default)]
+        task_id: Option<String>,
+        phase: DesktopPublicTaskPhase,
+        status: String,
+    },
+    TaskPlanUpdated {
+        task_id: String,
+        plan_version: u32,
+        status: String,
+        steps: Vec<DesktopPublicTaskPlanStep>,
+    },
+    TaskBatchChanged {
+        task_id: String,
+        plan_version: u32,
+        batch_id: String,
+        active: u32,
+        completed: u32,
+        failed: u32,
+    },
+    TaskStepChanged {
+        task_id: String,
+        plan_version: u32,
+        step_id: String,
+        #[serde(default)]
+        attempt_id: Option<String>,
+        status: String,
+    },
+    IntegrationLaneChanged {
+        task_id: String,
+        plan_version: u32,
+        plan_id: String,
+        lane_id: String,
+        status: String,
+        conflicts: Vec<String>,
+    },
+    RunFailed {
+        error: String,
+    },
+    RunCancelled,
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ToolCallStarted {
+        call: DesktopPublicToolCall,
+    },
+    ToolCallArgsDelta {
+        id: String,
+        delta: String,
+    },
+    ToolCallCompleted {
+        call: DesktopPublicToolCall,
+    },
+    ApprovalRequested {
+        call: DesktopPublicToolCall,
+        #[serde(default)]
+        operation: Option<String>,
+        #[serde(default)]
+        risk: Option<String>,
+        #[serde(default)]
+        snapshot_required: bool,
+        #[serde(default)]
+        preview: Option<DesktopPublicToolPreview>,
+    },
+    ApprovalResolved {
+        call_id: String,
+        approved: bool,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    ToolResult {
+        result: DesktopPublicToolResult,
+    },
+    ToolProgress {
+        progress: DesktopPublicToolProgress,
+    },
+    Usage {},
+    ContinuationState {},
+    Control {
+        control: DesktopPublicControlEvent,
+    },
+    AssistantMessage {
+        message: DesktopPublicAssistantMessage,
+    },
+    Notice {
+        message: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 /// Renderer-facing event categories. These are presentation facts, not a second run state machine.
@@ -51,6 +261,14 @@ pub struct DesktopPublicRunEvent {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopTimelineEventKind {
     RunStarted,
+    TaskRunStarted,
+    TaskRunFinished,
+    TaskRoutingChanged,
+    TaskPhaseChanged,
+    TaskPlanUpdated,
+    TaskBatchChanged,
+    TaskStepChanged,
+    IntegrationLaneChanged,
     AssistantDelta,
     ReasoningDelta,
     AssistantMessage,
@@ -67,6 +285,42 @@ pub enum DesktopTimelineEventKind {
     RunFailed,
     RunCancelled,
     Other,
+}
+
+/// Typed task projection safe to send to the local renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineTask {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<DesktopPublicTaskPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<DesktopTimelineTaskPlanStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
 }
 
 /// Narrow approval summary safe to send to the local renderer.
@@ -125,6 +379,8 @@ pub struct DesktopTimelineEvent {
     pub tool_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<DesktopTimelineApproval>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<DesktopTimelineTask>,
 }
 
 impl DesktopProtocolEvent {
@@ -137,135 +393,192 @@ impl DesktopProtocolEvent {
         renderer_session_id: &str,
     ) -> Result<DesktopTimelineEvent, DesktopProtocolEventError> {
         self.validate(expected_session_id, expected_run_id)?;
-        let event_type = self
-            .run_event
-            .event
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(DesktopProtocolEventError::InvalidPayload)?;
-        let field = |name: &str| {
-            self.run_event
-                .event
-                .get(name)
-                .and_then(Value::as_str)
-                .map(bounded_text)
+        let event = &self.run_event.event;
+        let tool_call = match event {
+            DesktopPublicRunEventKind::ToolCallStarted { call }
+            | DesktopPublicRunEventKind::ToolCallCompleted { call }
+            | DesktopPublicRunEventKind::ApprovalRequested { call, .. } => Some(call),
+            _ => None,
         };
-        let nested_string = |object: &str, name: &str| {
-            self.run_event
-                .event
-                .get(object)
-                .and_then(|value| value.get(name))
-                .and_then(Value::as_str)
-                .map(bounded_text)
+        let tool_name = tool_call
+            .map(|call| bounded_text(&call.name))
+            .or_else(|| match event {
+                DesktopPublicRunEventKind::ToolResult { result } => {
+                    Some(bounded_text(&result.tool_name))
+                }
+                DesktopPublicRunEventKind::ToolProgress { progress } => {
+                    Some(bounded_text(&progress.tool_name))
+                }
+                _ => None,
+            });
+        let tool_input = tool_call.and_then(project_tool_input);
+        let assistant_kind = match event {
+            DesktopPublicRunEventKind::AssistantMessage { message } => {
+                message.assistant_kind.as_deref().map(bounded_text)
+            }
+            _ => None,
         };
-        let call_id = nested_string("call", "id");
-        let tool_name = nested_string("call", "name")
-            .or_else(|| nested_string("result", "tool_name"))
-            .or_else(|| nested_string("progress", "tool_name"));
-        let assistant_kind = if event_type == "assistant_message" {
-            nested_string("message", "assistant_kind")
-        } else {
-            None
-        };
-        let tool_input = project_tool_input(&self.run_event.event);
-        let (kind, text, item_id, status) = match event_type {
-            "run_started" => (
+        let (kind, text, item_id, status) = match event {
+            DesktopPublicRunEventKind::RunStarted { prompt } => (
                 DesktopTimelineEventKind::RunStarted,
-                field("prompt"),
+                Some(bounded_text(prompt)),
                 None,
                 None,
             ),
-            "text_delta" => (
-                DesktopTimelineEventKind::AssistantDelta,
-                field("text"),
+            DesktopPublicRunEventKind::TaskRunStarted { .. } => (
+                DesktopTimelineEventKind::TaskRunStarted,
                 None,
                 None,
-            ),
-            "reasoning_delta" => (
-                DesktopTimelineEventKind::ReasoningDelta,
-                field("text"),
-                None,
-                None,
-            ),
-            "assistant_message" => (
-                DesktopTimelineEventKind::AssistantMessage,
-                nested_string("message", "content"),
-                nested_string("message", "id"),
-                None,
-            ),
-            "tool_call_started" => (
-                DesktopTimelineEventKind::ToolStarted,
-                None,
-                call_id.clone(),
                 Some("running".to_owned()),
             ),
-            "tool_call_completed" => (
+            DesktopPublicRunEventKind::TaskRunFinished { status, .. } => (
+                DesktopTimelineEventKind::TaskRunFinished,
+                None,
+                None,
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TaskRoutingChanged {
+                handoff_id, status, ..
+            } => (
+                DesktopTimelineEventKind::TaskRoutingChanged,
+                None,
+                Some(bounded_text(handoff_id)),
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TaskPhaseChanged { status, .. } => (
+                DesktopTimelineEventKind::TaskPhaseChanged,
+                None,
+                None,
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TaskPlanUpdated { status, .. } => (
+                DesktopTimelineEventKind::TaskPlanUpdated,
+                None,
+                None,
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TaskBatchChanged {
+                batch_id, failed, ..
+            } => (
+                DesktopTimelineEventKind::TaskBatchChanged,
+                None,
+                Some(bounded_text(batch_id)),
+                Some(if *failed == 0 { "running" } else { "failed" }.to_owned()),
+            ),
+            DesktopPublicRunEventKind::TaskStepChanged {
+                step_id, status, ..
+            } => (
+                DesktopTimelineEventKind::TaskStepChanged,
+                None,
+                Some(bounded_text(step_id)),
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::IntegrationLaneChanged {
+                lane_id, status, ..
+            } => (
+                DesktopTimelineEventKind::IntegrationLaneChanged,
+                None,
+                Some(bounded_text(lane_id)),
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TextDelta { text } => (
+                DesktopTimelineEventKind::AssistantDelta,
+                Some(bounded_text(text)),
+                None,
+                None,
+            ),
+            DesktopPublicRunEventKind::ReasoningDelta { text } => (
+                DesktopTimelineEventKind::ReasoningDelta,
+                Some(bounded_text(text)),
+                None,
+                None,
+            ),
+            DesktopPublicRunEventKind::AssistantMessage { message } => (
+                DesktopTimelineEventKind::AssistantMessage,
+                message.content.as_deref().map(bounded_text),
+                Some(bounded_text(&message.id)),
+                None,
+            ),
+            DesktopPublicRunEventKind::ToolCallStarted { call } => (
+                DesktopTimelineEventKind::ToolStarted,
+                None,
+                Some(bounded_text(&call.id)),
+                Some("running".to_owned()),
+            ),
+            DesktopPublicRunEventKind::ToolCallCompleted { call } => (
                 DesktopTimelineEventKind::ToolCompleted,
                 None,
-                call_id.clone(),
+                Some(bounded_text(&call.id)),
                 Some("ready".to_owned()),
             ),
-            "tool_progress" => (
+            DesktopPublicRunEventKind::ToolProgress { progress } => (
                 DesktopTimelineEventKind::ToolProgress,
-                nested_string("progress", "message"),
-                nested_string("progress", "call_id"),
-                nested_string("progress", "status"),
+                progress.message.as_deref().map(bounded_text),
+                Some(bounded_text(&progress.call_id)),
+                Some(bounded_text(&progress.status)),
             ),
-            "tool_result" => (
+            DesktopPublicRunEventKind::ToolResult { result } => (
                 DesktopTimelineEventKind::ToolResult,
-                nested_string("result", "content"),
-                nested_string("result", "call_id"),
-                tool_result_status(&self.run_event.event),
+                Some(bounded_text(&result.content)),
+                Some(bounded_text(&result.call_id)),
+                Some(bounded_text(&result.status)),
             ),
-            "approval_requested" => (
+            DesktopPublicRunEventKind::ApprovalRequested { call, .. } => (
                 DesktopTimelineEventKind::ApprovalRequested,
                 None,
-                call_id.clone(),
+                Some(bounded_text(&call.id)),
                 Some("waiting".to_owned()),
             ),
-            "approval_resolved" => (
+            DesktopPublicRunEventKind::ApprovalResolved {
+                call_id,
+                approved,
+                reason,
+            } => (
                 DesktopTimelineEventKind::ApprovalResolved,
-                field("reason"),
-                field("call_id"),
-                self.run_event
-                    .event
-                    .get("approved")
-                    .and_then(Value::as_bool)
-                    .map(|approved| if approved { "approved" } else { "denied" }.to_owned()),
+                reason.as_deref().map(bounded_text),
+                Some(bounded_text(call_id)),
+                Some(if *approved { "approved" } else { "denied" }.to_owned()),
             ),
-            "notice" => (
+            DesktopPublicRunEventKind::Notice { message } => (
                 DesktopTimelineEventKind::Notice,
-                field("message"),
+                Some(bounded_text(message)),
                 None,
                 None,
             ),
-            "usage" => (DesktopTimelineEventKind::Usage, None, None, None),
-            "control" => (
+            DesktopPublicRunEventKind::Usage {} => {
+                (DesktopTimelineEventKind::Usage, None, None, None)
+            }
+            DesktopPublicRunEventKind::Control { control } => (
                 DesktopTimelineEventKind::Control,
                 None,
-                nested_string("control", "kind"),
+                Some(bounded_text(&control.kind)),
                 None,
             ),
-            "run_finished" => (
+            DesktopPublicRunEventKind::RunFinished { final_text } => (
                 DesktopTimelineEventKind::RunFinished,
-                field("final_text"),
+                Some(bounded_text(final_text)),
                 None,
                 Some("finished".to_owned()),
             ),
-            "run_failed" => (
+            DesktopPublicRunEventKind::RunFailed { error } => (
                 DesktopTimelineEventKind::RunFailed,
-                field("error"),
+                Some(bounded_text(error)),
                 None,
                 Some("failed".to_owned()),
             ),
-            "run_cancelled" => (
+            DesktopPublicRunEventKind::RunCancelled => (
                 DesktopTimelineEventKind::RunCancelled,
                 None,
                 None,
                 Some("cancelled".to_owned()),
             ),
-            _ => (DesktopTimelineEventKind::Other, None, None, None),
+            DesktopPublicRunEventKind::ToolCallArgsDelta { .. }
+            | DesktopPublicRunEventKind::ContinuationState {}
+            | DesktopPublicRunEventKind::Unknown => {
+                (DesktopTimelineEventKind::Other, None, None, None)
+            }
         };
+        let task = project_task_event(event)?;
         let approval = if kind == DesktopTimelineEventKind::ApprovalRequested {
             Some(self.approval_view(tool_name.as_deref())?)
         } else {
@@ -288,6 +601,7 @@ impl DesktopProtocolEvent {
             assistant_kind,
             tool_input,
             approval,
+            task,
         })
     }
 
@@ -341,7 +655,16 @@ impl DesktopProtocolEvent {
         if projected_tool_name != Some(guard.tool_name.as_str()) {
             return Err(DesktopProtocolEventError::InvalidApproval);
         }
-        let preview = self.run_event.event.get("preview");
+        let DesktopPublicRunEventKind::ApprovalRequested {
+            call,
+            operation,
+            risk,
+            snapshot_required,
+            preview,
+        } = &self.run_event.event
+        else {
+            return Err(DesktopProtocolEventError::InvalidApproval);
+        };
         Ok(DesktopTimelineApproval {
             call_id: bounded_machine_label(&guard.call_id)?,
             tool_name: bounded_machine_label(&guard.tool_name)?,
@@ -350,46 +673,22 @@ impl DesktopProtocolEvent {
             policy_version: bounded_machine_label(&guard.policy_version)?,
             expires_at_ms: guard.expires_at_ms,
             session_grant_available: guard.session_grant_available,
-            tool_input: project_tool_input(&self.run_event.event),
-            operation: self
-                .run_event
-                .event
-                .get("operation")
-                .and_then(Value::as_str)
-                .map(bounded_text),
-            risk: self
-                .run_event
-                .event
-                .get("risk")
-                .and_then(Value::as_str)
-                .map(bounded_text),
-            snapshot_required: self
-                .run_event
-                .event
-                .get("snapshot_required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            preview_title: preview
-                .and_then(|value| value.get("title"))
-                .and_then(Value::as_str)
-                .map(bounded_text),
+            tool_input: project_tool_input(call),
+            operation: operation.as_deref().map(bounded_text),
+            risk: risk.as_deref().map(bounded_text),
+            snapshot_required: *snapshot_required,
+            preview_title: preview.as_ref().map(|preview| bounded_text(&preview.title)),
             preview_summary: preview
-                .and_then(|value| value.get("summary"))
-                .and_then(Value::as_str)
-                .map(bounded_text),
-            preview_body: preview
-                .and_then(|value| value.get("body"))
-                .and_then(Value::as_str)
-                .map(bounded_text),
+                .as_ref()
+                .map(|preview| bounded_text(&preview.summary)),
+            preview_body: preview.as_ref().map(|preview| bounded_text(&preview.body)),
         })
     }
 }
 
-fn project_tool_input(event: &Value) -> Option<String> {
-    let call = event.get("call")?;
-    let tool_name = call.get("name")?.as_str()?;
-    let args = serde_json::from_str::<Value>(call.get("args_json")?.as_str()?).ok()?;
-    let value = match tool_name {
+fn project_tool_input(call: &DesktopPublicToolCall) -> Option<String> {
+    let args = serde_json::from_str::<Value>(&call.args_json).ok()?;
+    let value = match call.name.as_str() {
         "bash" | "shell" | "terminal_start" => {
             let command = args.get("command")?.as_str()?;
             if command_contains_credential_shape(command) {
@@ -413,6 +712,119 @@ fn project_tool_input(event: &Value) -> Option<String> {
         _ => return None,
     };
     Some(bounded_text(&value))
+}
+
+fn project_task_event(
+    event: &DesktopPublicRunEventKind,
+) -> Result<Option<DesktopTimelineTask>, DesktopProtocolEventError> {
+    let task = match event {
+        DesktopPublicRunEventKind::TaskRunStarted { task_id, objective } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            objective: Some(bounded_text(objective)),
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskRunFinished { task_id, .. } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskRoutingChanged {
+            handoff_id,
+            task_id,
+            ..
+        } => DesktopTimelineTask {
+            task_id: bounded_optional_machine_label(task_id.as_deref())?,
+            handoff_id: Some(bounded_machine_label(handoff_id)?),
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskPhaseChanged { task_id, phase, .. } => DesktopTimelineTask {
+            task_id: bounded_optional_machine_label(task_id.as_deref())?,
+            phase: Some(*phase),
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskPlanUpdated {
+            task_id,
+            plan_version,
+            steps,
+            ..
+        } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            plan_version: Some(*plan_version),
+            steps: steps
+                .iter()
+                .map(project_task_plan_step)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskBatchChanged {
+            task_id,
+            plan_version,
+            batch_id,
+            active,
+            completed,
+            failed,
+        } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            plan_version: Some(*plan_version),
+            batch_id: Some(bounded_machine_label(batch_id)?),
+            active: Some(*active),
+            completed: Some(*completed),
+            failed: Some(*failed),
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskStepChanged {
+            task_id,
+            plan_version,
+            step_id,
+            attempt_id,
+            ..
+        } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            plan_version: Some(*plan_version),
+            step_id: Some(bounded_machine_label(step_id)?),
+            attempt_id: bounded_optional_machine_label(attempt_id.as_deref())?,
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::IntegrationLaneChanged {
+            task_id,
+            plan_version,
+            plan_id,
+            lane_id,
+            conflicts,
+            ..
+        } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            plan_version: Some(*plan_version),
+            plan_id: Some(bounded_machine_label(plan_id)?),
+            lane_id: Some(bounded_machine_label(lane_id)?),
+            conflicts: conflicts.iter().map(|value| bounded_text(value)).collect(),
+            ..DesktopTimelineTask::default()
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(task))
+}
+
+fn project_task_plan_step(
+    step: &DesktopPublicTaskPlanStep,
+) -> Result<DesktopTimelineTaskPlanStep, DesktopProtocolEventError> {
+    Ok(DesktopTimelineTaskPlanStep {
+        step_id: bounded_machine_label(&step.step_id)?,
+        title: bounded_text(&step.title),
+        role: bounded_machine_label(&step.role)?,
+        depends_on: step
+            .depends_on
+            .iter()
+            .map(|dependency| bounded_machine_label(dependency))
+            .collect::<Result<Vec<_>, _>>()?,
+        mode: bounded_machine_label(&step.mode)?,
+        isolation: bounded_machine_label(&step.isolation)?,
+    })
+}
+
+fn bounded_optional_machine_label(
+    value: Option<&str>,
+) -> Result<Option<String>, DesktopProtocolEventError> {
+    value.map(bounded_machine_label).transpose()
 }
 
 fn command_contains_credential_shape(command: &str) -> bool {
@@ -449,15 +861,21 @@ fn project_named_string_fields(args: &Value, names: &[&str]) -> Option<String> {
     (!fields.is_empty()).then(|| fields.join("\n"))
 }
 
-fn tool_result_status(event: &Value) -> Option<String> {
-    let status = event.get("result")?.get("status")?;
-    if let Some(label) = status.as_str() {
-        return Some(bounded_text(label));
-    }
-    status
-        .as_object()
-        .and_then(|object| object.keys().next())
-        .map(|label| bounded_text(label))
+fn deserialize_tool_result_status<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let status = Value::deserialize(deserializer)?;
+    let label = status
+        .as_str()
+        .or_else(|| {
+            status
+                .as_object()
+                .and_then(|object| object.keys().next())
+                .map(String::as_str)
+        })
+        .ok_or_else(|| serde::de::Error::custom("tool result status must have a discriminant"))?;
+    Ok(label.to_owned())
 }
 
 fn bounded_machine_label(value: &str) -> Result<String, DesktopProtocolEventError> {

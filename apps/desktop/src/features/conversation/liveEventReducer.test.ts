@@ -9,6 +9,7 @@ import {
   selectDeltaText,
   selectLatestPendingApproval,
   selectSemanticLiveItems,
+  selectTaskEvents,
   selectTerminalSignals,
   semanticLiveItemFromTimelineEvent,
 } from "./liveEventReducer";
@@ -16,6 +17,64 @@ import {
 const SESSION_ID = "session-1";
 
 describe("live event reducer", () => {
+  it("keeps typed task slots monotonic and removes them with their run", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_step_changed",
+      runSequence: "4",
+      itemId: "step-1",
+      status: "running",
+      task: {
+        taskId: "task-1",
+        planVersion: 2,
+        stepId: "step-1",
+        attemptId: "attempt-1",
+      },
+    }));
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_step_changed",
+      runSequence: "6",
+      itemId: "step-1",
+      status: "completed",
+      task: {
+        taskId: "task-1",
+        planVersion: 2,
+        stepId: "step-1",
+        attemptId: "attempt-1",
+      },
+    }));
+    const completed = state;
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_step_changed",
+      runSequence: "5",
+      itemId: "step-1",
+      status: "running",
+      task: {
+        taskId: "task-1",
+        planVersion: 2,
+        stepId: "step-1",
+        attemptId: "attempt-1",
+      },
+    }));
+
+    expect(state).toBe(completed);
+    expect(selectTaskEvents(state)).toMatchObject([
+      {
+        kind: "task_step_changed",
+        runSequence: "6",
+        status: "completed",
+        task: { taskId: "task-1", planVersion: 2, stepId: "step-1" },
+      },
+    ]);
+
+    state = liveEventReducer(state, {
+      type: "run_discarded",
+      sessionId: SESSION_ID,
+      runId: "run-1",
+    });
+    expect(selectTaskEvents(state)).toEqual([]);
+  });
+
   it("orders semantic items by exact decimal run sequence and ignores legacy numeric sequence", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({

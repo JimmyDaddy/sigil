@@ -557,6 +557,7 @@ async fn terminal_snapshot(
         assistant_kind: None,
         tool_input: None,
         approval: None,
+        task: None,
     };
     owner.record_event(timeline.clone()).await;
     let _ = app.emit(DESKTOP_RUN_EVENT_NAME, timeline);
