@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O5b2、O6a、O6b1、O6b2a-O6b2b implemented；O6 remainder-O8 deferred
+状态：accepted / O0、O1a-O1d、O2-O5b2、O6a、O6b1、O6b2a-O6b2b implemented；O1e、O6c-O8 deferred
 
 创建日期：2026-07-22
 
@@ -17,13 +17,20 @@
 - [RFC-0028](0028-real-model-acceptance-and-provider-conformance-v1.md)
 - [RFC-0035](0035-tui-orchestration-boundary-hardening-v1.md)
 
-## 1. Problem statement
+后续集成：
+
+- [RFC-0051 Intent Stack / 意图级版本控制 V1](0051-intent-stack-and-intent-level-version-control-v1.md)
+  复用本 RFC 的 TaskPlan、attempt、isolated changeset、integration 和 parent verification
+  事实；Intent Stack 未启用时，本 RFC 不创建或猜测 intent identity。
+
+## 1. Problem statement and current residual
 
 Sigil 已有 durable task、planner/executor/subagent role、agent profile、child session、
-append-only task projection 和 task DAG，但当前产品行为仍与 Claude Code、Codex 等成熟
-agent harness 有明显差距：
+append-only task projection 和 task DAG。下列列表同时保留 RFC 建立时的历史基线与当前剩余；
+已经由 O2-O6b2b 关闭的项目必须按实现检查点理解，不能作为待办重复实施：
 
-- 普通 chat 没有可靠的 structured task admission；只有显式 `/task` 才进入 durable planner。
+- RFC 建立时普通 chat 只有显式 `/task`；O2 已接入 structured task admission，剩余问题是
+  HTTP/Desktop parity、默认 rollout 和真实 routing eval。
 - `[task].routing_policy` 已在 O1 加入兼容解析，并由 O2 接入 TUI 普通输入；`default_mode` 只保留 composer 偏好语义。尚未拥有 task executor 的 HTTP/Desktop application surface 继续强制 manual。
 - `multi_agent_mode = "explicit_request_only"` 是默认值，`spawn_agent` 描述明确禁止因任务复杂而主动委派。
 - O1 之前 `multi_agent_mode` 只停留在模型提示层；当前 runtime spawn admission 已在 provider、budget 和 thread 创建前执行硬检查。
@@ -32,9 +39,12 @@ agent harness 有明显差距：
   TUI Task planner 已接入一次性的 host-owned read-only discovery batch。
 - O5a 之前 task scheduler 虽能选出 `read_only_batch`，runner 仍对 batch 中的步骤逐项 `.await`；当前 shared-read-only participant 已进入真实并发执行。
 - `TaskChildSessionRunner` 的单成员兼容接口仍接收 parent `Session`、handler 和 approval handler；O5a batch override 已把 participant future 与 parent Session 分离，并把 parent mutation 收口到 prepare/commit。
-- 同一模型轮次的 tool calls 顺序执行；`join_before_final` agent call 会在第一个 child 上阻塞后续 fan-out。
-- agent completion 仍围绕 `wait_agent` 和轮询心智，完成后还可能要求模型再次调用 wait，浪费模型轮次。
-- child 权限组合没有被证明是 parent、role、profile 与 invocation policy 的单调收窄。
+- O4 前同一模型轮次的 Agent tool calls 会串行阻塞；当前 host-owned joined/background batch 已
+  解决已证明安全的 Agent fan-out，其他普通 tool calls 仍按各自 effect policy 调度。
+- joined completion 已不再围绕 `wait_agent`；手动 detached/background inspect 仍保留轻量
+  status/read surface，但不能退回模型 polling 编排。
+- child 的 ancestor/parent/role/profile policy 已单调收窄；invocation-scoped grant 与自然语言
+  explicit authority 仍由 O1e 补齐。
 - 写 agent 已有 changeset-only foreground 与单 child physical worktree 路径；并行 worktree
   conflict-aware integration 尚未闭环。
 
@@ -117,7 +127,8 @@ pub enum MultiAgentMode {
 - `ExplicitRequestOnly`：只有 typed user/skill delegation authority 或 accepted TaskPlan step 可以 spawn。
 - `Proactive`：允许模型主动 spawn 通过安全证明的 Explore；Worker 仍必须满足 isolation 和 permission。
 
-目标默认值是 `Proactive`，但只有在本文 O1-O5 的 admission、completion、权限 meet 和真实并发闭环后切换。
+目标默认值是 `Proactive`，但 O1-O5 只建立 admission、completion 和只读并发基础；必须等
+O1e、O6-O8 的写隔离、恢复、产品面和冻结 eval 门槛全部完成后才切换。
 
 ### 4.3 Default behavior matrix
 
@@ -317,6 +328,9 @@ pub failure_policy: TaskStepFailurePolicy;
 
 #[serde(default)]
 pub conflict_domain: Option<TaskConflictDomainHint>;
+
+#[serde(default)]
+pub intent_refs: Vec<IntentVersionRef>;
 ```
 
 规则：
@@ -328,6 +342,12 @@ pub conflict_domain: Option<TaskConflictDomainHint>;
 - 新 plan schema 不允许 executable `role = planner`；旧日志只做兼容投影。
 - `failure_policy` V1 支持 `required | advisory`；required failure 阻断依赖节点，advisory failure 进入 synthesis。
 - `conflict_domain` 只是 planner hint，最终冲突域以 materialized write set 和 runtime effect plan 为准。
+- `intent_refs` 是 RFC-0051 启用后的 additive extension point。模型只能返回 proposal alias；
+  runtime 必须从 accepted IntentPlan 解析为稳定 `IntentVersionRef`。Intent Stack V1 中，
+  可形成 selective-drop layer 的 write step 必须精确绑定一个 accepted intent；未绑定或绑定多个
+  intent 的 write 仍可执行和审查，但其产物标记为 `unassigned/shared`，不能获得意图级改写权限。
+- read/review/verify step 可以关联多个 intent closure；其输出只提供 evidence link，不把模型结论
+  变成 acceptance criterion 已通过的系统证据。
 
 ### 7.4 Plan mode handoff
 
@@ -348,9 +368,13 @@ pub enum TaskPhase {
     Integrating,
     Verifying,
     Synthesizing,
-    AwaitingUser,
-    Cancelling,
-    Terminal,
+}
+
+pub enum TaskPhaseStatus {
+    Started,
+    Completed,
+    Blocked,
+    Interrupted,
 }
 
 pub struct TaskPhaseEntry {
@@ -361,6 +385,10 @@ pub struct TaskPhaseEntry {
     pub reason_code: Option<TaskPhaseReason>,
 }
 ```
+
+`TaskPhase` 只表示工作阶段，`TaskPhaseStatus` 只表示该阶段的执行状态；已有
+`TaskRunStatus::{Started, Running, Paused, Completed, Failed, Cancelled, Interrupted}` 继续表示
+整个 Task 生命周期。不得再把 `Paused/Failed/Completed` 同时当作 phase 名和 run status。
 
 状态流：
 
@@ -374,16 +402,19 @@ Admitted
   -> Completed
 ```
 
-任意非 final 状态可以进入：
+任意非 final phase 可以让 Task run 进入：
 
-- `AwaitingUser`：approval、merge review 或 guidance；
-- `Paused`：可恢复阻塞；
-- `Cancelling`：已停止新 admission，正在等待 quiescence；
+- `Paused + AwaitingUser reason`：approval、merge review 或 guidance；
+- `Paused + typed blocker`：其他可恢复阻塞；
+- cancellation-requested typed entry：已停止新 admission，正在等待 quiescence；不伪造一个已经
+  terminal 的 run status；
 - `Interrupted`：cleanup 或远端状态不确定；
 - `Cancelled`：所有 child/effect permit 已确认 quiescent。
 
-`Completed` 与 `Cancelled` 是 final；`Paused`、`Failed`、`Interrupted` 是否可 continue 由 typed
-`TaskResumeEligibility` 决定，不依赖 UI 猜测。
+`Completed`、`Failed`、`Cancelled` 与 `Interrupted` 按现有 `TaskRunStatus::is_terminal`
+解释；是否可以创建新的 continue attempt 由 typed `TaskResumeEligibility` 决定，不依赖 UI
+猜测。phase reducer 必须拒绝从 terminal run 继续追加 Running phase，除非先有合法 continue
+admission 和新的 root cancellation scope。
 
 ## 9. Participant execution protocol
 
@@ -639,13 +670,17 @@ pub struct AgentSpawnAdmissionContext {
 - `UserExplicit`
 - `AcceptedTaskPlan { task_id, plan_version, step_id }`
 - `ModelProactive`
-- `SystemRecovery`
 
 `multi_agent_mode` 在 runtime 检查：
 
 - `None` 拒绝所有 model authority；
 - `ExplicitRequestOnly` 只允许 UserExplicit / AcceptedTaskPlan；
 - `Proactive` 允许通过 safety proof 的 ModelProactive Explore。
+
+Recovery 不属于 agent spawn authority。startup/resume 只能执行 runtime 内建、zero-forward-effect、
+幂等的 typed reconciliation action；它不能创建 child、发起 provider/tool/merge 请求，也不能从
+旧 admission 重新铸造 `AgentInvocationGrant`。需要继续执行时必须走新的显式 continue/root-run
+admission。
 
 ### 13.3 Approval UX
 
@@ -933,7 +968,8 @@ allow_write_subagents = true
 1. `default_mode` 标记 deprecated；一版内保留解析和 warning。
 2. 显式 legacy `default_mode = "chat"` 映射 `routing_policy = "manual"`，避免升级后突然自动编排。
 3. 显式 legacy `default_mode = "plan"` 只映射 composer Plan-mode preference，不隐式启动 Task。
-4. 未配置的新安装在 O1-O5 完成后默认 `routing_policy = "auto"`、`multi_agent_mode = "proactive"`。
+4. 未配置的新安装只有在 O8d rollout gate 完成后才默认
+   `routing_policy = "auto"`、`multi_agent_mode = "proactive"`；此前继续保持 manual/explicit。
 5. 旧 session 缺 phase/attempt/batch entries 时使用 legacy projection；running legacy step 恢复为 Interrupted/Paused。
 6. 不扫描旧 prompt 猜测并补建 task。
 7. unfinished legacy task 只能显式 continue，不自动重放。
@@ -948,6 +984,10 @@ allow_write_subagents = true
 - O0 事实基线已落地：RFC-0007 和回归测试明确当前只有 ready batching，runner 仍串行；planner internal prompt 污染的基线断言已在 O2 翻转为 transient-only。
 - O1a 已落地安全基础：`multi_agent_mode` 在 provider、budget reservation 和 `AgentThreadStarted` 之前 fail closed；`none` 同时覆盖 model spawn 与 `@profile`。生产 runtime 不再暴露 ambient authority setter，模型工具参数不能提供 authority。每次成功启动前追加 `AgentDelegationAdmitted`，绑定 thread、profile、mode、source、objective hash 与冻结后的 tool-contract fingerprint。
 - O1b 已落地第一阶段：child 的 ancestor、parent、role、profile materialized policies 在 concrete ToolSpec、operation、network effect 和 subjects 上逐层求最严格决策；prepared execution 复用同一 policy chain。invocation-scoped permission grant 尚未实现，不得把当前实现描述为四层 permission meet。
+- O1e 尚未落地：普通自然语言输入在 `explicit_request_only` 下还不能形成 host-owned
+  delegation authority；当前只有 `@profile` 和 accepted TaskPlan 等 typed source 可以获得
+  authority。invocation-scoped grant、确认后的 natural-language delegation handoff 和逐 tool-call
+  revalidation 必须在默认切换前完成。
 - O1c 已落地：proactive Explore 基于冻结 registry 的实际 ToolSpec、network effect 和 `ToolMutationTracking` 证明；Custom/MCP 默认 unknown，已审计的本地只读 Custom tool 显式声明 `None`；detachable 分支复用同一证明。
 - O1d 已落地配置基础：新增 `routing_policy = "manual" | "auto"`，缺字段保持 `manual`；O2 已接入生产 consumer，兼容迁移 warning 和新安装默认值仍留待 O8。
 - O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。HTTP/Desktop application surface 在拥有同一 executor 和 synthesis contract 前强制 manual，不能创建无人执行的 Started task。
@@ -998,8 +1038,8 @@ O5b2d1 adaptive provider route concurrency window 和 O5b2d2 Planner/Synthesis r
 以及 O5b2d3a 实时 route attribution/diagnostics、O5b2d3b completion-arrival 与
 request-order durable commit 双序视图，以及显式 prepare/detached future/one-shot commit
 envelope 边界均已完成。O6a 也已完成 changeset-only proposal 的有界真实并发、共享 immutable
-base snapshot、parent snapshot revalidation 与稳定 proposal/review commit；后续工作从 O6b
-开始。
+base snapshot、parent snapshot revalidation 与稳定 proposal/review commit；后续工作从 O1e
+和 O6c 开始。
 
 ### O0: Truth baseline and contract correction
 
@@ -1015,13 +1055,48 @@ base snapshot、parent snapshot revalidation 与稳定 proposal/review commit；
 
 ### O1: Runtime admission and permission foundation
 
+实施状态：O1a-O1d 完成；O1e deferred。
+
+已完成：
+
 - runtime 强制执行 `multi_agent_mode`，不再只依赖工具描述。
-- 接入 typed delegation authority 和 ordinary chat explicit hard gate。
-- 实现 parent/role/profile/invocation permission meet。
+- ancestor、parent、role 和 profile policy 在 concrete tool call 上单调收窄。
 - 自动 Explore 按最终 ToolSpec/effect proof 判定，不按工具名称白名单。
 - 把 `default_mode` 迁移为真实 `routing_policy`。
 
-退出条件：parent deny 不可被 child 放宽；unsafe 同名 tool 不能伪装 Explore；mode 配置改变真实 spawn admission。
+O1e：invocation-scoped grant 与普通输入显式委派闭环。
+
+1. runtime 新增 host-minted、模型参数不可构造的 `AgentInvocationGrant`。它绑定 source turn、
+   authority、profile、role、isolation、允许的 tool/effect upper bound、root cancellation scope、
+   tool-contract fingerprint 和有效期；durable entry 只保存安全 fingerprint 与来源，不保存可重放
+   的 ambient capability。
+2. `@profile` 与 accepted TaskPlan 分别产生 `UserExplicit`、`AcceptedTaskPlan` grant。
+   `Proactive` Explore 只能获得 read-only、无 network mutate/unknown、无 external path 和无
+   unknown custom/MCP effect 的 `ModelProactive` grant。System recovery 不产生 invocation
+   grant，只能执行 §13.2 的 zero-forward-effect reconciliation。
+3. `explicit_request_only` 下的普通自然语言不能靠关键词扫描直接铸造 `UserExplicit`。模型只能
+   返回 typed `request_agent_delegation` proposal；runtime 展示一次 bounded batch preview，
+   用户确认后才铸造对应 invocation grant。拒绝或取消继续原 chat，不创建 child。
+4. child 每次 concrete tool call 和 prepared execution 都计算
+   `ancestor ∩ parent ∩ role ∩ profile ∩ invocation grant`；显式 `Deny/Ask`、network/source
+   policy、protected path 和 external-directory gate 不能被 grant 放宽。
+5. spawn admission 与 tool execution 前都重新核对 source turn、profile/tool fingerprint、
+   workspace snapshot 和 cancellation scope；任一漂移在 provider/tool effect 前 fail closed。
+6. 增加 durable projection 与恢复规则：confirmed grant 只能在绑定 root run 内使用；crash 后
+   未开始的 grant 失效，已 Started attempt 按现有 interrupted reconciliation 收口，不能凭旧 grant
+   自动重放 provider、工具或创建 recovery child。
+
+O1e 验收：
+
+- parent/profile/invocation 任一层 `Deny` 都不能被 child 放宽；
+- natural-language proposal 未确认时 child/provider dispatch 为零；
+- 同一确认只授权 preview 中的 exact batch/profile/effect upper bound；
+- profile、tool schema、workspace 或 source-turn binding 漂移时零 effect；
+- `none`、`explicit_request_only`、`proactive` 的正反例均由 runtime 测试证明，而不是只检查 prompt。
+
+O1 总退出条件：四层 permission meet 真实生效；unsafe 同名 tool 不能伪装 Explore；
+ordinary natural-language delegation 不依赖关键词且没有 ambient authority；mode 配置改变真实
+spawn admission。
 
 ### O2: ConversationCoordinator and auto handoff MVP
 
@@ -1253,7 +1328,8 @@ O5b2 coordinator boundary 已完成：
 
 退出条件：barrier 测试证明 overlap；无 parent mutable borrow 跨 child await；429 不产生 fan-out storm。
 
-完成 O5 并通过 dogfood/eval 后，才把新安装默认切到 auto/proactive。
+完成 O5 只证明只读编排基础，不授权切换默认；默认值必须继续等待 O1e、O6-O8 和第 23 节
+rollout gate。
 
 ### O6: Parallel isolated writes and integration lanes
 
@@ -1300,30 +1376,259 @@ O5b2 coordinator boundary 已完成：
     cleanup crash window，binding 冲突继续 fail closed。
   - 当前物理路径仍要求 clean、无 submodule 的 Git repository root；并行 Worktree batch 与
     integration lane 属于 O6 后续。
-- conflict graph、multi-lane integration refs、scoped verification。
-- final promotion CAS、parent verification、stale/conflict UX。
-- shared-workspace direct write 保持 exclusive；path-lease parallel direct write 作为后续 gated slice。
 
-退出条件：非冲突 workers 的写/测试/integration 时间区间可重叠；冲突 proposals 不自动覆盖；最终 ref/workspace promotion 可审计、可恢复。
+O6c：exact user snapshot materialization。
+
+1. Worktree base identity 由 `repository HEAD/base commit + WorkspaceSnapshotId +
+   overlay manifest digest` 共同组成，不能再把 clean Git HEAD 等同于用户当前 workspace。
+2. runtime 在 parent mutation lease/read barrier 下冻结 tracked dirty files 与显式纳入的安全
+   untracked files；每个 entry 绑定 relative path、kind、content digest、mode/readonly metadata
+   和来源。artifact 复用 RFC-0002 content-addressed lifecycle，不建立第二套无 retention 的 blob
+   store。
+3. `.git`、Sigil state/cache、owned worktree root、ignored build output、secret-like content、
+   symlink/special file、超限或读取不确定 entry 不进入 overlay。若目标 task 依赖其中任一 entry，
+   Worktree admission 在任何 physical materialization/provider dispatch 前失败，并建议
+   `ChangesetOnly` 或用户先整理 workspace；不得静默从 HEAD 启动缺文件的 child。
+4. child worktree 先从 exact base commit 创建，再应用一次 immutable overlay；应用后重新生成
+   manifest，必须与 frozen parent snapshot 的可物化范围逐 entry 相等。overlay 只能按值消费，
+   不得在不同 child 间共享可变目录。
+5. overlay 应用完成后的 child snapshot 是 worker delta 的唯一 before baseline。O6b2b 当前
+   clean-only 路径从 base commit 提取 diff；O6c 必须把 extraction、per-file before hash、
+   ChangeSet 和 integration candidate 全部改为相对 frozen post-overlay snapshot 计算。parent 原有
+   dirty/untracked bytes 只能作为 inherited baseline，不能被误归因为 agent proposal。
+6. 多个 child 可以引用同一 content-addressed immutable overlay，但各自拥有独立 workspace、
+   branch/ref、build output、snapshot id 和 cleanup receipt。compiler cache 只有在 backend
+   明确只读或按 child namespace 隔离时才可共享。
+7. V1 继续拒绝 submodule、nested repository、non-Git root 和不受支持的文件类型；这些限制必须
+   进入 admission diagnostic、TUI review 和 DoD 边界，不能由 copy fallback 绕过。
+
+O6c 验收：dirty tracked 与安全 untracked fixture 在每个 child 中逐字节一致；ignored/secret/
+unsupported entry 不泄漏；worker 未修改 inherited dirty/untracked entry 时 proposal changed-set
+为空，修改时 before hash 精确等于 overlay bytes；parent 在 materialization 期间 drift 时整批
+零启动；restart cleanup 不会删除非 owned path。
+
+O6d：parallel Worktree batch 与 deterministic conflict graph。
+
+1. scheduler 只把相互独立的 `SubagentWrite + Worktree` ready step 组成 homogeneous batch；
+   coordinator 在启动前冻结同一 O6c base identity，并对 profile、permission、workspace、
+   provider route、slot 和 owned-root capacity 做 whole-batch preflight。
+2. 全部 `IsolatedWorkspacePrepared/Created` 与 child Started durable 后才统一放行 provider；
+   中途创建失败会收口已创建 workspace、释放 reservation，并保持所有 child provider dispatch
+   为零。
+3. 每个 child terminal envelope 必须携带 materialized changed-path set、per-file before/after
+   hash、rename/special/binary classification、declared effect、observed global effect、
+   changeset artifact ref 和 child verification refs。缺失或超限 facts 使 proposal 只能进入
+   serial/manual review，不能猜成 disjoint。
+4. kernel 用稳定输入构建 `TaskIntegrationGraph`：Task DAG edge、path overlap、generated artifact、
+   package/build/git/global effect、base compatibility 和 verification scope 都形成 edge reason。
+   planner `conflict_domain` 只作提示，不参与授权。
+5. unknown shell、formatter/codegen/package manager、Git ref mutation、shared generated root 或
+   无法证明的 effect 默认进入同一 exclusive lane；不同 repository/workspace 才可拥有独立
+   promotion barrier。
+6. lane assignment 同时冻结 base representation：只有无 overlay 的 clean commit batch 可以使用
+   managed-ref lane；携带 O6c overlay 的 batch 必须使用 snapshot-workspace lane。runtime 不得把
+   dirty/untracked baseline 丢失后仍把 proposals 应用到仅含 base commit 的 private ref。
+
+O6d 验收：反向 completion 不改变 graph/lane identity；任一缺失 effect fact 不会被判定为
+non-conflicting；同路径、rename、generated output 和 global effect corpus 全部稳定产生 edge；
+whole-batch admission 失败时零 provider dispatch。
+
+O6e：integration lane ownership、target 与 scoped verification。
+
+1. runtime 分配 opaque `IntegrationLaneId` 和互斥 lane target；renderer、模型和 planner 不能提供
+   真实 path 或 ref name：
+   - `ManagedRefLane { expected_oid, private_ref }` 只用于无 overlay 的 clean commit base；
+   - `SnapshotWorkspaceLane { base_snapshot, overlay_digest, revision, owned_workspace }` 从 O6c
+     frozen post-overlay snapshot 物化，用于 dirty/untracked baseline，不要求这些 inherited bytes
+     能表示为 Git commit。
+   新增 recovery-critical typed facts：
+   `IntegrationLanePrepared`、`IntegrationLaneMemberApplied`、
+   `IntegrationLaneVerificationLinked`、`IntegrationLaneTerminal` 和
+   `IntegrationLaneCleanupRecorded`。
+2. 同一 lane 内按 accepted TaskPlan order 应用 proposal；不同 lane 可并行 apply/rebase 和运行
+   scoped verification。`ManagedRefLane` 每次 ref advance 使用 expected-old/new-object CAS；
+   `SnapshotWorkspaceLane` 每次 apply 使用 RFC-0002 full preflight 与 expected snapshot/revision
+   CAS。两者都把 receipt 绑定 lane、exact base representation、ordered member set 和 candidate
+   snapshot。
+3. child `Passed` 只能作为 lane input evidence；lane check 只证明 lane candidate，不证明 parent。
+   check spec、scope、backend、network receipt 和 candidate snapshot 必须沿用 RFC-0003。
+4. apply conflict、stale base 或 CAS failure 会把该 lane置为 `Conflicted/Stale`；不冲突 lane
+   继续。冲突修复必须创建新的 isolated attempt 和 proposal，不能让 agent 直接覆盖 winner 或
+   就地改写旧 lane。
+5. lane ref/workspace cleanup 与 O6b ownership inventory 使用同一 startup/session-transition
+   reconciliation。Snapshot lane 的 overlay artifact 在 lane terminal/cleanup 前 retention-pin；
+   未知 ref/workspace ownership、cleanup failure 或 partial apply 都保留 review inventory，不能
+   被最终 promotion 忽略。
+
+O6e 验收：两个 disjoint lane 的 apply/check 时间可证明重叠；同 lane member 顺序稳定；clean
+ref 与 dirty-overlay fixtures 分别只进入正确 target；snapshot lane 未触碰 inherited dirty file 时
+candidate delta 不包含该文件；restart 能重建 prepared/applied/verified/conflicted/cleanup 状态
+且不重放 apply/check。
+
+O6f：promotion barrier、parent mutation 与 final verification。
+
+1. coordinator 只有在 required lanes terminal-success、没有 pending approval/conflict/cleanup
+   ambiguity 时，才生成 content-bound `TaskPromotionPreview`。preview 绑定 task/plan、ordered
+   lane candidates、aggregate diff artifact、一个且仅一个 promotion target、verification
+   invalidation 和 digest。
+2. V1 默认只接受 exact user integration review 产生的 host-owned promotion authority。若
+   RFC-0005 E05.17 已启用，runtime 可以额外消费其 post-effect、content-bound promotion
+   admission；该 authority 必须绑定 task/plan、target kind、aggregate diff digest、expected
+   snapshot/ref、intent binding、policy digest、expiry 和 single-use nonce。TaskPlan、
+   multi-agent mode、planner 文本或普通 tool approval 都不能自行铸造 merge authority。apply 前
+   重新投影 preview 并校验 authority、artifact availability 和 permission policy。
+3. V1 promotion target 是互斥 tagged union：
+   - `WorkspaceApply { expected_snapshot, expected_revision }`：默认目标，复用 RFC-0002 full
+     preflight/mutation batch，把 aggregate delta 应用到当前用户 workspace；不更新任何 Git ref，
+     支持 O6c 的 dirty/untracked baseline。
+   - `GitRefAdvance { expected_old_oid, candidate_oid }`：只允许 clean、未被用户 worktree checkout
+     的显式目标 ref，通过 expected-old/new-object CAS 更新；不修改用户 workspace 文件。目标 ref
+     正被 checkout、repo dirty 或 candidate 不能完整表示 inherited overlay 时拒绝该模式，用户
+     使用 `WorkspaceApply`。
+   同一次 promotion 不同时执行 ref CAS 和 workspace mutation；需要 commit/export 时必须在
+   parent verification 后发起独立、可审阅 action。
+   当 accepted TaskPlan 含 RFC-0051 executable `intent_refs` 时，V1 只允许
+   `WorkspaceApply`；`GitRefAdvance` 只能保留 read-only/unassigned intent provenance，不能把
+   intent application state 标记为 applied/verified。preview 在 target 选择阶段必须解释这一限制，
+   Synthesis 也不能把 ref-only proposal 宣称为 Intent Stack 已闭环。
+4. promotion 为所选 target 生成新的 authoritative snapshot：`WorkspaceApply` 使用用户
+   workspace 的 post-mutation snapshot；`GitRefAdvance` 在 runtime-owned clean checkout 中
+   物化 target oid 的 snapshot，不把未变化的用户 worktree 当作结果。所有旧 child/lane receipt
+   继续是 stale 或 child-scoped。required parent checks 必须在该 promoted target snapshot 上
+   重新运行；只有 RFC-0003 verdict 满足 accepted plan policy，Task 才能进入 Synthesis。
+5. promotion、parent check 与 synthesis 各有独立 attempt identity；crash recovery只补齐可由
+   durable evidence唯一推导的本地 terminal，不重放 merge、check 或 provider final。
+
+O6f 验收：`WorkspaceApply` 的 parent drift 与 `GitRefAdvance` 的 ref drift 分别在首个 effect 前
+fail closed；preview/authority 不能换 target kind；workspace mutation partial 与 ref CAS failure
+分别恢复且不误报成功；一次 operation 的 durable facts 不同时出现 workspace/ref effect；
+user/content-bound authority 的 stale/replay/target-digest mismatch 零 effect；带 executable
+intent_refs 的 GitRef target 在 admission 前拒绝；parent verification 失败或 stale 时没有 Task
+final answer。
+
+O6g：integration review 最小产品面。
+
+- Task 主面只显示 `review integration`、`resolve conflict`、`run parent checks` 或 `continue`
+  中唯一推荐动作；lane/ref/path inventory 留在 detail/audit。
+- review 展示 aggregate diff、lane provenance、冲突原因、child/lane/parent verification 区别和
+  exact promotion digest。TUI 不暴露 private worktree path/ref，也不提供“强制覆盖”快捷动作。
+- stale preview、迟到响应、session switch 和 task supersede 都以 request id/task id/plan version
+  隔离；旧 modal 回包不能作用于新 task。
+
+O6 依赖顺序：
+
+```text
+O1e -> O6c -> O6d -> O6e -> O6f
+                         \-> O6g
+```
+
+O6 总退出条件：非冲突 workers 的写、测试和 integration 时间区间可证明重叠；冲突 proposal
+不自动覆盖；最终 ref/workspace promotion 可审计、可恢复；parent verification 是 final
+synthesis 的硬前置。Shared-workspace direct write 继续 exclusive；path-lease parallel direct
+write 不属于本 RFC V1。
 
 ### O7: Recovery, follow-up and approval routing
 
-- task-targeted guidance 和 safe-point application。
-- dispatched follow-up 从 pending view 删除。
-- parallel child approval attribution 和 identical-signature aggregation。
-- cancel/quiescence、restart、continuation dedupe、stale isolated workspace inventory。
+O7a：task-targeted guidance。
 
-退出条件：resume 后不重复 plan/spawn/merge；cancel 后晚到 child 结果不会复活 task；approval 能定位到 exact agent/batch。
+- `ConversationInputTarget::Task` / `TaskGuidance` 绑定 task、plan version、queue revision 和 source
+  turn；只有 scheduler safe point 能将 pending guidance promotion 为 dispatched。
+- guidance 影响 plan、scope 或 accepted intent 时必须进入 typed replan/review，不能直接改写
+  running participant prompt。只影响尚未 Started step 的补充信息可在新 attempt input hash 中
+  materialize。
+- pending view 只展示未 promotion 的 item；dispatched/expired/rejected 仍保留 durable audit，
+  但不继续占据 pending UI。crash recovery 按 promotion 与 physical-attempt evidence分类，不自动
+  重发状态不确定的 guidance。
+
+O7b：parallel approval routing。
+
+- 每个 Ask 绑定 task、batch、thread、attempt、tool call、permission signature 和 source workspace；
+  parent presenter 只展示安全 preview。
+- 只有 signature、policy snapshot、subjects、risk、network/source facet 与 isolation 全部相同
+  时才可聚合；一次 decision 分别追加每个 child 的 routed/resolved evidence。
+- background child 在没有交互 owner 时进入 `BlockedNeedsApproval`；它不能把 Ask 降为 deny 或
+  无限等待。session switch/resume 后，过期 approval 必须重新预览。
+
+O7c：cancel、quiescence 与 restart reconciliation。
+
+- Task cancel 先关闭新 planner/child/integration/promotion admission，再传播 root cancellation；
+  child、lane、worktree、process 和 effect permit 全部收口后才写 `Cancelled`。
+- deadline、cleanup/ref ownership 或远端结果不确定时写 `Interrupted/CleanupIncomplete`，并保留
+  exact recovery action。晚到 child/lane success 只能补审计，不能重新触发 integration、
+  promotion 或 final continuation。
+- 启动恢复按 handoff、plan、attempt、continuation、workspace、lane、promotion 和 guidance 的
+  typed projection 顺序执行；每个 repair 幂等，且不得创建 provider/tool/merge request。
+
+O7 退出条件：resume 后不重复 plan/spawn/merge；cancel 后晚到结果不会复活 task；approval
+能定位到 exact agent/batch/tool；dispatched follow-up 不再显示 pending。
 
 ### O8: TUI polish, public protocol and model eval
 
-- task/live/follow-up 视觉分区与键盘/鼠标交互。
-- typed public events 和 HTTP/Desktop projection。
-- performance：长 task/task strip/agent list 使用缓存 projection，不按 frame replay 全日志。
-- deterministic eval、real-model eval、PTY E2E、chaos/restart suite。
-- 文档、README、config guide 和 migration note。
+O8a：TUI product completion。
 
-退出条件：满足第 22 节 Definition of Done。
+- 完成 task/live/follow-up 三分区、task/agent/integration inspect、Pause/Continue/Cancel、
+  completed collapse、narrow layout、mouse hit-area、keyboard help 和 session switch。
+- renderer 只消费 versioned ViewModel/cache；durable cursor 未变化时不重放全日志。增加长 task
+  fixture，证明 frame render 不触发 session store scan 或完整 reducer replay。
+- 所有异步 modal/action 使用 request id + task id + plan version；迟到回包不能覆盖新状态。
+
+O8b：typed public protocol 与 application parity。
+
+- 第 18 节 public events 进入 versioned DTO/OpenAPI；HTTP replay/live SSE 和 Desktop renderer
+  复用同一 task/agent/integration projection，不解析 opaque `Control.payload`。
+- HTTP/Desktop 只有在拥有与 TUI 相同的 coordinator、executor、approval/cancel、synthesis 和
+  recovery contract 后才允许 `routing_policy=auto`；否则继续强制 manual。
+- DTO 不暴露 bearer、absolute/private worktree path、private Git ref、raw prompt/transcript 或
+  mutation authority。generated schema drift、真实 `sigil serve` contract 和 Desktop interaction
+  test 是完成门。
+
+O8c：deterministic、real-model 与 chaos acceptance。
+
+1. 先为 RFC-0013/0028 production-path harness 增加 orchestration campaign extension。RFC-0028
+   V1 明确禁止 child agent，现有 runner 不能被直接宣称为 O8 证据；extension 必须继续复用
+   `ApplicationRunServices`、真实 coordinator/supervisor/session、隔离 workspace、cost admission
+   和 report contract，不能新建评测专用 agent loop。
+2. extension 提交至少 20 个 negative（问答、单符号查询、单文件小改）和 10 个 positive
+   （跨层实现、并行调研、独立写模块）case；默认候选 provider/model 每 case 至少 3 次同质
+   repetition 才进入 rollout 统计。
+   每份 report 必须绑定不可变 `OrchestrationEvalIdentity`：provider adapter/kind、resolved
+   endpoint family、canonical model id/version、route fingerprint、routing/planner/system prompt
+   digest、tool/profile contract digest、task config digest、corpus version/digest、Sigil commit/build
+   和 repetition seed。可漂移 model alias 未解析到同一 identity 时报告立即 stale。
+3. negative automatic-task false-positive rate 必须 `<= 5%`，且任一 case 不得在多数 repetition
+   中误路由；positive task miss rate 必须 `<= 10%`。安全断言、duplicate handoff/spawn/
+   continuation/merge、parent-child duplicate final 和 model polling turn 的容忍值均为 `0`。
+4. deterministic fake-provider suite 必须 100% 通过 permission monotonicity、whole-batch
+   zero-start、reverse completion、429、cancel、restart、compaction、guidance、approval、
+   lane CAS、promotion partial 和 cleanup inventory。
+5. PTY E2E 覆盖 auto handoff、并行进度、approval、cancel/continue、integration review 和唯一 final；
+   真实模型失败保留 session/artifact，不以补跑隐藏失败。
+6. gate 按 route fingerprint 独立计算。一个 route/model 的 report 不授权其他 provider、model、
+   endpoint 或 prompt/config digest；未出现在候选 release qualified-route manifest 中的 route
+   保持 `manual + explicit_request_only`，即使全局新安装默认已经切换。
+
+O8d：默认切换、迁移与回滚。
+
+- 只有 O1e、O6、O7、O8a-O8c 全部完成并附带同一候选 release 的 eval report 后，才允许修改
+  新安装默认值。O1-O5 完成不再被描述为足以切换默认。
+- rollout 固定为 internal dogfood -> exact-route explicit opt-in -> qualified-route
+  new-install default。新安装对 qualified manifest 中的 route 使用
+  `routing_policy=auto` / `multi_agent_mode=proactive`；其他 route 仍 manual/explicit。任何已有
+  显式配置和 legacy `default_mode=chat` 继续保持原行为，不静默迁移。
+- runtime 对每个 route 维护本地 kill switch：任何 duplicate handoff/spawn/continuation/merge、
+  permission monotonicity violation、unknown-effect replay 或 parent-child duplicate final（阈值
+  `> 0`）立即为当前 build/route 追加 `OrchestrationRouteDisabled`，后续输入回退
+  manual/explicit，并在 doctor/TUI 给出 report handle；不能等下一次模型判断自行恢复。
+- candidate/canary report 只要 false-positive `> 5%`、positive miss `> 10%` 或任一 case 在多数
+  repetition 中误路由，就阻止/撤销该 route 的阶段晋级。重新启用必须由新 build/manifest 和新
+  eval identity 证明，不能编辑旧报告。
+- 保留用户可见的 coarse rollback：配置恢复 `manual + explicit_request_only` 即完全关闭自动
+  handoff/proactive spawn；rollback 不需要删除 durable task history。
+- README、EN/ZH user/config/safety 文档、migration note、doctor 和 setup 默认展示必须与真实
+  binary 一致。
+
+O8 退出条件：满足第 22 节 Definition of Done 和上述冻结阈值；阈值只能通过 RFC amendment
+调整，不能在实现时临时放宽。
 
 ## 21. Verification matrix
 
@@ -1331,15 +1636,16 @@ O5b2 coordinator boundary 已完成：
 | --- | --- |
 | Kernel state | handoff idempotency；phase/attempt/batch roundtrip；active_steps；duplicate terminal/continuation rejection |
 | DAG scheduler | true overlap barrier；dependency order；independent failure continues；reverse completion deterministic merge |
-| Runtime admission | none/explicit/proactive；typed authority；whole-batch zero-start rejection；budget release |
-| Permission | parent deny upper bound；role policy active；profile only narrows；unsafe same-name ToolSpec；batch approval signature |
+| Runtime admission | none/explicit/proactive；natural-language confirmation handoff；typed invocation grant；whole-batch zero-start rejection；budget release |
+| Permission | ancestor/parent/role/profile/invocation monotonic meet；grant drift；unsafe same-name ToolSpec；batch approval signature |
 | Planner | one discovery round；bounded probes；profile snapshot binding；no internal User history；no executable planner step |
 | Completion | single terminal envelope；joined automatic resume；background no focus steal；restart delivery once；no wait polling |
 | Cancellation | before launch；provider stream；tool effect；partial batch；cleanup incomplete；late success after cancel |
 | Rate limit | Retry-After；route cooldown；bounded retry；zero-effect proof；after-output/uncertain no retry |
-| Changeset | same-base parallel proposals；disjoint lanes；overlap conflict；stale CAS；parent re-verification |
-| Worktree | dirty/untracked snapshot；secret/cache exclusion；symlink escape；build isolation；crash cleanup |
+| Changeset/integration | same-base parallel proposals；deterministic conflict graph；disjoint lane overlap；clean-ref/dirty-snapshot lane target；lane CAS；互斥 workspace/ref promotion target；aggregate promotion preview；parent re-verification |
+| Worktree | dirty tracked/safe untracked snapshot；post-overlay delta baseline；secret/cache exclusion；symlink escape；submodule/non-Git rejection；build isolation；crash cleanup |
 | TUI | auto handoff；task/live/follow-up separators；agent inspect；pause/continue/cancel；completed collapse |
+| Public protocol | replay/live DTO parity；OpenAPI/generated schema；private path/ref redaction；real serve/Desktop contract |
 | Negative eval | simple Q&A、single lookup、one-line edit 不建 task；overlapping work不重复 spawn；no parent-child duplicate investigation |
 | Positive eval | cross-layer implementation builds task；planner fans out Explore；independent read/write scopes use concurrency |
 | Recovery E2E | 429、provider disconnect、compaction、process restart、task continue 不重复 task/step/spawn/merge |
@@ -1364,29 +1670,61 @@ RFC-0053 只有同时满足以下条件才算完成：
 5. planner 可以一次声明多个 Explore probes，并真实并发完成。
 6. Task DAG 的 independent read attempts 存在可证明的时间重叠。
 7. 模型等待 child 时不会重复调用 wait 或 terminal polling tool。
-8. `multi_agent_mode` 是 runtime hard policy，permission meet 只能收窄。
+8. `multi_agent_mode` 是 runtime hard policy；host-minted invocation grant 已进入逐 tool-call
+   permission meet，普通自然语言显式委派不靠关键词或 ambient authority。
 9. auto Explore 无多余审批；Worker/network/MCP 的来源和 effect 可审阅。
-10. 多个 isolated workers 可以并行写和测试；非冲突 integration lanes 可以并行预集成。
-11. 同一 ref/workspace promotion 使用 CAS；冲突/stale proposal 不会静默覆盖。
+10. dirty tracked 与安全 untracked 内容能被 exact materialize；多个 isolated workers 可以并行
+    写和测试，非冲突 integration lanes 可以并行预集成。
+11. Workspace promotion 使用 snapshot/revision CAS，Git ref promotion 使用 object CAS；两种 target
+    互斥，冲突/stale proposal 不会静默覆盖。
 12. Task 最终只写一个 parent final answer。
 13. crash、429、cancel、continue 和 compaction 不会重复 task、attempt、spawn、continuation 或 merge。
 14. task、live progress 和 follow-ups 在 TUI 中有清晰边界；dispatched follow-up 不留在 pending list。
 15. public protocol、用户文档、核心技术方案和真实实现一致。
-16. targeted、standard/full gates 和 opt-in real-model acceptance 按阶段要求通过。
+16. TUI、HTTP 和 Desktop 在声明 auto 支持时消费同一 coordinator/executor/synthesis contract，
+    public DTO 不泄漏 private worktree/ref 或 mutation authority。
+17. targeted、standard/full gates 和 O8c 冻结的 deterministic/real-model/PTY acceptance 按阶段要求通过。
 
 ## 23. Rollout rule
 
-实现期默认保持现有 `explicit_request_only`，按 O0-O5 逐项落地并开启内部 dogfood。
+实现期默认保持现有 `manual + explicit_request_only`，按剩余 slice 逐项落地并开启内部 dogfood。
 
 只有同时满足以下指标，才将新安装默认切换为 `routing_policy = "auto"`、
 `multi_agent_mode = "proactive"`：
 
-- negative eval 中简单任务误触发率低于约定阈值；
+- O1e、O6、O7、O8a-O8c 均已完成；
+- O8c 的至少 20 个 negative / 10 个 positive case 满足 `false-positive <= 5%`、
+  `positive miss <= 10%`，且没有 case 在多数 repetition 中误路由；每个启用 route 都有独立
+  `OrchestrationEvalIdentity` 和 qualified manifest entry；
 - joined agent completion 无 polling turn；
-- duplicate handoff/spawn/continuation 为 0；
+- duplicate handoff/spawn/continuation/merge 与 parent-child duplicate final 为 0；
 - parent permission monotonicity suite 全绿；
-- 429/cancel/restart chaos suite 无自动重放不确定副作用；
-- TUI 能明确展示 task/agent 状态和用户可恢复 action。
+- 429/cancel/restart/compaction/promotion chaos suite 无自动重放不确定副作用；
+- TUI/HTTP/Desktop 的支持声明、projection 与恢复 action 通过各自 contract gate。
+- route-local hard invariant kill switch 和 staged rollback fixtures 全绿。
 
 切换默认值不放宽 write、execute、network、external directory、MCP 或 merge 权限；autonomy 与 permission
 继续是两条正交的控制轴。
+
+## 24. Completion boundary and remaining product gaps
+
+RFC-0053 完成后，Sigil 将具备默认可启用的 Chat/Task 自动路由、host-owned 并行探索、隔离写
+Agent、冲突感知 integration、统一进度、恢复和唯一 final answer。它仍不单独解决：
+
+1. **受控自动执行预设**：沙箱内 execute 自动、越界/network/high-risk 再审批属于
+   [RFC-0005](0005-execution-backend.md) 的 permission/execution/network 组合产品化，不由
+   multi-agent policy 放宽。
+2. **跨会话项目记忆**：Task/Agent 只产生可作为来源的 durable facts；workspace-wide retention、
+   validity、trust、inspect/edit/delete 属于
+   [RFC-0010](0010-structured-compaction-and-task-memory.md) 的项目记忆产品化。
+3. **意图级版本控制**：TaskPlan 可以携带 `intent_refs` extension，但 intent acceptance、
+   ownership、drop/replace 和 checkpoint/retention 联动由
+   [RFC-0051](0051-intent-stack-and-intent-level-version-control-v1.md) 实现。
+4. **外部副作用补偿**：shell、network、MCP、database、publish 等 effect 仍只能审计、阻断或
+   人工补救；本 RFC 不宣称可以按 task/intent 自动撤销。
+5. **完全自治 agent team 与任意 workspace backend**：V1 保持 parent-coordinated participant
+   model，并继续拒绝 submodule、nested/non-Git worktree materialization 和无证明的
+   shared-workspace parallel direct write。
+
+这些是完成边界，不得用来降低第 22 节 DoD；其中前 3 项已有各自 RFC 的可执行 follow-up，
+后 2 项需要新的独立安全契约后才能扩展。

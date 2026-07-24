@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation deferred
+状态：proposed / execution plan hardened / implementation deferred
 
 创建日期：2026-07-22
 
@@ -13,6 +13,7 @@
 - [RFC-0014 Write Isolation and Worktree Merge](0014-write-isolation-and-worktree-merge.md)
 - [RFC-0018 Plan-to-Task Handoff](0018-plan-to-task-handoff.md)
 - [RFC-0024 TUI Checkpoint / Rewind V1](0024-tui-checkpoint-rewind-v1.md)
+- [RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1](0053-autonomous-task-routing-and-parallel-agent-orchestration-v1.md)
 
 ## 1. Summary
 
@@ -26,7 +27,7 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 
 > 撤销一个需求，而不是回到一个时间点。
 
-本 RFC 只冻结语义、所有权和安全边界，**不授权当前变更进入实现**。V1 后续实施也只覆盖归属明确、互不重叠、由 Sigil 受控文件 mutation 产生的普通文件改动；任意人工 drift、共享 hunk、未知副作用或依赖歧义必须 fail closed。
+本 RFC 只冻结语义、所有权和安全边界，**不授权当前变更进入实现**。V1 后续实施也只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
 
 ## 2. Problem statement
 
@@ -114,6 +115,8 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 不撤销 shell、MCP、network、database、remote service、package publish 或其他外部副作用。
 - 不以模型生成的逆向 patch 替代受控 artifact lineage。
 - 不保证 V1 对共享 hunk、同一 symbol 内交织修改或任意后续人工编辑做自动语义合并。
+- 不在 V1 对同一文件的多个 active intent 做 retained-layer rematerialization；即使 byte range
+  不重叠，也统一标为 shared/read-only。
 - 不把每个 agent step、tool call 或 validation command 都暴露为用户要管理的 stack item。
 - 不新增一组 command-only 的 `/intent-*` 主入口，也不要求用户维护复杂配置矩阵。
 - 不替代 Git；Intent Stack 是高于文件版本控制的产品语义层，最终仍可导出普通 diff/commit。
@@ -132,6 +135,22 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 当前状态与不可执行原因。
 
 用户可以先接受整个 plan，再允许执行。简单任务只生成一个 intent，不为了展示功能而强制拆分。
+
+为避免和 RFC-0053 自动 Task 路由产生额外仪式，V1 冻结以下 acceptance 规则：
+
+1. 原始 user turn 由 host 建立一个 `UserDeclaredRoot` intent，statement 绑定 source turn ref；
+   它表示用户请求的完整 outcome，不表示系统已证明内部拆分。该单 intent 可以随 Task admission
+   一次接受，不需要再弹一个“是否接受你刚才说的话”的确认。
+2. Planner/模型建议的多个可独立 drop intent 属于 `SuggestedDecomposition`。runtime 必须展示
+   title、statement、acceptance criteria、dependency 和来源；用户一次确认后，才能把 proposal
+   变成 accepted IntentPlan。模型、renderer 和 imported untrusted text 不能自行接受拆分。
+3. trusted spec import 仍只提供 source/provenance；除非已有显式、内容绑定的规格接受 decision，
+   否则不能跳过 acceptance。
+4. Task 路径中的 accepted IntentPlan 与引用它的 TaskPlan version 必须在同一个 durable writer
+   batch 中提交；只成功一半时恢复不能启动 write participant。Chat 路径没有 TaskPlan，host
+   必须在首个 mutating tool admission 前把 accepted root intent 与 exact root logical run/source
+   turn 绑定。Task replan 若只改变执行步骤，不增加 intent version；statement、criteria 或
+   dependency 变化才创建新的 IntentPlan version。
 
 ### 6.2 Intent-level review
 
@@ -203,11 +222,33 @@ struct IntentChangeUnit {
     application_state: IntentApplicationState,
     source: IntentSource,
     base_snapshot_id: Option<SnapshotId>,
-    changeset_id: Option<ChangeSetId>,
+    execution_bindings: Vec<IntentExecutionBinding>,
+    changeset_ids: Vec<ChangeSetId>,
     layer_manifest_ref: Option<ArtifactId>,
     artifact_bindings: Vec<IntentArtifactBinding>,
     verification_receipts: Vec<EvidenceReceiptId>,
     supersedes: Option<IntentVersionRef>,
+}
+
+struct IntentExecutionBinding {
+    intent_ref: IntentVersionRef,
+    origin: IntentExecutionOrigin,
+    binding_kind: IntentExecutionBindingKind,
+    source_event_id: EventId,
+}
+
+enum IntentExecutionOrigin {
+    Task {
+        task_id: TaskId,
+        task_plan_version: u32,
+        step_id: TaskStepId,
+        attempt_id: Option<TaskStepAttemptId>,
+    },
+    Chat {
+        root_logical_run_id: LogicalRunId,
+        source_turn_id: TurnId,
+        attempt_id: Option<AgentRunAttemptId>,
+    },
 }
 
 struct IntentArtifactBinding {
@@ -222,10 +263,13 @@ struct IntentArtifactBinding {
 
 struct IntentLayerManifest {
     intent_id: IntentId,
+    intent_version: u64,
     execution_id: IntentExecutionId,
+    execution_origin: IntentExecutionOrigin,
     base_snapshot_id: SnapshotId,
     result_snapshot_id: SnapshotId,
     files: Vec<IntentLayerFile>,
+    changeset_ids: Vec<ChangeSetId>,
     operation_ids: Vec<OperationId>,
     forward_patch_ref: ArtifactId,
     reverse_patch_ref: ArtifactId,
@@ -240,6 +284,17 @@ struct IntentLayerManifest {
 - `definition_state` 与 `application_state` 必须分离；plan 被 supersede 不等于旧代码已从 workspace 移除，反之亦然。
 - intent、stack 和 artifact id 必须由 runtime 分配，不能信任 renderer 或 provider 生成的 id。
 - digest 绑定有序内容、依赖、artifact bindings 与必要的 workspace identity；显示文案变化不能偷偷改变操作目标。
+- 规范 provenance chain 根据 execution origin 分为：
+  - Task：`IntentVersionRef -> TaskPlanVersion -> TaskStep -> TaskStepAttempt -> ChangeSet ->
+    parent Mutation/Verification`；
+  - Chat：`IntentVersionRef -> root logical run -> source turn -> agent-run attempt ->
+    controlled Mutation/ChangeSet -> parent Verification`。
+  任一适用的中间 identity 缺失时仍可保留普通执行审计，但不得生成可执行 intent layer。
+- 同一个 intent version 可以有多个 changeset/attempt（例如 conflict repair 或 replace），因此
+  `changeset_ids` 是有序集合而不是 singular shortcut。只有最终 promotion 到 parent workspace
+  且留下 RFC-0002 evidence 的 layer 才进入 `application_state = applied`。
+- `IntentLayerManifest.execution_origin` 必须包含 concrete terminal attempt；projection 中
+  `attempt_id = None` 的预绑定只能用于 admission/recovery，不能成为 layer authority。
 
 ### 7.2 Artifact kinds
 
@@ -253,6 +308,17 @@ V1 至少区分：
 - `UnsupportedSideEffect`：只记录 bounded warning，不成为可 drop artifact。
 
 Symbol、AST node 或模型解释可以作为 inspect hint，但不能单独构成 mutation authority。V1 的可执行 identity 必须回落到受控 bytes、diff digest、path binding 和 workspace snapshot。
+
+V1 `FileHunk` identity 使用 layer-local canonical byte diff：
+
+- 绑定 normalized relative path、完整 before/after file digest、old/new UTF-8 byte range、
+  old/new range content digest 和 owning layer manifest digest；
+- canonical representation 由 runtime 的单一 diff materializer 生成，不信任 provider 行号；
+- identity 只在该 before/after pair 内稳定。formatter、codegen 或人工 edit 改变完整文件 digest
+  后，旧 hunk 进入 `drifted`，不得用 fuzzy/context matching 迁移；
+- 同一 normalized file 被多个 active intent 修改时一律 `shared`，即使 canonical byte ranges
+  当前不重叠。完整文件 digest 会随着任一 layer/drop 改变；V1 不猜测 retained-layer rebase，
+  也不引入 composition artifact 来提高可执行率。
 
 Forward/reverse patch 原文不能放进 event JSON，也不能只留在 process memory。可执行 layer 必须引用 content-addressed artifact，event 只保存 artifact id、digest、bounded hunk metadata 和 lifecycle state。artifact 过期、缺失或 hash 不匹配时，该 intent 永久降级为 read-only，直到通过新的受控 execution 建立 lineage。
 
@@ -274,10 +340,13 @@ Intent Stack 复用 RFC-0001 append-only session truth。建议的领域事件�
 - `IntentStackCreated`
 - `IntentPlanRecorded`
 - `IntentPlanAccepted`
+- `IntentExecutionBound`
 - `IntentChangeSetBound`
+- `IntentLayerManifestRecorded`
 - `IntentArtifactBindingsRecorded`
 - `IntentVerificationLinked`
 - `IntentOperationRequested`
+- `IntentOperationPrepared`
 - `IntentOperationResolved`
 - `IntentConflictRecorded`
 - `IntentVersionSuperseded`
@@ -288,11 +357,14 @@ Intent Stack 复用 RFC-0001 append-only session truth。建议的领域事件�
 2. provider 输出只能成为 proposal，runtime admission 后才进入 durable plan。
 3. artifact binding 必须引用既有 mutation/ChangeSet/snapshot evidence，不能复制一份不一致的影子事实。
 4. operation request 记录 operation id、stack version、preview digest、目标 intent/closure 和 bounded reason。
-5. resolved event 记录 committed、rejected、conflicted 或 interrupted，以及关联的新 mutation/evidence id。
-6. recovery 根据 durable state 重建 projection；process-local cache 和 UI optimism 不是真相。
-7. projection 必须对 unknown event、缺失 artifact、旧 schema 和不完整 operation fail closed。
-8. intent execution、drop 与 conflict 是 recovery-critical typed event，不能用自由文本 `Note` 代替。
-9. 旧 session 没有 intent facts 时只显示 `Intent history unavailable`，不得从旧 prompt、commit message 或 diff 追溯猜测。
+5. operation prepared 只在完整 preflight 后追加，绑定 exact artifact set、current workspace revision、
+   permission/approval authority 和即将使用的 RFC-0002 batch identity；它不是已写入证明。
+6. resolved event 记录 committed、rejected、cancelled、conflicted、partially_applied 或 interrupted，以及
+   关联的新 mutation/evidence id。
+7. recovery 根据 durable state 重建 projection；process-local cache 和 UI optimism 不是真相。
+8. projection 必须对 unknown event、缺失 artifact、旧 schema 和不完整 operation fail closed。
+9. intent execution、drop 与 conflict 是 recovery-critical typed event，不能用自由文本 `Note` 代替。
+10. 旧 session 没有 intent facts 时只显示 `Intent history unavailable`，不得从旧 prompt、commit message 或 diff 追溯猜测。
 
 ## 9. Execution semantics
 
@@ -313,6 +385,75 @@ accepted intent plan
 Write isolation 是建立清晰 ownership 的优先手段，但不是证明本身。即使一个 worktree 只分配给一个 intent，merge 后仍必须记录准确 artifact binding，并检查与其他 intent/human edit 的重叠。
 
 V1 中，一个产生可操作 layer 的 write execution 必须精确绑定一个 accepted intent。read/review/verify 可以服务多个 intent；未绑定或绑定多个 intent 的写入可以继续按普通 ChangeSet 审查，但标记为 `unassigned`，不得 selective drop。Child workspace proposal 只有在 parent apply 成功并留下受控 mutation evidence 后，才能成为 active intent layer。
+
+#### 9.1.1 TaskPlan and verification bridge
+
+RFC-0053 启用 Intent Stack 后，执行链固定为：
+
+```text
+IntentPlanAccepted + TaskPlanAccepted (one durable batch)
+  -> TaskStepSpec.intent_refs
+  -> TaskStepAttempt profile/snapshot/input binding
+  -> isolated ChangeSet / integration lane
+  -> parent RFC-0002 mutation
+  -> parent RFC-0003 verification
+  -> IntentLayerManifest + intent review
+```
+
+规则：
+
+1. Planner 只能 proposal intent alias；runtime 从当前 accepted IntentPlan 解析 stable ref，并把
+   resolved mapping 纳入 TaskPlan digest。unknown/stale/duplicate ref 在任何 write attempt 前拒绝。
+2. V1 write step 必须精确绑定一个 `IntentVersionRef` 才可形成 exclusive layer；read/review/verify
+   可以绑定多个 intent closure。共享实现应拆为显式 shared intent，或保持 `shared/unassigned`
+   read-only，不允许为了支持 drop 而复制相同 hunk。
+3. Task replan 只改变 step/attempt 时保留 intent version，并追加新的
+   `IntentExecutionBound`；statement、criteria 或 dependency 变化先 supersede IntentPlan，再允许新
+   TaskPlan write step。
+4. Worktree/changeset child receipt 只证明 proposal；只有 RFC-0053 promotion 在 parent workspace
+   留下 mutation evidence 后，runtime 才能记录 active `IntentLayerManifest`。child/lane Passed
+   不能直接链接为 parent intent verified。
+   RFC-0053 的 ref-only `GitRefAdvance` 在本 RFC V1 中也只产生 read-only/unassigned provenance；
+   它没有 parent workspace RFC-0002 mutation evidence，不能把 intent 标记为 applied/verified。
+   含 executable `intent_refs` 的 Task 在 V1 必须选择 `WorkspaceApply`。
+5. acceptance criterion 与 test/check 的关联分为 `Advisory` 和 `SystemVerified`。只有 check spec
+   显式声明 bounded intent/criterion scope、receipt 绑定当前 parent snapshot 且 policy coverage
+   满足 RFC-0003 时，才可投影 `SystemVerified`；模型、文件名相似度或用户界面勾选只能形成
+   advisory link。
+6. Synthesis 必须同时读取 Task readiness 和 Intent projection：存在 required intent 未应用、
+   artifact/conflict 不可解释或 required criterion 未满足时，不得宣称完整 intent verified。
+
+#### 9.1.2 Chat execution and verification bridge
+
+0053 的简单解释、查询和单点局部修改保持 Chat，不为 Intent Stack 强制创建 durable Task。
+简单 Chat 写入使用以下链：
+
+```text
+UserDeclaredRoot IntentPlanAccepted
+  + IntentExecutionBound(Chat root logical run/source turn)
+  -> exact agent-run attempt
+  -> controlled file mutation / ChangeSet projection
+  -> parent workspace snapshot
+  -> parent RFC-0003 verification
+  -> IntentLayerManifest + intent review
+```
+
+规则：
+
+1. host 在首个 mutating tool admission 前，把 exact source turn 建立的单一
+   `UserDeclaredRoot` intent 与当前 root logical run 绑定；模型不能提交 intent/root-run id。
+2. 一次 Chat run 只有一个 accepted root intent 时，受控普通文件 mutation 可以形成 exclusive
+   layer。模型在运行中追加的子目标不自动变成独立 intent；需要多个可 drop intent 时，必须转为
+   SuggestedDecomposition acceptance 或 Task。
+3. binding 必须贯穿 tool call、RFC-0002 mutation batch、可选 ChangeSet projection、result
+   snapshot 和 verification。没有 ChangeSet 的直接 file tool 路径必须由 runtime 从 mutation
+   evidence 生成 bounded ChangeSet projection，不能让模型补写 lineage。
+4. shell/MCP/network/unknown effect 仍只记录 `UnsupportedSideEffect`，不能因为和 Chat root
+   intent 同 run 就获得 drop authority。
+5. continue/retry 使用新的 agent-run attempt 并追加 execution binding；source turn、root run、
+   workspace snapshot 或 intent version 漂移时，旧 binding 只能 read-only。
+6. Chat 与 Task 最终都通过相同 `IntentLayerManifest`、artifact ownership、drop、retention 和
+   verification contract；TUI 不暴露两套不同的 Intent Stack 操作语义。
 
 ### 9.2 Exact preview
 
@@ -344,6 +485,41 @@ V1 `drop` 复用 RFC-0002 mutation protocol：
 
 与 checkpoint 一样，V1 不宣传多文件文件系统级原子性。未知状态必须进入 reconciliation，不能在 UI 中假装完整成功；partial apply 必须投影为 `partially_applied`/`conflict`，绝不能显示 `dropped`。
 
+#### 9.3.1 Crash-consistent operation state machine
+
+Intent operation 不新建第二套事务系统。它把高层 operation identity 绑定到 RFC-0002 的
+mutation batch，并按下列状态机恢复：
+
+```text
+Requested
+  -> Rejected | Cancelled | Prepared
+Prepared
+  -> Cancelled | Applying
+Applying
+  -> Committed | PartiallyApplied | Conflicted | Interrupted
+```
+
+- `Requested` 只证明用户/上游请求存在；可以安全重做 preview，不能开始写入。
+- `Rejected` 表示 permission/policy/user review 明确拒绝；`Cancelled` 表示用户撤回或 Task/
+  session cancellation 在任何 per-file prepare evidence 前成功收口。两者都是 durable terminal，
+  不产生 mutation/verification transition。
+- `Prepared` 必须绑定 exact stack version、preview digest、artifact manifest、permission/approval
+  authority、workspace revision 与尚未执行的 mutation batch id。
+- `Prepared` 只有在 RFC-0002 尚无任何 per-file prepare/commit evidence 时可转
+  `Cancelled`；一旦进入 `Applying`，取消请求只能先停止后续 admission，再根据实际 evidence
+  收口为 committed/partial/conflicted/interrupted，不能伪造无 effect 的 Cancelled。
+- `Applying` 不是单独的模型状态；任一 RFC-0002 per-file prepare/commit evidence 已存在时，由
+  projection 推导。每个文件 evidence 必须带同一 intent operation id。
+- `Committed` 仅在 batch reconciliation 证明全部目标文件 commit、result snapshot 已建立且
+  `IntentOperationResolved(committed)` 已追加后成立。
+- 已有部分 commit、缺失 artifact、hash drift 或无法证明的 batch 状态分别投影为
+  `PartiallyApplied`、`Conflicted` 或 `Interrupted`，不得自动重发 provider/tool/文件写请求。
+- restart 时，若 RFC-0002 已完整 commit 但 terminal intent event 缺失，reconciler 可以从
+  同一 batch evidence 幂等追加唯一 `IntentOperationResolved`；证据不足时只能进入人工
+  reconciliation。
+- verification invalidation 与 application-state transition 必须与 terminal resolution 使用同一
+  operation/batch lineage；恢复不能出现“文件已改变但旧 receipt 仍显示 verified”的中间终态。
+
 ### 9.4 Dependency closure
 
 - drop 一个被 active downstream intent 依赖的 intent 时阻止操作；V1 只允许 leaf intent。
@@ -356,11 +532,58 @@ V1 `drop` 复用 RFC-0002 mutation protocol：
 
 Intent drop 本身会产生新的受控文件 mutation，但不能被 checkpoint 当作普通原始 intent 写入。否则后续 rewind 可能把已删除代码重新加入，而 Intent Stack 仍投影为 `dropped`。
 
-V1 在统一 redo/reconciliation 语义落地前，必须让 checkpoint projection 识别 intent-operation ids，并把这些 mutation 排除出普通 restore candidate；Session Review 同时展示 bounded warning。未来如果允许 rewind 跨过 intent operation，必须在同一恢复协议中同步追加 intent application-state transition，不能只改文件。
+V1 在统一 redo/reconciliation 语义落地前，必须：
+
+1. 让 checkpoint projection 识别 intent execution/drop/replace operation id，并把这些 mutation
+   排除出普通 restore candidate；
+2. 在 checkpoint exact preview/apply preflight 中查询 active Intent Stack。若目标文件/range 与
+   active intent layer 重叠，或 restore 会跨越 intent application-state transition，则在首个写入
+   前返回 typed `intent_state_conflict`；
+3. 允许与所有 active intent artifact path/range 可证明 disjoint 的 checkpoint restore继续使用
+   RFC-0024；不能因一个 stack 存在而全局禁用 rewind；
+4. Session Review 展示 bounded warning 和关联 intent，不提供“忽略 Intent 状态强制恢复”；
+5. 未来若允许 rewind 跨 intent operation，必须在同一恢复协议中追加 intent
+   application-state transition 和 verification invalidation，不能只改文件。
+
+### 9.6 Artifact retention and deletion
+
+Intent Stack 不新建 artifact store。forward/reverse patch、layer manifest 和 before-content
+继续复用 RFC-0002 content-addressed artifact/lifecycle。
+
+- `applied` 且仍向用户提供 drop/replace 的 intent layer artifact 自动进入 retention-protected
+  set；普通 age/count/bytes cleanup 不得静默选择它们。
+- cleanup preview 必须列出将失去的 intent operation capability。用户可以显式确认物理删除；
+  apply 复用既有 `MutationArtifactCleanupRequested` /
+  `MutationArtifactLifecycleRecorded`，并追加对应 Intent conflict/read-only projection。
+- artifact deleted/expired/corrupted 后，历史 title、source、digest 和 lifecycle 仍可审计，但
+  drop/replace 永久返回 `artifact_unavailable`，不能从 Git diff、模型或旧 preview 重建 authority。
+- `secret-like`、unsupported 或无法安全持久化的 bytes 从一开始就不能形成可执行 layer；
+  不得为了保留 Intent 功能降低 RFC-0002 的敏感内容策略。
+- intent dropped/superseded 后，artifact 可退出 protected set，但仍服从普通 retention horizon；
+  cleanup 与 Intent projection 重建必须幂等。
+
+### 9.7 Resume, fork, branch and worktree identity
+
+- 同一 session resume 从 durable events 重建同一 stack/version，不重新解释 prompt。
+- conversation fork 只继承 read-only provenance ref，不继承 mutation authority 或 active
+  application state。用户必须显式 adopt 到新 stack/version，且 adoption 重新绑定当前 workspace
+  snapshot；否则只能 inspect。
+- Task worktree child 可继承 attempt-scoped intent binding，但 child layer 不进入 parent active
+  stack；只有 parent promotion 后的 mutation/verification bridge 能激活。
+- branch/workspace switch 后，旧 stack 默认 `out_of_scope`。只有 workspace id、branch lineage
+  和 snapshot adoption 全部匹配时才可创建新 version；不得让相同 relative path 暗示 identity
+  继承。
+- Git merge、checkpoint restore 或人工 drift 改变已绑定 bytes 时，projection 追加 conflict/
+  invalidation，不原地改写旧 binding。
 
 ## 10. Safety and trust boundaries
 
 1. 只有受控普通文件 mutation 可以进入 V1 可写范围；shell、MCP、remote 和 unknown effects 永远只提示。
+   shell receipt 本身仍是 `UnsupportedSideEffect`；但 shell 在 RFC-0005
+   `IsolatedMutation` 或 RFC-0053 owned child workspace 中产生的普通文件 bytes，如果随后经过
+   exact delta materialization、单 intent attempt binding、parent `WorkspaceApply` 与 RFC-0002
+   evidence，可以由最终文件 layer 获得 ownership。该规则不把 shell 的 network/remote/global
+   effect 伪装成已撤销。
 2. protected path、secret-like content、symlink、directory、rename 和 unsupported artifact 沿用更严格的既有 policy。
 3. renderer 只消费 bounded DTO；不得获得 snapshot 内容、absolute internal path、raw provider payload 或 mutation authority。
 4. intent statement、title、model explanation 与 imported spec 都是不可信文本，不能触发工具或绕过 approval。
@@ -401,34 +624,53 @@ Intent Stack · 3 changes
 
 | Slice | Scope | Completion evidence |
 | --- | --- | --- |
-| R51.0 | RFC、domain vocabulary、threat model、fixture design | accepted contract；无代码行为变化 |
-| R51.1 | Intent plan durable events 与 read-only projection | recovery/schema/property tests；旧 session 兼容 |
-| R51.2 | ChangeSet attribution、content-addressed layer artifact 与 intent-level review | retention/recovery、exclusive/shared/unowned/drift fixtures；projection tests |
-| R51.3 | 非重叠受控文件贡献的 exact `drop` | mutation/recovery/CAS/conflict/receipt-stale tests |
-| R51.4 | Dependency impact、revise/replace read-only preview | DAG closure/cycle/supersede tests |
-| R51.5 | TUI Intent Stack surface | render/input/narrow-layout/mouse/session-switch tests |
-| R51.6 | Isolated regeneration 与受限 replace/rebase | independent safety RFC；merge/overlap/human-drift corpus |
-| R51.7 | Desktop/automation adapter 与 dogfood | same-contract conformance；real worker-loop E2E；no P1/P2 |
+| R51.0 | 冻结 domain/event/DTO schema、canonical digest、operation error taxonomy 与 fixture corpus | contract review 把 §15 已锁定决策逐项编码为 golden schema/digest fixtures；无代码行为变化 |
+| R51.1 | IntentPlan admission、`UserDeclaredRoot`/`SuggestedDecomposition`、与 TaskPlan 同批接受、append-only projection | proposal 不能伪造 acceptance；batch crash/replay、schema/property、旧 session unavailable-state tests |
+| R51.2 | `IntentExecutionBinding` 的 Task/Chat origin、attempt/ChangeSet/parent mutation/verification bridge、criterion evidence level | lineage 缺口降级 read-only；Chat direct-file mutation projection；Task replan/WorkspaceApply；GitRef-only negative fixture；stale parent receipt；Advisory/SystemVerified fixtures |
+| R51.3 | canonical layer materializer、content-addressed artifact、file-exclusive ownership、retention protection 与 inspect projection | cross-intent same-file 一律 shared；exclusive/shared/unowned/drift/formatter/codegen/secret/cleanup/delete/restart fixtures |
+| R51.4 | exact drop preview、RFC-0002 batch apply、operation recovery 与 verification invalidation | CAS、lease、all-file preflight、partial commit、terminal-event repair、no-replay、checkpoint-conflict tests |
+| R51.5 | dependency closure、revise/replace 的 read-only impact preview 与 fork/branch/worktree adoption | DAG cycle/leaf/supersede/replan/out-of-scope/adoption tests；仍不开放 replace mutation |
+| R51.6 | TUI Intent Stack review/drop/retention/conflict surface | render/input/narrow-layout/mouse/session-switch/restart/stale-request tests；一个清晰主动作 |
+| R51.7 | typed HTTP/Desktop/automation adapter 与 canonical dogfood | same-command/projection conformance；real worker-loop E2E；§13 全门槛；无 P1/P2 |
 
 依赖顺序：
 
 ```text
-R51.0 -> R51.1 -> R51.2 -> R51.3 -> R51.5 -> R51.7
-                           \-> R51.4 -> R51.6 -/
+R51.0 -> R51.1 -> R51.2 -> R51.3 -> R51.4 -> R51.6 -> R51.7
+                           \-> R51.5 -----------/
 ```
 
-R51.3 是首个“意图级版本控制”可执行里程碑。R51.1/R51.2 只有可视化和追踪价值，不能单独宣传已经支持按意图撤销。
+R51.4 是首个“意图级版本控制”可执行里程碑。R51.1-R51.3 只有接受、追踪和
+read-only review 价值，不能单独宣传已经支持按意图撤销。Isolated regeneration、
+replace/rebase mutation 不再混入 V1 active slices；它们必须在 R51.4 dogfood 后以独立安全 RFC
+冻结 merge/overlap/human-drift 语义。
 
 ## 13. Acceptance gates
 
 - 同一 turn 内两个无依赖 intent 修改不同文件时，可独立 review，并安全 drop 其中一个。
-- 两个 intent 修改同一文件但 non-overlapping、ownership 可证明时，可精确保留非目标贡献。
+- 两个 active intent 修改同一文件时，即使 non-overlapping 也稳定投影为 shared/read-only；
+  V1 不声称可以单独 drop。
+- 用户原始单一明确目标可形成 `UserDeclaredRoot`；模型建议的多 intent 分解在用户接受前不产生
+  accepted plan，IntentPlan/TaskPlan 的一次接受不会出现只有一半 durable 的状态。
+- 每个可执行 layer 都能沿对应 Task 或 Chat execution chain 追溯到 exact attempt、controlled
+  mutation/ChangeSet 与 parent verification；任一适用 identity 缺失只允许 read-only review。
+- 单点局部修改保持 Chat 时仍可形成一个 `UserDeclaredRoot` layer，不为 Intent Stack 强制建
+  Task；同一 Chat run 中未经接受的模型子目标不能伪装成独立可 drop intent。
+- 带 executable intent binding 的 Task 选择 ref-only promotion 时在首个 effect 前拒绝；它不能
+  绕过 parent workspace mutation evidence 获得 applied/verified 状态。
 - shared hunk、unowned edit、人工 drift、missing artifact 或 stale digest 在首个写入前 fail closed。
 - 被 downstream intent 依赖的目标不可 drop；V1 不自动扩大到依赖闭包。
 - drop 产生新的 append-only mutation/operation evidence；旧 stack/version/history 不被改写。
 - drop 后相关 verification receipt 变 stale，并按 policy 重跑后才恢复 verified。
-- crash/restart 能区分 requested、prepared、partially applied、committed 与 conflicted operation。
+- crash/restart 能区分 requested、rejected、cancelled、prepared、partially applied、committed 与
+  conflicted operation。
+- batch 已完整 commit 但 terminal event 缺失时只做证据驱动的幂等收口；未知状态不会重发写入。
 - intent-drop mutation 不会被普通 checkpoint restore 成功改写后仍留下错误的 `dropped` 状态。
+- cleanup 不会静默删除仍支持 drop 的 artifact；用户显式删除后，历史仍可审计且 operation
+  永久、可解释地降级为 read-only。
+- resume 保持 identity；fork、branch/worktree switch 在显式 adopt 前不继承 mutation authority。
+- `SystemVerified` criterion 必须绑定当前 parent snapshot 上 policy-qualified receipt；模型关联只能
+  是 `Advisory`。
 - TUI 不把 unsupported shell/remote side effect 描述为已撤销。
 - provider、renderer 或模型文本不能伪造 intent admission、artifact ownership 或 successful operation。
 - 现有 checkpoint、task DAG、write isolation 和普通 Git diff workflow 不回退。
@@ -446,17 +688,31 @@ R51.3 是首个“意图级版本控制”可执行里程碑。R51.1/R51.2 只�
 
 该 demo 只有在第 5 步的 shared/drift 情况能够稳定 fail closed 时才算通过；“大多数时候模型猜对”不构成验收证据。
 
-## 15. Open questions
+## 15. Locked decisions and deferred boundaries
 
-以下问题不阻塞 RFC 保存，但必须在对应 slice 开始前关闭：
+为使 R51.0 可以直接执行，本 RFC 冻结原开放问题：
 
-1. Intent acceptance 是独立 durable event，还是 task-plan admission 的扩展 projection？
-2. V1 hunk identity 使用哪种 canonical diff 表示，如何跨 formatter 运行保持可解释而不误认？
-3. 同一行同时服务多个 intent 时，是否一律 shared，还是允许显式 composition artifact？
-4. acceptance criterion 与 test evidence 的绑定是人工确认、静态分析还是 verification policy 输出？
-5. intent plan 跨 conversation fork、session resume 和 worktree merge 时如何继承 identity？
-6. artifact retention 清理后，哪些 intent operation 必须永久降级为 read-only？
-7. 非 coding adapter 的 artifact/operation contract 应由本 RFC 泛化，还是由后续 Outcome/Case RFC 建立上层抽象？
+1. Intent acceptance 使用独立 typed event；Task 路径与对应 `TaskPlanAccepted` 由同一个 durable
+   writer batch 提交，Chat 路径在首个写入前绑定 root logical run/source turn。任一适用 identity
+   缺失都不进入 executable projection。
+2. V1 hunk identity 使用 §7.2 的 layer-local canonical byte diff。formatter/codegen 改变完整文件
+   digest 后标记 drifted，不跨运行 fuzzy 迁移。
+3. 同一 normalized file 服务多个 active intent 时一律 shared；V1 不支持 retained-layer
+   rematerialization 或 composition artifact。
+4. criterion evidence 按 §9.1.1-§9.1.2 分为 Advisory/SystemVerified；只有 verification policy 和当前
+   parent snapshot receipt 可以产生 SystemVerified。
+5. resume/fork/worktree/branch 采用 §9.7：resume 重放，其他边界在显式 adopt/rebind 前只读。
+6. artifact 被显式或 policy cleanup 删除后，依赖它的 drop/replace 永久降级 read-only；不得重建
+   authority。
+7. 本 RFC 的 adapter-neutral contract 只泛化 coding artifact/operation；非 coding Outcome/Case
+   由后续 RFC 建立上层抽象，不复用文件 mutation authority。
+
+以下边界有意延后，不阻塞 R51.0-R51.7：
+
+- shared hunk 的语义拆分、composition artifact 与任意历史 Git attribution；
+- isolated regeneration、replace/rebase mutation 和自动处理 human drift；
+- shell、network、MCP、数据库、发布等外部副作用的撤销/补偿；
+- 跨设备 intent sync 与非 coding Outcome/Case version control。
 
 ## 16. Decision and deferral
 
@@ -468,4 +724,9 @@ R51.3 是首个“意图级版本控制”可执行里程碑。R51.1/R51.2 只�
 - 对共享贡献、外部副作用、人工 drift 与复杂 replace/rebase 保持 fail closed；
 - 先把 review/provenance 做对，再开放 destructive operation。
 
-本 RFC 当前仅为 `proposed / implementation deferred`。本次变更不新增代码、事件 schema、命令、UI 或用户文档入口；后续实施必须由新的明确任务启动，并在 R51.0 重新核对当时的 live contracts。
+完成 R51.0-R51.7 后，Intent Stack V1 的 accepted-plan、provenance、read-only review 与安全
+selective drop 闭环完成；它仍不等于通用语义 merge、外部副作用补偿或项目级长期记忆。
+
+本 RFC 当前仍为 `proposed / implementation deferred`。本次变更不新增代码、事件 schema、
+命令、UI 或用户文档入口；后续实施必须由新的明确任务启动。R51.0 只需重新核对当时的 live
+contracts、冻结具体 Rust/DTO 命名与 golden fixtures，不再重新打开 §15 已冻结的产品语义。

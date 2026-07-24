@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / E05.1-E05.9, E05.11-E05.13 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / productization remains
+状态：draft / E05.1-E05.9, E05.11-E05.15 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / E05.17 controlled-auto deferred / productization remains
 
 创建日期：2026-06-28
 
@@ -113,7 +113,7 @@ pub trait ExecutionBackend {
   - Docker persistent PTY 请求会 fail closed，不静默 fallback 到 local PTY；Docker `exec -it` / attach / resize / cleanup 属于后续 productization，不属于本切片。
   - macOS real PTY test 覆盖 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture。
   - Linux ignored real PTY manager test 覆盖 Bubblewrap PTY wrapper 的 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture；需要显式在支持 bwrap user/mount namespace 的 Linux host 上运行。
-- 已开始 E05.14 MCP stdio sandbox handoff：
+- 已完成 E05.14 MCP stdio sandbox handoff core semantics：
   - 新增 MCP stdio process launcher / launch receipt boundary，`sigil-mcp` 不再直接把 process coverage 隐式等同于 local child process。
   - 默认 local launcher 保持兼容行为，但 receipt 明确标记 `local_stdio_outside_sandbox`。
   - runtime 会向 eager startup、lazy activation 和 manual refresh 注入 configured MCP launcher。
@@ -180,6 +180,137 @@ pub trait ExecutionBackend {
 - 为 Docker/container persistent terminal 增加真正 `exec -it` / attach / resize / cleanup productization（如果后续产品需要）。当前 macOS Seatbelt 与 Linux Bubblewrap 已支持 PTY wrapper；Docker 仍 fail closed。
 - 将 execution coverage labels 接入更完整的 TUI/runtime detail views；当前已提供 kernel/plugin summary API 和测试覆盖。
 
+### 6.1 E05.17 Controlled-auto execution preset
+
+RFC-0051 与 RFC-0053 完成后，Intent/Task 编排仍不能单凭“运行在 sandbox”就静默执行命令。
+为提供用户可理解的粗粒度模式，本 RFC 增加 `controlled-auto` 产品 preset：**受控 workspace
+内的低风险文件操作和已证明的 sandbox command 自动运行；越界、网络、外部副作用与高风险
+写入继续审批或拒绝。**
+
+该 preset 是 runtime-owned permission admission 与 execution backend evidence 的组合，不把
+permission、network policy 和 sandbox capability 合并成一个布尔值：
+
+- read 与普通 workspace file edit 沿用 `auto-edit` 的安全子集；
+- execute 只有在 spawn 前存在 host 生成、不可由模型构造的 `PreparedExecutionAdmission` 时，
+  才能把 local baseline 从 `ask` 收窄为 `allow`；command fingerprint 只绑定请求，不证明命令
+  在可写 workspace 中是非破坏性的；
+- admission 必须绑定 exact tool/call、normalized command/args、cwd、subjects、workspace
+  snapshot/revision、backend kind/instance、sandbox profile/fingerprint、network intent、resource
+  limits、environment policy、有效期和 policy digest；
+- backend 必须证明该次 launch 具有 filesystem + process isolation，写边界不超过当前
+  admission class；缺 capability、backend fallback、binding drift 或 receipt 不一致均 fail
+  closed，不能降级为裸 local auto-run；
+- network facet 独立评估。preset 默认 `ask`；只有 exact destination/purpose 已获授权且 backend
+  receipt 与计划一致时才执行。`network = deny` 必须有实际 isolation receipt，不能靠声明；
+- arbitrary shell/terminal 的 network grant 不能证明远端 effect 是 read-only。它们只有在
+  backend 实际强制 `network = deny` 时才可进入 unattended `ReadOnlyDirect`/
+  `IsolatedMutation`；需要网络时继续 `ask`。只有具备独立、已审计的 read-only network
+  ToolSpec、exact destination 和 grant 的非 shell tool 才可在授权后自动执行；
+- protected/external path、delete/rename、secret-like content、credential/env grant、MCP、plugin、
+  remote service、package publish、Git remote mutation、system configuration 与无法被本地
+  isolation 完整约束的 unknown effect 不继承 command auto-allow，继续 `ask` 或 `deny`；
+- shell effect shape 未被 audited command classifier/ToolSpec 证明为 read-only 时，只能在
+  network-denied、secret-free、resource-bounded 的 `IsolatedMutation` 中自动运行；它不能进入
+  `ReadOnlyDirect` 或 `DirectWorkspaceMutation`，observed diff 也必须经过后置 promotion
+  admission；
+- user/session/plan grant 只能进一步收窄或精确授权，不能让 renderer/provider 文本扩大 preset；
+- execution 后必须记录 prepared identity、实际 backend/profile/network/resource/cleanup receipt。
+  pre-spawn revalidation 失败不执行；post-spawn mismatch 投影为 policy violation 并阻止后续同形状
+  自动运行。
+
+`PreparedExecutionAdmission` 必须选择以下互斥 execution class，不能只写
+`sandboxed = true`：
+
+任何 class 进入 unattended execute 前还必须具备 `ExecutionReadEgressProof`：
+
+- child process 从 `env_clear` 开始，只注入固定非敏感 baseline 和 exact、显式允许的变量名；
+  credential/secret grant 使该次执行退回 `ask`；
+- backend read policy 使用 deny-by-default allowlist，只暴露 exact workspace snapshot、必要的
+  runtime/toolchain/library roots 与显式 read-only dependency cache；用户 home、SSH/cloud
+  credential、keychain、浏览器数据和任意 host root 不得因“只读”而自动可见；
+- stdout/stderr/tool artifact 在进入 provider context、Task/Intent summary 或 remote telemetry
+  前经过统一 sensitivity/egress gate；secret-like 命中时只保留本地受控 artifact 和 redacted
+  receipt，provider projection fail closed，不把“子进程已禁网”误当成“输出不会外传”；
+- receipt 绑定 resolved environment names、read allowlist digest、output gate version/result 和
+  provider-egress decision。任一 unsupported/unknown proof 使 execute 保持 `ask`。
+
+当前允许全文件系统读取的 macOS Seatbelt profile，以及继承 parent environment 的
+bash/terminal/verification path，**不满足 E05.17 unattended 条件**。只有新的受限 launch plan
+通过真实 conformance 后，才能用于本 preset；现有 backend capability 不能被文档推断升级。
+
+1. `ReadOnlyDirect`：用户 workspace 以 read-only mount 暴露，只有显式 scratch/tmp 可写；
+   适用于查询、编译检查和能把 cache/output 限定到 scratch 的验证命令。backend 必须在 receipt
+   中证明 workspace write denied、host read allowlist 与最小环境均已应用。
+2. `IsolatedMutation`：从 exact user snapshot 创建 disposable workspace/overlay，命令只能写该
+   isolated root 和 scratch，不能挂载可写用户 workspace。terminal 后 materialize bounded effect
+   inventory 与 aggregate diff；这时只得到 proposal，不等于用户 workspace 已改变。
+3. `DirectWorkspaceMutation`：任意 shell/terminal 对真实用户 workspace 可写。V1 一律保持
+   `ask`，即使 OS sandbox 能阻止越界；sandbox 不能证明命令不会删除或重写整个 workspace。
+
+`IsolatedMutation` 还必须冻结 origin，避免与 RFC-0053 重复创建或提前合并 workspace：
+
+- `StandaloneDisposable`：E05.17 自己创建 exact-snapshot isolated root；terminal 后按下述
+  post-effect admission 决定是否 promotion 到 parent。
+- `TaskOwnedWorkspace { ownership_receipt, task_id, step_attempt_id, before_snapshot }`：直接消费
+  RFC-0053 已建立的 exclusive owned workspace/lease，不再嵌套创建 root。每次 command 只更新
+  child workspace 和 command receipt；E05.17 不对 parent 执行 per-command promotion，也不清理
+  不属于自己的 worktree。child terminal 后由 RFC-0053 从 frozen post-overlay baseline 提取
+  aggregate proposal、进入 lane/promotion。
+- origin、ownership/lease、command-before snapshot、backend/read-egress proof 在 spawn 前重验；
+  mismatch 零 effect。Task cancellation/cleanup 仍由 RFC-0053 owner 收口。
+
+`StandaloneDisposable` 的 `IsolatedMutation` proposal promotion 是第二次独立 admission：
+
+- runtime 绑定 exact before/after bytes、path、file kind、delete/rename、risk、snapshot/revision
+  与 diff digest，并通过 RFC-0002 full preflight/CAS 应用；
+- 只有全部结果仍属于 `auto-edit` 的低风险普通文件安全子集、路径在预声明 subjects 内、无
+  delete/rename/protected/secret/generated/unknown effect 且预算未超限时，才允许自动 promotion；
+- 其他结果展示一次 aggregate review，用户批准后才能 promotion；拒绝只清理 isolated root，
+  不回滚用户 workspace；
+- persistent terminal 因后续输入不受初始 command fingerprint 约束，V1 只能使用
+  `IsolatedMutation` 且 resulting diff 始终需要 review，不能 unattended auto-promote；
+- crash/timeout/cleanup unknown 保留 receipt/inventory，不能自动重跑 command 或把 partial
+  isolated state promotion 到 parent。
+
+产品与配置合同：
+
+- TUI setup 与 task header 提供一个 `controlled-auto` 粗粒度选择，并用一句话显示当前自动范围；
+- 高级配置仍保留 permission、network、backend/profile/fallback 独立轴，preset 只是生成/收窄
+  它们的 runtime policy，不成为第二套配置真相；
+- 现有配置保持原行为，不自动迁移到该 preset；headless 模式缺交互审批通道时，对 `ask`
+  fail closed；
+- tool/approval card 展示“为何自动运行”或“为何仍需审批”的 bounded evidence，不宣传
+  `sandbox = trusted`。
+
+实施切片：
+
+| Slice | Scope | Completion evidence |
+| --- | --- | --- |
+| E05.17a | 冻结 preset/config/migration、eligible operation taxonomy、read/env/output-egress capability 与 typed denial reasons | config round-trip、旧配置不漂移、policy/read-mount/env/egress golden fixtures |
+| E05.17b | `PreparedExecutionAdmission`、`ExecutionReadEgressProof`、互斥 execution class/origin、spawn 前 revalidation、receipt binding 与 recovery | credential/home-read/stdout-exfiltration、tampered call/cwd/snapshot/backend/profile/network/env/resource fixtures；writable-real-workspace zero-auto；crash 不重放 |
+| E05.17c | bash/verification 的 read-only/isolated path、standalone effect materialization/RFC-0002 promotion、RFC-0053 owned-workspace handoff；persistent terminal review-only；MCP/plugin/remote fail-closed 边界 | direct-read-only/standalone-promotion/Task-owned conformance；无 nested root/per-command parent promotion；destructive shell 只影响 isolated root；fallback/local/unsupported backend negative tests |
+| E05.17d | TUI setup/header/tool/approval/doctor surface 与 dogfood | PTY E2E、headless denial、stale request isolation、macOS/Linux/Docker capability matrix |
+
+E05.17 的默认开启门槛固定为：
+
+1. eligibility corpus 中任何 external/protected/destructive/unknown/network-unapproved case 的
+   自动执行数为 0；
+2. backend fallback、capability lie、snapshot/cwd/command drift 的 fail-closed deterministic
+   tests 为 100%；
+3. 任意 writable-real-workspace shell/persistent terminal 的 unattended auto-run 为 0；destructive
+   command corpus 只能改变 disposable isolated root，且 delete/rename/unknown proposal 的自动
+   promotion 为 0；
+4. macOS/Linux 至少各一个真实 sandbox backend 完成 read-only user-workspace、isolated write、
+   host-read allowlist、minimal env、secret-output egress block、外部写阻断与 cleanup conformance；
+   未覆盖平台保留手动模式；
+5. Task-owned execution 不创建 nested root、不做 per-command parent promotion，ownership/cancel/
+   cleanup 与 RFC-0053 conformance 一致；
+6. TUI 与 headless 使用同一 admission/receipt contract，且恢复不会重放未知执行或 promotion。
+
+E05.17 不解决外部副作用补偿，也不让 RFC-0053 的 agent 调度成为 permission grant。两者只消费
+同一 runtime policy：编排决定“由谁、何时尝试”，本 RFC 决定“该次尝试能影响什么、是否可以
+无需再次审批”。
+
 2026-06-29 productization slice expansion:
 
 - E05.7 Sandbox Capability Matrix and Backend Selection Contract：已实现 backend selection、fallback、diagnostics 和 profile requirement taxonomy。该切片是后续完整 OS Sandbox 的直接入口。
@@ -193,6 +324,8 @@ pub trait ExecutionBackend {
 - E05.14 MCP Stdio Sandbox Handoff：core semantics 已完成；本地 stdio MCP server 通过 injected launcher 启动，runtime/session/doctor/TUI 可见 process coverage，macOS Seatbelt conformance 已覆盖真实 sandboxed stdio process。
 - E05.15 Plugin Hook Process Sandbox Handoff：core semantics 已完成。Trusted plugin hook command runtime 已经过 `ExecutionBackend`；mutating/unknown hook 已要求 mutation evidence；hook started/finished durable entries 记录 execution coverage、sandbox profile、egress logging、secret policy summary、network 和 resource receipt；runtime conformance 覆盖 configured sandbox backend evidence；`/config` 和 session detail 提供 coarse but truthful audit surface。Docker/container PTY、long-lived plugin daemon、Windows restricted backend 和 per-hook backend matrix 仍是后续 productization / platform slices。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
+- E05.17 Controlled-auto Execution Preset：计划已在 §6.1 冻结，尚未实现；必须满足 prepared
+  admission、真实 backend capability/receipt 与独立 network policy 后才可开放默认自动运行。
 
 E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在；2026-06-29 首次 workflow 运行在 host namespace diagnostics 阶段失败，原因是 runner 不允许 bwrap 配置 loopback network namespace。workflow 现已改为 preflight/report 模式：默认记录 unsupported runner；需要硬门禁时用 `require_conformance=true` 运行。2026-06-29 已在外部 Ubuntu Linux host 上跑通 ignored real conformance test，因此 E05.8 backend semantics 已完成；GitHub hosted runner 仍不是 Linux Bubblewrap conformance 证明。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
 
