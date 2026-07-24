@@ -58,7 +58,10 @@ pub use promotion_recovery::{
     IntegrationPromotionReconciliation, RecoveredIntegrationPromotion,
     reconcile_integration_promotions,
 };
-pub use review::{PreparedTaskIntegrationReview, prepare_task_integration_review};
+pub use review::{
+    PreparedTaskIntegrationReview, TaskIntegrationAcceptanceOutput, accept_task_integration_review,
+    prepare_task_integration_review,
+};
 
 const ZERO_GIT_OBJECT_ID: &str = "0000000000000000000000000000000000000000";
 const MAX_INTEGRATION_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;

@@ -33,10 +33,11 @@ use super::{
     GitIntegrationRunRequest, IntegrationArtifact, IntegrationLaneRuntimeEvent,
     IntegrationLaneRuntimeEventRequest, IntegrationPromotionPreparationTarget,
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
-    ParentVerificationRunRequest, prepare_git_integration_promotion,
-    prepare_task_integration_review, reconcile_integration_promotions,
-    run_authoritative_parent_verification, run_git_integration_lanes,
-    run_git_integration_lanes_with_events, run_git_integration_promotion_with_events,
+    ParentVerificationRunRequest, accept_task_integration_review,
+    prepare_git_integration_promotion, prepare_task_integration_review,
+    reconcile_integration_promotions, run_authoritative_parent_verification,
+    run_git_integration_lanes, run_git_integration_lanes_with_events,
+    run_git_integration_promotion_with_events,
 };
 use crate::isolated_workspace::{
     GitWorktreeBaseFreezeRequest, GitWorktreeCleanupRequest, cleanup_git_worktree,
@@ -810,19 +811,36 @@ async fn durable_integration_review_rebuilds_only_the_exact_reviewed_candidate()
     );
     rebuilt.prepared.cleanup().await?;
 
-    let changed_policy =
-        VerificationPolicy::no_checks_required("different-parent-verification-scope");
-    session.append_control(ControlEntry::VerificationPolicyChanged(
-        VerificationPolicyChangedEntry::new(
-            EvidenceScope::Task(plan.task_id.as_str().to_owned()),
-            changed_policy,
-            "policy-drift-after-review",
-        )?,
-    ))?;
-    let error = prepare_task_integration_review(&session, &root, &request)
-        .await
-        .expect_err("policy drift must invalidate the reviewed candidate");
-    assert!(format!("{error:#}").contains("verification policy changed"));
+    let mut handler = NoopEventHandler;
+    let accepted = accept_task_integration_review(
+        &mut session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        &root,
+        &request,
+    )
+    .await?;
+    assert_eq!(
+        accepted.promotion.record.status,
+        IntegrationPromotionStatus::Promoted
+    );
+    assert_eq!(
+        accepted
+            .parent_verification
+            .as_ref()
+            .map(|output| output.record.verdict),
+        Some(VerificationVerdict::NotApplicable)
+    );
+    assert_eq!(fs::read_to_string(root.join("a.txt"))?, "new-a\n");
+    let projection = IntegrationProjection::from_entries(session.entries());
+    assert_eq!(
+        projection
+            .plans
+            .get(&plan.plan_id)
+            .and_then(|state| state.synthesis_ready_attempt()),
+        accepted.promotion.record.attempt_id.as_ref()
+    );
+    assert!(sigil_kernel::task_integration_review_product(session.entries()).is_none());
     Ok(())
 }
 

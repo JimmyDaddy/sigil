@@ -1,17 +1,21 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ControlEntry, EvidenceScope, IntegrationBaseRepresentation, IntegrationProjection, Session,
-    SessionLogEntry, TaskIntegrationReviewRequest, TaskPromotionPreview, VerificationPolicy,
-    stable_event_uuid, stable_workspace_id,
+    ControlEntry, EventHandler, EvidenceScope, ExecutionBackend, IntegrationBaseRepresentation,
+    IntegrationProjection, IntegrationPromotionAttemptId, RunEvent, Session, SessionLogEntry,
+    TaskIntegrationReviewRequest, TaskPromotionAuthority, TaskPromotionPreview, TrustedCheckSpec,
+    VerificationPolicy, WorkspaceTrust, stable_event_uuid, stable_workspace_id,
 };
 
 use super::{
-    GitIntegrationPromotionPreparationRequest, IntegrationArtifact,
-    IntegrationPromotionPreparationTarget, PreparedGitIntegrationPromotion,
-    prepare_git_integration_promotion,
+    GitIntegrationPromotionOutput, GitIntegrationPromotionPreparationRequest,
+    GitIntegrationPromotionRunRequest, IntegrationArtifact, IntegrationPromotionPreparationTarget,
+    IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
+    ParentVerificationRunOutput, ParentVerificationRunRequest, PreparedGitIntegrationPromotion,
+    prepare_git_integration_promotion, run_authoritative_parent_verification,
+    run_git_integration_promotion_with_events, unix_time_ms,
 };
 use crate::isolated_workspace::{
     FrozenGitWorktreeBase, FrozenGitWorktreeBaseRestoreRequest, restore_frozen_git_worktree_base,
@@ -25,6 +29,13 @@ pub struct PreparedTaskIntegrationReview {
     pub prepared: PreparedGitIntegrationPromotion,
     pub preview: TaskPromotionPreview,
     pub verification_policy: VerificationPolicy,
+}
+
+/// Terminal promotion plus authoritative parent verification for one accepted exact review.
+#[derive(Debug)]
+pub struct TaskIntegrationAcceptanceOutput {
+    pub promotion: GitIntegrationPromotionOutput,
+    pub parent_verification: Option<ParentVerificationRunOutput>,
 }
 
 /// Rebuilds the exact aggregate candidate bound to one current durable review request.
@@ -133,6 +144,204 @@ pub async fn prepare_task_integration_review(
         preview: product.preview,
         verification_policy,
     })
+}
+
+/// Consumes one exact user integration review and runs the final promotion/parent-check barrier.
+///
+/// Authority and terminal promotion facts are durably appended and acknowledged before the
+/// runtime advances to the next effect. Trusted checks and workspace trust are projected before
+/// the physical promotion so an incomplete verification context cannot mutate the parent.
+///
+/// # Errors
+///
+/// Returns an error before promotion for stale review, policy/provenance drift or incomplete
+/// trusted checks, and after durable recovery facts for acknowledged runtime failures.
+pub async fn accept_task_integration_review<H>(
+    session: &mut Session,
+    handler: &mut H,
+    execution_backend: Arc<dyn ExecutionBackend>,
+    workspace_root: &Path,
+    request: &TaskIntegrationReviewRequest,
+) -> Result<TaskIntegrationAcceptanceOutput>
+where
+    H: EventHandler + Send,
+{
+    let reviewed = prepare_task_integration_review(session, workspace_root, request).await?;
+    let parent_context = parent_verification_context(
+        session,
+        &reviewed.preview.task_id,
+        workspace_root,
+        &reviewed.verification_policy,
+    )?;
+    let now = unix_time_ms();
+    let attempt_id = IntegrationPromotionAttemptId::new(format!(
+        "promotion-{}",
+        stable_event_uuid("sigil-task-integration-promotion", &request.request_id)
+    ))?;
+    let authority = TaskPromotionAuthority::from_user_integration_review(
+        &reviewed.preview,
+        request.request_id.clone(),
+        now.saturating_add(5 * 60 * 1_000),
+        format!(
+            "nonce-{}",
+            stable_event_uuid("sigil-task-integration-authority", &request.request_id)
+        ),
+    )?;
+    let mutation_recorder = session
+        .mutation_event_recorder()
+        .ok_or_else(|| anyhow!("task integration acceptance requires durable mutation storage"))?;
+    let preview = reviewed.preview;
+    let verification_policy = reviewed.verification_policy;
+    let (event_sender, mut event_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<IntegrationPromotionRuntimeEventRequest>();
+    let mut promotion = Box::pin(run_git_integration_promotion_with_events(
+        GitIntegrationPromotionRunRequest {
+            prepared: reviewed.prepared,
+            attempt_id: attempt_id.clone(),
+            preview: preview.clone(),
+            authority,
+            verification_policy: verification_policy.clone(),
+            mutation_recorder,
+        },
+        event_sender,
+    ));
+    let mut append_error: Option<String> = None;
+    let promotion = loop {
+        tokio::select! {
+            event = event_receiver.recv() => {
+                let Some(event) = event else {
+                    break promotion.await;
+                };
+                let acknowledgement = if let Some(error) = append_error.as_ref() {
+                    Err(error.clone())
+                } else {
+                    match append_promotion_runtime_event(session, handler, event.event().clone()) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            let message = format!("{error:#}");
+                            append_error = Some(message.clone());
+                            Err(message)
+                        }
+                    }
+                };
+                event.acknowledge(acknowledgement);
+            }
+            result = &mut promotion => break result,
+        }
+    };
+    let mut promotion = match (promotion, append_error) {
+        (Ok(output), None) => output,
+        (Err(error), _) => return Err(error),
+        (Ok(_), Some(error)) => bail!("failed to persist integration promotion event: {error}"),
+    };
+    if promotion.record.status != sigil_kernel::IntegrationPromotionStatus::Promoted {
+        return Ok(TaskIntegrationAcceptanceOutput {
+            promotion,
+            parent_verification: None,
+        });
+    }
+    let promoted_snapshot_id = promotion
+        .authoritative_snapshot_id
+        .clone()
+        .ok_or_else(|| anyhow!("promoted integration target has no authoritative snapshot"))?;
+    let target = promotion
+        .verification_target
+        .take()
+        .ok_or_else(|| anyhow!("promoted integration target was not retained for verification"))?;
+    let target_root = target.workspace_root().to_path_buf();
+    let parent_verification = run_authoritative_parent_verification(
+        session,
+        handler,
+        execution_backend,
+        ParentVerificationRunRequest {
+            attempt_id,
+            plan_id: preview.plan_id,
+            preview_digest: preview.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: preview.policy_digest,
+            policy: verification_policy,
+            trusted_checks: parent_context.trusted_checks,
+            workspace_trust: parent_context.workspace_trust,
+            workspace_trust_snapshot_id: parent_context.workspace_trust_snapshot_id,
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "authoritative parent verification failed for {}",
+            target_root.display()
+        )
+    })?;
+    Ok(TaskIntegrationAcceptanceOutput {
+        promotion,
+        parent_verification: Some(parent_verification),
+    })
+}
+
+struct ParentVerificationContext {
+    trusted_checks: Vec<TrustedCheckSpec>,
+    workspace_trust: WorkspaceTrust,
+    workspace_trust_snapshot_id: String,
+}
+
+fn parent_verification_context(
+    session: &Session,
+    task_id: &sigil_kernel::TaskId,
+    workspace_root: &Path,
+    policy: &VerificationPolicy,
+) -> Result<ParentVerificationContext> {
+    let projection = session.verification_state_projection();
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    let task_scope = EvidenceScope::Task(task_id.as_str().to_owned());
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
+    let projected = projection.check_specs_for_scopes(&[task_scope, workspace_scope]);
+    let mut trusted_checks = Vec::with_capacity(policy.required_checks.len());
+    for required in &policy.required_checks {
+        let trusted = projected
+            .iter()
+            .find(|entry| {
+                entry.trusted_check.check_spec.check_spec_id == required.check_spec_id
+                    && entry.trusted_check.check_spec.check_spec_hash == required.check_spec_hash
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "accepted parent verification check {} is unavailable or changed",
+                    required.check_spec_id
+                )
+            })?;
+        trusted_checks.push(trusted.trusted_check.clone());
+    }
+    let trust = projection.workspace_trust.get(&workspace_id);
+    Ok(ParentVerificationContext {
+        trusted_checks,
+        workspace_trust: trust.map_or(WorkspaceTrust::Unknown, |entry| entry.trust),
+        workspace_trust_snapshot_id: trust
+            .map(|entry| entry.workspace_trust_snapshot_id.clone())
+            .unwrap_or_else(|| format!("workspace-trust:unknown:{workspace_id}")),
+    })
+}
+
+fn append_promotion_runtime_event<H>(
+    session: &mut Session,
+    handler: &mut H,
+    event: IntegrationPromotionRuntimeEvent,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let control = match event {
+        IntegrationPromotionRuntimeEvent::AuthorityConsumed(entry) => {
+            ControlEntry::TaskPromotionAuthorityConsumed(entry)
+        }
+        IntegrationPromotionRuntimeEvent::PromotionRecorded(entry) => {
+            ControlEntry::IntegrationPromotionRecorded(entry)
+        }
+    };
+    session.append_control(control.clone())?;
+    handler.handle(RunEvent::Control(control))
 }
 
 fn integration_review_policy(
