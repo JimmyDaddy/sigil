@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -8,36 +9,42 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::{Stream, stream};
 use sigil_kernel::{
-    AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason,
-    ApprovalHandler, AssistantMessageKind, AutoApproveHandler, ControlEntry,
-    ConversationRunLifecycleRecordV1, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, DisclosurePresentationError, DisclosurePresentationReceipt,
-    EgressDisclosurePresenter, JsonlSessionStore, ModelMessage, PreEgressDisclosure,
-    PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig, RunCancellationOwner,
-    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, StartDurableTaskAction,
-    TaskHandoffId, TaskId, TaskRunEntry, TaskRunStatus, TaskStepId, TaskVerificationRerunRequest,
-    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    conversation_run_lifecycle_record_from_stream,
+    AgentRole, AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunPurpose,
+    AgentRunResult, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind,
+    AutoApproveHandler, CompletionRequest, ControlEntry, ConversationRunLifecycleRecordV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
+    DisclosurePresentationReceipt, EgressDisclosurePresenter, InteractionMode, JsonlSessionStore,
+    ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider, ProviderCapabilities,
+    ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort, ReasoningStreamSupport,
+    RootConfig, RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session,
+    SessionLogEntry, SessionRef, StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId,
+    TaskId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
 };
+
+use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 
 use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
-    ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
-    ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
-    ApplicationSessionLeaseManager, ApplicationTranscriptRole,
-    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    admit_application_agent_binding, admit_application_model_selection,
-    admit_application_reasoning_effort, admit_application_skill_binding,
-    application_run_context_view, application_run_input, application_session_frontier_view,
-    application_session_transcript_page, application_terminal_projection,
-    application_verification_view, attach_application_request_context, bind_application_session,
+    ApplicationRunExecutionKind, ApplicationRunInteraction, ApplicationRunPrepareError,
+    ApplicationRunPrepareErrorClass, ApplicationRunRequest, ApplicationRunServices,
+    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, ApplicationTaskExecutionRuntime,
+    ApplicationTranscriptRole, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+    PublicApplicationEventBridge, admit_application_agent_binding,
+    admit_application_model_selection, admit_application_reasoning_effort,
+    admit_application_skill_binding, application_run_context_view, application_run_input,
+    application_session_frontier_view, application_session_transcript_page,
+    application_terminal_projection, application_verification_view,
+    attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
-    constrain_application_tool_registry, default_application_session_path,
-    optional_eager_mcp_warning, prepare_application_run_blocking,
-    record_application_preparation_cancellation, rerun_application_verification,
-    validate_execution_contract,
+    constrain_application_tool_registry, continue_application_task_handoff,
+    default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
+    prepare_application_run_blocking, record_application_preparation_cancellation,
+    rerun_application_verification, validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -86,6 +93,106 @@ impl EgressDisclosurePresenter for RejectingDisclosurePresenter {
         _disclosure: PreEgressDisclosure,
     ) -> std::result::Result<DisclosurePresentationReceipt, DisclosurePresentationError> {
         Err(DisclosurePresentationError::SinkClosed)
+    }
+}
+
+struct ApplicationTaskRoleProviderBuilder;
+
+impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
+    fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(ApplicationTaskRoleProvider { role }))
+    }
+}
+
+struct ApplicationTaskRoleProvider {
+    role: AgentRole,
+}
+
+#[async_trait]
+impl Provider for ApplicationTaskRoleProvider {
+    fn name(&self) -> &str {
+        "application-task-test"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        application_task_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let chunks = if self.role == AgentRole::Planner
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == TASK_PLAN_UPDATE_TOOL_NAME)
+        {
+            let args = r#"{
+                "plan_version": 1,
+                "status": "accepted",
+                "steps": [{
+                    "step_id": "inspect_application",
+                    "title": "Inspect application runtime",
+                    "role": "executor",
+                    "mode": "read",
+                    "isolation": "shared_read_only"
+                }]
+            }"#;
+            vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "application-task-plan".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "application-task-plan".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "application-task-plan".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]
+        } else if self.role == AgentRole::Planner {
+            vec![
+                Ok(ProviderChunk::TextDelta(
+                    "application durable task completed".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ]
+        } else {
+            vec![
+                Ok(ProviderChunk::TextDelta(
+                    "application task step completed".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ]
+        };
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+}
+
+fn application_task_provider_capabilities() -> ProviderCapabilities {
+    ProviderCapabilities {
+        exact_prefix_cache: true,
+        reports_cache_tokens: true,
+        reasoning_stream: ReasoningStreamSupport::Native,
+        supports_reasoning_effort: true,
+        supports_tool_stream: true,
+        supports_background_tasks: false,
+        supports_response_handles: false,
+        supports_reasoning_artifacts: false,
+        supports_structured_output: true,
+        supports_assistant_prefix_seed: false,
+        supports_schema_constrained_tools: true,
+        supports_agent_background_resume: false,
+        supports_agent_thread_usage: false,
+        supports_agent_result_replay: false,
+        supports_infill_completion: false,
+        supports_system_fingerprint: true,
+        tool_name_max_chars: 64,
     }
 }
 
@@ -190,8 +297,11 @@ api_key = "test-secret-key"
     let mut request =
         ApplicationRunRequest::non_interactive(&config_path, temp.path(), "continue", "next-run");
     request.session_path = Some(binding.session_log_path.clone());
-    let prepared =
-        prepare_application_run_blocking(request, Arc::new(ApplicationSessionLeaseManager::new()))?;
+    let prepared = prepare_application_run_blocking(
+        request,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
 
     let lifecycle = application_conversation_lifecycle(&binding.session_log_path)?;
     assert!(matches!(
@@ -1353,6 +1463,211 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
     let (status, event) = application_terminal_projection(&output);
     assert_eq!(status, ApplicationRunTerminalStatus::Blocked);
     assert!(matches!(event, PublicRunEventKind::RunFailed { .. }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_auto_routing_stays_manual_without_attached_task_executor() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+routing_policy = "auto"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "implement the cross-layer feature",
+        "run-application-without-task-executor",
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+
+    let prepared = prepare_application_run(request, &services).await?;
+
+    assert!(prepared.execution.task_execution.is_none());
+    let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
+        panic!("ordinary application request must prepare the main agent");
+    };
+    let Some(AgentRunPurpose::Conversation(context)) = input.purpose.as_ref() else {
+        panic!("ordinary application request must carry conversation purpose");
+    };
+    assert_eq!(context.routing_policy, TaskRoutingPolicy::Manual);
+    assert!(context.task_handoff.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_preparation_enables_model_owned_auto_handoff_without_host_classification()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+routing_policy = "auto"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "implement the cross-layer feature",
+        "run-application-auto-handoff",
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+
+    let prepared = prepare_application_run(request, &services).await?;
+
+    assert!(prepared.execution.task_execution.is_some());
+    let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
+        panic!("ordinary application request must prepare the main agent");
+    };
+    let Some(AgentRunPurpose::Conversation(context)) = input.purpose.as_ref() else {
+        panic!("ordinary application request must carry conversation purpose");
+    };
+    assert_eq!(context.routing_policy, TaskRoutingPolicy::Auto);
+    assert!(
+        context.task_handoff.is_some(),
+        "auto routing exposes typed handoff authority to the model"
+    );
+    assert!(
+        prepared
+            .execution
+            .session
+            .task_state_projection()
+            .tasks
+            .is_empty(),
+        "host preparation must not infer prompt intent or create a task before the model tool call"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_task_handoff_runs_shared_executor_and_returns_synthesis() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "application-task-test"
+model = "application-task-model"
+"#,
+    )?;
+    let mut root_config = RootConfig::load(&config_path)?;
+    root_config.task.enabled = true;
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        Session::load_from_store("application-task-test", "application-task-model", store)?;
+    let task_id = TaskId::new("task-application-execution")?;
+    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "inspect the application runtime".to_owned(),
+        status: TaskRunStatus::Started,
+        reason: Some("accepted by the application conversation coordinator".to_owned()),
+    }))?;
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let task_execution = ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+        ),
+        base_registry: ToolRegistry::new(),
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let action = StartDurableTaskAction {
+        handoff_id: TaskHandoffId::new("handoff-application-execution")?,
+        task_id: task_id.clone(),
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-application-execution",
+            "run-application-execution",
+        )?,
+    };
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::StartDurableTask(action),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    )
+    .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(
+        output.result.final_text,
+        "application durable task completed"
+    );
+    assert!(output.result.final_message_id.is_some());
+    assert!(cancellation_handle.is_naturally_finalized());
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task should exist");
+    assert_eq!(task.status, TaskRunStatus::Completed);
+    assert_eq!(
+        task.final_answer
+            .as_ref()
+            .map(|answer| answer.message_id.as_str()),
+        output.result.final_message_id.as_deref()
+    );
     Ok(())
 }
 

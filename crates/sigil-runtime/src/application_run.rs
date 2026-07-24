@@ -10,18 +10,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentProfileId, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunOutcome,
-    AgentRunOutput, AgentRunResult, AgentThreadStatus, ApprovalHandler, AssistantMessageKind,
-    ControlEntry, ConversationRunFinalizedEntryV1, ConversationRunLifecycleRecorder,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, EgressDisclosurePresenter,
-    EventHandler, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
-    McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler,
-    PermissionMode, PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
-    RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
+    AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
+    ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
+    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
+    MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler, PermissionMode,
+    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
-    Session, SessionLogEntry, SessionRef, TaskVerificationRerunRequest, ToolRegistryScope,
-    VerificationProductView, WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root,
-    safe_persistence_text, verification_product_view, workspace_trust_from_entries,
+    Session, SessionLogEntry, SessionRef, TaskId, TaskRunStatus, TaskVerificationRerunRequest,
+    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
+    resolve_workspace_root, safe_persistence_text, verification_product_view,
+    workspace_trust_from_entries,
 };
 
 use crate::{
@@ -375,6 +377,8 @@ impl Drop for ApplicationSessionLease {
 pub struct ApplicationRunServices {
     disclosure_presenter: Arc<dyn EgressDisclosurePresenter>,
     session_leases: Arc<ApplicationSessionLeaseManager>,
+    task_role_provider_builder:
+        Option<Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>>,
 }
 
 impl std::fmt::Debug for ApplicationRunServices {
@@ -383,6 +387,10 @@ impl std::fmt::Debug for ApplicationRunServices {
             .debug_struct("ApplicationRunServices")
             .field("disclosure_presenter", &"configured")
             .field("session_leases", &self.session_leases)
+            .field(
+                "task_role_provider_builder",
+                &self.task_role_provider_builder.is_some(),
+            )
             .finish()
     }
 }
@@ -394,6 +402,7 @@ impl ApplicationRunServices {
         Self {
             disclosure_presenter,
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
+            task_role_provider_builder: None,
         }
     }
 
@@ -406,7 +415,18 @@ impl ApplicationRunServices {
         Self {
             disclosure_presenter,
             session_leases,
+            task_role_provider_builder: None,
         }
+    }
+
+    /// Replaces task role provider construction for an embedded adapter or deterministic test.
+    #[must_use]
+    pub fn with_task_role_provider_builder(
+        mut self,
+        builder: Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
+    ) -> Self {
+        self.task_role_provider_builder = Some(builder);
+        self
     }
 }
 
@@ -901,6 +921,7 @@ impl std::error::Error for ApplicationCancellationRequestError {
 /// One prepared provider/session/tool application execution.
 pub struct ApplicationRunExecution {
     kind: ApplicationRunExecutionKind,
+    task_execution: Option<ApplicationTaskExecutionRuntime>,
     session: Session,
     options: AgentRunOptions,
     session_id: String,
@@ -918,6 +939,15 @@ pub struct ApplicationRunExecution {
     conversation_coordinator: crate::ConversationCoordinator,
     parent_session_ref: SessionRef,
     _session_lease: Arc<ApplicationSessionLease>,
+}
+
+struct ApplicationTaskExecutionRuntime {
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: sigil_kernel::ToolRegistry,
+    agent_supervisor: crate::AgentSupervisor,
+    role_provider_builder:
+        Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
 }
 
 enum ApplicationRunExecutionKind {
@@ -1076,6 +1106,20 @@ impl ApplicationRunExecution {
                 .await
             }
         };
+        let run = match run {
+            Ok(agent_output) => {
+                continue_application_task_handoff(
+                    &mut self.session,
+                    agent_output,
+                    self.task_execution.take(),
+                    &mut bridge,
+                    approval_handler,
+                    &self.cancellation_handle,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         match run {
             Ok(agent_output) => {
                 let (terminal_status, terminal_event) =
@@ -1132,6 +1176,124 @@ impl ApplicationRunExecution {
             }
         }
     }
+}
+
+async fn continue_application_task_handoff<H, A>(
+    session: &mut Session,
+    output: AgentRunOutput,
+    task_execution: Option<ApplicationTaskExecutionRuntime>,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: &RunCancellationHandle,
+) -> Result<AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let AgentRunDisposition::StartDurableTask(action) = output.disposition.clone() else {
+        return Ok(output);
+    };
+    let Some(task_execution) = task_execution else {
+        return Ok(output);
+    };
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&action.task_id)
+        .cloned();
+    let Some(task) = task else {
+        if !cancellation_handle.is_naturally_finalized()
+            && !cancellation_handle.try_finalize_naturally()
+        {
+            bail!("run cancellation won the missing-task terminal-state race");
+        }
+        bail!(
+            "accepted task handoff {} is missing its durable task",
+            action.task_id.as_str()
+        );
+    };
+    let ApplicationTaskExecutionRuntime {
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+    } = task_execution;
+    let status = crate::agent_supervisor::task_execution::run_admitted_task_to_root_terminal(
+        session,
+        crate::agent_supervisor::task_execution::AdmittedTaskExecution {
+            task_id: action.task_id.clone(),
+            parent_session_ref: task.parent_session_ref,
+            objective: task.objective,
+            root_config,
+            options,
+            base_registry,
+            agent_supervisor,
+            role_provider_builder: role_provider_builder.as_ref(),
+            handler,
+            cancellation_handle: cancellation_handle.clone(),
+        },
+        approval_handler,
+    )
+    .await?;
+    application_task_terminal_output(session, &action.task_id, status, output)
+}
+
+fn application_task_terminal_output(
+    session: &Session,
+    task_id: &TaskId,
+    status: TaskRunStatus,
+    mut output: AgentRunOutput,
+) -> Result<AgentRunOutput> {
+    match status {
+        TaskRunStatus::Completed => {
+            let committed = session
+                .task_state_projection()
+                .tasks
+                .get(task_id)
+                .and_then(|task| task.final_answer.clone())
+                .ok_or_else(|| {
+                    anyhow!("completed application task has no committed final answer")
+                })?;
+            let message = session
+                .entries()
+                .iter()
+                .find_map(|entry| match entry {
+                    SessionLogEntry::Assistant(message) if message.id == committed.message_id => {
+                        Some(message)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow!("completed application task final message is missing"))?;
+            if message.assistant_kind != Some(AssistantMessageKind::FinalAnswer) {
+                bail!("completed application task message is not a final answer");
+            }
+            output.result.final_text =
+                safe_persistence_text(message.content.as_deref().unwrap_or_default());
+            if output.result.final_text.trim().is_empty() {
+                bail!("completed application task final answer is empty");
+            }
+            output.result.final_message_id = Some(committed.message_id);
+            output.disposition = AgentRunDisposition::FinalAnswer;
+            output.outcome.terminal_reason = AgentRunTerminalReason::FinalAnswer;
+        }
+        TaskRunStatus::Cancelled | TaskRunStatus::Interrupted => {
+            output.result.final_text.clear();
+            output.result.final_message_id = None;
+            output.disposition = AgentRunDisposition::Interrupted;
+            output.outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
+        }
+        TaskRunStatus::Started
+        | TaskRunStatus::Running
+        | TaskRunStatus::Paused
+        | TaskRunStatus::Failed => {
+            output.result.final_text.clear();
+            output.result.final_message_id = None;
+            output.disposition = AgentRunDisposition::Blocked;
+            output.outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
+        }
+    }
+    Ok(output)
 }
 
 async fn execute_application_agent_profile(
@@ -1285,8 +1447,9 @@ async fn prepare_application_run_internal(
                 message: safe_persistence_text(&error.to_string()),
             })?;
     let session_leases = Arc::clone(&services.session_leases);
+    let task_executor_attached = services.task_role_provider_builder.is_some();
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(request, session_leases)
+        prepare_application_run_blocking(request, session_leases, task_executor_attached)
     })
     .await
     .map_err(|error| ApplicationRunPrepareError::Internal {
@@ -1315,6 +1478,7 @@ async fn prepare_application_run_internal(
         tool_scope,
         skill_descriptor,
         agent_invocation,
+        task_agent_registry,
     } = prepared;
     let surface =
         build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
@@ -1398,11 +1562,25 @@ async fn prepare_application_run_internal(
             .unwrap_or("session.jsonl"),
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    // Application/HTTP/Desktop do not yet own the durable task executor. Keep their conversation
-    // purpose explicit but force manual routing so Auto cannot create a stranded Started task.
-    // TUI is the only O2 surface that attaches handoff admission to planner/executor ownership.
-    let conversation_coordinator =
-        crate::ConversationCoordinator::new(false, root_config.task.routing_policy);
+    let task_execution = task_agent_registry
+        .zip(services.task_role_provider_builder.as_ref())
+        .map(
+            |(profile_registry, role_provider_builder)| ApplicationTaskExecutionRuntime {
+                root_config: root_config.clone(),
+                options: options.clone(),
+                base_registry: registry.clone(),
+                agent_supervisor: crate::AgentSupervisor::new(
+                    profile_registry,
+                    crate::AgentBudgetPolicy::from_root_config(&root_config),
+                    provider.capabilities(),
+                ),
+                role_provider_builder: Arc::clone(role_provider_builder),
+            },
+        );
+    let conversation_coordinator = crate::ConversationCoordinator::new(
+        task_execution.is_some(),
+        root_config.task.routing_policy,
+    );
     if queued_first_request.is_none() && agent_invocation.is_none() {
         input = conversation_coordinator
             .bind_conversation_input(
@@ -1482,6 +1660,7 @@ async fn prepare_application_run_internal(
     let prepared = PreparedApplicationRun {
         execution: ApplicationRunExecution {
             kind,
+            task_execution,
             session,
             options,
             session_id,
@@ -2234,11 +2413,13 @@ struct BlockingApplicationRunPreparation {
     tool_scope: Option<ToolRegistryScope>,
     skill_descriptor: Option<sigil_kernel::SkillDescriptor>,
     agent_invocation: Option<(crate::AgentProfileRegistry, AgentProfileId)>,
+    task_agent_registry: Option<crate::AgentProfileRegistry>,
 }
 
 fn prepare_application_run_blocking(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
+    task_executor_attached: bool,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
     if let Some(constraints) = request.constraints.as_ref()
         && (constraints.max_turns == 0
@@ -2301,6 +2482,19 @@ fn prepare_application_run_blocking(
         &workspace_root,
         session.entries(),
     )?;
+    let task_agent_registry =
+        if task_executor_attached && root_config.task.enabled && agent_invocation.is_none() {
+            Some(
+                crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+                    &root_config,
+                    &workspace_root,
+                    session.entries(),
+                )
+                .map_err(ApplicationRunPrepareError::execution)?,
+            )
+        } else {
+            None
+        };
     let provider =
         crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     attach_session_url_capability_store(&mut session)
@@ -2369,6 +2563,7 @@ fn prepare_application_run_blocking(
             .map(|constraints| constraints.tool_scope),
         skill_descriptor: loaded_skill.map(|loaded| loaded.descriptor),
         agent_invocation,
+        task_agent_registry,
     })
 }
 
