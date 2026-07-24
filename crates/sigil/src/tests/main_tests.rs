@@ -11,11 +11,11 @@ use anyhow::{Result, anyhow};
 use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, RootConfig, RunEvent,
-    SessionConfig, StorageConfig, ToolAccess, ToolCall, ToolCategory, ToolErrorKind,
-    ToolExecutionId, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceTrust, resolve_workspace_root,
-    workspace_trust_from_entries,
+    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, PublicRunEventKind,
+    PublicTaskPhase, RootConfig, RunEvent, SessionConfig, StorageConfig, ToolAccess, ToolCall,
+    ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
+    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
 };
 use sigil_runtime::application_run::{application_run_input, default_application_session_path};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
@@ -512,6 +512,58 @@ fn cli_help_hides_provider_debug_commands() {
     assert!(!help.contains("prefix"));
     assert!(!help.contains("fim"));
     assert!(!help.contains("model-eval"));
+}
+
+#[test]
+fn text_cli_ignores_structured_task_state_events() {
+    let events = [
+        PublicRunEventKind::TaskRoutingChanged {
+            handoff_id: "handoff-1".to_owned(),
+            status: "accepted".to_owned(),
+            task_id: Some("task-1".to_owned()),
+        },
+        PublicRunEventKind::TaskPhaseChanged {
+            task_id: Some("task-1".to_owned()),
+            phase: PublicTaskPhase::Planning,
+            status: "running".to_owned(),
+        },
+        PublicRunEventKind::TaskPlanUpdated {
+            task_id: "task-1".to_owned(),
+            plan_version: 1,
+            status: "accepted".to_owned(),
+            steps: Vec::new(),
+        },
+        PublicRunEventKind::TaskBatchChanged {
+            task_id: "task-1".to_owned(),
+            plan_version: 1,
+            batch_id: "batch-1".to_owned(),
+            active: 1,
+            completed: 0,
+            failed: 0,
+        },
+        PublicRunEventKind::TaskStepChanged {
+            task_id: "task-1".to_owned(),
+            plan_version: 1,
+            step_id: "step-1".to_owned(),
+            attempt_id: Some("attempt-1".to_owned()),
+            status: "running".to_owned(),
+        },
+        PublicRunEventKind::IntegrationLaneChanged {
+            task_id: "task-1".to_owned(),
+            plan_version: 1,
+            plan_id: "plan-1".to_owned(),
+            lane_id: "lane-1".to_owned(),
+            status: "pending".to_owned(),
+            conflicts: Vec::new(),
+        },
+    ];
+
+    for event in events {
+        assert_eq!(
+            super::render_public_run_event(event),
+            super::RenderedOutput::default()
+        );
+    }
 }
 
 #[test]

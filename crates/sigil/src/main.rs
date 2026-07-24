@@ -1350,6 +1350,12 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
+        | PublicRunEventKind::TaskRoutingChanged { .. }
+        | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskBatchChanged { .. }
+        | PublicRunEventKind::TaskStepChanged { .. }
+        | PublicRunEventKind::IntegrationLaneChanged { .. }
         | PublicRunEventKind::RunFailed { .. }
         | PublicRunEventKind::RunCancelled
         | PublicRunEventKind::ContinuationState { .. }
