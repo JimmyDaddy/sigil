@@ -576,13 +576,26 @@ impl AppState {
                         format!("ignored stale acceptance response {}", request.request_id),
                     );
                 } else {
+                    let synthesis_ready = matches!(
+                        parent_verdict,
+                        Some(
+                            sigil_kernel::VerificationVerdict::Passed
+                                | sigil_kernel::VerificationVerdict::NotApplicable
+                        )
+                    );
                     self.sync_current_session_state(entries);
                     self.clear_integration_review();
                     let parent = parent_verdict
                         .map(|verdict| format!(" · parent {verdict:?}"))
                         .unwrap_or_default();
-                    self.last_notice =
-                        Some(format!("integration {}{parent}", promotion_status.as_str()));
+                    self.last_notice = Some(if synthesis_ready {
+                        format!(
+                            "integration {}{parent} · resuming synthesis",
+                            promotion_status.as_str()
+                        )
+                    } else {
+                        format!("integration {}{parent}", promotion_status.as_str())
+                    });
                     self.push_event(
                         "integration:accept",
                         format!(
@@ -591,6 +604,17 @@ impl AppState {
                             request.preview_digest
                         ),
                     );
+                    if synthesis_ready {
+                        self.start_worker_run_phase(
+                            RunPhase::Thinking,
+                            "resuming task synthesis",
+                            format!("task-synthesis|{}", request.task_id.as_str()),
+                        );
+                        self.enqueue_worker_command(WorkerCommand::ContinueTask {
+                            task_id: Some(request.task_id.as_str().to_owned()),
+                            guidance: None,
+                        });
+                    }
                 }
             }
             WorkerMessage::TaskIntegrationAcceptanceFailed {

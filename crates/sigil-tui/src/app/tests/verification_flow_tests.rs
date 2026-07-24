@@ -210,6 +210,31 @@ fn integration_review_loads_only_the_exact_current_response() -> anyhow::Result<
             .is_some_and(|notice| notice.contains("parent drifted"))
     );
 
+    let _ = app.drain_pending_worker_commands();
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationAccepted {
+        request: request.clone(),
+        promotion_status: sigil_kernel::IntegrationPromotionStatus::Promoted,
+        parent_verdict: Some(sigil_kernel::VerificationVerdict::Passed),
+        entries: app.session_browser.current_entries.clone(),
+    })?;
+    assert!(app.runtime.is_busy);
+    assert!(
+        app.last_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("resuming task synthesis"))
+    );
+    let pending = app.drain_pending_worker_commands();
+    assert!(
+        matches!(
+            pending.as_slice(),
+            [crate::runner::WorkerCommand::ContinueTask {
+                task_id: Some(task_id),
+                guidance: None,
+            }] if task_id == request.task_id.as_str()
+        ),
+        "accepted integration should resume the exact task: {pending:?}",
+    );
+
     app.sync_current_session_state(Vec::new());
     app.handle_worker_message(crate::runner::WorkerMessage::TaskIntegrationReviewLoaded {
         request,
