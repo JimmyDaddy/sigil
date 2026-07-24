@@ -29,7 +29,12 @@ SUPPORT_SPEC.loader.exec_module(SUPPORT)
 SCHEMA_VERSION = 1
 MODEL_NAME = "orchestration-fixture-model"
 FINAL_CANARY = "ORCHESTRATION-PTY-FINAL-CANARY-7319"
+APPROVAL_FINAL_CANARY = "ORCHESTRATION-PTY-APPROVAL-FINAL-8427"
 USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-2486"
+APPROVAL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-3597"
+APPROVAL_PATH = "approval-note.txt"
+APPROVAL_CONTENT = "approved task write\n"
+APPROVAL_TOOL_CALL_ID = "approval-write-call"
 READ_STEP_IDS = ("inspect_kernel", "inspect_runtime")
 READ_STEP_TITLES = ("Inspect kernel route", "Inspect runtime route")
 PLAN_ARGS = json.dumps(
@@ -59,6 +64,26 @@ HANDOFF_ARGS = json.dumps(
     {"reason_codes": ["parallel_research", "multi_stage_change"]},
     separators=(",", ":"),
 )
+APPROVAL_PLAN_ARGS = json.dumps(
+    {
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [
+            {
+                "step_id": "write_note",
+                "title": "Write approved note",
+                "role": "executor",
+                "mode": "write",
+                "isolation": "sequential_workspace_write",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
+APPROVAL_WRITE_ARGS = json.dumps(
+    {"path": APPROVAL_PATH, "content": APPROVAL_CONTENT},
+    separators=(",", ":"),
+)
 
 
 class AcceptanceError(RuntimeError):
@@ -70,7 +95,10 @@ class SessionAudit:
     event_counts: dict[str, int]
     completed_steps: tuple[str, ...]
     final_answer_count: int
+    approval_final_answer_count: int
     task_final_count: int
+    approval_route_resolved_count: int
+    approved_tool_call_count: int
     failed_run_count: int
 
 
@@ -83,9 +111,10 @@ class FixtureState:
     max_concurrent_reads: int = 0
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
-    def start_request(self, kind: str) -> None:
+    def start_request(self, kind: str) -> int:
         with self.lock:
             self.request_counts[kind] = self.request_counts.get(kind, 0) + 1
+            request_number = self.request_counts[kind]
             self.request_order.append(kind)
             if kind.startswith("read:"):
                 self.active_reads += 1
@@ -93,6 +122,7 @@ class FixtureState:
                     self.max_concurrent_reads,
                     self.active_reads,
                 )
+            return request_number
 
     def finish_request(self, kind: str) -> None:
         if not kind.startswith("read:"):
@@ -129,21 +159,35 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if not self.path.endswith("/chat/completions"):
                 raise AcceptanceError(f"unexpected fixture path {self.path}")
             kind = classify_request(payload)
-            self.fixture.start_request(kind)
+            request_number = self.fixture.start_request(kind)
             if kind == "conversation":
                 self._send_tool_call(
-                    "handoff-call",
+                    f"handoff-call-{request_number}",
                     "request_task_planning",
                     HANDOFF_ARGS,
                 )
             elif kind == "planner":
-                self._send_tool_call("task-plan-call", "task_plan_update", PLAN_ARGS)
+                arguments = PLAN_ARGS if request_number == 1 else APPROVAL_PLAN_ARGS
+                self._send_tool_call(
+                    f"task-plan-call-{request_number}",
+                    "task_plan_update",
+                    arguments,
+                )
             elif kind.startswith("read:"):
                 time.sleep(0.35)
                 step_id = kind.removeprefix("read:")
                 self._send_text(f"bounded result for {step_id}")
+            elif kind == "write:request":
+                self._send_tool_call(
+                    APPROVAL_TOOL_CALL_ID,
+                    "write_file",
+                    APPROVAL_WRITE_ARGS,
+                )
+            elif kind == "write:after_tool":
+                self._send_text("approved write completed")
             elif kind == "synthesis":
-                self._send_text(FINAL_CANARY)
+                final = FINAL_CANARY if request_number == 1 else APPROVAL_FINAL_CANARY
+                self._send_text(final)
             else:
                 raise AcceptanceError(f"unsupported request kind {kind}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
@@ -275,6 +319,20 @@ def request_text(payload: object) -> str:
     return "\n".join(values)
 
 
+def has_tool_result(payload: object, call_id: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, dict)
+        and message.get("role") == "tool"
+        and message.get("tool_call_id") == call_id
+        for message in messages
+    )
+
+
 def classify_request(payload: object) -> str:
     names = tool_names(payload)
     text = request_text(payload)
@@ -288,6 +346,10 @@ def classify_request(payload: object) -> str:
         matching = [step_id for step_id in READ_STEP_IDS if f"Step: {step_id}" in text]
         if len(matching) == 1:
             return f"read:{matching[0]}"
+    if "Step: write_note" in text and "Role: executor" in text:
+        if has_tool_result(payload, APPROVAL_TOOL_CALL_ID):
+            return "write:after_tool"
+        return "write:request"
     raise AcceptanceError("provider request does not match a production orchestration role")
 
 
@@ -330,7 +392,7 @@ max_subagents = 4
 max_parallel_read_steps = 2
 
 [permission]
-mode = "auto-edit"
+mode = "manual"
 
 [terminal]
 keyboard_enhancement = "off"
@@ -350,7 +412,11 @@ def read_session_audit(path: Path) -> SessionAudit:
     counts: dict[str, int] = {}
     completed_steps: list[str] = []
     final_answer_count = 0
+    approval_final_answer_count = 0
     task_final_count = 0
+    approval_route_resolved_count = 0
+    approved_tool_call_count = 0
+    approval_child_refs: set[str] = set()
     failed_run_count = 0
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         record = json.loads(raw_line)
@@ -369,9 +435,11 @@ def read_session_audit(path: Path) -> SessionAudit:
         if (
             isinstance(assistant, dict)
             and assistant.get("assistant_kind") == "final_answer"
-            and assistant.get("content") == FINAL_CANARY
         ):
-            final_answer_count += 1
+            if assistant.get("content") == FINAL_CANARY:
+                final_answer_count += 1
+            elif assistant.get("content") == APPROVAL_FINAL_CANARY:
+                approval_final_answer_count += 1
         control = entry.get("control")
         if not isinstance(control, dict):
             continue
@@ -384,11 +452,40 @@ def read_session_audit(path: Path) -> SessionAudit:
             completed_steps.append(step["step_id"])
         if isinstance(control.get("task_final_answer_committed"), dict):
             task_final_count += 1
+        approval_route = control.get("task_subagent_approval_route")
+        if (
+            isinstance(approval_route, dict)
+            and approval_route.get("status") == "resolved"
+            and approval_route.get("call_id") == APPROVAL_TOOL_CALL_ID
+        ):
+            approval_route_resolved_count += 1
+            child_ref = approval_route.get("child_session_ref")
+            relative = child_ref.get("path") if isinstance(child_ref, dict) else None
+            if isinstance(relative, str):
+                approval_child_refs.add(relative)
+    for relative in approval_child_refs:
+        child_path = path.parent / relative
+        for raw_line in child_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(raw_line)
+            payload = record.get("payload")
+            entry = payload.get("session_log_entry") if isinstance(payload, dict) else None
+            control = entry.get("control") if isinstance(entry, dict) else None
+            approval = control.get("tool_approval") if isinstance(control, dict) else None
+            if (
+                isinstance(approval, dict)
+                and approval.get("action") == "resolved"
+                and approval.get("call_id") == APPROVAL_TOOL_CALL_ID
+                and approval.get("user_decision") == "approved"
+            ):
+                approved_tool_call_count += 1
     return SessionAudit(
         event_counts=counts,
         completed_steps=tuple(completed_steps),
         final_answer_count=final_answer_count,
+        approval_final_answer_count=approval_final_answer_count,
         task_final_count=task_final_count,
+        approval_route_resolved_count=approval_route_resolved_count,
+        approved_tool_call_count=approved_tool_call_count,
         failed_run_count=failed_run_count,
     )
 
@@ -452,6 +549,43 @@ def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     if fixture.max_concurrent_reads != 2:
         raise AcceptanceError(
             "parallel read steps did not overlap at the provider boundary"
+        )
+    if fixture.protocol_errors:
+        raise AcceptanceError(
+            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+        )
+
+
+def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
+    if audit.event_counts.get("task_handoff_requested") != 2:
+        raise AcceptanceError("approval phase did not append its model-owned handoff")
+    if audit.event_counts.get("task_handoff_resolved") != 2:
+        raise AcceptanceError("approval phase did not resolve its task handoff")
+    if audit.completed_steps.count("write_note") != 1:
+        raise AcceptanceError("approved write step did not complete exactly once")
+    if (
+        audit.approval_route_resolved_count != 1
+        or audit.approved_tool_call_count != 1
+    ):
+        raise AcceptanceError(
+            "write approval was not durably resolved once in both parent route and child audit"
+        )
+    if audit.final_answer_count != 1 or audit.approval_final_answer_count != 1:
+        raise AcceptanceError("approval phase violated the one-final-per-task contract")
+    if audit.task_final_count != 2 or audit.failed_run_count != 0:
+        raise AcceptanceError("approval task did not complete through the shared root terminal")
+    expected_requests = {
+        "conversation": 2,
+        "planner": 2,
+        f"read:{READ_STEP_IDS[0]}": 1,
+        f"read:{READ_STEP_IDS[1]}": 1,
+        "write:request": 1,
+        "write:after_tool": 1,
+        "synthesis": 2,
+    }
+    if fixture.request_counts != expected_requests:
+        raise AcceptanceError(
+            f"unexpected approval provider request distribution {fixture.request_counts}"
         )
     if fixture.protocol_errors:
         raise AcceptanceError(
@@ -540,6 +674,38 @@ def main() -> int:
         if READ_STEP_TITLES[0] not in raw_text or "0/2" not in raw_text:
             raise AcceptanceError("TUI never rendered the parallel task batch progress")
         validate_audit(audit, fixture)
+
+        runner.type_text(APPROVAL_USER_PROMPT)
+        runner.send("\r")
+        runner.wait_until(
+            lambda text: "Review Tool Call" in text
+            and "write_file" in text
+            and APPROVAL_PATH in text,
+            deadline.remaining(),
+            "task participant write approval",
+            final_screen=True,
+        )
+        runner.send("y")
+        session_path, approval_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.approval_final_answer_count == 1
+            and value.task_final_count == 2,
+            deadline.remaining(),
+        )
+        approval_screen = runner.wait_until(
+            lambda text: APPROVAL_FINAL_CANARY in text
+            and "Thinking..." not in text
+            and "Replying..." not in text,
+            deadline.remaining(),
+            "settled approved task final answer",
+            final_screen=True,
+        )
+        if approval_screen.count(APPROVAL_FINAL_CANARY) != 1:
+            raise AcceptanceError("TUI rendered the approved task final more than once")
+        if (workspace / APPROVAL_PATH).read_text(encoding="utf-8") != APPROVAL_CONTENT:
+            raise AcceptanceError("approved task write did not reach the workspace")
+        validate_approval_audit(approval_audit, fixture)
         runner.quit(timeout=deadline.remaining(10.0))
         runner.stop()
         runner = None
@@ -561,6 +727,8 @@ def main() -> int:
                 "parallel_read_provider_overlap": fixture.max_concurrent_reads,
                 "completed_step_count": len(audit.completed_steps),
                 "unique_parent_final_count": audit.final_answer_count,
+                "approved_write_count": approval_audit.approved_tool_call_count,
+                "completed_task_count": approval_audit.task_final_count,
                 "route_kill_switch_count": audit.event_counts.get(
                     "orchestration_route_disabled",
                     0,

@@ -73,6 +73,32 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             ),
             "synthesis",
         )
+        write_messages = [
+            {
+                "role": "user",
+                "content": "Execute task step.\nStep: write_note\nRole: executor",
+            }
+        ]
+        self.assertEqual(
+            MODULE.classify_request({"messages": write_messages, "tools": []}),
+            "write:request",
+        )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": write_messages
+                    + [
+                        {
+                            "role": "tool",
+                            "tool_call_id": MODULE.APPROVAL_TOOL_CALL_ID,
+                            "content": "ok",
+                        }
+                    ],
+                    "tools": [],
+                }
+            ),
+            "write:after_tool",
+        )
 
     def test_unknown_request_fails_closed(self) -> None:
         with self.assertRaises(MODULE.AcceptanceError):
@@ -91,7 +117,10 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             },
             completed_steps=MODULE.READ_STEP_IDS,
             final_answer_count=1,
+            approval_final_answer_count=0,
             task_final_count=1,
+            approval_route_resolved_count=0,
+            approved_tool_call_count=0,
             failed_run_count=0,
         )
         fixture = MODULE.FixtureState(
