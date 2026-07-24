@@ -1242,6 +1242,8 @@ fn orchestration_eval_route_gate(
         || eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES;
     let status = if stale_reason.is_some() {
         OrchestrationEvalRouteStatus::Stale
+    } else if hard_invariant_violations > 0 {
+        OrchestrationEvalRouteStatus::Blocked
     } else if insufficient {
         OrchestrationEvalRouteStatus::InsufficientEvidence
     } else if reasons.is_empty() {

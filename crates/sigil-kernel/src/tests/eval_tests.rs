@@ -289,6 +289,44 @@ fn orchestration_eval_rejects_duplicate_repetition_identity_as_evidence() -> Res
 }
 
 #[test]
+fn orchestration_eval_hard_invariant_violation_blocks_even_with_insufficient_evidence() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut record = orchestration_report_record(
+        "negative-invariant",
+        OrchestrationEvalCaseClass::Negative,
+        1,
+        false,
+    );
+    record.observation.duplicate_handoffs = 1;
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-hard-invariant-block".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: 1,
+            records: vec![record],
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.eligible_negative_cases, 0);
+    assert_eq!(gate.eligible_positive_cases, 0);
+    assert_eq!(gate.hard_invariant_violations, 1);
+    assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
+    assert!(
+        gate.reasons
+            .iter()
+            .any(|reason| reason.contains("tolerance is zero"))
+    );
+    Ok(())
+}
+
+#[test]
 fn orchestration_eval_never_combines_different_endpoint_identities() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("orchestration-report");
