@@ -17,6 +17,8 @@ on:
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/check-orchestration-deterministic.sh"
+      - "scripts/tui-orchestration-pty-acceptance.py"
+      - "scripts/test-tui-orchestration-pty-acceptance.py"
       - "scripts/generate-desktop-contract.sh"
       - "scripts/test-check-test-layout.py"
       - "scripts/long-session-evidence.py"
@@ -42,6 +44,8 @@ on:
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/check-orchestration-deterministic.sh"
+      - "scripts/tui-orchestration-pty-acceptance.py"
+      - "scripts/test-tui-orchestration-pty-acceptance.py"
       - "scripts/generate-desktop-contract.sh"
       - "scripts/test-check-test-layout.py"
       - "scripts/long-session-evidence.py"
@@ -80,6 +84,7 @@ jobs:
         run: |
           python3 scripts/test-alpha-dogfood-campaign.py
           python3 scripts/test-tui-stateful-pty-acceptance.py
+          python3 scripts/test-tui-orchestration-pty-acceptance.py
 
       - name: Enforce physical Rust test layout
         run: |
@@ -208,6 +213,23 @@ jobs:
 
       - name: Run deterministic orchestration acceptance
         run: ./scripts/check-orchestration-deterministic.sh
+
+      - name: Build Sigil for orchestration PTY acceptance
+        run: cargo build --locked -p sigil
+
+      - name: Run model-owned orchestration real-PTY acceptance
+        run: >-
+          timeout 120s python3 scripts/tui-orchestration-pty-acceptance.py
+          --binary target/debug/sigil
+
+      - name: Upload orchestration PTY acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tui-orchestration-pty-acceptance
+          path: .repo-local-dev/tui-orchestration-acceptance/**
+          if-no-files-found: warn
+          retention-days: 7
 
   platform-check:
     name: Platform reliability (${{ matrix.name }})
