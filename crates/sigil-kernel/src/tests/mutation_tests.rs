@@ -6,14 +6,14 @@ use std::{
 use anyhow::Result;
 
 use crate::{
-    CheckpointRestored, DurableEventType, EventClass, JsonlSessionStore, ModelMessage,
-    MutationArtifactCleanupRequested, MutationArtifactCleanupTarget,
-    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
-    MutationArtifactRetentionPolicy, MutationBatchStatus, MutationEventRecorder,
-    MutationObservedState, MutationPrepared, MutationReconciled, MutationResolution,
-    MutationSubject, SessionLogEntry, SessionStreamRecord, SnapshotCoverage, ToolEffect,
-    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
+    CheckpointRestored, ControlEntry, DurableEventType, EventClass, IsolatedWorkspaceBackend,
+    IsolatedWorkspacePrepared, JsonlSessionStore, ModelMessage, MutationArtifactCleanupRequested,
+    MutationArtifactCleanupTarget, MutationArtifactLifecycleRecorded,
+    MutationArtifactLifecycleStatus, MutationArtifactRetentionPolicy, MutationBatchStatus,
+    MutationEventRecorder, MutationObservedState, MutationPrepared, MutationReconciled,
+    MutationResolution, MutationSubject, SessionLogEntry, SessionStreamRecord, SnapshotCoverage,
+    ToolEffect, VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceMutationScan, WriteIsolationMode, bytes_hash,
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, file_content_hash,
     restore_file_from_snapshot_with_mutation, stable_workspace_id, write_file_with_mutation,
@@ -587,6 +587,7 @@ fn controlled_prepare_skips_common_secret_like_artifacts() -> Result<()> {
             "{\"private_key\":\"old\"}",
             "{\"private_key\":\"new\"}",
         ),
+        ("sigil.toml", "api_key = \"old\"", "api_key = \"new\""),
     ] {
         let target = workspace.join(file_name);
         fs::write(&target, old_content)?;
@@ -613,7 +614,7 @@ fn controlled_prepare_skips_common_secret_like_artifacts() -> Result<()> {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(prepared_events.len(), 3);
+    assert_eq!(prepared_events.len(), 4);
     assert!(
         prepared_events
             .iter()
@@ -1069,6 +1070,54 @@ fn mutation_artifact_cleanup_targets_select_coarse_groups() -> Result<()> {
         payloads[0].reason,
         "artifact metadata is not referenced by session events"
     );
+    Ok(())
+}
+
+#[test]
+fn isolated_workspace_overlay_artifacts_are_durable_retention_references() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let workspace_id = stable_workspace_id(&workspace)?;
+    let content_artifact = recorder.capture_immutable_content_artifact(
+        &workspace_id,
+        "overlay-operation",
+        Path::new("note.txt"),
+        b"dirty note",
+    )?;
+    let manifest_artifact = recorder.capture_immutable_content_artifact(
+        &workspace_id,
+        "overlay-operation",
+        Path::new(".sigil-overlay/manifest.json"),
+        b"overlay manifest",
+    )?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::IsolatedWorkspacePrepared(IsolatedWorkspacePrepared {
+            isolated_workspace_id: "worktree-overlay-retention".to_owned(),
+            parent_workspace_id: workspace_id,
+            owner_agent_id: "task:overlay".to_owned(),
+            isolation_mode: WriteIsolationMode::Worktree,
+            base_snapshot_id: "snapshot-overlay".to_owned(),
+            backend: IsolatedWorkspaceBackend::GitWorktree,
+            base_commit: Some("0123456789012345678901234567890123456789".to_owned()),
+            overlay_digest: Some("sha256:overlay".to_owned()),
+            overlay_artifact_ref: Some(manifest_artifact),
+            overlay_content_artifact_refs: vec![content_artifact],
+            overlay_entry_count: 1,
+        }),
+    ))?;
+
+    let preview = recorder.preview_artifact_cleanup(
+        &MutationArtifactCleanupTarget::Unreferenced,
+        &MutationArtifactRetentionPolicy::default(),
+    )?;
+
+    assert_eq!(preview.scanned_artifacts, 2);
+    assert_eq!(preview.deleted_artifacts, 0);
+    assert_eq!(artifact_files(&artifact_root)?.len(), 4);
     Ok(())
 }
 

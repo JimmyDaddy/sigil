@@ -44,11 +44,12 @@ use super::{
     TaskChildSessionRunRequest, TaskChildSessionRunner, child_status_from_output,
     decode_changeset_only_child_output, durable_workspace_mutation_evidence,
     latest_relevant_successful_verification_sequence, participant_result_entry, planner_prompt,
-    reconcile_task_final_answer_prefix, relevant_verification_receipts,
-    rerun_task_verification_check, route_id_for_call, run_status_from_step_status,
-    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, subagent_step_prompt, task_status_from_step_status,
-    task_step_auto_run_policy, task_step_default_policy, task_step_readiness,
+    reconcile_task_final_answer_prefix, record_isolated_child_output,
+    relevant_verification_receipts, rerun_task_verification_check, route_id_for_call,
+    run_status_from_step_status, run_task_step_verification_checks, step_status_after_readiness,
+    step_status_from_outcome, step_terminal_reason, subagent_step_prompt,
+    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -3375,6 +3376,40 @@ async fn worktree_child_records_physical_source_and_child_snapshot_without_paren
         produced.child_snapshot_id.as_deref(),
         Some("snapshot-worktree-child")
     );
+    Ok(())
+}
+
+#[test]
+fn unchanged_worktree_child_does_not_request_empty_merge_review() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_worktree_noop")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect without changing inherited files".to_owned(),
+    };
+    let step = worktree_step()?;
+    let output = StepRunOutput {
+        final_text: "no changes needed".to_owned(),
+        outcome: crate::AgentRunOutcome::default(),
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changeset_proposal: None,
+        isolated_parent_snapshot_id: Some("snapshot-parent".to_owned()),
+    };
+    let mut session = Session::new("planner", "model");
+    let mut handler = RecordingEventHandler::default();
+
+    record_isolated_child_output(
+        &mut session,
+        &mut handler,
+        &request,
+        1,
+        &step,
+        "snapshot-parent",
+        &output,
+    )?;
+
+    assert!(session.entries().is_empty());
+    assert!(handler.events.is_empty());
     Ok(())
 }
 

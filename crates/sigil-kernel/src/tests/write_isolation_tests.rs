@@ -147,6 +147,12 @@ fn write_isolation_projection_tracks_lease_and_merge_review_state() {
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: "snapshot-base".to_owned(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
+        materialized_snapshot_id: None,
     };
     let produced = IsolatedChangeSetProduced {
         changeset_id: change_set_id(),
@@ -238,6 +244,11 @@ fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_win
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: "snapshot-base".to_owned(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: Some("0123456789012345678901234567890123456789".to_owned()),
+        overlay_digest: Some("sha256:overlay".to_owned()),
+        overlay_artifact_ref: Some("mutation-artifact:sha256:manifest".to_owned()),
+        overlay_content_artifact_refs: vec!["mutation-artifact:sha256:content".to_owned()],
+        overlay_entry_count: 1,
     };
     let created = IsolatedWorkspaceCreated {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),
@@ -246,6 +257,12 @@ fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_win
         isolation_mode: prepared.isolation_mode,
         base_snapshot_id: prepared.base_snapshot_id.clone(),
         backend: prepared.backend,
+        base_commit: prepared.base_commit.clone(),
+        overlay_digest: prepared.overlay_digest.clone(),
+        overlay_artifact_ref: prepared.overlay_artifact_ref.clone(),
+        overlay_content_artifact_refs: prepared.overlay_content_artifact_refs.clone(),
+        overlay_entry_count: prepared.overlay_entry_count,
+        materialized_snapshot_id: Some("snapshot-materialized".to_owned()),
     };
     let failed_cleanup = IsolatedWorkspaceCleanupRecorded {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),
@@ -310,6 +327,11 @@ fn isolated_workspace_projection_marks_conflicting_materialization_binding() {
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: "snapshot-base".to_owned(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
     };
     let created = IsolatedWorkspaceCreated {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),
@@ -318,6 +340,12 @@ fn isolated_workspace_projection_marks_conflicting_materialization_binding() {
         isolation_mode: prepared.isolation_mode,
         base_snapshot_id: prepared.base_snapshot_id.clone(),
         backend: prepared.backend,
+        base_commit: prepared.base_commit.clone(),
+        overlay_digest: prepared.overlay_digest.clone(),
+        overlay_artifact_ref: prepared.overlay_artifact_ref.clone(),
+        overlay_content_artifact_refs: prepared.overlay_content_artifact_refs.clone(),
+        overlay_entry_count: prepared.overlay_entry_count,
+        materialized_snapshot_id: None,
     };
 
     let projection = WriteIsolationProjection::from_entries(&[
@@ -397,6 +425,11 @@ fn typed_event_decode_covers_write_isolation_family() {
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: "snapshot-base".to_owned(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
     };
     let event = stored_control_event(
         DurableEventType::IsolatedWorkspacePrepared,
@@ -451,6 +484,11 @@ fn write_isolation_projection_replays_durable_stream_records() -> Result<()> {
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: "snapshot-base".to_owned(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
     };
     let cleanup = IsolatedWorkspaceCleanupRecorded {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),

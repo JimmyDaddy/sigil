@@ -150,7 +150,7 @@ pub(super) fn snapshot_coverage_for_pre_mutation_content(
     Ok(SnapshotCoverage::Captured(artifact_id))
 }
 
-fn store_mutation_artifact(
+pub(super) fn store_mutation_artifact(
     artifact_root: &Path,
     workspace_id: &str,
     operation_id: &str,
@@ -394,7 +394,7 @@ fn mutation_artifact_digest(artifact_id: &MutationArtifactId) -> Result<&str> {
         .ok_or_else(|| anyhow!("unsupported mutation artifact id: {artifact_id}"))
 }
 
-fn is_sensitive_snapshot_path(path: &Path) -> bool {
+pub(super) fn is_sensitive_snapshot_path(path: &Path) -> bool {
     let components = path
         .components()
         .filter_map(|component| match component {
@@ -416,6 +416,7 @@ fn is_sensitive_snapshot_path(path: &Path) -> bool {
         "credentials.json",
         "service-account.json",
         "service_account.json",
+        "sigil.toml",
         "known_hosts",
         "config",
         "id_rsa",

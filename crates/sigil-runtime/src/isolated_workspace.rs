@@ -5,7 +5,7 @@
 //! outcomes through the durable write-isolation protocol.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -13,14 +13,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, IsolatedWorkspaceBackend,
-    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, Session,
-    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, VerificationScope,
-    WorkspaceSnapshotBuild, WriteIsolationMode, build_workspace_snapshot, stable_workspace_id,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, MutationArtifactId,
+    MutationEventRecorder, Session, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
+    VerificationScope, WorkspaceSnapshotBuild, WriteIsolationMode, build_workspace_snapshot,
+    is_sensitive_mutation_artifact_path, stable_workspace_id,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -36,6 +38,8 @@ const MAX_CHANGESET_FILES: usize = 256;
 const MAX_CHANGESET_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHANGESET_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHANGESET_PATH_BYTES: usize = 256 * 1024;
+const MAX_OVERLAY_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const OVERLAY_MANIFEST_VERSION: u32 = 1;
 
 /// Request for one detached Git worktree bound to an existing parent snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,112 @@ pub struct GitWorktreeMaterializationRequest {
     pub parent_workspace_root: PathBuf,
     pub isolated_workspace_id: String,
     pub base_snapshot_id: String,
+}
+
+/// Request to freeze one exact Git commit plus safe dirty/untracked overlay.
+#[derive(Debug, Clone)]
+pub struct GitWorktreeBaseFreezeRequest {
+    pub parent_workspace_root: PathBuf,
+    pub base_snapshot_id: String,
+    pub operation_id: String,
+    pub artifact_recorder: MutationEventRecorder,
+}
+
+/// Immutable, content-addressed parent baseline reusable by independent child worktrees.
+#[derive(Debug, Clone)]
+pub struct FrozenGitWorktreeBase {
+    parent_workspace_root: PathBuf,
+    base_snapshot: WorkspaceSnapshotBuild,
+    base_commit: String,
+    overlay_manifest: GitWorktreeOverlayManifest,
+    overlay_digest: String,
+    overlay_artifact_ref: MutationArtifactId,
+    artifact_recorder: MutationEventRecorder,
+}
+
+impl FrozenGitWorktreeBase {
+    #[must_use]
+    pub fn parent_workspace_root(&self) -> &Path {
+        &self.parent_workspace_root
+    }
+
+    #[must_use]
+    pub fn base_snapshot_id(&self) -> &str {
+        self.base_snapshot
+            .workspace_snapshot_id
+            .as_deref()
+            .expect("frozen worktree base must own a complete snapshot")
+    }
+
+    #[must_use]
+    pub fn base_commit(&self) -> &str {
+        &self.base_commit
+    }
+
+    #[must_use]
+    pub fn overlay_digest(&self) -> &str {
+        &self.overlay_digest
+    }
+
+    #[must_use]
+    pub fn overlay_artifact_ref(&self) -> &MutationArtifactId {
+        &self.overlay_artifact_ref
+    }
+
+    #[must_use]
+    pub fn overlay_content_artifact_refs(&self) -> Vec<MutationArtifactId> {
+        self.overlay_manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.content_artifact_ref.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn overlay_entry_count(&self) -> usize {
+        self.overlay_manifest.entries.len()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+struct GitWorktreeOverlayManifest {
+    version: u32,
+    base_commit: String,
+    parent_snapshot_id: String,
+    entries: Vec<GitWorktreeOverlayEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+struct GitWorktreeOverlayEntry {
+    relative_path: PathBuf,
+    action: GitWorktreeOverlayAction,
+    source: GitWorktreeOverlaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_artifact_ref: Option<MutationArtifactId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
+    #[serde(default)]
+    readonly: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GitWorktreeOverlayAction {
+    Upsert,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GitWorktreeOverlaySource {
+    TrackedDirty,
+    Untracked,
 }
 
 /// Owned receipt for one materialized detached Git worktree.
@@ -58,6 +168,11 @@ pub struct MaterializedGitWorktree {
     base_snapshot_id: String,
     child_snapshot_id: String,
     base_commit: String,
+    baseline_tree: String,
+    overlay_digest: Option<String>,
+    overlay_artifact_ref: Option<MutationArtifactId>,
+    overlay_content_artifact_refs: Vec<MutationArtifactId>,
+    overlay_entry_count: usize,
 }
 
 impl MaterializedGitWorktree {
@@ -89,6 +204,26 @@ impl MaterializedGitWorktree {
     #[must_use]
     pub fn base_commit(&self) -> &str {
         &self.base_commit
+    }
+
+    #[must_use]
+    pub fn overlay_digest(&self) -> Option<&str> {
+        self.overlay_digest.as_deref()
+    }
+
+    #[must_use]
+    pub fn overlay_artifact_ref(&self) -> Option<&MutationArtifactId> {
+        self.overlay_artifact_ref.as_ref()
+    }
+
+    #[must_use]
+    pub fn overlay_content_artifact_refs(&self) -> &[MutationArtifactId] {
+        &self.overlay_content_artifact_refs
+    }
+
+    #[must_use]
+    pub fn overlay_entry_count(&self) -> usize {
+        self.overlay_entry_count
     }
 
     /// Captures the current complete task verification snapshot for this exact worktree.
@@ -134,7 +269,7 @@ impl MaterializedGitWorktree {
         change_set_id: ChangeSetId,
         title: impl Into<String>,
         summary: impl Into<String>,
-    ) -> Result<TaskChildChangeSetProposal> {
+    ) -> Result<Option<TaskChildChangeSetProposal>> {
         extract_git_worktree_changeset(self, change_set_id, title.into(), summary.into()).await
     }
 }
@@ -165,6 +300,67 @@ pub struct IsolatedWorkspaceCleanupReconciliation {
     pub failures: Vec<String>,
 }
 
+/// Freezes the exact parent snapshot and persists a safe dirty/untracked overlay through the
+/// RFC-0002 content-addressed mutation artifact store.
+///
+/// The caller should hold the workspace mutation lease while this function runs. The function
+/// independently checks the requested snapshot before and after capture so mutations that do not
+/// participate in that lease still fail closed.
+///
+/// # Errors
+///
+/// Returns an error before child materialization for snapshot/ref drift, submodules, unmerged
+/// paths, unsafe or secret-like overlay content, unsupported file kinds, or artifact budgets.
+pub async fn freeze_git_worktree_base(
+    request: GitWorktreeBaseFreezeRequest,
+) -> Result<FrozenGitWorktreeBase> {
+    if request.base_snapshot_id.trim().is_empty() {
+        bail!("isolated Git worktree base snapshot id must not be empty");
+    }
+    if request.operation_id.trim().is_empty() {
+        bail!("isolated Git worktree overlay operation id must not be empty");
+    }
+    let parent_workspace_root = canonical_directory(&request.parent_workspace_root)
+        .await
+        .context("failed to resolve parent workspace root for isolated Git worktree overlay")?;
+    validate_git_repository_root(&parent_workspace_root).await?;
+    validate_no_submodules(&parent_workspace_root).await?;
+    let parent_snapshot =
+        validate_parent_snapshot(&parent_workspace_root, &request.base_snapshot_id).await?;
+    let base_commit = resolve_base_commit(&parent_workspace_root).await?;
+    let workspace_id = stable_workspace_id(&parent_workspace_root)?;
+    let overlay_manifest = capture_git_worktree_overlay(
+        &parent_workspace_root,
+        &parent_snapshot,
+        &base_commit,
+        &workspace_id,
+        &request.operation_id,
+        &request.artifact_recorder,
+    )
+    .await?;
+    validate_frozen_parent(&parent_workspace_root, &base_commit, &parent_snapshot).await?;
+    let manifest_bytes = serde_json::to_vec(&overlay_manifest)
+        .context("failed to encode isolated Git worktree overlay manifest")?;
+    let overlay_digest = format!("sha256:{}", bytes_sha256(&manifest_bytes));
+    let overlay_artifact_ref = capture_immutable_overlay_artifact(
+        request.artifact_recorder.clone(),
+        workspace_id,
+        request.operation_id.clone(),
+        PathBuf::from(".sigil-overlay/manifest.json"),
+        manifest_bytes,
+    )
+    .await?;
+    Ok(FrozenGitWorktreeBase {
+        parent_workspace_root,
+        base_snapshot: parent_snapshot,
+        base_commit,
+        overlay_manifest,
+        overlay_digest,
+        overlay_artifact_ref,
+        artifact_recorder: request.artifact_recorder,
+    })
+}
+
 /// Materializes a detached Git worktree only when the parent is clean and still matches the
 /// requested workspace snapshot.
 ///
@@ -191,35 +387,67 @@ pub async fn materialize_git_worktree(
     validate_clean_parent(&parent_workspace_root).await?;
     let parent_snapshot =
         validate_parent_snapshot(&parent_workspace_root, &request.base_snapshot_id).await?;
-
-    let base_commit = git_text(
-        &parent_workspace_root,
-        [
-            OsString::from("rev-parse"),
-            OsString::from("--verify"),
-            OsString::from("HEAD^{commit}"),
-        ],
+    let base_commit = resolve_base_commit(&parent_workspace_root).await?;
+    materialize_git_worktree_binding(
+        parent_workspace_root,
+        request.isolated_workspace_id,
+        request.base_snapshot_id,
+        parent_snapshot,
+        base_commit,
+        None,
     )
     .await
-    .context("failed to resolve isolated Git worktree base commit")?;
-    if !(40..=64).contains(&base_commit.len())
-        || !base_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        bail!("Git returned an invalid base commit for isolated worktree");
-    }
+}
 
+/// Materializes one independently owned worktree from a frozen commit plus immutable overlay.
+///
+/// Each call creates a separate worktree and consumes no mutable shared directory. Content blobs
+/// may be shared read-only through the RFC-0002 artifact store.
+///
+/// # Errors
+///
+/// Returns an error and cleans up the private worktree if the parent snapshot/ref drifts, an
+/// overlay artifact is unavailable, overlay application is unsafe, or the materialized snapshot
+/// differs from the frozen parent snapshot.
+pub async fn materialize_git_worktree_from_frozen_base(
+    frozen: &FrozenGitWorktreeBase,
+    isolated_workspace_id: impl Into<String>,
+) -> Result<MaterializedGitWorktree> {
+    let isolated_workspace_id = isolated_workspace_id.into();
+    validate_isolated_workspace_id(&isolated_workspace_id)?;
+    validate_frozen_parent(
+        &frozen.parent_workspace_root,
+        &frozen.base_commit,
+        &frozen.base_snapshot,
+    )
+    .await?;
+    materialize_git_worktree_binding(
+        frozen.parent_workspace_root.clone(),
+        isolated_workspace_id,
+        frozen.base_snapshot_id().to_owned(),
+        frozen.base_snapshot.clone(),
+        frozen.base_commit.clone(),
+        Some(frozen),
+    )
+    .await
+}
+
+async fn materialize_git_worktree_binding(
+    parent_workspace_root: PathBuf,
+    isolated_workspace_id: String,
+    base_snapshot_id: String,
+    parent_snapshot: WorkspaceSnapshotBuild,
+    base_commit: String,
+    frozen: Option<&FrozenGitWorktreeBase>,
+) -> Result<MaterializedGitWorktree> {
     let git_common_dir = resolve_git_common_dir(&parent_workspace_root).await?;
     let isolation_root = prepare_isolation_root(&git_common_dir).await?;
-    let workspace_root = isolation_root.join(&request.isolated_workspace_id);
-    ensure_confined_destination(
-        &isolation_root,
-        &workspace_root,
-        &request.isolated_workspace_id,
-    )?;
+    let workspace_root = isolation_root.join(&isolated_workspace_id);
+    ensure_confined_destination(&isolation_root, &workspace_root, &isolated_workspace_id)?;
     if tokio::fs::symlink_metadata(&workspace_root).await.is_ok() {
         bail!(
             "isolated Git worktree destination already exists for {}",
-            request.isolated_workspace_id
+            isolated_workspace_id
         );
     }
 
@@ -251,8 +479,15 @@ pub async fn materialize_git_worktree(
     if let Err(error) = ensure_confined_destination(
         &isolation_root,
         &canonical_workspace_root,
-        &request.isolated_workspace_id,
+        &isolated_workspace_id,
     ) {
+        let cleanup_error =
+            cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
+        return Err(with_cleanup_context(error, cleanup_error));
+    }
+    if let Some(frozen) = frozen
+        && let Err(error) = apply_frozen_overlay(&canonical_workspace_root, frozen).await
+    {
         let cleanup_error =
             cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
         return Err(with_cleanup_context(error, cleanup_error));
@@ -269,15 +504,38 @@ pub async fn materialize_git_worktree(
                 return Err(with_cleanup_context(error, cleanup_error));
             }
         };
+    let baseline_tree = match capture_materialized_baseline_tree(&canonical_workspace_root).await {
+        Ok(tree) => tree,
+        Err(error) => {
+            let cleanup_error =
+                cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root)
+                    .await;
+            return Err(with_cleanup_context(error, cleanup_error));
+        }
+    };
+    if let Err(error) =
+        validate_frozen_parent(&parent_workspace_root, &base_commit, &parent_snapshot).await
+    {
+        let cleanup_error =
+            cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
+        return Err(with_cleanup_context(error, cleanup_error));
+    }
 
     Ok(MaterializedGitWorktree {
         parent_workspace_root,
         workspace_root: canonical_workspace_root,
         isolation_root,
-        isolated_workspace_id: request.isolated_workspace_id,
-        base_snapshot_id: request.base_snapshot_id,
+        isolated_workspace_id,
+        base_snapshot_id,
         child_snapshot_id,
         base_commit,
+        baseline_tree,
+        overlay_digest: frozen.map(|frozen| frozen.overlay_digest.clone()),
+        overlay_artifact_ref: frozen.map(|frozen| frozen.overlay_artifact_ref.clone()),
+        overlay_content_artifact_refs: frozen
+            .map(FrozenGitWorktreeBase::overlay_content_artifact_refs)
+            .unwrap_or_default(),
+        overlay_entry_count: frozen.map_or(0, FrozenGitWorktreeBase::overlay_entry_count),
     })
 }
 
@@ -417,12 +675,531 @@ pub async fn reconcile_isolated_workspace_cleanup(
     Ok(report)
 }
 
+async fn capture_git_worktree_overlay(
+    parent_workspace_root: &Path,
+    parent_snapshot: &WorkspaceSnapshotBuild,
+    base_commit: &str,
+    workspace_id: &str,
+    operation_id: &str,
+    artifact_recorder: &MutationEventRecorder,
+) -> Result<GitWorktreeOverlayManifest> {
+    let unmerged = git_bytes_with_limit(
+        parent_workspace_root,
+        [
+            OsString::from("ls-files"),
+            OsString::from("--unmerged"),
+            OsString::from("-z"),
+        ],
+        MAX_CHANGESET_PATH_BYTES,
+    )
+    .await?;
+    if !unmerged.is_empty() {
+        bail!("isolated Git worktree overlay does not support unmerged paths");
+    }
+
+    let tracked_dirty = git_bytes_with_limit(
+        parent_workspace_root,
+        [
+            OsString::from("diff"),
+            OsString::from("--name-only"),
+            OsString::from("-z"),
+            OsString::from("--no-renames"),
+            OsString::from("HEAD"),
+            OsString::from("--"),
+        ],
+        MAX_CHANGESET_PATH_BYTES,
+    )
+    .await?;
+    let untracked = git_bytes_with_limit(
+        parent_workspace_root,
+        [
+            OsString::from("ls-files"),
+            OsString::from("--others"),
+            OsString::from("--exclude-standard"),
+            OsString::from("-z"),
+        ],
+        MAX_CHANGESET_PATH_BYTES,
+    )
+    .await?;
+    let mut sources = BTreeMap::new();
+    for path in parse_nul_paths(&tracked_dirty)? {
+        sources.insert(path, GitWorktreeOverlaySource::TrackedDirty);
+    }
+    for path in parse_nul_paths(&untracked)? {
+        sources
+            .entry(path)
+            .or_insert(GitWorktreeOverlaySource::Untracked);
+    }
+    let materializable_paths = parent_snapshot
+        .manifest
+        .entries
+        .iter()
+        .map(|entry| entry.normalized_path.clone())
+        .collect::<BTreeSet<_>>();
+    let materializable_entry_count = sources
+        .keys()
+        .filter(|path| materializable_paths.contains(*path))
+        .count();
+    if materializable_entry_count > MAX_CHANGESET_FILES {
+        bail!(
+            "isolated Git worktree overlay contains {} entries, exceeding the {} entry limit",
+            materializable_entry_count,
+            MAX_CHANGESET_FILES
+        );
+    }
+    let mut total_bytes = 0_usize;
+    let mut entries = Vec::with_capacity(sources.len());
+    for (path, source) in sources {
+        let relative_path = validate_relative_path(&path)?;
+        validate_overlay_path(&relative_path)?;
+        if !materializable_paths.contains(&relative_path) {
+            continue;
+        }
+        reject_nested_repository(parent_workspace_root, &relative_path).await?;
+        let absolute_path = parent_workspace_root.join(&relative_path);
+        let metadata = match tokio::fs::symlink_metadata(&absolute_path).await {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect isolated overlay path {}",
+                        relative_path.display()
+                    )
+                });
+            }
+        };
+        let Some(metadata) = metadata else {
+            if source == GitWorktreeOverlaySource::Untracked {
+                bail!(
+                    "untracked isolated overlay path disappeared during capture: {}",
+                    relative_path.display()
+                );
+            }
+            entries.push(GitWorktreeOverlayEntry {
+                relative_path,
+                action: GitWorktreeOverlayAction::Delete,
+                source,
+                content_artifact_ref: None,
+                content_sha256: None,
+                mode: None,
+                readonly: false,
+            });
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "isolated Git worktree overlay path must be a regular file: {}",
+                relative_path.display()
+            );
+        }
+        let file_size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        if file_size > MAX_CHANGESET_FILE_BYTES {
+            bail!(
+                "isolated Git worktree overlay path {} exceeds the {} byte file limit",
+                relative_path.display(),
+                MAX_CHANGESET_FILE_BYTES
+            );
+        }
+        total_bytes = total_bytes.saturating_add(file_size);
+        if total_bytes > MAX_OVERLAY_TOTAL_BYTES {
+            bail!(
+                "isolated Git worktree overlay exceeds the {} byte total limit",
+                MAX_OVERLAY_TOTAL_BYTES
+            );
+        }
+        let bytes = tokio::fs::read(&absolute_path).await.with_context(|| {
+            format!(
+                "failed to read isolated overlay path {}",
+                relative_path.display()
+            )
+        })?;
+        if looks_like_secret_overlay_content(&bytes) {
+            bail!(
+                "isolated Git worktree overlay rejected secret-like content at {}; use changeset-only isolation or clean the workspace first",
+                relative_path.display()
+            );
+        }
+        let content_sha256 = format!("sha256:{}", bytes_sha256(&bytes));
+        let content_artifact_ref = capture_immutable_overlay_artifact(
+            artifact_recorder.clone(),
+            workspace_id.to_owned(),
+            operation_id.to_owned(),
+            relative_path.clone(),
+            bytes,
+        )
+        .await?;
+        entries.push(GitWorktreeOverlayEntry {
+            relative_path,
+            action: GitWorktreeOverlayAction::Upsert,
+            source,
+            content_artifact_ref: Some(content_artifact_ref),
+            content_sha256: Some(content_sha256),
+            mode: overlay_file_mode(&metadata),
+            readonly: metadata.permissions().readonly(),
+        });
+    }
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(GitWorktreeOverlayManifest {
+        version: OVERLAY_MANIFEST_VERSION,
+        base_commit: base_commit.to_owned(),
+        parent_snapshot_id: parent_snapshot
+            .workspace_snapshot_id
+            .clone()
+            .ok_or_else(|| anyhow!("isolated overlay parent snapshot is incomplete"))?,
+        entries,
+    })
+}
+
+async fn apply_frozen_overlay(workspace_root: &Path, frozen: &FrozenGitWorktreeBase) -> Result<()> {
+    let manifest_bytes = read_immutable_overlay_artifact(
+        frozen.artifact_recorder.clone(),
+        frozen.overlay_artifact_ref.clone(),
+    )
+    .await?;
+    let observed_digest = format!("sha256:{}", bytes_sha256(&manifest_bytes));
+    if observed_digest != frozen.overlay_digest {
+        bail!("isolated Git worktree overlay manifest digest mismatch");
+    }
+    let observed_manifest = serde_json::from_slice::<GitWorktreeOverlayManifest>(&manifest_bytes)
+        .context("failed to decode isolated Git worktree overlay manifest")?;
+    if observed_manifest != frozen.overlay_manifest
+        || observed_manifest.version != OVERLAY_MANIFEST_VERSION
+        || observed_manifest.base_commit != frozen.base_commit
+        || observed_manifest.parent_snapshot_id != frozen.base_snapshot_id()
+    {
+        bail!("isolated Git worktree overlay manifest binding mismatch");
+    }
+
+    for entry in &observed_manifest.entries {
+        let relative_path = validate_relative_path(&entry.relative_path)?;
+        validate_overlay_path(&relative_path)?;
+        ensure_overlay_parent(workspace_root, &relative_path).await?;
+        let absolute_path = workspace_root.join(&relative_path);
+        let existing = match tokio::fs::symlink_metadata(&absolute_path).await {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("failed to inspect overlay destination"),
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            bail!(
+                "isolated Git worktree overlay destination is not a regular file: {}",
+                relative_path.display()
+            );
+        }
+        match entry.action {
+            GitWorktreeOverlayAction::Delete => {
+                if existing.is_some() {
+                    tokio::fs::remove_file(&absolute_path)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to delete inherited overlay path {}",
+                                relative_path.display()
+                            )
+                        })?;
+                }
+            }
+            GitWorktreeOverlayAction::Upsert => {
+                let artifact_ref = entry.content_artifact_ref.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "isolated overlay path {} is missing content artifact",
+                        relative_path.display()
+                    )
+                })?;
+                let bytes = read_immutable_overlay_artifact(
+                    frozen.artifact_recorder.clone(),
+                    artifact_ref.clone(),
+                )
+                .await?;
+                let content_sha256 = format!("sha256:{}", bytes_sha256(&bytes));
+                if entry.content_sha256.as_deref() != Some(content_sha256.as_str()) {
+                    bail!(
+                        "isolated overlay path {} content digest mismatch",
+                        relative_path.display()
+                    );
+                }
+                tokio::fs::write(&absolute_path, bytes)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to apply inherited overlay path {}",
+                            relative_path.display()
+                        )
+                    })?;
+                apply_overlay_permissions(&absolute_path, entry).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn capture_immutable_overlay_artifact(
+    recorder: MutationEventRecorder,
+    workspace_id: String,
+    operation_id: String,
+    source_path: PathBuf,
+    bytes: Vec<u8>,
+) -> Result<MutationArtifactId> {
+    tokio::task::spawn_blocking(move || {
+        recorder.capture_immutable_content_artifact(
+            &workspace_id,
+            &operation_id,
+            &source_path,
+            &bytes,
+        )
+    })
+    .await
+    .context("isolated overlay artifact capture task failed")?
+}
+
+async fn read_immutable_overlay_artifact(
+    recorder: MutationEventRecorder,
+    artifact_id: MutationArtifactId,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || recorder.read_immutable_content_artifact(&artifact_id))
+        .await
+        .context("isolated overlay artifact read task failed")?
+}
+
+async fn capture_materialized_baseline_tree(workspace_root: &Path) -> Result<String> {
+    run_git(
+        workspace_root,
+        [
+            OsString::from("add"),
+            OsString::from("--all"),
+            OsString::from("--"),
+        ],
+    )
+    .await?;
+    let tree = git_text(workspace_root, [OsString::from("write-tree")])
+        .await
+        .context("failed to capture post-overlay baseline tree")?;
+    validate_git_object_id("post-overlay baseline tree", &tree)?;
+    run_git(
+        workspace_root,
+        [
+            OsString::from("reset"),
+            OsString::from("--mixed"),
+            OsString::from("--quiet"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .await?;
+    Ok(tree)
+}
+
+async fn validate_frozen_parent(
+    parent_workspace_root: &Path,
+    base_commit: &str,
+    parent_snapshot: &WorkspaceSnapshotBuild,
+) -> Result<()> {
+    let observed_commit = resolve_base_commit(parent_workspace_root).await?;
+    if observed_commit != base_commit {
+        bail!("parent Git HEAD drifted from the frozen worktree base commit");
+    }
+    let expected_snapshot_id = parent_snapshot
+        .workspace_snapshot_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("frozen parent workspace snapshot is incomplete"))?;
+    let observed = validate_parent_snapshot(parent_workspace_root, expected_snapshot_id).await?;
+    if observed.manifest.entries != parent_snapshot.manifest.entries
+        || observed.manifest.scope_hash != parent_snapshot.manifest.scope_hash
+    {
+        bail!("parent workspace materializable manifest drifted after overlay freeze");
+    }
+    Ok(())
+}
+
+async fn resolve_base_commit(parent_workspace_root: &Path) -> Result<String> {
+    let base_commit = git_text(
+        parent_workspace_root,
+        [
+            OsString::from("rev-parse"),
+            OsString::from("--verify"),
+            OsString::from("HEAD^{commit}"),
+        ],
+    )
+    .await
+    .context("failed to resolve isolated Git worktree base commit")?;
+    validate_git_object_id("base commit", &base_commit)?;
+    Ok(base_commit)
+}
+
+fn validate_git_object_id(label: &str, object_id: &str) -> Result<()> {
+    if !(40..=64).contains(&object_id.len())
+        || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("Git returned an invalid {label}");
+    }
+    Ok(())
+}
+
+fn validate_overlay_path(relative_path: &Path) -> Result<()> {
+    if is_sensitive_mutation_artifact_path(relative_path) {
+        bail!(
+            "isolated Git worktree overlay rejected secret-like path {}; use changeset-only isolation or clean the workspace first",
+            relative_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn looks_like_secret_overlay_content(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let upper = text.to_ascii_uppercase();
+    upper.contains("-----BEGIN PRIVATE KEY-----")
+        || upper.contains("-----BEGIN RSA PRIVATE KEY-----")
+        || upper.contains("-----BEGIN OPENSSH PRIVATE KEY-----")
+        || upper.lines().any(line_contains_secret_assignment)
+}
+
+fn line_contains_secret_assignment(line: &str) -> bool {
+    let line = line.trim();
+    let Some((key, value)) = line.split_once(['=', ':']) else {
+        return false;
+    };
+    let key = key
+        .trim()
+        .trim_matches(['"', '\''])
+        .replace(['-', '.'], "_");
+    const SECRET_KEY_MARKERS: &[&str] = &[
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_TOKEN",
+        "AUTH_TOKEN",
+        "AUTHORIZATION",
+        "PASSWORD",
+        "PRIVATE_KEY",
+        "SECRET",
+    ];
+    (SECRET_KEY_MARKERS.iter().any(|marker| key.contains(marker))
+        || secret_value_has_known_prefix(value))
+        && likely_non_placeholder_secret(value)
+}
+
+fn secret_value_has_known_prefix(value: &str) -> bool {
+    let value = value.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+    [
+        "sk-",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "akia",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
+}
+
+fn likely_non_placeholder_secret(value: &str) -> bool {
+    let value = value.trim().trim_matches(['"', '\'']);
+    value.len() >= 16
+        && !value.to_ascii_lowercase().contains("example")
+        && !value.to_ascii_lowercase().contains("placeholder")
+        && !value.contains("${")
+}
+
+async fn reject_nested_repository(workspace_root: &Path, relative_path: &Path) -> Result<()> {
+    let mut current = relative_path.parent();
+    while let Some(parent) = current {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if tokio::fs::symlink_metadata(workspace_root.join(parent).join(".git"))
+            .await
+            .is_ok()
+        {
+            bail!(
+                "isolated Git worktree overlay does not support nested repository path {}",
+                relative_path.display()
+            );
+        }
+        current = parent.parent();
+    }
+    Ok(())
+}
+
+async fn ensure_overlay_parent(workspace_root: &Path, relative_path: &Path) -> Result<()> {
+    let Some(parent) = relative_path.parent() else {
+        return Ok(());
+    };
+    let mut current = workspace_root.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            bail!("isolated overlay parent contains unsafe traversal");
+        };
+        current.push(name);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => bail!(
+                "isolated overlay parent is not a plain directory: {}",
+                current.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir(&current).await.with_context(|| {
+                    format!(
+                        "failed to create isolated overlay parent {}",
+                        current.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect isolated overlay parent {}",
+                        current.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn overlay_file_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    Some(metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn overlay_file_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+async fn apply_overlay_permissions(path: &Path, entry: &GitWorktreeOverlayEntry) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = entry
+        .mode
+        .unwrap_or(if entry.readonly { 0o444 } else { 0o644 });
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn apply_overlay_permissions(path: &Path, entry: &GitWorktreeOverlayEntry) -> Result<()> {
+    let mut permissions = tokio::fs::metadata(path).await?.permissions();
+    permissions.set_readonly(entry.readonly);
+    tokio::fs::set_permissions(path, permissions).await?;
+    Ok(())
+}
+
 async fn extract_git_worktree_changeset(
     materialized: &MaterializedGitWorktree,
     change_set_id: ChangeSetId,
     title: String,
     summary: String,
-) -> Result<TaskChildChangeSetProposal> {
+) -> Result<Option<TaskChildChangeSetProposal>> {
     let observed_head = git_text(
         &materialized.workspace_root,
         [
@@ -475,7 +1252,7 @@ async fn extract_git_worktree_changeset(
             OsString::from("--name-only"),
             OsString::from("-z"),
             OsString::from("--no-renames"),
-            OsString::from("HEAD"),
+            OsString::from(&materialized.baseline_tree),
             OsString::from("--"),
         ],
         MAX_CHANGESET_PATH_BYTES,
@@ -483,7 +1260,7 @@ async fn extract_git_worktree_changeset(
     .await?;
     let changed = parse_nul_paths(&changed)?;
     if changed.is_empty() {
-        bail!("isolated worktree did not produce a reviewable changeset");
+        return Ok(None);
     }
     if changed.len() > MAX_CHANGESET_FILES {
         bail!(
@@ -496,8 +1273,9 @@ async fn extract_git_worktree_changeset(
     let mut files = Vec::with_capacity(changed.len());
     for path in &changed {
         let relative = validate_relative_path(path)?;
-        let before = git_blob_at_head(
+        let before = git_blob_at_tree(
             &materialized.workspace_root,
+            &materialized.baseline_tree,
             &relative,
             MAX_CHANGESET_FILE_BYTES,
         )
@@ -553,7 +1331,7 @@ async fn extract_git_worktree_changeset(
             OsString::from("--full-index"),
             OsString::from("--no-ext-diff"),
             OsString::from("--no-renames"),
-            OsString::from("HEAD"),
+            OsString::from(&materialized.baseline_tree),
             OsString::from("--"),
         ],
         MAX_CHANGESET_ARTIFACT_BYTES,
@@ -569,7 +1347,7 @@ async fn extract_git_worktree_changeset(
         .await?
         .workspace_snapshot_id
         .ok_or_else(|| anyhow!("isolated child snapshot is incomplete after changes"))?;
-    Ok(TaskChildChangeSetProposal {
+    Ok(Some(TaskChildChangeSetProposal {
         change_set: ChangeSet {
             id: change_set_id,
             title,
@@ -586,7 +1364,7 @@ async fn extract_git_worktree_changeset(
         },
         source_isolation: WriteIsolationMode::Worktree,
         child_snapshot_id: Some(child_snapshot_id),
-    })
+    }))
 }
 
 async fn validate_git_repository_root(parent_workspace_root: &Path) -> Result<()> {
@@ -627,6 +1405,10 @@ async fn validate_clean_parent(parent_workspace_root: &Path) -> Result<()> {
     if !status.is_empty() {
         bail!("isolated Git worktree requires a clean parent workspace");
     }
+    validate_no_submodules(parent_workspace_root).await
+}
+
+async fn validate_no_submodules(parent_workspace_root: &Path) -> Result<()> {
     let submodules = git_bytes(
         parent_workspace_root,
         [
@@ -964,18 +1746,20 @@ async fn read_changed_file(
     )?))
 }
 
-async fn git_blob_at_head(
+async fn git_blob_at_tree(
     workspace_root: &Path,
+    treeish: &str,
     relative_path: &Path,
     limit: usize,
 ) -> Result<Option<Vec<u8>>> {
+    validate_git_object_id("baseline tree", treeish)?;
     let relative_path = validate_relative_path(relative_path)?;
     let tree = git_bytes_with_limit(
         workspace_root,
         [
             OsString::from("ls-tree"),
             OsString::from("-z"),
-            OsString::from("HEAD"),
+            OsString::from(treeish),
             OsString::from("--"),
             relative_path.as_os_str().to_owned(),
         ],

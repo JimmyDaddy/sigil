@@ -211,6 +211,24 @@ pub struct IsolatedWorkspaceCreated {
     pub isolation_mode: WriteIsolationMode,
     pub base_snapshot_id: WorkspaceSnapshotId,
     pub backend: IsolatedWorkspaceBackend,
+    /// Exact Git commit from which the owned workspace was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    /// Content digest of the immutable inherited dirty/untracked overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_digest: Option<String>,
+    /// Content-addressed mutation artifact containing the overlay manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_artifact_ref: Option<crate::MutationArtifactId>,
+    /// Content-addressed artifacts referenced by the overlay manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlay_content_artifact_refs: Vec<crate::MutationArtifactId>,
+    /// Number of entries in the inherited overlay; zero proves a clean commit representation.
+    #[serde(default)]
+    pub overlay_entry_count: usize,
+    /// Snapshot of the child workspace after the immutable overlay was applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_snapshot_id: Option<WorkspaceSnapshotId>,
 }
 
 /// Durable intent recorded before physical isolated-workspace materialization begins.
@@ -226,6 +244,21 @@ pub struct IsolatedWorkspacePrepared {
     pub isolation_mode: WriteIsolationMode,
     pub base_snapshot_id: WorkspaceSnapshotId,
     pub backend: IsolatedWorkspaceBackend,
+    /// Exact Git commit frozen with the parent snapshot before physical materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    /// Content digest of the immutable inherited dirty/untracked overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_digest: Option<String>,
+    /// Content-addressed mutation artifact containing the overlay manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_artifact_ref: Option<crate::MutationArtifactId>,
+    /// Content-addressed artifacts referenced by the overlay manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlay_content_artifact_refs: Vec<crate::MutationArtifactId>,
+    /// Number of entries in the inherited overlay; zero proves a clean commit representation.
+    #[serde(default)]
+    pub overlay_entry_count: usize,
 }
 
 /// Bounded cleanup outcome for one prepared or created isolated workspace.
@@ -827,6 +860,11 @@ fn prepared_matches_created(
         && prepared.isolation_mode == created.isolation_mode
         && prepared.base_snapshot_id == created.base_snapshot_id
         && prepared.backend == created.backend
+        && prepared.base_commit == created.base_commit
+        && prepared.overlay_digest == created.overlay_digest
+        && prepared.overlay_artifact_ref == created.overlay_artifact_ref
+        && prepared.overlay_content_artifact_refs == created.overlay_content_artifact_refs
+        && prepared.overlay_entry_count == created.overlay_entry_count
 }
 
 impl WriteLeaseState {

@@ -6,7 +6,10 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{DurableEventType, JsonlSessionStore, StoredEvent, verification::WorkspaceId};
+use crate::{
+    ControlEntry, DurableEventType, JsonlSessionStore, SessionLogEntry, StoredEvent,
+    verification::WorkspaceId,
+};
 
 use super::{
     MutationArtifactGroup, MutationArtifactId, MutationArtifactLifecycleRecorded,
@@ -669,19 +672,63 @@ fn referenced_mutation_artifact_ids(
     let mut artifact_ids = BTreeSet::new();
     for record in JsonlSessionStore::read_event_records(session_log_path)? {
         let event = record.into_stored_event();
-        if event.event_type != DurableEventType::MutationPrepared.as_str() {
-            continue;
-        }
-        let payload =
-            serde_json::from_value::<MutationPrepared>(event.payload).with_context(|| {
-                format!(
-                    "failed to decode {}",
-                    DurableEventType::MutationPrepared.as_str()
-                )
-            })?;
-        if let SnapshotCoverage::Captured(artifact_id) = payload.snapshot_coverage {
-            artifact_ids.insert(artifact_id);
+        if event.event_type == DurableEventType::MutationPrepared.as_str() {
+            let payload =
+                serde_json::from_value::<MutationPrepared>(event.payload).with_context(|| {
+                    format!(
+                        "failed to decode {}",
+                        DurableEventType::MutationPrepared.as_str()
+                    )
+                })?;
+            if let SnapshotCoverage::Captured(artifact_id) = payload.snapshot_coverage {
+                artifact_ids.insert(artifact_id);
+            }
+        } else if event.event_type == DurableEventType::IsolatedWorkspacePrepared.as_str()
+            || event.event_type == DurableEventType::IsolatedWorkspaceCreated.as_str()
+        {
+            let entry = event
+                .payload
+                .get("session_log_entry")
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{} event is missing session_log_entry", event.event_type)
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<SessionLogEntry>(value)
+                        .context("failed to decode isolated workspace artifact references")
+                })?;
+            match entry {
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(entry)) => {
+                    insert_overlay_artifact_refs(
+                        &mut artifact_ids,
+                        entry.overlay_artifact_ref,
+                        entry.overlay_content_artifact_refs,
+                    );
+                }
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(entry)) => {
+                    insert_overlay_artifact_refs(
+                        &mut artifact_ids,
+                        entry.overlay_artifact_ref,
+                        entry.overlay_content_artifact_refs,
+                    );
+                }
+                _ => {
+                    anyhow::bail!(
+                        "{} event does not contain a matching isolated workspace entry",
+                        event.event_type
+                    );
+                }
+            }
         }
     }
     Ok(artifact_ids)
+}
+
+fn insert_overlay_artifact_refs(
+    artifact_ids: &mut BTreeSet<MutationArtifactId>,
+    manifest_artifact_ref: Option<MutationArtifactId>,
+    content_artifact_refs: Vec<MutationArtifactId>,
+) {
+    artifact_ids.extend(manifest_artifact_ref);
+    artifact_ids.extend(content_artifact_refs);
 }

@@ -25,11 +25,12 @@ use crate::{
 
 use super::{
     CheckpointRestoreConflict, CheckpointRestored, CommittedFileMutation,
-    MutationArtifactCleanupRequested, MutationArtifactLifecycleRecorded, MutationBatchFinished,
-    MutationBatchId, MutationBatchStarted, MutationBatchStatus, MutationCommitted,
-    MutationCoordinator, MutationPrepared, MutationReconciled, MutationSubject, OperationId,
-    ToolCallId, WorkspaceMutationDetected, default_mutation_artifact_root, harden_artifact_dir,
-    harden_artifact_file, latest_workspace_revision,
+    MutationArtifactCleanupRequested, MutationArtifactId, MutationArtifactLifecycleRecorded,
+    MutationBatchFinished, MutationBatchId, MutationBatchStarted, MutationBatchStatus,
+    MutationCommitted, MutationCoordinator, MutationPrepared, MutationReconciled, MutationSubject,
+    OperationId, ToolCallId, WorkspaceMutationDetected, default_mutation_artifact_root,
+    harden_artifact_dir, harden_artifact_file, latest_workspace_revision,
+    read_mutation_artifact_content, store_mutation_artifact,
 };
 
 const WORKSPACE_MUTATION_LEASE_ATTEMPTS: usize = 500;
@@ -189,6 +190,35 @@ impl MutationEventRecorder {
         let mut coordinator = self.coordinator(workspace_root, tool_call_id, batch_id)?;
         coordinator.workspace_lease = Some(workspace_lease);
         Ok(coordinator)
+    }
+
+    /// Stores immutable content in the RFC-0002 content-addressed mutation artifact lifecycle.
+    ///
+    /// The caller must already have decided that the content is safe to persist. This method does
+    /// not append mutation authority or imply that a workspace effect occurred; durable protocols
+    /// must separately reference the returned artifact id.
+    pub fn capture_immutable_content_artifact(
+        &self,
+        workspace_id: &str,
+        operation_id: &str,
+        source_path: &Path,
+        bytes: &[u8],
+    ) -> Result<MutationArtifactId> {
+        store_mutation_artifact(
+            &self.artifact_root,
+            workspace_id,
+            operation_id,
+            source_path,
+            bytes,
+        )
+    }
+
+    /// Reads and hash-validates immutable content from the RFC-0002 artifact lifecycle.
+    pub fn read_immutable_content_artifact(
+        &self,
+        artifact_id: &MutationArtifactId,
+    ) -> Result<Vec<u8>> {
+        read_mutation_artifact_content(&self.artifact_root, artifact_id)
     }
 
     pub(super) fn acquire_workspace_mutation_lease(

@@ -4317,6 +4317,11 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
     let temp = tempfile::tempdir()?;
     let repository_root = temp.path().join("repository");
     initialize_worktree_test_repository(&repository_root)?;
+    fs::write(repository_root.join("base.txt"), "user dirty baseline\n")?;
+    fs::write(
+        repository_root.join("user-notes.txt"),
+        "safe untracked baseline\n",
+    )?;
     let base_snapshot_id = worktree_test_snapshot_id(&repository_root)?;
     let mut config = root_config();
     config.task.allow_write_subagents = true;
@@ -4434,6 +4439,13 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
                 .iter()
                 .any(|file| file.path == "worktree_a.txt"))
     );
+    assert_eq!(
+        outputs[0]
+            .changeset_proposal
+            .as_ref()
+            .map(|proposal| proposal.change_set.files.len()),
+        Some(1)
+    );
     assert!(
         outputs[1]
             .changeset_proposal
@@ -4445,8 +4457,19 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
                 .any(|file| file.path == "worktree_b.txt"))
     );
     assert_eq!(
+        outputs[1]
+            .changeset_proposal
+            .as_ref()
+            .map(|proposal| proposal.change_set.files.len()),
+        Some(1)
+    );
+    assert_eq!(
         fs::read_to_string(repository_root.join("base.txt"))?,
-        "base\n"
+        "user dirty baseline\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository_root.join("user-notes.txt"))?,
+        "safe untracked baseline\n"
     );
     assert!(!repository_root.join("worktree_a.txt").exists());
     assert!(!repository_root.join("worktree_b.txt").exists());
@@ -4461,6 +4484,20 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
             .count(),
         2
     );
+    let prepared = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared)) => {
+                Some(prepared)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(prepared.iter().all(|entry| entry.overlay_entry_count == 2
+        && entry.base_commit.is_some()
+        && entry.overlay_digest == prepared[0].overlay_digest
+        && entry.overlay_artifact_ref == prepared[0].overlay_artifact_ref));
     assert_eq!(
         session
             .entries()
@@ -4472,6 +4509,20 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
             .count(),
         2
     );
+    let created = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created)) => {
+                Some(created)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(created.iter().all(|entry| entry.overlay_entry_count == 2
+        && entry.materialized_snapshot_id.is_some()
+        && entry.overlay_digest == prepared[0].overlay_digest
+        && entry.overlay_artifact_ref == prepared[0].overlay_artifact_ref));
     assert_eq!(
         session
             .entries()

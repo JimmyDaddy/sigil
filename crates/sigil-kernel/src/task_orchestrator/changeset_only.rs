@@ -204,6 +204,12 @@ where
                 step.step_id.as_str()
             )
         })?;
+    if output.changeset_proposal.is_none()
+        && step.effective_isolation() == crate::TaskIsolationMode::Worktree
+        && output.outcome.changed_files.is_empty()
+    {
+        return Ok(());
+    }
     let proposal = output.changeset_proposal.as_ref().ok_or_else(|| {
         anyhow!(
             "isolated task step {} did not return a structured changeset proposal",

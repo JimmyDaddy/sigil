@@ -17,7 +17,7 @@ mod scan;
 use artifacts::{
     MutationArtifactGroup, default_mutation_artifact_root, locate_mutation_artifacts,
     read_mutation_artifact_content, scan_mutation_artifact_groups,
-    snapshot_coverage_for_pre_mutation_content,
+    snapshot_coverage_for_pre_mutation_content, store_mutation_artifact,
 };
 use hash::{
     artifact_blob_matches, atomic_replace, atomic_write_artifact, compare_current_directory_hash,
@@ -60,6 +60,12 @@ pub use retention::{
     MutationArtifactCleanupRequested, MutationArtifactCleanupTarget, MutationArtifactInventoryItem,
     MutationArtifactRetentionPolicy, MutationArtifactRetentionReport,
 };
+
+/// Returns whether RFC-0002 forbids persisting a path as mutation artifact content.
+#[must_use]
+pub fn is_sensitive_mutation_artifact_path(path: &std::path::Path) -> bool {
+    artifacts::is_sensitive_snapshot_path(path)
+}
 
 #[cfg(test)]
 #[path = "tests/mutation_tests.rs"]

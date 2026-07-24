@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
@@ -12,19 +12,20 @@ use sigil_kernel::{
     ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IntegrationLaneChanged,
     IntegrationLaneStatus, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
     IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
-    JsonlSessionStore, MultiAgentMode, ProviderCapabilities, ProviderPhysicalAttemptOutcome,
-    ProviderRequestRejection, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
-    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskParticipantAttemptId,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
-    TaskSynthesisSessionRunRequest, ToolApproval, ToolCall, ToolErrorKind, ToolSpec,
-    WriteIsolationMode, changeset_only_child_tool_registry, decode_changeset_only_child_output,
-    stable_event_uuid, stable_workspace_id, task_participant_child_task_id,
-    task_participant_input_hash, task_participant_logical_run_id, task_step_owner_agent_id,
+    JsonlSessionStore, MultiAgentMode, MutationEventRecorder, ProviderCapabilities,
+    ProviderPhysicalAttemptOutcome, ProviderRequestRejection, ProviderRouteCooldownError, RunEvent,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SessionStats,
+    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
+    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
+    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
+    ToolErrorKind, ToolSpec, WriteIsolationMode, changeset_only_child_tool_registry,
+    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
+    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
+    task_step_owner_agent_id,
 };
 
 use crate::{
@@ -34,7 +35,8 @@ use crate::{
         run_git_integration_lanes,
     },
     isolated_workspace::{
-        GitWorktreeMaterializationRequest, MaterializedGitWorktree, materialize_git_worktree,
+        FrozenGitWorktreeBase, GitWorktreeBaseFreezeRequest, MaterializedGitWorktree,
+        freeze_git_worktree_base, materialize_git_worktree_from_frozen_base,
     },
     provider_pressure::{
         TaskProviderPressure, TaskProviderRouteConsumer, wrap_task_agent_provider,
@@ -201,11 +203,65 @@ impl AgentSupervisorTaskChildRunner {
         Ok((child_session, child_thread, child_task_id))
     }
 
+    async fn freeze_task_worktree_base(
+        &self,
+        parent_session: &Session,
+        request: &TaskChildSessionRunRequest,
+    ) -> Result<FrozenGitWorktreeBase> {
+        let base_snapshot_id = request
+            .isolated_base_snapshot_id
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "worktree task child {} is missing its parent base snapshot",
+                    request.step.step_id.as_str()
+                )
+            })?;
+        let store_path = parent_session.store_path().ok_or_else(|| {
+            anyhow::anyhow!(
+                "worktree task child {} requires a durable parent session store",
+                request.step.step_id.as_str()
+            )
+        })?;
+        let operation_seed = format!(
+            "{}:{}:{}",
+            request.task.task_id.as_str(),
+            request.plan_version,
+            base_snapshot_id
+        );
+        let operation_id = format!(
+            "task-worktree-overlay-{}",
+            stable_event_uuid("sigil-task-worktree-overlay", &operation_seed)
+        );
+        let recorder =
+            MutationEventRecorder::new(JsonlSessionStore::new(store_path.to_path_buf())?);
+        let lease_recorder = recorder.clone();
+        let lease_workspace_root = request.options.workspace_root.clone();
+        let lease_operation_id = operation_id.clone();
+        let _lease = tokio::task::spawn_blocking(move || {
+            lease_recorder.coordinator_with_workspace_lease(
+                lease_workspace_root,
+                lease_operation_id,
+                None,
+            )
+        })
+        .await
+        .context("worktree overlay mutation lease task failed")??;
+        freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+            parent_workspace_root: request.options.workspace_root.clone(),
+            base_snapshot_id: base_snapshot_id.to_owned(),
+            operation_id,
+            artifact_recorder: recorder,
+        })
+        .await
+    }
+
     async fn prepare_task_worktree<H>(
         &self,
         parent_session: &mut Session,
         handler: &mut H,
         request: &TaskChildSessionRunRequest,
+        frozen: &FrozenGitWorktreeBase,
     ) -> Result<MaterializedGitWorktree>
     where
         H: EventHandler + Send,
@@ -220,6 +276,15 @@ impl AgentSupervisorTaskChildRunner {
                 )
             })?;
         let isolated_workspace_id = task_worktree_id(request);
+        if frozen.base_snapshot_id() != base_snapshot_id
+            || stable_workspace_id(frozen.parent_workspace_root())?
+                != stable_workspace_id(&request.options.workspace_root)?
+        {
+            anyhow::bail!(
+                "worktree task child {} does not match the frozen parent baseline",
+                request.step.step_id.as_str()
+            );
+        }
         let parent_workspace_id = stable_workspace_id(&request.options.workspace_root)?;
         let owner_agent_id =
             task_step_owner_agent_id(&request.task, request.plan_version, &request.step);
@@ -230,34 +295,36 @@ impl AgentSupervisorTaskChildRunner {
             isolation_mode: WriteIsolationMode::Worktree,
             base_snapshot_id: base_snapshot_id.to_owned(),
             backend: IsolatedWorkspaceBackend::GitWorktree,
+            base_commit: Some(frozen.base_commit().to_owned()),
+            overlay_digest: Some(frozen.overlay_digest().to_owned()),
+            overlay_artifact_ref: Some(frozen.overlay_artifact_ref().clone()),
+            overlay_content_artifact_refs: frozen.overlay_content_artifact_refs(),
+            overlay_entry_count: frozen.overlay_entry_count(),
         };
         append_control(
             parent_session,
             handler,
             ControlEntry::IsolatedWorkspacePrepared(prepared),
         )?;
-        let materialized = match materialize_git_worktree(GitWorktreeMaterializationRequest {
-            parent_workspace_root: request.options.workspace_root.clone(),
-            isolated_workspace_id: isolated_workspace_id.clone(),
-            base_snapshot_id: base_snapshot_id.to_owned(),
-        })
-        .await
-        {
-            Ok(materialized) => materialized,
-            Err(error) => {
-                append_control(
-                    parent_session,
-                    handler,
-                    ControlEntry::IsolatedWorkspaceCleanupRecorded(
-                        IsolatedWorkspaceCleanupRecorded {
-                            isolated_workspace_id,
-                            status: IsolatedWorkspaceCleanupStatus::Failed,
-                        },
-                    ),
-                )?;
-                return Err(error);
-            }
-        };
+        let materialized =
+            match materialize_git_worktree_from_frozen_base(frozen, isolated_workspace_id.clone())
+                .await
+            {
+                Ok(materialized) => materialized,
+                Err(error) => {
+                    append_control(
+                        parent_session,
+                        handler,
+                        ControlEntry::IsolatedWorkspaceCleanupRecorded(
+                            IsolatedWorkspaceCleanupRecorded {
+                                isolated_workspace_id,
+                                status: IsolatedWorkspaceCleanupStatus::Failed,
+                            },
+                        ),
+                    )?;
+                    return Err(error);
+                }
+            };
         let created = IsolatedWorkspaceCreated {
             isolated_workspace_id: materialized.isolated_workspace_id().to_owned(),
             parent_workspace_id,
@@ -265,6 +332,12 @@ impl AgentSupervisorTaskChildRunner {
             isolation_mode: WriteIsolationMode::Worktree,
             base_snapshot_id: base_snapshot_id.to_owned(),
             backend: IsolatedWorkspaceBackend::GitWorktree,
+            base_commit: Some(materialized.base_commit().to_owned()),
+            overlay_digest: materialized.overlay_digest().map(str::to_owned),
+            overlay_artifact_ref: materialized.overlay_artifact_ref().cloned(),
+            overlay_content_artifact_refs: materialized.overlay_content_artifact_refs().to_vec(),
+            overlay_entry_count: materialized.overlay_entry_count(),
+            materialized_snapshot_id: Some(materialized.child_snapshot_id().to_owned()),
         };
         if let Err(error) = append_control(
             parent_session,
@@ -366,6 +439,7 @@ impl AgentSupervisorTaskChildRunner {
         let plan_version = first.plan_version;
         let kind = ParallelTaskBatchKind::for_step(&first.step)?;
         let base_snapshot_id = first.isolated_base_snapshot_id.clone();
+        let parent_workspace_id = stable_workspace_id(&first.options.workspace_root)?;
         let mut attempt_ids = BTreeSet::new();
         for request in requests {
             if request.task.task_id != task_id || request.plan_version != plan_version {
@@ -389,6 +463,11 @@ impl AgentSupervisorTaskChildRunner {
             ) && request.isolated_base_snapshot_id.as_deref() != base_snapshot_id.as_deref()
             {
                 anyhow::bail!("parallel isolated task child batch mixes parent base snapshots");
+            }
+            if matches!(kind, ParallelTaskBatchKind::Worktree)
+                && stable_workspace_id(&request.options.workspace_root)? != parent_workspace_id
+            {
+                anyhow::bail!("parallel worktree task child batch mixes parent workspaces");
             }
         }
         let members = requests
@@ -499,18 +578,16 @@ impl AgentSupervisorTaskChildRunner {
                                     "parallel worktree task child lost its materialization receipt"
                                 )
                             })?;
-                            Some(
-                                worktree
-                                    .extract_changeset(
-                                        task_worktree_changeset_id(&prepared.request)?,
-                                        prepared.request.step.title.clone(),
-                                        format!(
-                                            "Isolated worktree changes for task step {}",
-                                            prepared.request.step.step_id.as_str()
-                                        ),
-                                    )
-                                    .await?,
-                            )
+                            worktree
+                                .extract_changeset(
+                                    task_worktree_changeset_id(&prepared.request)?,
+                                    prepared.request.step.title.clone(),
+                                    format!(
+                                        "Isolated worktree changes for task step {}",
+                                        prepared.request.step.step_id.as_str()
+                                    ),
+                                )
+                                .await?
                         }
                         _ => None,
                     };
@@ -701,13 +778,26 @@ impl AgentSupervisorTaskChildRunner {
             Ok(reservation) => reservation,
             Err(error) => return Ok(rejected_parallel_task_batch(&requests, error)),
         };
+        let Some(first_member) = preflight.members.first() else {
+            return Ok(rejected_parallel_task_batch(
+                &requests,
+                anyhow::anyhow!("parallel worktree task child batch lost its preflight members"),
+            ));
+        };
+        let frozen = match self
+            .freeze_task_worktree_base(parent_session, &first_member.request)
+            .await
+        {
+            Ok(frozen) => frozen,
+            Err(error) => return Ok(rejected_parallel_task_batch(&requests, error)),
+        };
 
         let mut materialized_members: Vec<PendingParallelWorktreeChild> =
             Vec::with_capacity(preflight.members.len());
         for mut member in preflight.members {
             let parent_options = member.request.options.clone();
             let worktree = match self
-                .prepare_task_worktree(parent_session, handler, &member.request)
+                .prepare_task_worktree(parent_session, handler, &member.request, &frozen)
                 .await
             {
                 Ok(worktree) => worktree,
@@ -1273,6 +1363,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     isolation_mode: WriteIsolationMode::Worktree,
                     base_snapshot_id: request.plan.base_snapshot_id.clone(),
                     backend: IsolatedWorkspaceBackend::GitWorktree,
+                    base_commit: None,
+                    overlay_digest: None,
+                    overlay_artifact_ref: None,
+                    overlay_content_artifact_refs: Vec::new(),
+                    overlay_entry_count: 0,
                 }),
             )?;
             append_control(
@@ -1530,8 +1625,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 {
                     anyhow::bail!("worktree task child requires a subagent_write write step");
                 }
+                let frozen = self
+                    .freeze_task_worktree_base(parent_session, &request)
+                    .await?;
                 let materialized = self
-                    .prepare_task_worktree(parent_session, handler, &request)
+                    .prepare_task_worktree(parent_session, handler, &request, &frozen)
                     .await?;
                 request.options.workspace_root = materialized.workspace_root().to_path_buf();
                 request.options.permission_context.workspace_root =
@@ -1666,18 +1764,16 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                         let workspace = worktree.as_ref().ok_or_else(|| {
                             anyhow::anyhow!("worktree task child lost its materialization receipt")
                         })?;
-                        Some(
-                            workspace
-                                .extract_changeset(
-                                    task_worktree_changeset_id(&request)?,
-                                    request.step.title.clone(),
-                                    format!(
-                                        "Isolated worktree changes for task step {}",
-                                        request.step.step_id.as_str()
-                                    ),
-                                )
-                                .await?,
-                        )
+                        workspace
+                            .extract_changeset(
+                                task_worktree_changeset_id(&request)?,
+                                request.step.title.clone(),
+                                format!(
+                                    "Isolated worktree changes for task step {}",
+                                    request.step.step_id.as_str()
+                                ),
+                            )
+                            .await?
                     }
                     _ => None,
                 };

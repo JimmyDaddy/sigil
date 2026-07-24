@@ -5,16 +5,18 @@ use std::{
 };
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSetFileAction, ChangeSetId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
-    IsolatedWorkspacePrepared, JsonlSessionStore, Session, VerificationScope, WriteIsolationMode,
-    build_workspace_snapshot, stable_workspace_id,
+    IsolatedWorkspacePrepared, JsonlSessionStore, MutationEventRecorder, Session,
+    VerificationScope, WriteIsolationMode, build_workspace_snapshot, stable_workspace_id,
 };
 use tempfile::TempDir;
 
 use crate::isolated_workspace::{
-    GitWorktreeMaterializationRequest, materialize_git_worktree,
+    GitWorktreeBaseFreezeRequest, GitWorktreeMaterializationRequest, freeze_git_worktree_base,
+    materialize_git_worktree, materialize_git_worktree_from_frozen_base,
     reconcile_isolated_workspace_cleanup,
 };
 
@@ -103,7 +105,8 @@ async fn git_worktree_extracts_bounded_review_artifact_without_mutating_parent()
             "Worktree edit",
             "Review isolated files",
         )
-        .await?;
+        .await?
+        .expect("worker edits should produce a proposal");
 
     assert_eq!(proposal.source_isolation, WriteIsolationMode::Worktree);
     assert!(proposal.child_snapshot_id.is_some());
@@ -132,6 +135,234 @@ async fn git_worktree_extracts_bounded_review_artifact_without_mutating_parent()
 }
 
 #[tokio::test]
+async fn frozen_dirty_overlay_is_shared_by_value_and_becomes_the_delta_baseline() -> Result<()> {
+    let repository = TestRepository::new()?;
+    fs::write(repository.root().join("base.txt"), "user edit\n")?;
+    fs::write(repository.root().join("notes.txt"), "user notes\n")?;
+    fs::write(
+        repository.root().join(".git/info/exclude"),
+        "ignored-output.txt\n",
+    )?;
+    fs::write(
+        repository.root().join("ignored-output.txt"),
+        "must not leak\n",
+    )?;
+    fs::create_dir_all(repository.root().join(".sigil/cache"))?;
+    fs::write(
+        repository.root().join(".sigil/cache/runtime-state.txt"),
+        "must not leak\n",
+    )?;
+    fs::create_dir(repository.root().join("target"))?;
+    fs::write(
+        repository.root().join("target/build-output.txt"),
+        "must not leak\n",
+    )?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let frozen = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id: base_snapshot_id.clone(),
+        operation_id: "overlay-shared-baseline".to_owned(),
+        artifact_recorder: repository.mutation_recorder()?,
+    })
+    .await?;
+
+    assert_eq!(frozen.base_snapshot_id(), base_snapshot_id);
+    assert_eq!(frozen.overlay_entry_count(), 2);
+    let first = materialize_git_worktree_from_frozen_base(&frozen, "dirty-child-first").await?;
+    let second = materialize_git_worktree_from_frozen_base(&frozen, "dirty-child-second").await?;
+    assert_ne!(first.workspace_root(), second.workspace_root());
+    for child in [&first, &second] {
+        assert_eq!(
+            fs::read(child.workspace_root().join("base.txt"))?,
+            b"user edit\n"
+        );
+        assert_eq!(
+            fs::read(child.workspace_root().join("notes.txt"))?,
+            b"user notes\n"
+        );
+        assert!(!child.workspace_root().join("ignored-output.txt").exists());
+        assert!(
+            !child
+                .workspace_root()
+                .join(".sigil/cache/runtime-state.txt")
+                .exists()
+        );
+        assert!(
+            !child
+                .workspace_root()
+                .join("target/build-output.txt")
+                .exists()
+        );
+        assert_eq!(child.overlay_digest(), Some(frozen.overlay_digest()));
+        assert_eq!(
+            child.overlay_artifact_ref(),
+            Some(frozen.overlay_artifact_ref())
+        );
+    }
+    assert!(
+        first
+            .extract_changeset(
+                ChangeSetId::new("changeset-inherited-noop")?,
+                "No worker edits",
+                "Inherited dirty bytes are not a proposal",
+            )
+            .await?
+            .is_none()
+    );
+
+    fs::write(first.workspace_root().join("base.txt"), "agent edit\n")?;
+    let proposal = first
+        .extract_changeset(
+            ChangeSetId::new("changeset-overlay-delta")?,
+            "Worker edit",
+            "Only the worker delta is reviewable",
+        )
+        .await?
+        .expect("worker edit should produce a proposal");
+    let base_file = proposal
+        .change_set
+        .files
+        .iter()
+        .find(|file| file.path == "base.txt")
+        .expect("base file proposal");
+    assert_eq!(
+        base_file.before_hash.as_deref(),
+        Some(hex_sha256(b"user edit\n").as_str())
+    );
+    assert!(proposal.artifact.content.contains("-user edit"));
+    assert!(!proposal.artifact.content.contains("-base"));
+    assert_eq!(
+        fs::read(repository.root().join("base.txt"))?,
+        b"user edit\n"
+    );
+    first.cleanup().await?;
+    second.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_overlay_rejects_secret_paths_before_owned_workspace_creation() -> Result<()> {
+    let repository = TestRepository::new()?;
+    fs::write(
+        repository.root().join(".env.local"),
+        "TOKEN=not-for-child\n",
+    )?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+
+    let error = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id,
+        operation_id: "overlay-secret-rejection".to_owned(),
+        artifact_recorder: repository.mutation_recorder()?,
+    })
+    .await
+    .expect_err("secret-like paths must fail closed");
+
+    assert!(
+        format!("{error:#}").contains("secret-like path"),
+        "{error:#}"
+    );
+    assert!(
+        !repository
+            .root()
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_overlay_rejects_secret_content_at_otherwise_safe_paths() -> Result<()> {
+    let repository = TestRepository::new()?;
+    fs::write(
+        repository.root().join("local-config.txt"),
+        "OPENAI_API_KEY=sk-live-value-that-must-not-leak\n",
+    )?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+
+    let error = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id,
+        operation_id: "overlay-secret-content-rejection".to_owned(),
+        artifact_recorder: repository.mutation_recorder()?,
+    })
+    .await
+    .expect_err("secret-like content must fail closed");
+
+    assert!(
+        format!("{error:#}").contains("secret-like content"),
+        "{error:#}"
+    );
+    assert!(
+        !repository
+            .root()
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn frozen_overlay_rejects_unsupported_symlink_entries() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let repository = TestRepository::new()?;
+    symlink("base.txt", repository.root().join("linked-base.txt"))?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+
+    let error = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id,
+        operation_id: "overlay-symlink-rejection".to_owned(),
+        artifact_recorder: repository.mutation_recorder()?,
+    })
+    .await
+    .expect_err("symlink overlays must fail closed");
+
+    assert!(
+        format!("{error:#}").contains("must be a regular file"),
+        "{error:#}"
+    );
+    assert!(
+        !repository
+            .root()
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_overlay_rejects_parent_drift_before_materialization() -> Result<()> {
+    let repository = TestRepository::new()?;
+    let frozen = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id: task_snapshot_id(repository.root())?,
+        operation_id: "overlay-parent-drift".to_owned(),
+        artifact_recorder: repository.mutation_recorder()?,
+    })
+    .await?;
+    fs::write(repository.root().join("base.txt"), "drifted\n")?;
+
+    let error = materialize_git_worktree_from_frozen_base(&frozen, "drifted-child-materialization")
+        .await
+        .expect_err("parent drift must reject the frozen baseline");
+
+    assert!(
+        format!("{error:#}").contains("snapshot drifted"),
+        "{error:#}"
+    );
+    assert!(
+        !repository
+            .root()
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn startup_reconciliation_removes_durable_created_worktree_once() -> Result<()> {
     let repository = TestRepository::new()?;
     let base_snapshot_id = task_snapshot_id(repository.root())?;
@@ -151,6 +382,11 @@ async fn startup_reconciliation_removes_durable_created_worktree_once() -> Resul
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id: base_snapshot_id.clone(),
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
     };
     let created = IsolatedWorkspaceCreated {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),
@@ -159,6 +395,12 @@ async fn startup_reconciliation_removes_durable_created_worktree_once() -> Resul
         isolation_mode: WriteIsolationMode::Worktree,
         base_snapshot_id,
         backend: IsolatedWorkspaceBackend::GitWorktree,
+        base_commit: None,
+        overlay_digest: None,
+        overlay_artifact_ref: None,
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
+        materialized_snapshot_id: None,
     };
     let session_path = repository
         .root()
@@ -322,9 +564,24 @@ impl TestRepository {
         self.git(&["rev-parse", "HEAD"])
     }
 
+    fn mutation_recorder(&self) -> Result<MutationEventRecorder> {
+        let state_root = self
+            .root
+            .parent()
+            .expect("test repository should have a temporary parent");
+        Ok(MutationEventRecorder::with_artifact_root(
+            JsonlSessionStore::new(state_root.join("mutation-session.jsonl"))?,
+            state_root.join("mutation-artifacts"),
+        ))
+    }
+
     fn git(&self, args: &[&str]) -> Result<String> {
         run_git(&self.root, args)
     }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn task_snapshot_id(workspace_root: &Path) -> Result<String> {

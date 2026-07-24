@@ -264,8 +264,9 @@ pub use mutation::{
     WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, execute_controlled_checkpoint_restore, file_content_hash,
-    preview_controlled_checkpoint_restore, restore_file_from_snapshot_with_mutation,
-    write_file_with_mutation, write_file_with_mutation_in_batch,
+    is_sensitive_mutation_artifact_path, preview_controlled_checkpoint_restore,
+    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
+    write_file_with_mutation_in_batch,
 };
 pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,
