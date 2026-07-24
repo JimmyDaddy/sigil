@@ -336,6 +336,7 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
             },
             authority_nonce: None,
             effect: None,
+            recovery_binding: None,
             reason: None,
             recorded_at_unix_ms: 0,
         },

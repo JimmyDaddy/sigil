@@ -7,11 +7,12 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use sigil_kernel::{
     ChangeSetId, IntegrationBaseRepresentation, IntegrationPromotionAttemptId,
-    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
-    IntegrationPromotionTarget, MutationEventRecorder, ParentChangeSetMutationRequest,
-    TaskChildChangeSetProposal, TaskPromotionAuthority, TaskPromotionAuthorityConsumed,
-    TaskPromotionPreview, VerificationPolicy, apply_parent_changeset_mutation_batch,
-    build_workspace_snapshot, stable_event_uuid, stable_workspace_id,
+    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionRecoveryBinding,
+    IntegrationPromotionStatus, IntegrationPromotionTarget, MutationEventRecorder,
+    ParentChangeSetMutationRequest, TaskChildChangeSetProposal, TaskPromotionAuthority,
+    TaskPromotionAuthorityConsumed, TaskPromotionPreview, VerificationPolicy,
+    apply_parent_changeset_mutation_batch, build_workspace_snapshot, stable_event_uuid,
+    stable_workspace_id,
 };
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -84,6 +85,18 @@ impl PreparedGitIntegrationPromotion {
     #[must_use]
     pub fn owned_workspace_id(&self) -> &str {
         self.workspace.isolated_workspace_id()
+    }
+
+    fn recovery_binding(
+        &self,
+        candidate_snapshot_id: String,
+        expected_parent_snapshot_id: String,
+    ) -> IntegrationPromotionRecoveryBinding {
+        IntegrationPromotionRecoveryBinding {
+            owned_workspace_id: self.owned_workspace_id().to_owned(),
+            candidate_snapshot_id,
+            expected_parent_snapshot_id: Some(expected_parent_snapshot_id),
+        }
     }
 
     /// Removes the exact runtime-owned candidate workspace after a denied or abandoned review.
@@ -398,6 +411,33 @@ async fn run_git_integration_promotion_inner(
     {
         return cleanup_rejected_run(request, error).await;
     }
+    let candidate_snapshot_id = match authoritative_snapshot_id(
+        request.prepared.workspace.workspace_root().to_path_buf(),
+        request.verification_policy.verification_scope.clone(),
+    )
+    .await
+    {
+        Ok(snapshot_id) => snapshot_id,
+        Err(error) => return cleanup_rejected_run(request, error).await,
+    };
+    let parent_workspace_id =
+        match stable_workspace_id(request.prepared.workspace.parent_workspace_root()) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return cleanup_rejected_run(request, error).await,
+        };
+    let expected_parent_snapshot_id = match snapshot_id_for_workspace(
+        request.prepared.workspace.workspace_root().to_path_buf(),
+        parent_workspace_id,
+        request.verification_policy.verification_scope.clone(),
+    )
+    .await
+    {
+        Ok(snapshot_id) => snapshot_id,
+        Err(error) => return cleanup_rejected_run(request, error).await,
+    };
+    let recovery_binding = request
+        .prepared
+        .recovery_binding(candidate_snapshot_id, expected_parent_snapshot_id);
     if let Err(error) = emit_promotion_event(
         &event_sender,
         IntegrationPromotionRuntimeEvent::AuthorityConsumed(TaskPromotionAuthorityConsumed {
@@ -416,6 +456,7 @@ async fn run_git_integration_promotion_inner(
         None,
         None,
         consumed_at_unix_ms,
+        recovery_binding.clone(),
     );
     if let Err(error) = emit_promotion_event(
         &event_sender,
@@ -465,6 +506,7 @@ async fn run_git_integration_promotion_inner(
                             IntegrationPromotionStatus::Failed,
                             format!("aggregate parent mutation failed: {error:#}"),
                         ),
+                        recovery_binding,
                         &event_sender,
                     )
                     .await;
@@ -479,6 +521,7 @@ async fn run_git_integration_promotion_inner(
                             IntegrationPromotionStatus::Failed,
                             format!("aggregate parent mutation task failed: {error:#}"),
                         ),
+                        recovery_binding,
                         &event_sender,
                     )
                     .await;
@@ -502,14 +545,24 @@ async fn run_git_integration_promotion_inner(
                 .context(
                     "workspace promotion effect completed but authoritative snapshot capture failed",
                 )?;
-                PhysicalPromotion {
-                    status: IntegrationPromotionStatus::Promoted,
-                    effect: Some(IntegrationPromotionEffect::WorkspaceApplied {
-                        promoted_snapshot_id: promoted_snapshot_id.clone(),
-                        promoted_revision: expected_revision.saturating_add(1),
-                    }),
-                    authoritative_snapshot_id: Some(promoted_snapshot_id),
-                    reason: None,
+                if recovery_binding.expected_parent_snapshot_id.as_deref()
+                    != Some(promoted_snapshot_id.as_str())
+                {
+                    PhysicalPromotion::terminal(
+                        IntegrationPromotionStatus::Failed,
+                        "aggregate parent mutation completed with an unexpected policy snapshot"
+                            .to_owned(),
+                    )
+                } else {
+                    PhysicalPromotion {
+                        status: IntegrationPromotionStatus::Promoted,
+                        effect: Some(IntegrationPromotionEffect::WorkspaceApplied {
+                            promoted_snapshot_id: promoted_snapshot_id.clone(),
+                            promoted_revision: expected_revision.saturating_add(1),
+                        }),
+                        authoritative_snapshot_id: Some(promoted_snapshot_id),
+                        reason: None,
+                    }
                 }
             } else {
                 PhysicalPromotion::terminal(
@@ -542,14 +595,8 @@ async fn run_git_integration_promotion_inner(
             &preview.target,
             IntegrationPromotionTarget::GitRefAdvance { .. }
         ) {
-        let promoted_snapshot_id = authoritative_snapshot_id(
-            prepared.workspace.workspace_root().to_path_buf(),
-            verification_policy.verification_scope,
-        )
-        .await
-        .context("Git ref promotion effect completed but authoritative snapshot capture failed")?;
         PhysicalPromotion {
-            authoritative_snapshot_id: Some(promoted_snapshot_id),
+            authoritative_snapshot_id: Some(recovery_binding.candidate_snapshot_id.clone()),
             ..physical
         }
     } else {
@@ -561,6 +608,7 @@ async fn run_git_integration_promotion_inner(
         preview,
         authority,
         physical,
+        recovery_binding,
         &event_sender,
     )
     .await
@@ -572,6 +620,7 @@ async fn finalize_promotion(
     preview: TaskPromotionPreview,
     authority: TaskPromotionAuthority,
     physical: PhysicalPromotion,
+    recovery_binding: IntegrationPromotionRecoveryBinding,
     event_sender: &Option<UnboundedSender<IntegrationPromotionRuntimeEventRequest>>,
 ) -> Result<GitIntegrationPromotionOutput> {
     let parent_workspace_root = prepared.workspace.parent_workspace_root().to_path_buf();
@@ -584,6 +633,7 @@ async fn finalize_promotion(
         target: preview.target,
         authority_nonce: Some(authority.nonce),
         effect: physical.effect,
+        recovery_binding: Some(recovery_binding),
         reason: physical.reason,
         recorded_at_unix_ms: unix_time_ms(),
     };
@@ -809,6 +859,9 @@ fn validate_run_request(request: &GitIntegrationPromotionRunRequest) -> Result<(
     if request.prepared.plan_id != request.preview.plan_id {
         bail!("prepared promotion belongs to another integration plan");
     }
+    if request.prepared.candidate_snapshot_id().is_none() {
+        bail!("prepared promotion candidate snapshot is missing");
+    }
     if request.prepared.target != request.preview.target {
         bail!("prepared promotion target does not match the exact preview");
     }
@@ -827,8 +880,16 @@ async fn authoritative_snapshot_id(
     workspace_root: PathBuf,
     verification_scope: sigil_kernel::VerificationScope,
 ) -> Result<String> {
+    let workspace_id = stable_workspace_id(&workspace_root)?;
+    snapshot_id_for_workspace(workspace_root, workspace_id, verification_scope).await
+}
+
+async fn snapshot_id_for_workspace(
+    workspace_root: PathBuf,
+    workspace_id: String,
+    verification_scope: sigil_kernel::VerificationScope,
+) -> Result<String> {
     tokio::task::spawn_blocking(move || {
-        let workspace_id = stable_workspace_id(&workspace_root)?;
         build_workspace_snapshot(&workspace_root, workspace_id, &verification_scope, 0)?
             .workspace_snapshot_id
             .ok_or_else(|| anyhow!("authoritative promotion snapshot is incomplete"))
@@ -843,6 +904,7 @@ fn promotion_record(
     effect: Option<IntegrationPromotionEffect>,
     reason: Option<String>,
     recorded_at_unix_ms: u64,
+    recovery_binding: IntegrationPromotionRecoveryBinding,
 ) -> IntegrationPromotionRecorded {
     IntegrationPromotionRecorded {
         plan_id: request.preview.plan_id.clone(),
@@ -852,6 +914,7 @@ fn promotion_record(
         target: request.preview.target.clone(),
         authority_nonce: Some(request.authority.nonce.clone()),
         effect,
+        recovery_binding: Some(recovery_binding),
         reason,
         recorded_at_unix_ms,
     }

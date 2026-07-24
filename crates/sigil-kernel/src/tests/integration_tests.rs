@@ -10,12 +10,13 @@ use crate::{
     IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
     IntegrationLaneVerificationLinked, IntegrationObservedEffect, IntegrationPlanId,
     IntegrationPlanRecorded, IntegrationProjection, IntegrationPromotionAttemptId,
-    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
-    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec, ReceiptStatus,
-    RedactionState, SessionLogEntry, TaskId, TaskParentVerificationRecorded,
-    TaskPromotionAuthority, TaskPromotionAuthorityConsumed, TaskPromotionPreviewInput,
-    TaskPromotionPreviewRecorded, TaskStepId, VerificationBinding, VerificationPolicy,
-    VerificationReceipt, VerificationVerdict, build_integration_plan, build_task_promotion_preview,
+    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionRecoveryBinding,
+    IntegrationPromotionStatus, IntegrationPromotionTarget, IntegrationProposalFacts,
+    IntegrationProposalSpec, ReceiptStatus, RedactionState, SessionLogEntry, TaskId,
+    TaskParentVerificationRecorded, TaskPromotionAuthority, TaskPromotionAuthorityConsumed,
+    TaskPromotionPreviewInput, TaskPromotionPreviewRecorded, TaskStepId, VerificationBinding,
+    VerificationPolicy, VerificationReceipt, VerificationVerdict, build_integration_plan,
+    build_task_promotion_preview,
 };
 
 fn integration_verification_receipt(
@@ -647,6 +648,7 @@ fn integration_projection_replays_lane_and_promotion_state() -> Result<()> {
                     promoted_snapshot_id: "snapshot-parent-after".to_owned(),
                     promoted_revision: 4,
                 }),
+                recovery_binding: None,
                 reason: None,
                 recorded_at_unix_ms: 0,
             },
@@ -1199,6 +1201,11 @@ fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> 
         "nonce-protocol",
     )?;
     let attempt_id = IntegrationPromotionAttemptId::new("promotion-attempt-protocol")?;
+    let recovery_binding = IntegrationPromotionRecoveryBinding {
+        owned_workspace_id: "promotion-protocol-workspace".to_owned(),
+        candidate_snapshot_id: "snapshot-promotion-candidate".to_owned(),
+        expected_parent_snapshot_id: Some("snapshot-expected-parent".to_owned()),
+    };
     entries.extend([
         SessionLogEntry::Control(ControlEntry::TaskPromotionPreviewRecorded(
             TaskPromotionPreviewRecorded {
@@ -1221,6 +1228,7 @@ fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> 
                 target: preview.target.clone(),
                 authority_nonce: Some(authority.nonce.clone()),
                 effect: None,
+                recovery_binding: Some(recovery_binding.clone()),
                 reason: None,
                 recorded_at_unix_ms: 21,
             },
@@ -1237,11 +1245,29 @@ fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> 
                     promoted_snapshot_id: "snapshot-parent-promoted".to_owned(),
                     promoted_revision: 1,
                 }),
+                recovery_binding: Some(recovery_binding),
                 reason: None,
                 recorded_at_unix_ms: 22,
             },
         )),
     ]);
+    let mut mismatched_recovery_entries = entries.clone();
+    let Some(SessionLogEntry::Control(ControlEntry::IntegrationPromotionRecorded(terminal))) =
+        mismatched_recovery_entries.last_mut()
+    else {
+        panic!("terminal promotion entry");
+    };
+    terminal
+        .recovery_binding
+        .as_mut()
+        .expect("terminal recovery binding")
+        .candidate_snapshot_id = "snapshot-substituted-candidate".to_owned();
+    assert!(
+        IntegrationProjection::from_entries(&mismatched_recovery_entries)
+            .latest()
+            .expect("mismatched recovery projection")
+            .inconsistent
+    );
     let mut receipt = integration_verification_receipt("parent-check", "scope-parent");
     receipt.binding.workspace_snapshot_id = "snapshot-parent-promoted".to_owned();
     receipt.receipt.workspace_snapshot_id = Some("snapshot-parent-promoted".to_owned());
@@ -1307,6 +1333,7 @@ fn integration_projection_rejects_mismatched_promotion_effect() -> Result<()> {
                     old_oid: "b".repeat(40),
                     new_oid: "a".repeat(40),
                 }),
+                recovery_binding: None,
                 reason: None,
                 recorded_at_unix_ms: 0,
             },

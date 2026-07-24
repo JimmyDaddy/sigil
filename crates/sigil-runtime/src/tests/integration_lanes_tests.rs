@@ -11,18 +11,20 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     CandidateCheck, ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
     CheckCommand, CheckDiscoverySource, CheckPromotion, CompletionCriteria, ControlEntry,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt, ExecutionRequest,
-    IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ExecutionBackend,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt,
+    ExecutionRequest, IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
     IntegrationLaneCandidate, IntegrationLaneCleanupStatus, IntegrationLaneStatus, IntegrationPlan,
     IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
     IntegrationPromotionAttemptId, IntegrationPromotionEffect, IntegrationPromotionStatus,
     IntegrationProposalFacts, IntegrationProposalSpec, JsonlSessionStore, MutationEventRecorder,
-    NoopEventHandler, SandboxProfileRequirement, Session, TaskId, TaskPromotionAuthority,
-    TaskPromotionPreview, TaskPromotionPreviewInput, TaskPromotionPreviewRecorded, TaskStepId,
-    ToolEffect, TrustedCheckSpec, VerificationAutoRunPolicy, VerificationPolicy, VerificationScope,
-    VerificationVerdict, WorkspaceTrust, WorkspaceTrustRequirement, build_integration_plan,
-    build_task_promotion_preview, build_workspace_snapshot, stable_workspace_id,
+    NoopEventHandler, SandboxProfileRequirement, Session, SessionLogEntry, TaskId,
+    TaskPromotionAuthority, TaskPromotionPreview, TaskPromotionPreviewInput,
+    TaskPromotionPreviewRecorded, TaskStepId, ToolEffect, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationScope, VerificationVerdict, WorkspaceTrust, WorkspaceTrustRequirement,
+    build_integration_plan, build_task_promotion_preview, build_workspace_snapshot,
+    stable_workspace_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
@@ -32,8 +34,9 @@ use super::{
     IntegrationLaneRuntimeEventRequest, IntegrationPromotionPreparationTarget,
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
     ParentVerificationRunRequest, prepare_git_integration_promotion,
-    run_authoritative_parent_verification, run_git_integration_lanes,
-    run_git_integration_lanes_with_events, run_git_integration_promotion_with_events,
+    reconcile_integration_promotions, run_authoritative_parent_verification,
+    run_git_integration_lanes, run_git_integration_lanes_with_events,
+    run_git_integration_promotion_with_events,
 };
 use crate::isolated_workspace::{
     GitWorktreeBaseFreezeRequest, GitWorktreeCleanupRequest, cleanup_git_worktree,
@@ -968,6 +971,187 @@ async fn git_ref_promotion_stale_target_has_zero_ref_or_workspace_effect() -> Re
 }
 
 #[tokio::test]
+async fn workspace_promotion_recovery_uses_complete_mutation_evidence_without_replay() -> Result<()>
+{
+    let mut fixture = interrupted_promotion_fixture(false, false).await?;
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "new-a\n");
+    assert_eq!(
+        IntegrationProjection::from_entries(fixture.session.entries())
+            .plans
+            .get(&fixture.plan_id)
+            .expect("interrupted promotion plan")
+            .promotions
+            .len(),
+        1
+    );
+    fixture
+        .session
+        .append_control(ControlEntry::VerificationPolicyChanged(
+            VerificationPolicyChangedEntry::new(
+                EvidenceScope::Task("task_workspace_recovery".to_owned()),
+                VerificationPolicy::no_checks_required("superseding-recovery-policy"),
+                "superseding-recovery-policy-event",
+            )?,
+        ))?;
+
+    let report = reconcile_integration_promotions(&mut fixture.session, &fixture.root).await?;
+
+    assert_eq!(report.inspected, 1);
+    assert_eq!(report.reconciled, 1);
+    assert_eq!(report.promoted, 1);
+    assert_eq!(report.needs_review, 0);
+    assert_eq!(report.recovered_promotions.len(), 1);
+    assert_eq!(
+        report.recovered_promotions[0].promoted_snapshot_id,
+        fixture
+            .promotion
+            .as_ref()
+            .expect("completed physical promotion")
+            .authoritative_snapshot_id
+            .as_deref()
+            .expect("physical workspace snapshot")
+    );
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "new-a\n");
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("recovered workspace promotion");
+    assert!(!state.inconsistent);
+    assert_eq!(state.promotions.len(), 2);
+    assert_eq!(
+        state.promotions.last().map(|record| record.status),
+        Some(IntegrationPromotionStatus::Promoted)
+    );
+    assert_eq!(
+        reconcile_integration_promotions(&mut fixture.session, &fixture.root)
+            .await?
+            .inspected,
+        0,
+        "reconciliation must be idempotent"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_ref_promotion_recovery_retains_exact_parent_check_target() -> Result<()> {
+    let mut fixture = interrupted_promotion_fixture(true, false).await?;
+    let candidate_oid = fixture
+        .candidate_oid
+        .as_deref()
+        .expect("Git recovery candidate oid");
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/heads/recovery-target"])?,
+        candidate_oid
+    );
+
+    let report = reconcile_integration_promotions(&mut fixture.session, &fixture.root).await?;
+
+    assert_eq!(report.inspected, 1);
+    assert_eq!(report.promoted, 1);
+    assert_eq!(report.needs_review, 0);
+    assert_eq!(
+        report.recovered_promotions[0]
+            .retained_owned_workspace_id
+            .as_deref(),
+        Some(fixture.owned_workspace_id.as_str())
+    );
+    assert_eq!(
+        report.recovered_promotions[0].promoted_snapshot_id,
+        fixture
+            .promotion
+            .as_ref()
+            .expect("completed physical promotion")
+            .authoritative_snapshot_id
+            .as_deref()
+            .expect("physical Git candidate snapshot")
+    );
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("recovered Git promotion");
+    assert!(!state.inconsistent);
+    assert!(matches!(
+        state.promotions.last().and_then(|record| record.effect.as_ref()),
+        Some(IntegrationPromotionEffect::GitRefAdvanced { new_oid, .. })
+            if new_oid == candidate_oid
+    ));
+    assert_eq!(
+        reconcile_integration_promotions(&mut fixture.session, &fixture.root)
+            .await?
+            .inspected,
+        0
+    );
+    fixture
+        .promotion
+        .as_mut()
+        .expect("completed physical promotion")
+        .verification_target
+        .take()
+        .expect("retained Git target")
+        .cleanup()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_promotion_recovery_cancels_prepared_attempt_with_zero_effect() -> Result<()> {
+    let mut fixture = interrupted_promotion_fixture(false, true).await?;
+    assert!(fixture.promotion.is_none());
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "old-a\n");
+
+    let report = reconcile_integration_promotions(&mut fixture.session, &fixture.root).await?;
+
+    assert_eq!(report.inspected, 1);
+    assert_eq!(report.reconciled, 1);
+    assert_eq!(report.cancelled, 1);
+    assert_eq!(report.promoted, 0);
+    assert_eq!(report.needs_review, 0);
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt"))?, "old-a\n");
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("cancelled promotion projection");
+    assert!(!state.inconsistent);
+    assert_eq!(
+        state.promotions.last().map(|record| record.status),
+        Some(IntegrationPromotionStatus::Cancelled)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_promotion_recovery_preserves_post_commit_drift_for_review() -> Result<()> {
+    let mut fixture = interrupted_promotion_fixture(false, false).await?;
+    fs::write(fixture.root.join("a.txt"), "user-drift\n")?;
+
+    let report = reconcile_integration_promotions(&mut fixture.session, &fixture.root).await?;
+
+    assert_eq!(report.inspected, 1);
+    assert_eq!(report.reconciled, 0);
+    assert_eq!(report.promoted, 0);
+    assert_eq!(report.needs_review, 1);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("a.txt"))?,
+        "user-drift\n"
+    );
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("drifted promotion projection");
+    assert!(!state.inconsistent);
+    assert_eq!(state.promotions.len(), 1);
+    assert_eq!(
+        state.promotions[0].status,
+        IntegrationPromotionStatus::Prepared
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejected_authority_ack_starts_no_promotion_effect_and_cleans_candidate() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("repo");
@@ -1253,6 +1437,199 @@ async fn git_ref_parent_checks_use_retained_authoritative_checkout() -> Result<(
         Some(&fixture.attempt_id)
     );
     Ok(())
+}
+
+struct InterruptedPromotionFixture {
+    _temp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    session: Session,
+    promotion: Option<super::GitIntegrationPromotionOutput>,
+    plan_id: IntegrationPlanId,
+    candidate_oid: Option<String>,
+    owned_workspace_id: String,
+}
+
+async fn interrupted_promotion_fixture(
+    git_ref_target: bool,
+    crash_after_prepared: bool,
+) -> Result<InterruptedPromotionFixture> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    if git_ref_target {
+        git(&root, &["branch", "recovery-target", &base_commit])?;
+    }
+    let change = change_set("promotion-recovery", "a.txt", "old-a\n", "new-a\n")?;
+    let artifacts = vec![artifact(
+        change.clone(),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+    )];
+    let plan = build_integration_plan(
+        IntegrationPlanId::new(if git_ref_target {
+            "plan-ref-recovery"
+        } else {
+            "plan-workspace-recovery"
+        })?,
+        TaskId::new(if git_ref_target {
+            "task_ref_recovery"
+        } else {
+            "task_workspace_recovery"
+        })?,
+        1,
+        vec![proposal(
+            &change,
+            "step_promotion_recovery",
+            &base_snapshot_id,
+            &base_commit,
+        )?],
+    )?;
+    let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
+    let store = JsonlSessionStore::new(temp.path().join("recovery-session.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store.clone());
+    for entry in lane_session.entries() {
+        session.append(entry.clone())?;
+    }
+    let prepared = prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+        preparation_id: if git_ref_target {
+            "ref-recovery-review".to_owned()
+        } else {
+            "workspace-recovery-review".to_owned()
+        },
+        parent_workspace_root: root.clone(),
+        plan: plan.clone(),
+        artifacts,
+        frozen_base: None,
+        target: if git_ref_target {
+            IntegrationPromotionPreparationTarget::GitRefAdvance {
+                target_ref: "refs/heads/recovery-target".to_owned(),
+                expected_old_oid: base_commit,
+            }
+        } else {
+            IntegrationPromotionPreparationTarget::WorkspaceApply {
+                expected_snapshot_id: base_snapshot_id,
+                expected_revision: 0,
+            }
+        },
+    })
+    .await?;
+    let candidate_oid = match prepared.target() {
+        sigil_kernel::IntegrationPromotionTarget::GitRefAdvance { candidate_oid, .. } => {
+            Some(candidate_oid.clone())
+        }
+        sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => None,
+    };
+    let owned_workspace_id = prepared.owned_workspace_id().to_owned();
+    let policy = promotion_policy();
+    let preview = promotion_preview_with_policy(&session, &plan, &prepared, &policy)?;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task(plan.task_id.as_str().to_owned()),
+            policy.clone(),
+            "promotion-recovery-policy",
+        )?,
+    ))?;
+    session.append_control(ControlEntry::TaskPromotionPreviewRecorded(
+        TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        },
+    ))?;
+    let authority = promotion_authority(
+        &preview,
+        if git_ref_target {
+            "ref-recovery-review"
+        } else {
+            "workspace-recovery-review"
+        },
+    )?;
+    let attempt_id = IntegrationPromotionAttemptId::new(if git_ref_target {
+        "attempt-ref-recovery"
+    } else {
+        "attempt-workspace-recovery"
+    })?;
+    let (event_tx, collector) =
+        interrupted_promotion_event_collector(store.clone(), crash_after_prepared);
+    let promotion = run_git_integration_promotion_with_events(
+        GitIntegrationPromotionRunRequest {
+            prepared,
+            attempt_id,
+            preview,
+            authority,
+            verification_policy: policy,
+            mutation_recorder: MutationEventRecorder::new(store.clone()),
+        },
+        event_tx,
+    )
+    .await;
+    assert_eq!(collector.await??, if crash_after_prepared { 2 } else { 3 });
+    let promotion = if crash_after_prepared {
+        let error = promotion.expect_err("prepared crash must stop before the physical effect");
+        assert!(
+            format!("{error:#}")
+                .contains("integration promotion durable event acknowledgement dropped")
+        );
+        None
+    } else {
+        Some(promotion?)
+    };
+    drop(session);
+    let session = Session::load_from_store("mock", "model", store)?;
+    Ok(InterruptedPromotionFixture {
+        _temp: temp,
+        root,
+        session,
+        promotion,
+        plan_id: plan.plan_id,
+        candidate_oid,
+        owned_workspace_id,
+    })
+}
+
+fn interrupted_promotion_event_collector(
+    store: JsonlSessionStore,
+    crash_after_prepared: bool,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<IntegrationPromotionRuntimeEventRequest>,
+    tokio::task::JoinHandle<Result<usize>>,
+) {
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<IntegrationPromotionRuntimeEventRequest>();
+    let collector = tokio::spawn(async move {
+        let mut event_count = 0;
+        while let Some(request) = event_rx.recv().await {
+            event_count += 1;
+            let is_prepared = matches!(
+                request.event(),
+                IntegrationPromotionRuntimeEvent::PromotionRecorded(entry)
+                    if entry.status == IntegrationPromotionStatus::Prepared
+            );
+            let control = match request.event() {
+                IntegrationPromotionRuntimeEvent::AuthorityConsumed(entry) => {
+                    Some(ControlEntry::TaskPromotionAuthorityConsumed(entry.clone()))
+                }
+                IntegrationPromotionRuntimeEvent::PromotionRecorded(entry)
+                    if entry.status == IntegrationPromotionStatus::Prepared =>
+                {
+                    Some(ControlEntry::IntegrationPromotionRecorded(entry.clone()))
+                }
+                IntegrationPromotionRuntimeEvent::PromotionRecorded(_) => None,
+            };
+            let acknowledgement = control.map_or(Ok(()), |control| {
+                store
+                    .append(&SessionLogEntry::Control(control))
+                    .map_err(|error| format!("{error:#}"))
+            });
+            if crash_after_prepared && is_prepared {
+                acknowledgement.map_err(anyhow::Error::msg)?;
+                drop(request);
+                break;
+            }
+            request.acknowledge(acknowledgement);
+        }
+        Ok(event_count)
+    });
+    (event_tx, collector)
 }
 
 struct PromotedWorkspaceFixture {

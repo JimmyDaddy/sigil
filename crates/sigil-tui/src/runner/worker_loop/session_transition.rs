@@ -98,6 +98,24 @@ where
             cleanup_report.failed
         )));
     }
+    let promotion_report = runtime
+        .block_on(
+            sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                &mut session,
+                workspace_root,
+            ),
+        )
+        .map_err(|error| format!("failed to reconcile integration promotions: {error:#}"))?;
+    if promotion_report.inspected > 0 {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
+            promotion_report.inspected,
+            promotion_report.promoted,
+            promotion_report.cancelled,
+            promotion_report.failed,
+            promotion_report.needs_review
+        )));
+    }
     let same_logical_session = state
         .session
         .current

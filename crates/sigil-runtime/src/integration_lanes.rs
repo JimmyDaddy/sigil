@@ -38,6 +38,7 @@ use crate::isolated_workspace::{
 
 mod parent_verification;
 mod promotion;
+mod promotion_recovery;
 
 pub use parent_verification::{
     ParentVerificationRunOutput, ParentVerificationRunRequest,
@@ -51,6 +52,10 @@ pub use promotion::{
     IntegrationPromotionRuntimeEvent, IntegrationPromotionRuntimeEventRequest,
     PreparedGitIntegrationPromotion, PromotedVerificationTarget, prepare_git_integration_promotion,
     run_git_integration_promotion_with_events,
+};
+pub use promotion_recovery::{
+    IntegrationPromotionReconciliation, RecoveredIntegrationPromotion,
+    reconcile_integration_promotions,
 };
 
 const ZERO_GIT_OBJECT_ID: &str = "0000000000000000000000000000000000000000";

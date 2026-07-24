@@ -1143,6 +1143,16 @@ pub enum IntegrationPromotionEffect {
     },
 }
 
+/// Runtime-owned recovery binding retained across a promotion crash window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationPromotionRecoveryBinding {
+    pub owned_workspace_id: String,
+    pub candidate_snapshot_id: WorkspaceSnapshotId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_snapshot_id: Option<WorkspaceSnapshotId>,
+}
+
 /// Append-only final promotion fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1157,6 +1167,8 @@ pub struct IntegrationPromotionRecorded {
     pub authority_nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<IntegrationPromotionEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_binding: Option<IntegrationPromotionRecoveryBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -2177,6 +2189,7 @@ fn protocol_promotion_matches_state(
                 && prepared.preview_digest == entry.preview_digest
                 && prepared.target == entry.target
                 && prepared.authority_nonce.as_deref() == Some(nonce)
+                && prepared.recovery_binding == entry.recovery_binding
                 && entry.status != IntegrationPromotionStatus::Prepared
         }
         _ => false,
@@ -2184,6 +2197,16 @@ fn protocol_promotion_matches_state(
 }
 
 fn promotion_effect_matches_target(entry: &IntegrationPromotionRecorded) -> bool {
+    if entry.recovery_binding.as_ref().is_some_and(|binding| {
+        binding.owned_workspace_id.trim().is_empty()
+            || binding.candidate_snapshot_id.trim().is_empty()
+            || binding
+                .expected_parent_snapshot_id
+                .as_ref()
+                .is_some_and(|snapshot_id| snapshot_id.trim().is_empty())
+    }) {
+        return false;
+    }
     match (&entry.target, &entry.effect, entry.status) {
         (
             IntegrationPromotionTarget::WorkspaceApply { .. },

@@ -65,6 +65,30 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     return;
                 }
             }
+            match runtime.block_on(
+                sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                    &mut session,
+                    &workspace_root,
+                ),
+            ) {
+                Ok(report) if report.inspected > 0 => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
+                        report.inspected,
+                        report.promoted,
+                        report.cancelled,
+                        report.failed,
+                        report.needs_review
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to reconcile integration promotions: {error:#}"
+                    )));
+                    return;
+                }
+            }
             mark_stale_dispatching_conversation_queue_items(
                 &mut session,
                 &initial_exact_conversation_prompts,

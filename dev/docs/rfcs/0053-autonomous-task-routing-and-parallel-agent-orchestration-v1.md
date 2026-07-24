@@ -1523,8 +1523,10 @@ O6f 协议检查点（尚不构成 O6f 完成）：
   前 fail closed，private candidate 会清理。parent-check runner 现在会校验 preview-bound policy，
   在同一 policy scope 的 authoritative target snapshot 上复用 RFC-0003 checks；GitRef checkout
   保留到检查 terminal 后再清理。task runner 只在当前版本全部 integration plans 都返回
-  `synthesis_ready_attempt` 后启动 Synthesis。promotion recovery reconciliation 仍属于后续 O6f
-  切片。
+  `synthesis_ready_attempt` 后启动 Synthesis。启动和 session switch 现在还会投影 attempt-bound
+  `Prepared`：WorkspaceApply 只接受完整 RFC-0002 batch 与当前 policy snapshot，GitRefAdvance
+  只接受 exact expected/candidate ref；可唯一证明的本地终态会幂等补齐，证据缺失或歧义则保留
+  needs-review，且不会重放 merge、check 或 provider。
 
 O6f：promotion barrier、parent mutation 与 final verification。
 
