@@ -14,10 +14,11 @@ After completing Quick Setup, manage the selected user config without editing TO
 sigil mcp add filesystem -- node /absolute/path/to/server.js
 sigil mcp add my-search --url https://mcp.example.com/mcp
 sigil mcp list
+sigil mcp get my-search
 sigil mcp remove filesystem
 ```
 
-Use `--inherit-env NAME` for each environment variable a stdio server needs, or `--bearer-token-env-var NAME` for a remote static bearer token. New entries use `approval_default = "ask"`, do not allow secrets, start eagerly, and remain optional unless `--required` is set. `list` intentionally omits commands, arguments, and credential sources; use `--json` for structured safe output. Pass the global `--config PATH` before `mcp` to edit an explicit config.
+Use `--inherit-env NAME` for each environment variable a stdio server needs, or `--bearer-token-env-var NAME` for a remote static bearer token. New entries use `approval_default = "ask"`, do not allow secrets, start eagerly, and remain optional unless `--required` is set. `list` intentionally omits commands, arguments, and credential sources. `get` shows the selected command or safe remote destination plus credential source names, but redacts command arguments and credential values. Both read commands support `--json`. Pass the global `--config PATH` before `mcp` to edit an explicit config.
 
 ## Minimal Config
 

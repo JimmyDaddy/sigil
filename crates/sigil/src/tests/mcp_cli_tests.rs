@@ -7,7 +7,7 @@ use tempfile::tempdir;
 use super::{McpCommand, McpStartupArg, execute_mcp_command};
 
 #[test]
-fn stdio_add_list_and_remove_round_trip_without_echoing_command_details() -> Result<()> {
+fn stdio_add_get_list_and_remove_round_trip_without_echoing_argument_details() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_config(&config_path)?;
@@ -52,6 +52,18 @@ fn stdio_add_list_and_remove_round_trip_without_echoing_command_details() -> Res
     assert!(listed.contains("stdio"));
     assert!(!listed.contains("/private/bin"));
     assert!(!listed.contains("must-not-echo"));
+
+    let inspected = execute_mcp_command(
+        &config_path,
+        McpCommand::Get {
+            name: "filesystem".to_owned(),
+            json: false,
+        },
+    )?;
+    assert!(inspected.contains("Command: \"/private/bin/mcp-secret\""));
+    assert!(inspected.contains("Arguments: 1 configured (redacted)"));
+    assert!(inspected.contains("Inherited environment: MCP_TOKEN"));
+    assert!(!inspected.contains("must-not-echo"));
 
     let removed = execute_mcp_command(
         &config_path,
@@ -99,6 +111,26 @@ fn remote_add_uses_safe_trust_defaults_and_json_list_projection() -> Result<()> 
     assert_eq!(listed[0]["transport"], "streamable_http");
     assert_eq!(listed[0]["approval_default"], "ask");
     assert!(!listed.to_string().contains("SEARCH_BEARER_TOKEN"));
+
+    let inspected = execute_mcp_command(
+        &config_path,
+        McpCommand::Get {
+            name: "search".to_owned(),
+            json: true,
+        },
+    )?;
+    let inspected: serde_json::Value = serde_json::from_str(&inspected)?;
+    assert_eq!(inspected["name"], "search");
+    assert_eq!(
+        inspected["transport_detail"]["destination"],
+        "https://mcp.example.com/"
+    );
+    assert_eq!(inspected["transport_detail"]["authorization"], "bearer_env");
+    assert_eq!(
+        inspected["transport_detail"]["credential_environment"][0],
+        "SEARCH_BEARER_TOKEN"
+    );
+    assert_eq!(inspected["transport_detail"]["oauth"]["state"], "off");
     Ok(())
 }
 
@@ -145,6 +177,84 @@ fn mcp_config_updates_fail_closed_for_missing_duplicate_and_ambiguous_inputs() -
         .is_err()
     );
     assert_eq!(fs::read(&config_path)?, unchanged);
+    Ok(())
+}
+
+#[test]
+fn mcp_add_validates_names_commands_urls_and_credential_environment_before_writing() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_config(&config_path)?;
+    let unchanged = fs::read(&config_path)?;
+
+    for command in [
+        McpCommand::Add {
+            name: " ".to_owned(),
+            url: None,
+            bearer_token_env_var: None,
+            inherit_env: Vec::new(),
+            required: false,
+            startup: McpStartupArg::Eager,
+            command: vec!["node".to_owned()],
+        },
+        McpCommand::Add {
+            name: "empty".to_owned(),
+            url: None,
+            bearer_token_env_var: None,
+            inherit_env: Vec::new(),
+            required: false,
+            startup: McpStartupArg::Eager,
+            command: vec![" ".to_owned()],
+        },
+        McpCommand::Add {
+            name: "bad-env".to_owned(),
+            url: None,
+            bearer_token_env_var: None,
+            inherit_env: vec!["BAD-NAME".to_owned()],
+            required: false,
+            startup: McpStartupArg::Eager,
+            command: vec!["node".to_owned()],
+        },
+        McpCommand::Add {
+            name: "userinfo".to_owned(),
+            url: Some("https://user:pass@mcp.example.com/mcp".to_owned()),
+            bearer_token_env_var: None,
+            inherit_env: Vec::new(),
+            required: false,
+            startup: McpStartupArg::Eager,
+            command: Vec::new(),
+        },
+        McpCommand::Add {
+            name: "insecure-token".to_owned(),
+            url: Some("http://mcp.example.com/mcp".to_owned()),
+            bearer_token_env_var: Some("MCP_TOKEN".to_owned()),
+            inherit_env: Vec::new(),
+            required: false,
+            startup: McpStartupArg::Eager,
+            command: Vec::new(),
+        },
+    ] {
+        assert!(execute_mcp_command(&config_path, command).is_err());
+        assert_eq!(fs::read(&config_path)?, unchanged);
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_get_requires_an_exact_configured_name() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_config(&config_path)?;
+
+    let error = execute_mcp_command(
+        &config_path,
+        McpCommand::Get {
+            name: "missing".to_owned(),
+            json: false,
+        },
+    )
+    .expect_err("missing server must fail");
+    assert!(error.to_string().contains("not configured"));
     Ok(())
 }
 

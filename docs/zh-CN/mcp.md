@@ -14,10 +14,11 @@ Sigil 可以连接本机 stdio 服务和用户级的 Streamable HTTP MCP 服务�
 sigil mcp add filesystem -- node /absolute/path/to/server.js
 sigil mcp add my-search --url https://mcp.example.com/mcp
 sigil mcp list
+sigil mcp get my-search
 sigil mcp remove filesystem
 ```
 
-本机 stdio 服务需要环境变量时，逐个传入 `--inherit-env NAME`；远端静态 Bearer 令牌使用 `--bearer-token-env-var NAME`。新条目默认 `approval_default = "ask"`、不允许 secrets、立即启动，并且除非显式传入 `--required`，否则不会因为启动失败阻断 Sigil。`list` 不展示命令、参数和凭据来源；需要结构化安全输出时使用 `--json`。要修改指定配置，请把全局 `--config PATH` 放在 `mcp` 之前。
+本机 stdio 服务需要环境变量时，逐个传入 `--inherit-env NAME`；远端静态 Bearer 令牌使用 `--bearer-token-env-var NAME`。新条目默认 `approval_default = "ask"`、不允许 secrets、立即启动，并且除非显式传入 `--required`，否则不会因为启动失败阻断 Sigil。`list` 不展示命令、参数和凭据来源；`get` 展示选中服务的命令或经过脱敏的远端目的地及凭据来源名称，但不会展示命令参数和凭据值。两个读取命令都支持 `--json`。要修改指定配置，请把全局 `--config PATH` 放在 `mcp` 之前。
 
 ## 最小配置
 
