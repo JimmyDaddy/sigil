@@ -80,9 +80,9 @@ pub use changeset_only::{
     validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use child_session::TaskChildSessionRunner;
-#[cfg(test)]
-use runner::participant_result_entry;
 pub use runner::{SequentialTaskOrchestrator, reconcile_task_final_answer_prefix};
+#[cfg(test)]
+use runner::{append_integration_run_output, participant_result_entry};
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,

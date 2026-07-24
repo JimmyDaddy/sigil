@@ -1528,10 +1528,7 @@ where
         {
             bail!("physical integration returned inconsistent lane identities");
         }
-        for lane in output.lanes {
-            append_task_control(session, handler, ControlEntry::IntegrationLaneChanged(lane))?;
-        }
-        Ok(())
+        append_integration_run_output(session, handler, output)
     }
 
     async fn complete_task_with_synthesis<H, A>(
@@ -2324,6 +2321,30 @@ fn validate_isolated_planner_output(
         bail!("isolated planner did not return a non-empty accepted plan");
     }
     TaskGraphProjection::from_plan_entry(plan)?;
+    Ok(())
+}
+
+pub(super) fn append_integration_run_output<H>(
+    session: &mut Session,
+    handler: &mut H,
+    output: TaskIntegrationRunOutput,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    for lane in output.lanes {
+        append_task_control(session, handler, ControlEntry::IntegrationLaneChanged(lane))?;
+    }
+    if let Some(preview) = output.promotion_preview {
+        preview.validate()?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::TaskPromotionPreviewRecorded(crate::TaskPromotionPreviewRecorded {
+                preview,
+            }),
+        )?;
+    }
     Ok(())
 }
 

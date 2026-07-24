@@ -358,6 +358,7 @@ pub struct TaskIntegrationRunRequest {
 #[derive(Debug, Clone)]
 pub struct TaskIntegrationRunOutput {
     pub lanes: Vec<crate::IntegrationLaneChanged>,
+    pub promotion_preview: Option<crate::TaskPromotionPreview>,
 }
 
 #[derive(Clone)]

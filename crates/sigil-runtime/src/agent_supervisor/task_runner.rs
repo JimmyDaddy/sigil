@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -10,9 +11,10 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, ExecutionBackend,
-    IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
-    IntegrationObservedEffect, IntegrationProposalFacts, IsolatedWorkspaceBackend,
+    ApprovalHandler, ChangeSetId, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler,
+    EvidenceScope, ExecutionBackend, IntegrationContentClass, IntegrationEffect,
+    IntegrationLaneChanged, IntegrationLaneStatus, IntegrationObservedEffect,
+    IntegrationProjection, IntegrationProposalFacts, IsolatedWorkspaceBackend,
     IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
     IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, MutationEventRecorder,
     ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
@@ -22,10 +24,11 @@ use sigil_kernel::{
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
     TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskParticipantAttemptId,
     TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
-    TaskSynthesisSessionRunRequest, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus,
-    ToolOperation, ToolSpec, WriteIsolationMode, changeset_only_child_tool_registry,
+    TaskPlannerSessionRunRequest, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
+    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
+    ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec, VerificationPolicy,
+    WriteIsolationMode, build_task_promotion_preview, changeset_only_child_tool_registry,
     decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
     task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
     task_step_owner_agent_id,
@@ -35,8 +38,10 @@ use sigil_tools_builtin::LocalExecutionBackend;
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
     integration_lanes::{
-        GitIntegrationRunRequest, IntegrationArtifact, IntegrationLaneRuntimeEvent,
-        git_integration_workspace_id, run_git_integration_lanes_with_events,
+        GitIntegrationPromotionPreparationRequest, GitIntegrationRunRequest, IntegrationArtifact,
+        IntegrationLaneRuntimeEvent, IntegrationPromotionPreparationTarget,
+        PreparedGitIntegrationPromotion, git_integration_workspace_id,
+        prepare_git_integration_promotion, run_git_integration_lanes_with_events,
     },
     isolated_workspace::{
         FrozenGitWorktreeBase, GitWorktreeBaseFreezeRequest, MaterializedGitWorktree,
@@ -1294,6 +1299,146 @@ async fn persist_changeset_artifact(
     Ok(())
 }
 
+fn integration_promotion_policy(
+    parent_session: &Session,
+    task_id: &TaskId,
+    workspace_root: &Path,
+) -> Result<VerificationPolicy> {
+    let projection = parent_session.verification_state_projection();
+    let task_scope = EvidenceScope::Task(task_id.as_str().to_owned());
+    let workspace_scope = EvidenceScope::Workspace(stable_workspace_id(workspace_root)?);
+    Ok(projection
+        .latest_policy(&task_scope)
+        .or_else(|| projection.latest_policy(&workspace_scope))
+        .map(|entry| entry.policy.clone())
+        .unwrap_or_else(|| {
+            VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH)
+        }))
+}
+
+async fn persist_integration_promotion_artifact(
+    parent_session: &Session,
+    workspace_root: &Path,
+    prepared: &PreparedGitIntegrationPromotion,
+) -> Result<String> {
+    let recorder = parent_session
+        .mutation_event_recorder()
+        .ok_or_else(|| anyhow::anyhow!("integration promotion review requires durable storage"))?;
+    let content = prepared.aggregate().artifact.content.as_bytes().to_vec();
+    let observed_digest = format!("{:x}", Sha256::digest(&content));
+    if observed_digest != prepared.aggregate().artifact.content_sha256 {
+        anyhow::bail!("integration promotion aggregate digest changed before persistence");
+    }
+    let operation_id = format!(
+        "task-promotion-preview-artifact-{}",
+        stable_event_uuid(
+            "sigil-task-promotion-preview-artifact",
+            &format!(
+                "{}:{}",
+                prepared.plan_id().as_str(),
+                prepared.aggregate().artifact.content_sha256
+            )
+        )
+    );
+    let source_path = std::path::PathBuf::from(".sigil-task-artifacts")
+        .join(format!("{}.promotion.diff", prepared.plan_id().as_str()));
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    tokio::task::spawn_blocking(move || {
+        recorder.capture_immutable_content_artifact(
+            &workspace_id,
+            &operation_id,
+            &source_path,
+            &content,
+        )
+    })
+    .await
+    .context("integration promotion artifact persistence task failed")?
+}
+
+async fn promotion_preview_from_prepared(
+    parent_session: &Session,
+    workspace_root: &Path,
+    plan: &sigil_kernel::IntegrationPlan,
+    prepared: &mut PreparedGitIntegrationPromotion,
+) -> Result<TaskPromotionPreview> {
+    let artifact_ref =
+        persist_integration_promotion_artifact(parent_session, workspace_root, prepared).await?;
+    prepared.bind_aggregate_artifact_ref(artifact_ref.clone())?;
+    let policy = integration_promotion_policy(parent_session, &plan.task_id, workspace_root)?;
+    let policy_digest = policy.stable_hash()?;
+    let projection = IntegrationProjection::from_entries(parent_session.entries());
+    let state = projection
+        .plans
+        .get(&plan.plan_id)
+        .ok_or_else(|| anyhow::anyhow!("integration plan disappeared before promotion review"))?;
+    build_task_promotion_preview(
+        state,
+        TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: artifact_ref,
+            aggregate_diff_digest: prepared.aggregate_diff_digest(),
+            target: prepared.target().clone(),
+            verification_invalidation: vec![policy.verification_scope.scope_hash.clone()],
+            intent_binding: None,
+            policy_digest,
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before unix epoch")?
+                .as_millis()
+                .try_into()
+                .context("promotion preview timestamp exceeds u64")?,
+        },
+    )
+}
+
+async fn prepare_integration_promotion_preview(
+    parent_session: &Session,
+    workspace_root: &Path,
+    plan: &sigil_kernel::IntegrationPlan,
+    artifacts: Vec<IntegrationArtifact>,
+    frozen_base: Option<FrozenGitWorktreeBase>,
+) -> Result<TaskPromotionPreview> {
+    let preparation_id = format!(
+        "review-{}",
+        stable_event_uuid(
+            "sigil-task-promotion-preview",
+            &format!(
+                "{}:{}:{}",
+                plan.task_id.as_str(),
+                plan.plan_id.as_str(),
+                plan.plan_version
+            )
+        )
+    );
+    let mut prepared =
+        prepare_git_integration_promotion(GitIntegrationPromotionPreparationRequest {
+            preparation_id,
+            parent_workspace_root: workspace_root.to_path_buf(),
+            plan: plan.clone(),
+            artifacts,
+            frozen_base,
+            target: IntegrationPromotionPreparationTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+        })
+        .await?;
+    let preview =
+        promotion_preview_from_prepared(parent_session, workspace_root, plan, &mut prepared).await;
+    let cleanup = prepared.cleanup().await;
+    match (preview, cleanup) {
+        (Ok(preview), Ok(())) => Ok(preview),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup.context(
+            "integration promotion preview candidate cleanup failed after preview preparation",
+        )),
+        (Err(error), Err(cleanup)) => Err(error.context(format!(
+            "integration promotion preview candidate cleanup also failed: {cleanup:#}"
+        ))),
+    }
+}
+
 fn task_worktree_id(request: &TaskChildSessionRunRequest) -> String {
     let seed = format!(
         "{}:{}:{}:{}",
@@ -1795,7 +1940,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             GitIntegrationRunRequest {
                 parent_workspace_root: request.workspace_root.clone(),
                 plan: request.plan.clone(),
-                artifacts,
+                artifacts: artifacts.clone(),
                 frozen_base: frozen_base.clone(),
                 verification_backend: Some(self.integration_verification_backend.clone()),
             },
@@ -1905,7 +2050,27 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 reason: lane.reason,
             });
         }
-        Ok(TaskIntegrationRunOutput { lanes })
+        let promotion_preview = if lanes
+            .iter()
+            .all(|lane| lane.status == IntegrationLaneStatus::Ready)
+        {
+            Some(
+                prepare_integration_promotion_preview(
+                    parent_session,
+                    &request.workspace_root,
+                    &request.plan,
+                    artifacts,
+                    frozen_base,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        Ok(TaskIntegrationRunOutput {
+            lanes,
+            promotion_preview,
+        })
     }
 
     async fn run_planner_session<H, A>(

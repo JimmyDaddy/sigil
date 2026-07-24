@@ -72,6 +72,24 @@ impl PreparedGitIntegrationPromotion {
         format!("sha256:{}", self.aggregate.artifact.content_sha256)
     }
 
+    /// Rebinds the aggregate bytes to their durable content-addressed artifact identity.
+    ///
+    /// Preview preparation persists the exact aggregate diff before exposing it for review.
+    /// Reconstructed promotion candidates must bind the same identity before the final
+    /// content-bound promotion request can pass validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable artifact identity is empty.
+    pub fn bind_aggregate_artifact_ref(&mut self, artifact_ref: impl Into<String>) -> Result<()> {
+        let artifact_ref = artifact_ref.into();
+        if artifact_ref.trim().is_empty() {
+            bail!("aggregate promotion artifact ref must not be empty");
+        }
+        self.aggregate.artifact_ref = artifact_ref;
+        Ok(())
+    }
+
     #[must_use]
     pub fn target(&self) -> &IntegrationPromotionTarget {
         &self.target

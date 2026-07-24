@@ -5003,7 +5003,7 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
     let proposal = TaskIntegrationProposal {
         step_id,
         depends_on: Vec::new(),
-        base_snapshot_id,
+        base_snapshot_id: base_snapshot_id.clone(),
         proposal: TaskChildChangeSetProposal {
             change_set,
             artifact_ref: "inline:integration-lifecycle".to_owned(),
@@ -5039,7 +5039,7 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
         ),
     );
     let store = JsonlSessionStore::new(temp.path().join("integration-parent.jsonl"))?;
-    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
     session.append_control(ControlEntry::IntegrationPlanRecorded(
         sigil_kernel::IntegrationPlanRecorded { plan: plan.clone() },
     ))?;
@@ -5048,7 +5048,7 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
         .run_integration_lanes(
             &mut session,
             TaskIntegrationRunRequest {
-                plan,
+                plan: plan.clone(),
                 workspace_root: repository_root.clone(),
                 proposals: vec![proposal],
             },
@@ -5061,6 +5061,32 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
         output.lanes[0].status,
         sigil_kernel::IntegrationLaneStatus::Ready
     );
+    let preview = output
+        .promotion_preview
+        .as_ref()
+        .expect("ready lanes should produce one exact promotion preview");
+    assert_eq!(preview.plan_id, plan.plan_id);
+    assert_eq!(
+        preview.target,
+        sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {
+            expected_snapshot_id: base_snapshot_id,
+            expected_revision: 0,
+        }
+    );
+    assert!(
+        preview
+            .aggregate_diff_artifact_ref
+            .starts_with("mutation-artifact:sha256:")
+    );
+    let aggregate_diff = session
+        .mutation_event_recorder()
+        .expect("durable integration session should own an artifact recorder")
+        .read_immutable_content_artifact(&preview.aggregate_diff_artifact_ref)?;
+    assert_eq!(
+        preview.aggregate_diff_digest,
+        format!("sha256:{:x}", Sha256::digest(&aggregate_diff))
+    );
+    assert!(String::from_utf8_lossy(&aggregate_diff).contains("+integrated"));
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(_))
@@ -5110,6 +5136,27 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH
     );
     assert_eq!(fs::read(repository_root.join("base.txt"))?, b"base\n");
+    session.append_control(ControlEntry::TaskPromotionPreviewRecorded(
+        sigil_kernel::TaskPromotionPreviewRecorded {
+            preview: preview.clone(),
+        },
+    ))?;
+    drop(session);
+    let restored = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let restored_projection = sigil_kernel::IntegrationProjection::from_entries(restored.entries());
+    let restored_preview = restored_projection
+        .plans
+        .get(&plan.plan_id)
+        .and_then(|state| state.promotion_previews.get(&preview.preview_digest))
+        .expect("promotion preview should survive parent session ownership transfer");
+    assert_eq!(restored_preview, preview);
+    assert_eq!(
+        restored
+            .mutation_event_recorder()
+            .expect("restored session should retain its artifact recorder")
+            .read_immutable_content_artifact(&restored_preview.aggregate_diff_artifact_ref)?,
+        aggregate_diff
+    );
     Ok(())
 }
 

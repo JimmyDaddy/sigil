@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -42,15 +43,15 @@ use crate::{
 
 use super::{
     StepRunOutput, TaskChildSessionBatchCommitEnvelope, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, child_status_from_output,
-    decode_changeset_only_child_output, durable_workspace_mutation_evidence,
-    latest_relevant_successful_verification_sequence, participant_result_entry, planner_prompt,
-    reconcile_task_final_answer_prefix, record_isolated_child_output,
-    relevant_verification_receipts, rerun_task_verification_check, route_id_for_call,
-    run_status_from_step_status, run_task_step_verification_checks, step_status_after_readiness,
-    step_status_from_outcome, step_terminal_reason, subagent_step_prompt,
-    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
-    task_step_readiness,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskIntegrationRunOutput,
+    append_integration_run_output, child_status_from_output, decode_changeset_only_child_output,
+    durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
+    participant_result_entry, planner_prompt, reconcile_task_final_answer_prefix,
+    record_isolated_child_output, relevant_verification_receipts, rerun_task_verification_check,
+    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
+    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
+    subagent_step_prompt, task_status_from_step_status, task_step_auto_run_policy,
+    task_step_default_policy, task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -1375,6 +1376,146 @@ async fn synthesis_does_not_start_before_integration_parent_verification() -> Re
         task.participant_attempts_for(TaskParticipantPurpose::Synthesis, Some(1), None)
             .is_empty()
     );
+    Ok(())
+}
+
+#[test]
+fn integration_output_appends_the_exact_runtime_promotion_preview() -> Result<()> {
+    let task_id = TaskId::new("task_integration_output")?;
+    let plan_id = IntegrationPlanId::new("plan-integration-output")?;
+    let lane_id = crate::IntegrationLaneId::new("lane-integration-output")?;
+    let candidate = crate::IntegrationLaneCandidate::ManagedRef {
+        private_ref: "refs/sigil/integration/plan/lane".to_owned(),
+        base_commit: "b".repeat(40),
+        candidate_commit: "a".repeat(40),
+        workspace_snapshot_id: "snapshot-lane-output".to_owned(),
+    };
+    let check = CheckSpec::new(
+        "promotion-output-check",
+        CheckCommand {
+            command: "git".to_owned(),
+            args: vec!["diff".to_owned(), "--check".to_owned()],
+            cwd: None,
+        },
+        ToolEffect::ReadOnly,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    );
+    let receipt = task_test_verification_receipt(
+        &check,
+        EvidenceScope::Task(task_id.as_str().to_owned()),
+        None,
+        1,
+    );
+    let plan = crate::IntegrationPlan {
+        plan_id: plan_id.clone(),
+        task_id: task_id.clone(),
+        plan_version: 1,
+        base_snapshot_id: "snapshot-integration-output".to_owned(),
+        base_representation: crate::IntegrationBaseRepresentation::CleanCommit {
+            base_commit: "b".repeat(40),
+        },
+        proposals: Vec::new(),
+        conflicts: Vec::new(),
+        lanes: vec![crate::IntegrationLaneSpec {
+            lane_id: lane_id.clone(),
+            proposals: Vec::new(),
+            verification_scope_hashes: vec![DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned()],
+        }],
+    };
+    let state = crate::IntegrationPlanState {
+        recorded: IntegrationPlanRecorded { plan: plan.clone() },
+        lanes: BTreeMap::new(),
+        lifecycle_lanes: BTreeMap::from([(
+            lane_id.clone(),
+            crate::IntegrationLaneLifecycleState {
+                prepared: None,
+                applied_members: BTreeMap::new(),
+                verification: Some(crate::IntegrationLaneVerificationLinked {
+                    plan_id: plan_id.clone(),
+                    lane_id: lane_id.clone(),
+                    candidate: candidate.clone(),
+                    verification_check_ids: vec![check.check_spec_id.clone()],
+                    verification_scope_hashes: vec![
+                        DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned(),
+                    ],
+                    verification_receipts: vec![receipt.clone()],
+                    linked_at_unix_ms: 2,
+                }),
+                terminal: Some(crate::IntegrationLaneTerminal {
+                    plan_id: plan_id.clone(),
+                    lane_id: lane_id.clone(),
+                    status: crate::IntegrationLaneStatus::Ready,
+                    candidate: Some(candidate.clone()),
+                    reason: None,
+                    terminal_at_unix_ms: 3,
+                }),
+                cleanup: Some(crate::IntegrationLaneCleanupRecorded {
+                    plan_id: plan_id.clone(),
+                    lane_id: lane_id.clone(),
+                    owned_workspace_id: "workspace-integration-output".to_owned(),
+                    status: crate::IntegrationLaneCleanupStatus::Removed,
+                    recorded_at_unix_ms: 4,
+                }),
+                inconsistent: false,
+            },
+        )]),
+        promotion_previews: BTreeMap::new(),
+        consumed_promotion_authorities: BTreeMap::new(),
+        promotions: Vec::new(),
+        parent_verifications: BTreeMap::new(),
+        inconsistent: false,
+    };
+    let policy =
+        crate::VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let preview = crate::build_task_promotion_preview(
+        &state,
+        crate::TaskPromotionPreviewInput {
+            aggregate_diff_artifact_ref: "mutation-artifact:sha256:aggregate".to_owned(),
+            aggregate_diff_digest: format!("sha256:{}", "c".repeat(64)),
+            target: crate::IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: plan.base_snapshot_id.clone(),
+                expected_revision: 0,
+            },
+            verification_invalidation: vec![DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned()],
+            intent_binding: None,
+            policy_digest: policy.stable_hash()?,
+            has_pending_approval: false,
+            has_executable_intent_refs: false,
+            created_at_unix_ms: 5,
+        },
+    )?;
+    let lane = crate::IntegrationLaneChanged {
+        plan_id,
+        lane_id,
+        status: crate::IntegrationLaneStatus::Ready,
+        candidate: Some(candidate),
+        verification_check_ids: vec![check.check_spec_id],
+        reason: None,
+    };
+    let mut session = Session::new("fixture", "model");
+    let mut handler = RecordingEventHandler::default();
+
+    append_integration_run_output(
+        &mut session,
+        &mut handler,
+        TaskIntegrationRunOutput {
+            lanes: vec![lane],
+            promotion_preview: Some(preview.clone()),
+        },
+    )?;
+
+    assert!(matches!(
+        session.entries(),
+        [
+            SessionLogEntry::Control(ControlEntry::IntegrationLaneChanged(_)),
+            SessionLogEntry::Control(ControlEntry::TaskPromotionPreviewRecorded(recorded)),
+        ] if recorded.preview == preview
+    ));
+    assert!(matches!(
+        handler.events.last(),
+        Some(RunEvent::Control(ControlEntry::TaskPromotionPreviewRecorded(recorded)))
+            if recorded.preview == preview
+    ));
     Ok(())
 }
 
