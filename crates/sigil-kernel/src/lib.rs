@@ -20,6 +20,7 @@ pub mod image_attachment;
 pub mod integration;
 pub mod memory;
 pub mod mutation;
+pub mod orchestration;
 pub mod permission;
 pub mod persistence;
 pub mod plan;
@@ -285,6 +286,10 @@ pub use mutation::{
     is_sensitive_mutation_artifact_path, preview_controlled_checkpoint_restore,
     restore_file_from_snapshot_with_mutation, write_file_with_mutation,
     write_file_with_mutation_in_batch,
+};
+pub use orchestration::{
+    OrchestrationHardInvariant, OrchestrationRouteDisabledEntry,
+    OrchestrationRouteDisablementProjection,
 };
 pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,

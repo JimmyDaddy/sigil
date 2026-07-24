@@ -219,6 +219,7 @@ pub enum ControlEntry {
     TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),
     TaskParticipantResult(TaskParticipantResultEntry),
     TaskFinalAnswerCommitted(TaskFinalAnswerCommittedEntry),
+    OrchestrationRouteDisabled(crate::OrchestrationRouteDisabledEntry),
     TaskChildSession(TaskChildSessionEntry),
     TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry),
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),

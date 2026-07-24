@@ -696,6 +696,13 @@ impl Session {
         TaskHandoffProjection::from_entries(&self.entries)
     }
 
+    /// Returns route-local orchestration kill switches for this session.
+    pub fn orchestration_route_disablement_projection(
+        &self,
+    ) -> crate::OrchestrationRouteDisablementProjection {
+        crate::OrchestrationRouteDisablementProjection::from_entries(&self.entries)
+    }
+
     /// Returns durable resume job state reconstructed from append-only control entries.
     pub fn resume_job_state_projection(
         &self,

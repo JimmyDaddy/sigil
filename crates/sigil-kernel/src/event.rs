@@ -12,7 +12,7 @@ use crate::{
     CompactionFailureEntry, CompactionStartedEntry, ControlEntry, ConversationInputPromotedEntry,
     EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, JobIntentEntry,
     McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
-    PathTrustZone, PermissionConfirmation, PermissionRisk,
+    OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation, PermissionRisk,
     ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateRecordedEntry,
     ProviderContinuationObservedEntry, ProviderContinuationPayloadLifecycleEntry,
     ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
@@ -224,6 +224,7 @@ durable_event_types! {
     IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskParentVerificationRecorded => ("task_parent_verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskGuidanceApplied => ("task_guidance_applied", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    OrchestrationRouteDisabled => ("orchestration_route_disabled", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseHeartbeatRecorded => ("step_lease_heartbeat_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -476,6 +477,7 @@ pub enum TypedDomainEvent {
     CompactionFailed(CompactionFailureEntry),
     ConversationInputPromoted(ConversationInputPromotedEntry),
     TaskGuidancePromoted(TaskGuidancePromotedEntry),
+    OrchestrationRouteDisabled(OrchestrationRouteDisabledEntry),
     TaskMemoryRecordedV1(TaskMemoryRecordedV1),
     TaskMemoryInvalidated(TaskMemoryInvalidatedEntry),
     ToolOutputProjectionShrinkRecorded(ToolOutputProjectionShrinkRecorded),
@@ -604,6 +606,14 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             };
             entry.validate_for_session(&event.session_id)?;
             TypedDomainEvent::TaskGuidancePromoted(entry)
+        }
+        DurableEventType::OrchestrationRouteDisabled => {
+            let control = decode_control_entry(&event)?;
+            let ControlEntry::OrchestrationRouteDisabled(entry) = control else {
+                bail!("orchestration route disabled event carried a different control payload");
+            };
+            entry.validate()?;
+            TypedDomainEvent::OrchestrationRouteDisabled(entry)
         }
         DurableEventType::TaskMemoryRecordedV1 => {
             let entry: TaskMemoryRecordedV1 = decode_event_payload(&event)?;
@@ -1493,6 +1503,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",
         ControlEntry::TaskParticipantResult(_) => "task_participant_result",
         ControlEntry::TaskFinalAnswerCommitted(_) => "task_final_answer_committed",
+        ControlEntry::OrchestrationRouteDisabled(_) => "orchestration_route_disabled",
         ControlEntry::TaskChildSession(_) => "task_child_session",
         ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",
         ControlEntry::TaskSubagentApprovalRoute(_) => "task_subagent_approval_route",
