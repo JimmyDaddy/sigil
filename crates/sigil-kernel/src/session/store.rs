@@ -925,6 +925,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::TaskParentVerificationRecorded(_) => {
             DurableEventType::TaskParentVerificationRecorded
         }
+        ControlEntry::TaskGuidancePromoted(_) => DurableEventType::TaskGuidancePromoted,
         ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::ContextAssemblySkipped(_) => DurableEventType::ContextSourceCaptured,

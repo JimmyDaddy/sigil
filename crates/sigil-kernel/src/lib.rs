@@ -156,8 +156,8 @@ pub use conversation_queue::{
     ConversationQueueDurableProjection, ConversationQueueItemProjection, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueMutationReceipt,
     ConversationQueueProjection, ConversationQueueRevision,
-    MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence,
+    MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS, TaskGuidancePromotedEntry,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 pub use conversation_run::{
     CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION, ConversationRunFinalizedEntryV1,

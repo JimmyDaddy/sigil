@@ -13,6 +13,7 @@ use crate::{
     provider::{MessageRole, ModelMessage, ReasoningEffort},
     session::{ControlEntry, SessionLogEntry, SessionStreamRecord},
     task::TaskId,
+    task_handoff::ConversationTurnRef,
 };
 
 /// Durable hash prefix proving that dispatch requires process-local exact prompt material.
@@ -400,6 +401,65 @@ impl ConversationInputPromotedEntry {
     }
 }
 
+/// Critical scheduler binding for one task-targeted guidance item.
+///
+/// The durable payload contains only the safe prompt projection. Exact prompt material remains
+/// process-local and must match `prompt_hash` before a continuation attempt can start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskGuidancePromotedEntry {
+    pub queue_id: ConversationInputQueueId,
+    pub expected_queue_revision: ConversationQueueRevision,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub source_turn: ConversationTurnRef,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+    pub guidance: String,
+    pub dispatch_run_id: String,
+    pub promoted_at_ms: u64,
+}
+
+impl TaskGuidancePromotedEntry {
+    /// Validates the content-safe scheduler binding without relying on a stream.
+    pub fn validate_shape(&self) -> Result<()> {
+        self.expected_queue_revision.validate()?;
+        TaskId::new(self.task_id.as_str())?;
+        if self.plan_version == 0 {
+            bail!("task guidance promotion plan version must be non-zero");
+        }
+        ConversationTurnRef::new(
+            self.source_turn.session_scope_id.clone(),
+            self.source_turn.message_id.clone(),
+            self.source_turn.logical_run_id.clone(),
+        )?;
+        validate_queue_prompt_projection(&self.guidance, &self.prompt_hash)?;
+        let exact_prompt_required = self
+            .prompt_hash
+            .starts_with(CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX);
+        if self.exact_prompt_required != exact_prompt_required {
+            bail!("task guidance promotion exact-prompt flag does not match its prompt hash");
+        }
+        validate_stable_id(
+            "task guidance promotion dispatch run id",
+            &self.dispatch_run_id,
+        )?;
+        if self.promoted_at_ms == 0 {
+            bail!("task guidance promotion timestamp must be non-zero");
+        }
+        Ok(())
+    }
+
+    /// Validates that the source turn belongs to the durable session stream.
+    pub fn validate_for_session(&self, session_id: &str) -> Result<()> {
+        self.validate_shape()?;
+        if self.source_turn.session_scope_id != session_id {
+            bail!("task guidance promotion source turn belongs to a different session");
+        }
+        Ok(())
+    }
+}
+
 /// Canonical digest committed by one promoted input's URL capability descriptors.
 pub fn conversation_promotion_capability_digest(
     descriptors: &[WebUrlCapabilityDescriptor],
@@ -663,6 +723,31 @@ impl ConversationQueueDurableProjection {
         Ok(())
     }
 
+    /// Validates a task-guidance promotion against the exact queue revision and task-local FIFO.
+    pub fn validate_task_guidance_promotion(
+        &self,
+        entry: &TaskGuidancePromotedEntry,
+    ) -> Result<()> {
+        entry.validate_shape()?;
+        if self.revision.as_ref() != Some(&entry.expected_queue_revision) {
+            bail!("task guidance promotion queue revision is stale");
+        }
+        if self.queue.paused {
+            bail!("task guidance promotion cannot proceed while the queue is paused");
+        }
+        let next = self
+            .queue
+            .next_task_guidance_for(&entry.task_id)
+            .context("task guidance promotion has no dispatchable guidance for its task")?;
+        if next.queued.queue_id != entry.queue_id {
+            bail!("task guidance promotion queue item is no longer next for its task");
+        }
+        if next.queued.prompt_hash != entry.prompt_hash || next.queued.prompt != entry.guidance {
+            bail!("task guidance promotion prompt projection does not match the queue item");
+        }
+        Ok(())
+    }
+
     fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
@@ -694,6 +779,10 @@ impl ConversationQueueDurableProjection {
                     if let SessionLogEntry::Control(control) = entry
                         && is_queue_affecting_control(&control)
                     {
+                        if let ControlEntry::TaskGuidancePromoted(promoted) = &control {
+                            promoted.validate_for_session(&event.session_id)?;
+                            self.validate_task_guidance_promotion(promoted)?;
+                        }
                         if let ControlEntry::ConversationInputQueued(queued) = &control {
                             self.seen_queue_ids.insert(queued.queue_id.clone());
                         }
@@ -724,6 +813,27 @@ impl ConversationQueueProjection {
         }
 
         projection
+    }
+
+    /// Returns the oldest queued guidance item for one task without crossing task identities.
+    #[must_use]
+    pub fn next_task_guidance_for(
+        &self,
+        task_id: &TaskId,
+    ) -> Option<&ConversationQueueItemProjection> {
+        if self.paused {
+            return None;
+        }
+        self.items.iter().find(|item| {
+            item.status == ConversationInputStatus::Queued
+                && item.queued.kind == ConversationInputKind::TaskGuidance
+                && matches!(
+                    &item.queued.target,
+                    ConversationInputTarget::Task {
+                        task_id: target_task_id
+                    } if target_task_id == task_id
+                )
+        })
     }
 
     pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
@@ -788,6 +898,12 @@ impl ConversationQueueProjection {
                     item.reason = Some("promotion_bound".to_owned());
                 }
             }
+            ControlEntry::TaskGuidancePromoted(promoted) => {
+                if let Some(item) = indexed.get_mut(&promoted.queue_id) {
+                    item.status = ConversationInputStatus::Dispatching;
+                    item.reason = Some("task_guidance_promotion_bound".to_owned());
+                }
+            }
             _ => return,
         }
 
@@ -817,6 +933,7 @@ fn is_queue_affecting_control(control: &ControlEntry) -> bool {
             | ControlEntry::ConversationInputReordered(_)
             | ControlEntry::ConversationInputStatusChanged(_)
             | ControlEntry::ConversationInputPromoted(_)
+            | ControlEntry::TaskGuidancePromoted(_)
     )
 }
 

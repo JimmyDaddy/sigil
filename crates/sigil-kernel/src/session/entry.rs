@@ -282,6 +282,8 @@ pub enum ControlEntry {
     /// bound here for replay, but does not become provider-visible until the pre-turn sender
     /// consumes the promotion contract.
     ConversationInputPromoted(crate::ConversationInputPromotedEntry),
+    /// Scheduler-owned binding of queued task guidance to one accepted task plan version.
+    TaskGuidancePromoted(crate::TaskGuidancePromotedEntry),
     Note {
         kind: String,
         data: serde_json::Value,

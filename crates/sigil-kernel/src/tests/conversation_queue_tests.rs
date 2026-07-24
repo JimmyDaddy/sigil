@@ -15,9 +15,10 @@ use crate::{
     ConversationInputTerminalExpectation, ConversationInputTerminalFrontier,
     ConversationQueueDurableProjection, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, DurableEventType, EventClass,
-    JsonlSessionStore, ModelMessage, ReasoningEffort, Session, SessionLogEntry, ToolRestartPolicy,
-    WebUrlCapabilityDescriptor, WebUrlProvenanceKind, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence,
+    JsonlSessionStore, ModelMessage, ReasoningEffort, Session, SessionLogEntry, SessionRef,
+    TaskGuidancePromotedEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
+    ToolRestartPolicy, WebUrlCapabilityDescriptor, WebUrlProvenanceKind,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
 #[test]
@@ -460,6 +461,171 @@ fn task_guidance_queue_routing_is_typed_and_fail_closed() -> Result<()> {
             .is_err()
     );
     assert_eq!(fs::read(path)?, before_invalid);
+    Ok(())
+}
+
+#[test]
+fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let task_id = crate::TaskId::new("task_guidance_1")?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskRun(
+        TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+            objective: "finish the task safely".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: Some("safe point".to_owned()),
+        },
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskPlan(
+        TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        },
+    )))?;
+
+    let queue_id = ConversationInputQueueId::new("queue_task_guidance_promote")?;
+    let mut guidance = durable_queue_entry(queue_id.clone(), "inspect the recovery edge first");
+    guidance.target = ConversationInputTarget::Task {
+        task_id: task_id.clone(),
+    };
+    guidance.kind = ConversationInputKind::TaskGuidance;
+    let receipt = store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: ConversationQueueRevision::initial(),
+        mutation: ConversationQueueMutation::Enqueue {
+            entry: guidance.clone(),
+        },
+    })?;
+    let records = store.read_event_records_writer()?;
+    let session_id = records
+        .last()
+        .expect("queued guidance must have a durable record")
+        .session_id()
+        .to_owned();
+    let promoted = task_guidance_promotion_entry(
+        &session_id,
+        queue_id.clone(),
+        receipt.revision,
+        task_id,
+        1,
+        guidance.prompt_hash,
+        guidance.prompt,
+    )?;
+
+    let event = store.append_task_guidance_promoted(promoted.clone())?;
+    assert_eq!(event.event_type, "task_guidance_promoted");
+    let restored =
+        ConversationQueueDurableProjection::from_records(&store.read_event_records_writer()?)?;
+    let projected = restored
+        .queue
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == queue_id)
+        .expect("promoted guidance remains in the durable active projection");
+    assert_eq!(projected.status, ConversationInputStatus::Dispatching);
+    assert_eq!(
+        projected.reason.as_deref(),
+        Some("task_guidance_promotion_bound")
+    );
+
+    let before_duplicate = fs::read(&path)?;
+    assert!(store.append_task_guidance_promoted(promoted).is_err());
+    assert_eq!(fs::read(&path)?, before_duplicate);
+    Ok(())
+}
+
+#[test]
+fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let task_id = crate::TaskId::new("task_guidance_2")?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskRun(
+        TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+            objective: "continue an accepted plan".to_owned(),
+            status: TaskRunStatus::Failed,
+            reason: None,
+        },
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskPlan(
+        TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        },
+    )))?;
+    let queue_id = ConversationInputQueueId::new("queue_task_guidance_stale")?;
+    let mut guidance = durable_queue_entry(queue_id.clone(), "apply this at a safe point");
+    guidance.target = ConversationInputTarget::Task {
+        task_id: task_id.clone(),
+    };
+    guidance.kind = ConversationInputKind::TaskGuidance;
+    let receipt = store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: ConversationQueueRevision::initial(),
+        mutation: ConversationQueueMutation::Enqueue {
+            entry: guidance.clone(),
+        },
+    })?;
+    let session_id = store
+        .read_event_records_writer()?
+        .last()
+        .expect("queued guidance must have a durable record")
+        .session_id()
+        .to_owned();
+    let stale = task_guidance_promotion_entry(
+        &session_id,
+        queue_id.clone(),
+        receipt.revision.clone(),
+        task_id.clone(),
+        1,
+        guidance.prompt_hash.clone(),
+        guidance.prompt.clone(),
+    )?;
+    let paused = store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: receipt.revision,
+        mutation: ConversationQueueMutation::Pause {
+            reason: Some("test stale promotion".to_owned()),
+            updated_at_ms: Some(2),
+        },
+    })?;
+    let before_stale = fs::read(&path)?;
+    let error = store
+        .append_task_guidance_promoted(stale)
+        .expect_err("a stale queue revision must reject task guidance promotion");
+    assert!(format!("{error:#}").contains("queue revision is stale"));
+    assert_eq!(fs::read(&path)?, before_stale);
+
+    let resumed = store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
+        expected_queue_revision: paused.revision,
+        mutation: ConversationQueueMutation::Resume {
+            reason: None,
+            updated_at_ms: Some(3),
+        },
+    })?;
+    let wrong_plan = task_guidance_promotion_entry(
+        &session_id,
+        queue_id,
+        resumed.revision,
+        task_id,
+        2,
+        guidance.prompt_hash,
+        guidance.prompt,
+    )?;
+    let before_wrong_plan = fs::read(&path)?;
+    let error = store
+        .append_task_guidance_promoted(wrong_plan)
+        .expect_err("an unaccepted plan version must reject task guidance promotion");
+    assert!(format!("{error:#}").contains("accepted task plan"));
+    assert_eq!(fs::read(path)?, before_wrong_plan);
     Ok(())
 }
 
@@ -949,6 +1115,35 @@ fn promotion_entry(
         capability_descriptors: Vec::new(),
         capability_digest: conversation_promotion_capability_digest(&[])?,
         dispatch_run_id: "run-promote-1".to_owned(),
+        promoted_at_ms: 1,
+    })
+}
+
+fn task_guidance_promotion_entry(
+    session_id: &str,
+    queue_id: ConversationInputQueueId,
+    expected_queue_revision: ConversationQueueRevision,
+    task_id: crate::TaskId,
+    plan_version: u32,
+    prompt_hash: String,
+    guidance: String,
+) -> Result<TaskGuidancePromotedEntry> {
+    let exact_prompt_required =
+        prompt_hash.starts_with(crate::CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX);
+    Ok(TaskGuidancePromotedEntry {
+        queue_id,
+        expected_queue_revision,
+        task_id,
+        plan_version,
+        source_turn: crate::ConversationTurnRef::new(
+            session_id,
+            "task-guidance-message-1",
+            "task-guidance-run-1",
+        )?,
+        prompt_hash,
+        exact_prompt_required,
+        guidance,
+        dispatch_run_id: "task-guidance-run-1".to_owned(),
         promoted_at_ms: 1,
     })
 }

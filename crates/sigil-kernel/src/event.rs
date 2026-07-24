@@ -18,12 +18,12 @@ use crate::{
     ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
     ProviderObservedResolutionPlanRecordedEntry, ProviderPhysicalAttemptStartedEntry,
     ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome, QueryEgressStarted, SessionLogEntry,
-    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry, ToolCall, ToolOperation,
-    ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent, ToolResult, ToolSpec,
-    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
-    VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
-    WorkspaceMutationDetected,
+    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskGuidancePromotedEntry, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry,
+    ToolCall, ToolOperation, ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent,
+    ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
+    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
+    WebFetchTransportAuthorization, WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -256,6 +256,7 @@ durable_event_types! {
     TaskMemoryInvalidated => ("task_memory_invalidated", RecoveryCritical, Critical, DirectJson, "task_memory_invalidated"),
     ToolOutputProjectionShrinkRecorded => ("tool_output_projection_shrink_recorded", RecoveryCritical, Critical, DirectJson, "tool_output_projection_shrink_recorded"),
     ConversationInputPromoted => ("conversation_input_promoted", RecoveryCritical, Critical, DirectJson, "conversation_input_promoted"),
+    TaskGuidancePromoted => ("task_guidance_promoted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
     LogTailRecovered => ("log_tail_recovered", TailRecovery, Critical, DirectJson, "log_tail_recovered"),
 }
@@ -473,6 +474,7 @@ pub enum TypedDomainEvent {
     CompactionAppliedV2(Box<CompactionAppliedV2>),
     CompactionFailed(CompactionFailureEntry),
     ConversationInputPromoted(ConversationInputPromotedEntry),
+    TaskGuidancePromoted(TaskGuidancePromotedEntry),
     TaskMemoryRecordedV1(TaskMemoryRecordedV1),
     TaskMemoryInvalidated(TaskMemoryInvalidatedEntry),
     ToolOutputProjectionShrinkRecorded(ToolOutputProjectionShrinkRecorded),
@@ -593,6 +595,14 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             let entry: ConversationInputPromotedEntry = decode_event_payload(&event)?;
             entry.validate_for_session(&event.session_id)?;
             TypedDomainEvent::ConversationInputPromoted(entry)
+        }
+        DurableEventType::TaskGuidancePromoted => {
+            let control = decode_control_entry(&event)?;
+            let ControlEntry::TaskGuidancePromoted(entry) = control else {
+                bail!("task guidance promoted event carried a different control payload");
+            };
+            entry.validate_for_session(&event.session_id)?;
+            TypedDomainEvent::TaskGuidancePromoted(entry)
         }
         DurableEventType::TaskMemoryRecordedV1 => {
             let entry: TaskMemoryRecordedV1 = decode_event_payload(&event)?;
@@ -1500,6 +1510,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ConversationInputReordered(_) => "conversation_input_reordered",
         ControlEntry::ConversationInputStatusChanged(_) => "conversation_input_status_changed",
         ControlEntry::ConversationInputPromoted(_) => "conversation_input_promoted",
+        ControlEntry::TaskGuidancePromoted(_) => "task_guidance_promoted",
         ControlEntry::Note { .. } => "note",
     }
 }
