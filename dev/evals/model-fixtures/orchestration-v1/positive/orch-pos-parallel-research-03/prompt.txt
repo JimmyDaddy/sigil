@@ -1,0 +1,1 @@
+Analyze the parser and formatter as independent workstreams, then synthesize how errors and normalization should be introduced across the pipeline. Do not edit files.

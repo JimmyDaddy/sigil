@@ -1,0 +1,1 @@
+Perform a parallel review of the public facade, parser, and formatter. Report coupling risks and a proposed refactor sequence without changing the workspace.

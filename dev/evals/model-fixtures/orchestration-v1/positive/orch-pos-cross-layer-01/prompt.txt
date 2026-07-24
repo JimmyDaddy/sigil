@@ -1,0 +1,1 @@
+Implement the normalization change across the parser and formatter: lowercase parsed values, then wrap rendered values in square brackets. Coordinate the cross-module work and keep the public facade compiling.

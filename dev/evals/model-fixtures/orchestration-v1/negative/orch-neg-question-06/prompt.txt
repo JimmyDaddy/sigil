@@ -1,0 +1,1 @@
+What string prefix is added by the formatter, and where is that behavior defined? Do not edit.

@@ -1,0 +1,55 @@
+schema_version = 1
+id = "orch-pos-independent-modules-01"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:3660461438225fa8292c36dcce9cd2a00a0101e9cbe1e1811ed2754b9129d3be"
+allowed_tools = ["read_file", "edit_file"]
+max_turns = 16
+max_output_tokens = 16384
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[orchestration]
+case_class = "positive"
+corpus_version = "rfc-0053-orchestration-v1"
+
+[[assertions]]
+id = "acceptance-1"
+kind = "file_contains"
+path = "src/quota.rs"
+text = "    4"
+
+[[assertions]]
+id = "acceptance-2"
+kind = "file_contains"
+path = "src/timeout.rs"
+text = "    8"
+
+[[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:b27125736cd87a758e47f632265fe62ae21598905dd117c85488825eeda04b12"
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:c88f1dcfe2e1f8988af966353ba9eba7bb688a3095f633e8cfb739529cf28553"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:42e2d40c7efa81048810ceb7354f8010424c4379933892bbde052e1c3580a358"
+
+[[files]]
+path = "src/quota.rs"
+source = "files/src/quota.rs"
+sha256 = "sha256:6c48f4e2ab139b045a1f62fb8a6f4ca90fc796d4556c80e7aea043cdc8f8faf0"
+
+[[files]]
+path = "src/timeout.rs"
+source = "files/src/timeout.rs"
+sha256 = "sha256:53959a629af89021864eeb1c262520c252c088df8d5336d6bf85989b69549905"
+
+[[checks]]
+id = "cargo-check"
+command = ["cargo", "check", "--quiet"]
+timeout_ms = 30000

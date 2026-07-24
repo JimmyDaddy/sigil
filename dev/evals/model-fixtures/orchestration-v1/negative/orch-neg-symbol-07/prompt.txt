@@ -1,0 +1,1 @@
+Locate all functions returning String and list their module-qualified names. Do not modify files.

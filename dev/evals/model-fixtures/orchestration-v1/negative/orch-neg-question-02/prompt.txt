@@ -1,0 +1,1 @@
+Which module removes surrounding whitespace, and how is it called? Do not edit the workspace.

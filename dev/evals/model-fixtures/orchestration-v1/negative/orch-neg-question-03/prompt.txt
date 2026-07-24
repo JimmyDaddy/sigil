@@ -1,0 +1,1 @@
+Describe the output produced by render_record for the input `  alpha  `. Do not change code.

@@ -1,0 +1,47 @@
+schema_version = 1
+id = "orch-neg-question-04"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:3d325d306a4fca5fb4f84bab18e50faa38c42a8604b0543b45eb1b346b4dab42"
+allowed_tools = ["read_file"]
+max_turns = 16
+max_output_tokens = 16384
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[orchestration]
+case_class = "negative"
+corpus_version = "rfc-0053-orchestration-v1"
+
+[[assertions]]
+id = "acceptance-1"
+kind = "workspace_source_unchanged"
+
+[[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:3dec83228f9d621fcb6fe4ac318f1376b01286882f06d0f4555bdd95f6604a27"
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:202c73b1e58636f9b59a525ec3569bcadae38211ffcb8e81eaf681f8d2a93f4d"
+
+[[files]]
+path = "src/formatter.rs"
+source = "files/src/formatter.rs"
+sha256 = "sha256:447cad2f519a9b2cde2aa133274a6aed08fc5af1d81427b2e3a02929cec1ca57"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:b8a9893bba7bca6cce8058e3e04ae7f2bcefa9db7d53247a0fcf68042c78c08d"
+
+[[files]]
+path = "src/parser.rs"
+source = "files/src/parser.rs"
+sha256 = "sha256:5ccbce1958df9f7a5961e167efb05e925beda13a8051a91371ae805a32900492"
+
+[[checks]]
+id = "cargo-check"
+command = ["cargo", "check", "--quiet"]
+timeout_ms = 30000

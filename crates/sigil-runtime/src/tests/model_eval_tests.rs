@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::Path,
     sync::{Arc, Mutex},
@@ -174,6 +175,42 @@ fn committed_model_eval_fixtures_load_and_materialize() {
         assert!(!materialized.tool_scope.allows("websearch"));
         assert!(materialized.orchestration.is_none());
     }
+}
+
+#[test]
+fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
+    let corpus_root = fixture_root("orchestration-v1");
+    let mut fixture_paths = Vec::new();
+    for class in ["negative", "positive"] {
+        for entry in fs::read_dir(corpus_root.join(class)).expect("read orchestration class") {
+            let entry = entry.expect("orchestration fixture entry");
+            if entry.file_type().expect("fixture entry type").is_dir() {
+                fixture_paths.push(entry.path());
+            }
+        }
+    }
+    fixture_paths.sort();
+
+    let mut ids = BTreeSet::new();
+    let mut negative = 0;
+    let mut positive = 0;
+    for path in fixture_paths {
+        let fixture = load_model_eval_fixture(&path).expect("load orchestration fixture");
+        assert!(ids.insert(fixture.manifest.id.clone()));
+        let orchestration = fixture
+            .manifest
+            .orchestration
+            .expect("orchestration metadata");
+        assert_eq!(orchestration.corpus_version, "rfc-0053-orchestration-v1");
+        match orchestration.case_class {
+            sigil_kernel::OrchestrationEvalCaseClass::Negative => negative += 1,
+            sigil_kernel::OrchestrationEvalCaseClass::Positive => positive += 1,
+        }
+    }
+
+    assert_eq!(negative, 20);
+    assert_eq!(positive, 10);
+    assert_eq!(ids.len(), 30);
 }
 
 #[test]

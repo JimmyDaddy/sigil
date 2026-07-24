@@ -1,0 +1,1 @@
+Find the function that calls input.trim() and report its module path. Keep files unchanged.

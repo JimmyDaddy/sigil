@@ -1,0 +1,1 @@
+Find every reference to formatter::render and summarize it. Make no changes.

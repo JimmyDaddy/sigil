@@ -1,0 +1,1 @@
+Investigate parser and formatter independently, compare their ownership and allocation behavior, and return a consolidated design review. Use parallel exploration where useful; do not modify files.

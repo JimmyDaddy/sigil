@@ -1,0 +1,47 @@
+schema_version = 1
+id = "orch-pos-parallel-research-03"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:594e81abf7c3e7eaca2fbb3691c07978cade206d7fccbf14d045c17f432dc582"
+allowed_tools = ["read_file"]
+max_turns = 16
+max_output_tokens = 16384
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[orchestration]
+case_class = "positive"
+corpus_version = "rfc-0053-orchestration-v1"
+
+[[assertions]]
+id = "acceptance-1"
+kind = "workspace_source_unchanged"
+
+[[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:f93ac9660362539c55e9f5e7b08d43f5fa09473eb2951294a507c6fe0db5a9ac"
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:2eb37cae2eb66f590a9491242f5016f2ca37a1955d61f9faac63a43c79e17d30"
+
+[[files]]
+path = "src/formatter.rs"
+source = "files/src/formatter.rs"
+sha256 = "sha256:447cad2f519a9b2cde2aa133274a6aed08fc5af1d81427b2e3a02929cec1ca57"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:b8a9893bba7bca6cce8058e3e04ae7f2bcefa9db7d53247a0fcf68042c78c08d"
+
+[[files]]
+path = "src/parser.rs"
+source = "files/src/parser.rs"
+sha256 = "sha256:5ccbce1958df9f7a5961e167efb05e925beda13a8051a91371ae805a32900492"
+
+[[checks]]
+id = "cargo-check"
+command = ["cargo", "check", "--quiet"]
+timeout_ms = 30000

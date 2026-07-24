@@ -1,0 +1,1 @@
+Find the parse symbol and report its input and return types. Do not edit the workspace.
