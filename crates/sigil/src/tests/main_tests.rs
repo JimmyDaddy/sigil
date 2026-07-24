@@ -119,9 +119,19 @@ fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
     assert!(super::parse_model_eval_cost_microusd("NaN").is_err());
     let root = unique_temp_workspace("sigil-model-eval-cases")?;
     assert!(super::resolve_model_eval_fixture_roots(&root, &["../escape".to_owned()]).is_err());
+    assert!(super::resolve_model_eval_fixture_roots(&root, &["/absolute".to_owned()]).is_err());
     assert_eq!(
-        super::resolve_model_eval_fixture_roots(&root, &["small-doc-edit".to_owned()])?,
-        [root.join("dev/evals/model-fixtures/small-doc-edit")]
+        super::resolve_model_eval_fixture_roots(
+            &root,
+            &[
+                "small-doc-edit".to_owned(),
+                "orchestration/positive/cross-layer".to_owned(),
+            ],
+        )?,
+        [
+            root.join("dev/evals/model-fixtures/small-doc-edit"),
+            root.join("dev/evals/model-fixtures/orchestration/positive/cross-layer"),
+        ]
     );
     fs::remove_dir_all(root)?;
     Ok(())

@@ -418,14 +418,6 @@ fn validate_model_eval_manifest(manifest: &sigil_kernel::ModelEvalReportManifest
     Ok(())
 }
 
-const MODEL_EVAL_CASES: &[&str] = &[
-    "small-doc-edit",
-    "small-code-edit",
-    "stale-after-write",
-    "workspace-trust",
-    "sandbox-denial",
-];
-
 fn resolve_model_eval_fixture_roots(launch_cwd: &Path, cases: &[String]) -> Result<Vec<PathBuf>> {
     if cases.is_empty() {
         anyhow::bail!("model eval requires at least one --case");
@@ -434,10 +426,15 @@ fn resolve_model_eval_fixture_roots(launch_cwd: &Path, cases: &[String]) -> Resu
     cases
         .iter()
         .map(|case| {
-            if !MODEL_EVAL_CASES.contains(&case.as_str()) {
-                anyhow::bail!("unsupported model eval case: {case}");
+            let relative = Path::new(case);
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                anyhow::bail!("model eval case must be a safe relative fixture path: {case}");
             }
-            Ok(fixture_root.join(case))
+            Ok(fixture_root.join(relative))
         })
         .collect()
 }

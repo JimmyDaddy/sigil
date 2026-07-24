@@ -23,7 +23,9 @@ use super::{
     verification::ModelEvalVerificationExecution,
 };
 
-pub const MODEL_EVAL_MAX_CASES: usize = 16;
+/// Bounded above the RFC-0053 minimum 20-negative/10-positive orchestration corpus.
+pub const MODEL_EVAL_MAX_CASES: usize = 64;
+const _: () = assert!(MODEL_EVAL_MAX_CASES >= 30);
 pub const MODEL_EVAL_MAX_REPETITIONS: u32 = 10;
 pub const MODEL_EVAL_MAX_CAMPAIGN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 pub const MODEL_EVAL_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
