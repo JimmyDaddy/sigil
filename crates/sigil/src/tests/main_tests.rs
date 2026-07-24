@@ -251,6 +251,80 @@ fn model_eval_manifest_requires_every_requested_repetition() -> Result<()> {
 }
 
 #[test]
+fn orchestration_eval_manifest_requires_qualified_route_gates() -> Result<()> {
+    let mut manifest = orchestration_eval_manifest(
+        sigil_kernel::OrchestrationEvalRouteStatus::Qualified,
+        Vec::new(),
+    );
+    super::validate_orchestration_eval_manifest(&manifest)?;
+
+    for status in [
+        sigil_kernel::OrchestrationEvalRouteStatus::InsufficientEvidence,
+        sigil_kernel::OrchestrationEvalRouteStatus::Blocked,
+        sigil_kernel::OrchestrationEvalRouteStatus::Stale,
+    ] {
+        manifest.route_gates[0].status = status;
+        manifest.route_gates[0].reasons = vec!["test rejection".to_owned()];
+        let error = super::validate_orchestration_eval_manifest(&manifest)
+            .expect_err("a non-qualified route must fail campaign acceptance");
+        assert!(error.to_string().contains("sha256:route"));
+        assert!(error.to_string().contains("test rejection"));
+    }
+
+    manifest.route_gates.clear();
+    assert!(super::validate_orchestration_eval_manifest(&manifest).is_err());
+    Ok(())
+}
+
+fn orchestration_eval_manifest(
+    status: sigil_kernel::OrchestrationEvalRouteStatus,
+    reasons: Vec<String>,
+) -> sigil_kernel::OrchestrationEvalReportManifestV1 {
+    sigil_kernel::OrchestrationEvalReportManifestV1 {
+        report_schema_version: 1,
+        campaign_id: "campaign-test".to_owned(),
+        started_at_unix_ms: 1,
+        ended_at_unix_ms: 2,
+        requested_repetitions: 30,
+        results_jsonl_path: PathBuf::from("results.jsonl"),
+        summary_path: PathBuf::from("summary.md"),
+        route_gates: vec![sigil_kernel::OrchestrationEvalRouteGateV1 {
+            identity: sigil_kernel::OrchestrationEvalRouteIdentityV1 {
+                provider_adapter: "test-adapter".to_owned(),
+                provider_kind: "test-provider".to_owned(),
+                endpoint_family: "test-endpoint".to_owned(),
+                canonical_model_id: "test-model".to_owned(),
+                canonical_model_version: "test-version".to_owned(),
+                route_fingerprint: "sha256:route".to_owned(),
+                routing_prompt_digest: "sha256:routing-prompt".to_owned(),
+                planner_prompt_digest: "sha256:planner-prompt".to_owned(),
+                system_prompt_digest: "sha256:system-prompt".to_owned(),
+                tool_profile_contract_digest: "sha256:tool-profile".to_owned(),
+                task_config_digest: "sha256:task-config".to_owned(),
+                corpus_version: "rfc-0053-orchestration-v1".to_owned(),
+                corpus_digest: "sha256:corpus".to_owned(),
+                sigil_commit: "test-commit".to_owned(),
+                sigil_build: "test-build".to_owned(),
+            },
+            identity_digest: "sha256:route".to_owned(),
+            status,
+            negative_cases: 20,
+            positive_cases: 10,
+            eligible_negative_cases: 20,
+            eligible_positive_cases: 10,
+            provider_admitted_repetitions: 30,
+            completed_repetitions: 30,
+            false_positive_rate_ppm: Some(0),
+            positive_miss_rate_ppm: Some(0),
+            cases_with_majority_misroute: 0,
+            cases_with_duplicate_repetition_identity: 0,
+            hard_invariant_violations: 0,
+            reasons,
+        }],
+    }
+}
+
+#[test]
 fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
     let config_path = std::env::temp_dir()
         .join("sigil-config-parent")

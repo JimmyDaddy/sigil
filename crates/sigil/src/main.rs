@@ -398,6 +398,14 @@ async fn model_eval_command(
     let manifest_path = campaign.output_dir.join("manifest.json");
     let manifest: sigil_kernel::ModelEvalReportManifestV3 =
         serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let orchestration_manifest = if campaign.orchestration_route_contract.is_some() {
+        let orchestration_manifest_path = campaign.output_dir.join("orchestration/manifest.json");
+        Some(serde_json::from_slice::<
+            sigil_kernel::OrchestrationEvalReportManifestV1,
+        >(&std::fs::read(orchestration_manifest_path)?)?)
+    } else {
+        None
+    };
     println!(
         "wrote {}",
         campaign.output_dir.join("results.jsonl").display()
@@ -417,6 +425,9 @@ async fn model_eval_command(
         println!("wrote {}", orchestration_dir.join("summary.md").display());
     }
     validate_model_eval_manifest(&manifest)?;
+    if let Some(manifest) = &orchestration_manifest {
+        validate_orchestration_eval_manifest(manifest)?;
+    }
     Ok(())
 }
 
@@ -453,6 +464,34 @@ fn validate_model_eval_manifest(manifest: &sigil_kernel::ModelEvalReportManifest
             manifest.completed_repetitions,
             manifest.skipped_repetitions,
             manifest.accepted_repetitions,
+        );
+    }
+    Ok(())
+}
+
+fn validate_orchestration_eval_manifest(
+    manifest: &sigil_kernel::OrchestrationEvalReportManifestV1,
+) -> Result<()> {
+    if manifest.route_gates.is_empty() {
+        anyhow::bail!("orchestration eval acceptance failed: no route gates were produced");
+    }
+    let rejected = manifest
+        .route_gates
+        .iter()
+        .filter(|gate| gate.status != sigil_kernel::OrchestrationEvalRouteStatus::Qualified)
+        .map(|gate| {
+            format!(
+                "{}={:?} ({})",
+                gate.identity_digest,
+                gate.status,
+                gate.reasons.join("; ")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !rejected.is_empty() {
+        anyhow::bail!(
+            "orchestration eval acceptance failed: {}",
+            rejected.join(", ")
         );
     }
     Ok(())
