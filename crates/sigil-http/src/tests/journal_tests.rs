@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use sigil_kernel::{MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind};
+use sigil_kernel::{MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind, PublicTaskPlanStep};
 
 use super::*;
 use crate::{
@@ -593,6 +593,45 @@ fn durable_journal_omits_opaque_provider_and_control_payloads_and_sanitizes_tool
     assert!(!persisted.contains("super-secret"));
     assert!(persisted.contains("omitted_from_http_durable_event"));
     assert!(persisted.contains("[redacted]"));
+}
+
+#[test]
+fn durable_journal_keeps_typed_task_events_without_secret_capable_fields() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize");
+    let event = PublicRunEventKind::TaskPlanUpdated {
+        task_id: "task-public".to_owned(),
+        plan_version: 2,
+        status: "accepted".to_owned(),
+        steps: vec![PublicTaskPlanStep {
+            step_id: "step-public".to_owned(),
+            title: "inspect token=private-task-secret".to_owned(),
+            role: "executor".to_owned(),
+            depends_on: Vec::new(),
+            mode: "write".to_owned(),
+            isolation: "sequential_workspace_write".to_owned(),
+        }],
+    };
+    journal
+        .append(
+            HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+                "session-1",
+                "run-task",
+                1,
+                event,
+            ))
+            .expect("typed task event should project"),
+        )
+        .expect("typed task event should persist");
+
+    let persisted = std::fs::read_to_string(path).expect("journal should remain readable");
+    assert!(persisted.contains("task_plan_updated"));
+    assert!(persisted.contains("step-public"));
+    assert!(!persisted.contains("private-task-secret"));
+    assert!(persisted.contains("[redacted]"));
+    assert!(!persisted.contains("private_ref"));
+    assert!(!persisted.contains("workspace_path"));
 }
 
 #[test]

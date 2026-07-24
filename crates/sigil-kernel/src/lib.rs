@@ -30,6 +30,7 @@ pub mod provider;
 pub mod provider_error;
 pub mod provider_request_material;
 pub mod provider_timeout;
+pub mod public_task_event;
 pub mod resume;
 pub mod secret;
 pub mod session;
@@ -366,6 +367,7 @@ pub use provider_timeout::{
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
     timeout_provider_request, timeout_provider_stream_next,
 };
+pub use public_task_event::{PublicTaskEventProjector, PublicTaskPhase, PublicTaskPlanStep};
 pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
     ResumeJobStateProjection, StepLeaseEntry, StepLeaseHeartbeatEntry, StepLeaseStatus,

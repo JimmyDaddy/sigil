@@ -265,6 +265,12 @@ fn protocol_provisional_id(
         | PublicRunEventKind::RunCancelled => Some(ConversationLiveProvisionalSlotV1::Terminal),
         PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
+        | PublicRunEventKind::TaskRoutingChanged { .. }
+        | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskBatchChanged { .. }
+        | PublicRunEventKind::TaskStepChanged { .. }
+        | PublicRunEventKind::IntegrationLaneChanged { .. }
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::Usage { .. }
@@ -309,6 +315,77 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         }
         PublicRunEventKind::TaskRunFinished { status, .. } => {
             *status = safe_persistence_text(status);
+        }
+        PublicRunEventKind::TaskRoutingChanged {
+            handoff_id,
+            status,
+            task_id,
+        } => {
+            *handoff_id = safe_persistence_text(handoff_id);
+            *status = safe_persistence_text(status);
+            *task_id = task_id.as_deref().map(safe_persistence_text);
+        }
+        PublicRunEventKind::TaskPhaseChanged {
+            task_id, status, ..
+        } => {
+            *task_id = task_id.as_deref().map(safe_persistence_text);
+            *status = safe_persistence_text(status);
+        }
+        PublicRunEventKind::TaskPlanUpdated {
+            task_id,
+            status,
+            steps,
+            ..
+        } => {
+            *task_id = safe_persistence_text(task_id);
+            *status = safe_persistence_text(status);
+            for step in steps {
+                step.step_id = safe_persistence_text(&step.step_id);
+                step.title = safe_persistence_text(&step.title);
+                step.role = safe_persistence_text(&step.role);
+                step.depends_on = step
+                    .depends_on
+                    .iter()
+                    .map(|dependency| safe_persistence_text(dependency))
+                    .collect();
+                step.mode = safe_persistence_text(&step.mode);
+                step.isolation = safe_persistence_text(&step.isolation);
+            }
+        }
+        PublicRunEventKind::TaskBatchChanged {
+            task_id, batch_id, ..
+        } => {
+            *task_id = safe_persistence_text(task_id);
+            *batch_id = safe_persistence_text(batch_id);
+        }
+        PublicRunEventKind::TaskStepChanged {
+            task_id,
+            step_id,
+            attempt_id,
+            status,
+            ..
+        } => {
+            *task_id = safe_persistence_text(task_id);
+            *step_id = safe_persistence_text(step_id);
+            *attempt_id = attempt_id.as_deref().map(safe_persistence_text);
+            *status = safe_persistence_text(status);
+        }
+        PublicRunEventKind::IntegrationLaneChanged {
+            task_id,
+            plan_id,
+            lane_id,
+            status,
+            conflicts,
+            ..
+        } => {
+            *task_id = safe_persistence_text(task_id);
+            *plan_id = safe_persistence_text(plan_id);
+            *lane_id = safe_persistence_text(lane_id);
+            *status = safe_persistence_text(status);
+            *conflicts = conflicts
+                .iter()
+                .map(|conflict| safe_persistence_text(conflict))
+                .collect();
         }
         PublicRunEventKind::RunFailed { error } => {
             *error = safe_persistence_text(error);
@@ -1008,6 +1085,12 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
+        | PublicRunEventKind::TaskRoutingChanged { .. }
+        | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskBatchChanged { .. }
+        | PublicRunEventKind::TaskStepChanged { .. }
+        | PublicRunEventKind::IntegrationLaneChanged { .. }
         | PublicRunEventKind::RunFailed { .. }
         | PublicRunEventKind::RunCancelled
         | PublicRunEventKind::ToolCallStarted { .. }
