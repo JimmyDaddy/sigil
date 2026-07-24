@@ -1373,6 +1373,31 @@ fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> 
 }
 
 #[test]
+fn not_applicable_parent_verification_requires_zero_check_receipts() -> Result<()> {
+    let mut record = TaskParentVerificationRecorded {
+        attempt_id: IntegrationPromotionAttemptId::new("attempt-no-parent-checks")?,
+        plan_id: IntegrationPlanId::new("plan-no-parent-checks")?,
+        preview_digest: format!("sha256:{}", "a".repeat(64)),
+        promoted_snapshot_id: "snapshot-no-parent-checks".to_owned(),
+        policy_digest: VerificationPolicy::no_checks_required("scope-no-parent-checks")
+            .stable_hash()?,
+        verdict: VerificationVerdict::NotApplicable,
+        receipts: Vec::new(),
+        reason: Some("accepted parent verification policy requires no checks".to_owned()),
+        recorded_at_unix_ms: 1,
+    };
+    record.validate()?;
+
+    let mut receipt =
+        integration_verification_receipt("unexpected-check", "scope-no-parent-checks");
+    receipt.binding.workspace_snapshot_id = record.promoted_snapshot_id.clone();
+    receipt.receipt.workspace_snapshot_id = Some(record.promoted_snapshot_id.clone());
+    record.receipts.push(receipt);
+    assert!(record.validate().is_err());
+    Ok(())
+}
+
+#[test]
 fn integration_projection_rejects_mismatched_promotion_effect() -> Result<()> {
     let plan = build_integration_plan(
         IntegrationPlanId::new("plan-mismatched-promotion")?,

@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     ChangeSet, ChangeSetFileAction, ChangeSetId, ReceiptStatus, TaskId, TaskStepId,
-    VerificationReceipt, VerificationVerdict, WorkspaceSnapshotId,
+    VerificationPolicy, VerificationReceipt, VerificationVerdict, WorkspaceSnapshotId,
     session::{ControlEntry, SessionLogEntry},
     sha256_hex,
 };
@@ -1377,6 +1377,9 @@ impl TaskParentVerificationRecorded {
         }) {
             bail!("task parent verification receipt belongs to another snapshot or scope");
         }
+        if self.verdict == VerificationVerdict::NotApplicable && !self.receipts.is_empty() {
+            bail!("not-applicable task parent verification cannot carry check receipts");
+        }
         if self.verdict == VerificationVerdict::Passed
             && (self.receipts.is_empty()
                 || self.receipts.iter().any(|receipt| {
@@ -1390,6 +1393,21 @@ impl TaskParentVerificationRecorded {
         }
         Ok(())
     }
+}
+
+fn parent_verification_policy_matches_preview(
+    verification: &TaskParentVerificationRecorded,
+    preview: &TaskPromotionPreview,
+) -> bool {
+    if verification.verdict != VerificationVerdict::NotApplicable {
+        return true;
+    }
+    let [scope_hash] = preview.verification_invalidation.as_slice() else {
+        return false;
+    };
+    VerificationPolicy::no_checks_required(scope_hash)
+        .stable_hash()
+        .is_ok_and(|digest| digest == verification.policy_digest)
 }
 
 /// Builds one promotion preview only after every physical lane is ready and unambiguous.
@@ -1606,7 +1624,8 @@ impl IntegrationPlanState {
     /// Returns the promoted attempt whose parent-scope verification passed.
     ///
     /// Child and lane receipts intentionally do not satisfy this gate. The latest physical
-    /// promotion must be terminal-success and bind a passed parent verification record.
+    /// promotion must be terminal-success and bind either a passed parent verification record or
+    /// a projection-validated `NotApplicable` record for an exact no-check policy.
     #[must_use]
     pub fn synthesis_ready_attempt(&self) -> Option<&IntegrationPromotionAttemptId> {
         if self.inconsistent {
@@ -1620,8 +1639,10 @@ impl IntegrationPlanState {
         self.parent_verifications
             .get(attempt_id)
             .is_some_and(|verification| {
-                verification.verdict == VerificationVerdict::Passed
-                    && verification.preview_digest == promotion.preview_digest
+                matches!(
+                    verification.verdict,
+                    VerificationVerdict::Passed | VerificationVerdict::NotApplicable
+                ) && verification.preview_digest == promotion.preview_digest
             })
             .then_some(attempt_id)
     }
@@ -1993,6 +2014,9 @@ impl IntegrationProjection {
                                 .is_some_and(|preview| {
                                     preview.policy_digest == entry.policy_digest
                                         && preview.target == promotion.target
+                                        && parent_verification_policy_matches_preview(
+                                            entry, preview,
+                                        )
                                 })
                     });
                 if !valid {

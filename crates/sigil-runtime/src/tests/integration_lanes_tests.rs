@@ -1252,7 +1252,7 @@ async fn authoritative_parent_checks_pass_on_exact_promoted_workspace_snapshot()
             promoted_snapshot_id,
             policy_digest: fixture.policy.stable_hash()?,
             policy: fixture.policy,
-            trusted_checks: vec![fixture.trusted_check],
+            trusted_checks: fixture.trusted_checks,
             workspace_trust: WorkspaceTrust::Unknown,
             workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
             workspace_trust_approval_event_id: None,
@@ -1265,6 +1265,59 @@ async fn authoritative_parent_checks_pass_on_exact_promoted_workspace_snapshot()
     assert_eq!(output.record.verdict, VerificationVerdict::Passed);
     assert_eq!(output.record.receipts.len(), 1);
     assert!(output.cleanup_error.is_none());
+    let projection = IntegrationProjection::from_entries(fixture.session.entries());
+    let state = projection
+        .plans
+        .get(&fixture.plan_id)
+        .expect("integration plan projection");
+    assert!(!state.inconsistent);
+    assert_eq!(state.synthesis_ready_attempt(), Some(&fixture.attempt_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoritative_parent_no_check_policy_is_exactly_not_applicable_and_synthesis_ready()
+-> Result<()> {
+    let mut fixture = promoted_workspace_no_check_fixture().await?;
+    let promoted_snapshot_id = fixture
+        .promotion
+        .authoritative_snapshot_id
+        .take()
+        .expect("workspace promotion snapshot");
+    let target = fixture
+        .promotion
+        .verification_target
+        .take()
+        .expect("workspace promotion verification target");
+    let mut handler = NoopEventHandler;
+
+    let output = run_authoritative_parent_verification(
+        &mut fixture.session,
+        &mut handler,
+        Arc::new(LocalExecutionBackend),
+        ParentVerificationRunRequest {
+            attempt_id: fixture.attempt_id.clone(),
+            plan_id: fixture.plan_id.clone(),
+            preview_digest: fixture.preview_digest,
+            promoted_snapshot_id,
+            policy_digest: fixture.policy.stable_hash()?,
+            policy: fixture.policy,
+            trusted_checks: fixture.trusted_checks,
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            target,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.record.verdict, VerificationVerdict::NotApplicable);
+    assert!(output.record.receipts.is_empty());
+    assert_eq!(
+        output.record.reason.as_deref(),
+        Some("accepted parent verification policy requires no checks")
+    );
     let projection = IntegrationProjection::from_entries(fixture.session.entries());
     let state = projection
         .plans
@@ -1302,7 +1355,7 @@ async fn authoritative_parent_checks_detect_snapshot_drift_before_execution() ->
             promoted_snapshot_id,
             policy_digest: fixture.policy.stable_hash()?,
             policy: fixture.policy,
-            trusted_checks: vec![fixture.trusted_check],
+            trusted_checks: fixture.trusted_checks,
             workspace_trust: WorkspaceTrust::Unknown,
             workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
             workspace_trust_approval_event_id: None,
@@ -1354,7 +1407,7 @@ async fn failed_authoritative_parent_check_never_opens_synthesis_gate() -> Resul
             promoted_snapshot_id,
             policy_digest: fixture.policy.stable_hash()?,
             policy: fixture.policy,
-            trusted_checks: vec![fixture.trusted_check],
+            trusted_checks: fixture.trusted_checks,
             workspace_trust: WorkspaceTrust::Unknown,
             workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
             workspace_trust_approval_event_id: None,
@@ -1412,7 +1465,7 @@ async fn git_ref_parent_checks_use_retained_authoritative_checkout() -> Result<(
             promoted_snapshot_id,
             policy_digest: fixture.policy.stable_hash()?,
             policy: fixture.policy,
-            trusted_checks: vec![fixture.trusted_check],
+            trusted_checks: fixture.trusted_checks,
             workspace_trust: WorkspaceTrust::Unknown,
             workspace_trust_snapshot_id: "parent-check-trust".to_owned(),
             workspace_trust_approval_event_id: None,
@@ -1641,20 +1694,29 @@ struct PromotedWorkspaceFixture {
     plan_id: IntegrationPlanId,
     preview_digest: String,
     policy: VerificationPolicy,
-    trusted_check: TrustedCheckSpec,
+    trusted_checks: Vec<TrustedCheckSpec>,
 }
 
 async fn promoted_workspace_fixture(check_script: &str) -> Result<PromotedWorkspaceFixture> {
-    promoted_fixture(check_script, false).await
+    let trusted_check = trusted_parent_check(check_script)?;
+    let policy = parent_verification_policy(&trusted_check);
+    promoted_fixture(false, policy, vec![trusted_check]).await
 }
 
 async fn promoted_git_ref_fixture(check_script: &str) -> Result<PromotedWorkspaceFixture> {
-    promoted_fixture(check_script, true).await
+    let trusted_check = trusted_parent_check(check_script)?;
+    let policy = parent_verification_policy(&trusted_check);
+    promoted_fixture(true, policy, vec![trusted_check]).await
+}
+
+async fn promoted_workspace_no_check_fixture() -> Result<PromotedWorkspaceFixture> {
+    promoted_fixture(false, promotion_policy(), Vec::new()).await
 }
 
 async fn promoted_fixture(
-    check_script: &str,
     git_ref_target: bool,
+    policy: VerificationPolicy,
+    trusted_checks: Vec<TrustedCheckSpec>,
 ) -> Result<PromotedWorkspaceFixture> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("repo");
@@ -1704,8 +1766,6 @@ async fn promoted_fixture(
         },
     })
     .await?;
-    let trusted_check = trusted_parent_check(check_script)?;
-    let policy = parent_verification_policy(&trusted_check);
     let preview = promotion_preview_with_policy(&session, &plan, &prepared, &policy)?;
     session.append_control(ControlEntry::TaskPromotionPreviewRecorded(
         TaskPromotionPreviewRecorded {
@@ -1749,7 +1809,7 @@ async fn promoted_fixture(
         plan_id: plan.plan_id,
         preview_digest: preview.preview_digest,
         policy,
-        trusted_check,
+        trusted_checks,
     })
 }
 

@@ -238,9 +238,6 @@ fn validate_request(request: &ParentVerificationRunRequest) -> Result<()> {
     {
         bail!("authoritative parent verification binding is incomplete");
     }
-    if request.policy.required_checks.is_empty() {
-        bail!("authoritative parent verification requires at least one accepted-policy check");
-    }
     if request.policy.stable_hash()? != request.policy_digest {
         bail!("authoritative parent verification policy does not match the promotion preview");
     }
@@ -321,6 +318,9 @@ fn parent_verification_reason(
         return Some(format!(
             "parent verification completed but owned target cleanup failed: {error}"
         ));
+    }
+    if verdict == VerificationVerdict::NotApplicable {
+        return Some("accepted parent verification policy requires no checks".to_owned());
     }
     (verdict != VerificationVerdict::Passed)
         .then(|| format!("accepted parent verification policy evaluated to {verdict:?}"))
