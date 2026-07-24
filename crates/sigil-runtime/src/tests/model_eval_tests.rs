@@ -8,7 +8,7 @@ use std::{
 use sigil_kernel::{
     ControlEntry, DisclosurePresentationError, DisclosurePresentationReceipt,
     EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, ReceiptStatus, Session,
-    VerificationVerdict, write_file_with_mutation,
+    TaskRoutingPolicy, VerificationVerdict, write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -71,6 +71,7 @@ fn committed_model_eval_fixtures_load_and_materialize() {
         );
         assert!(!materialized.tool_scope.allows("bash"));
         assert!(!materialized.tool_scope.allows("websearch"));
+        assert!(materialized.orchestration.is_none());
     }
 }
 
@@ -207,6 +208,9 @@ fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
     assert!(rendered.contains("enabled = false"));
     assert!(rendered.contains(&materialized.workspace_root.display().to_string()));
     assert!(isolated.session_path.starts_with(&run_root));
+    let config = sigil_kernel::RootConfig::load(&isolated.config_path).expect("load config");
+    assert!(!config.task.enabled);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
 
     let second_run_root = temp.path().join("run-2");
     fs::create_dir(&second_run_root).expect("second run root");
@@ -221,6 +225,56 @@ fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
         isolated.isolated_config_digest,
         second.isolated_config_digest
     );
+}
+
+#[test]
+fn orchestration_fixture_classification_is_manifest_owned_and_enables_auto_routing() {
+    let source = fixture_root("small-code-edit");
+    let fixture_temp = tempdir().expect("fixture temp dir");
+    copy_directory(&source, fixture_temp.path());
+    let manifest_path = fixture_temp.path().join("fixture.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+    manifest.push_str(
+        r#"
+
+[orchestration]
+case_class = "positive"
+corpus_version = "rfc-0053-v1"
+"#,
+    );
+    fs::write(&manifest_path, manifest).expect("write orchestration manifest");
+
+    let fixture = load_model_eval_fixture(fixture_temp.path()).expect("load orchestration fixture");
+    let temp = tempdir().expect("temp dir");
+    let run_root = temp.path().join("run");
+    fs::create_dir(&run_root).expect("run root");
+    let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+        .expect("materialize fixture");
+    let source_config = temp.path().join("source.toml");
+    write_source_config(&source_config, "http://127.0.0.1:9", "auto-edit");
+
+    let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+        .expect("write orchestration config");
+    let config = sigil_kernel::RootConfig::load(&isolated.config_path).expect("load config");
+
+    assert_eq!(
+        materialized
+            .orchestration
+            .as_ref()
+            .expect("orchestration metadata")
+            .case_class,
+        sigil_kernel::OrchestrationEvalCaseClass::Positive
+    );
+    assert_eq!(
+        materialized
+            .orchestration
+            .as_ref()
+            .expect("orchestration metadata")
+            .corpus_version,
+        "rfc-0053-v1"
+    );
+    assert!(config.task.enabled);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
 }
 
 #[test]
@@ -321,9 +375,74 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         assert!(request.contains(r#""max_tokens":4096"#));
         assert!(request.contains(r#""name":"read_file""#));
         assert!(request.contains(r#""name":"edit_file""#));
+        assert!(!request.contains(r#""name":"request_task_planning""#));
         assert!(!request.contains(r#""name":"bash""#));
         assert!(!request.contains("websearch"));
         assert_eq!(requests.lock().expect("requests lock").len(), 1);
+    });
+}
+
+#[test]
+fn orchestration_campaign_attaches_the_production_task_executor() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::orchestration_campaign_attaches_the_production_task_executor",
+        "SIGIL_TEST_ORCHESTRATION_EVAL_CAMPAIGN_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_deepseek_eval_server(Arc::clone(&requests))
+            .await
+            .expect("spawn server");
+        let _api_key = EnvironmentGuard::set("SIGIL_API_KEY", "model-eval-test-key");
+        let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", &base_url);
+        let _beta_url = EnvironmentGuard::set("SIGIL_BETA_BASE_URL", &base_url);
+        let _anthropic_url = EnvironmentGuard::set("SIGIL_ANTHROPIC_BASE_URL", &base_url);
+        let fixture_temp = tempdir().expect("fixture temp dir");
+        copy_directory(&fixture_root("small-code-edit"), fixture_temp.path());
+        let manifest_path = fixture_temp.path().join("fixture.toml");
+        let mut manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+        manifest.push_str(
+            r#"
+
+[orchestration]
+case_class = "positive"
+corpus_version = "rfc-0053-v1"
+"#,
+        );
+        fs::write(&manifest_path, manifest).expect("write orchestration manifest");
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("source.toml");
+        write_source_config(&config_path, &base_url, "auto-edit");
+
+        let campaign = run_model_eval_campaign(
+            ModelEvalCampaignRequest {
+                config_path,
+                fixture_roots: vec![fixture_temp.path().to_path_buf()],
+                repetitions: 1,
+                max_cost_microusd: 500_000,
+                campaign_timeout: Duration::from_secs(10),
+                output_dir: temp.path().join("campaign"),
+            },
+            &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+        )
+        .await
+        .expect("run orchestration campaign");
+
+        assert_eq!(campaign.runs.len(), 1);
+        assert_eq!(
+            campaign.runs[0].status,
+            ModelEvalRunExecutionStatus::Completed
+        );
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains(r#""name":"request_task_planning""#));
     });
 }
 

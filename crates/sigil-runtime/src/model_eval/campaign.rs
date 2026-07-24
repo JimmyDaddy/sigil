@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -177,7 +178,10 @@ pub fn write_isolated_model_eval_config(
     config.skills.user_agents = false;
     config.compaction.enabled = false;
     config.code_intelligence.enabled = false;
-    config.task.enabled = false;
+    config.task.enabled = fixture.orchestration.is_some();
+    if fixture.orchestration.is_some() {
+        config.task.routing_policy = sigil_kernel::TaskRoutingPolicy::Auto;
+    }
     config.web.enabled = false;
     config.web.network_mode = NetworkPolicy::Deny;
     config.web.search_mcp = None;
@@ -213,8 +217,14 @@ pub fn write_isolated_model_eval_config(
         || reloaded.agent.model != config.agent.model
         || !reloaded.mcp_servers.is_empty()
         || reloaded.web.enabled
+        || reloaded.task.enabled != fixture.orchestration.is_some()
     {
         bail!("isolated model eval config did not round-trip its safety boundary");
+    }
+    if fixture.orchestration.is_some()
+        && reloaded.task.routing_policy != sigil_kernel::TaskRoutingPolicy::Auto
+    {
+        bail!("isolated orchestration eval config did not retain automatic routing");
     }
     sync_directory(run_root)?;
 
@@ -290,13 +300,14 @@ pub async fn run_model_eval_campaign(
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
+            let run_services = model_eval_run_services(&materialized, services);
             let mut execution = execute_model_eval_run(
                 &materialized,
                 repetition,
                 run_id,
                 isolated,
                 remaining,
-                services,
+                &run_services,
             )
             .await;
             if execution.status != ModelEvalRunExecutionStatus::PreparationFailed {
@@ -325,6 +336,18 @@ pub async fn run_model_eval_campaign(
     super::write_model_eval_campaign_report(&campaign)?;
     sync_directory(&campaign.output_dir)?;
     Ok(campaign)
+}
+
+fn model_eval_run_services(
+    fixture: &MaterializedModelEvalFixture,
+    services: &ApplicationRunServices,
+) -> ApplicationRunServices {
+    if fixture.orchestration.is_none() {
+        return services.clone();
+    }
+    services.clone().with_task_role_provider_builder(Arc::new(
+        crate::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
+    ))
 }
 
 pub(crate) fn model_eval_reservation_microusd(

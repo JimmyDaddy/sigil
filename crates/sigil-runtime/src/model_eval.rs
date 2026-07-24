@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sigil_kernel::ToolRegistryScope;
+use sigil_kernel::{OrchestrationEvalCaseClass, ToolRegistryScope};
 
 mod campaign;
 pub use campaign::*;
@@ -47,6 +47,18 @@ pub struct ModelEvalFixtureManifest {
     pub assertions: Vec<ModelEvalFixtureAssertion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration: Option<ModelEvalOrchestrationCase>,
+}
+
+/// Explicit RFC-0053 corpus metadata for a production-path orchestration case.
+///
+/// The expected route class is committed with the fixture and is never inferred from prompt text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ModelEvalOrchestrationCase {
+    pub case_class: OrchestrationEvalCaseClass,
+    pub corpus_version: String,
 }
 
 /// One immutable source file copied into a generated fixture workspace.
@@ -162,6 +174,7 @@ pub struct MaterializedModelEvalFixture {
     pub expected_terminal: Vec<ModelEvalExpectedTerminal>,
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
+    pub orchestration: Option<ModelEvalOrchestrationCase>,
 }
 
 /// Loads and fully validates one committed model-eval fixture directory.
@@ -288,6 +301,7 @@ pub fn materialize_model_eval_fixture(
         expected_terminal: fixture.manifest.expected_terminal.clone(),
         expected_verification: fixture.manifest.expected_verification.clone(),
         post_run_mutation: fixture.manifest.post_run_mutation.clone(),
+        orchestration: fixture.manifest.orchestration.clone(),
     })
 }
 
@@ -301,6 +315,12 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
     validate_id("fixture id", &manifest.id)?;
     validate_relative_path("prompt_file", &manifest.prompt_file)?;
     validate_sha256_shape("prompt_sha256", &manifest.prompt_sha256)?;
+    if let Some(orchestration) = &manifest.orchestration {
+        validate_id(
+            "orchestration corpus version",
+            &orchestration.corpus_version,
+        )?;
+    }
 
     if manifest.allowed_tools.is_empty() {
         bail!("model eval fixture tool scope must not be empty");
