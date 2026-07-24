@@ -124,6 +124,13 @@ where
                 let conversation_coordinator = ConversationCoordinator::new(
                     root_config.task.enabled && !plan_mode,
                     root_config.task.routing_policy,
+                )
+                .with_orchestration_route_guard(
+                    sigil_runtime::OrchestrationRouteGuard::new(
+                        &root_config.agent.provider,
+                        &root_config.agent.model,
+                        sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+                    ),
                 );
                 let task_root_config = root_config.clone();
                 let task_base_registry = agent.tool_registry().clone();
@@ -171,14 +178,20 @@ where
                                 .with_cancellation(cancellation_handle.clone()))
                         } else {
                             conversation_coordinator
-                                .bind_conversation_input(
-                                    &run_session,
-                                    input,
-                                    parent_session_ref.clone(),
-                                    provider_logical_run_id.clone(),
-                                    None,
+                                .enforce_orchestration_route_kill_switch(
+                                    &mut run_session,
                                     current_unix_time_ms(),
                                 )
+                                .and_then(|_| {
+                                    conversation_coordinator.bind_conversation_input(
+                                        &run_session,
+                                        input,
+                                        parent_session_ref.clone(),
+                                        provider_logical_run_id.clone(),
+                                        None,
+                                        current_unix_time_ms(),
+                                    )
+                                })
                                 .map(|input| input.with_cancellation(cancellation_handle.clone()))
                                 .map_err(|error| format!("{error:#}"))
                         };

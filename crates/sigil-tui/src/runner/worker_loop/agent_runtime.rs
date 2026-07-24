@@ -449,7 +449,12 @@ where
     .with_background_runs(background_runs.clone());
     let task_result_tx = task_result_tx.clone();
     let conversation_coordinator =
-        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy);
+        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+            .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
+                &root_config.agent.provider,
+                &root_config.agent.model,
+                sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+            ));
     let task_root_config = root_config.clone();
     let task_base_registry = base_registry.clone();
     let task_agent_supervisor = agent_supervisor.clone();
@@ -465,17 +470,20 @@ where
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
                 .with_initial_frozen_provider_request(frozen_request);
             let input = conversation_coordinator
-                .bind_conversation_input(
-                    &run_session,
-                    input,
-                    parent_session_ref.clone(),
-                    dispatch_run_id.clone(),
-                    Some(ConversationSourceTurn {
-                        message_id: queued.promotion.durable_user_message.id.clone(),
-                        objective: safe_prompt.clone(),
-                    }),
-                    current_unix_time_ms(),
-                )
+                .enforce_orchestration_route_kill_switch(&mut run_session, current_unix_time_ms())
+                .and_then(|_| {
+                    conversation_coordinator.bind_conversation_input(
+                        &run_session,
+                        input,
+                        parent_session_ref.clone(),
+                        dispatch_run_id.clone(),
+                        Some(ConversationSourceTurn {
+                            message_id: queued.promotion.durable_user_message.id.clone(),
+                            objective: safe_prompt.clone(),
+                        }),
+                        current_unix_time_ms(),
+                    )
+                })
                 .map(|input| input.with_cancellation(cancellation_handle.clone()))
                 .map_err(|error| format!("{error:#}"));
             let output = match input {

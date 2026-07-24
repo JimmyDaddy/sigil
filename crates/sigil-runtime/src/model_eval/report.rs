@@ -1,21 +1,16 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::Result;
 use sigil_kernel::{
-    AgentResultContinuationStatus, ControlEntry, EvalEvidenceKind, EvalEvidenceRef, EvalFailure,
-    EvalFailureKind, EvalResult, EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary,
-    IntegrationPromotionStatus, JsonlSessionStore, MODEL_EVAL_REPORT_SCHEMA_VERSION,
-    ModelEvalAssertionResultV3, ModelEvalCostConfidence as ReportCostConfidence,
-    ModelEvalExecutionStatus, ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage,
+    ControlEntry, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalResult,
+    EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary, JsonlSessionStore,
+    MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalAssertionResultV3,
+    ModelEvalCostConfidence as ReportCostConfidence, ModelEvalExecutionStatus,
+    ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage,
     ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalIdentityV1,
     OrchestrationEvalObservationV1, OrchestrationEvalReportCampaignV1,
     OrchestrationEvalReportRecordV1, OrchestrationEvalRouteIdentityV1, ProjectionCursor,
-    RootConfig, RunStatus, Session, SessionLogEntry, TaskAdmissionTrigger, TaskHandoffDecision,
-    TaskParticipantAttemptStatus, TaskRunStatus, ToolErrorKind, ToolExecutionStatus,
+    RootConfig, RunStatus, Session, SessionLogEntry, ToolErrorKind, ToolExecutionStatus,
     VerificationVerdict, write_model_eval_report_v3, write_orchestration_eval_report_v1,
 };
 
@@ -300,116 +295,7 @@ fn build_model_eval_report_record(
 /// Derives RFC-0053 orchestration gate observations only from typed durable session facts.
 #[must_use]
 pub fn orchestration_eval_observation(session: &Session) -> OrchestrationEvalObservationV1 {
-    let mut observation = OrchestrationEvalObservationV1::default();
-    let mut requested_handoffs = BTreeSet::new();
-    let mut requested_source_turns = BTreeMap::new();
-    let mut model_requested_handoffs = BTreeSet::new();
-    let mut resolved_handoffs = BTreeSet::new();
-    let mut accepted_model_tasks = BTreeSet::new();
-    let mut started_tasks = BTreeSet::new();
-    let mut spawn_identities = BTreeSet::new();
-    let mut started_continuations = BTreeSet::new();
-    let mut merge_effects = BTreeSet::new();
-    let mut committed_finals = BTreeSet::new();
-
-    for entry in session.entries() {
-        let SessionLogEntry::Control(control) = entry else {
-            continue;
-        };
-        match control {
-            ControlEntry::TaskHandoffRequested(request) => {
-                let duplicate_id = !requested_handoffs.insert(request.handoff_id.clone());
-                let duplicate_source = requested_source_turns
-                    .insert(request.source_turn.clone(), request.handoff_id.clone())
-                    .is_some_and(|existing| existing != request.handoff_id);
-                if duplicate_id || duplicate_source {
-                    increment(&mut observation.duplicate_handoffs);
-                }
-                if request.trigger == TaskAdmissionTrigger::ModelRequested {
-                    model_requested_handoffs.insert(request.handoff_id.clone());
-                }
-            }
-            ControlEntry::TaskHandoffResolved(resolution) => {
-                if !resolved_handoffs.insert(resolution.handoff_id.clone()) {
-                    increment(&mut observation.duplicate_handoffs);
-                }
-                if resolution.decision == TaskHandoffDecision::Accepted
-                    && model_requested_handoffs.contains(&resolution.handoff_id)
-                    && let Some(task_id) = &resolution.task_id
-                {
-                    accepted_model_tasks.insert(task_id.clone());
-                }
-            }
-            ControlEntry::TaskRun(run) if run.status == TaskRunStatus::Started => {
-                started_tasks.insert(run.task_id.clone());
-            }
-            ControlEntry::AgentThreadStarted(thread) => {
-                let identity = match (&thread.batch_id, &thread.batch_member_key) {
-                    (Some(batch_id), Some(member_key)) => {
-                        format!("batch:{}/{}", batch_id.as_str(), member_key.as_str())
-                    }
-                    _ => format!("thread:{}", thread.thread_id.as_str()),
-                };
-                if !spawn_identities.insert(identity) {
-                    increment(&mut observation.duplicate_spawns);
-                }
-            }
-            ControlEntry::TaskParticipantAttempt(attempt)
-                if attempt.status == TaskParticipantAttemptStatus::Started =>
-            {
-                if !spawn_identities.insert(format!("participant:{}", attempt.attempt_id.as_str()))
-                {
-                    increment(&mut observation.duplicate_spawns);
-                }
-            }
-            ControlEntry::AgentResultContinuation(continuation)
-                if continuation.status == AgentResultContinuationStatus::Started =>
-            {
-                if !started_continuations.insert(continuation.thread_id.clone()) {
-                    increment(&mut observation.duplicate_continuations);
-                }
-            }
-            ControlEntry::IntegrationLaneMemberApplied(applied) => {
-                let identity = format!(
-                    "lane:{}/{}/{}",
-                    applied.plan_id.as_str(),
-                    applied.lane_id.as_str(),
-                    applied.member_index
-                );
-                if !merge_effects.insert(identity) {
-                    increment(&mut observation.duplicate_merges);
-                }
-            }
-            ControlEntry::IntegrationPromotionRecorded(promotion)
-                if promotion.status == IntegrationPromotionStatus::Promoted =>
-            {
-                let identity = format!("promotion:{}", promotion.plan_id.as_str());
-                if !merge_effects.insert(identity) {
-                    increment(&mut observation.duplicate_merges);
-                }
-            }
-            ControlEntry::TaskFinalAnswerCommitted(final_answer) => {
-                if !committed_finals.insert(final_answer.task_id.clone()) {
-                    increment(&mut observation.duplicate_parent_child_finals);
-                }
-            }
-            ControlEntry::ToolExecution(execution)
-                if execution.status == ToolExecutionStatus::Started
-                    && execution.tool_name == crate::agent_tools::WAIT_AGENT_TOOL_NAME =>
-            {
-                increment(&mut observation.model_polling_turns);
-            }
-            _ => {}
-        }
-    }
-    observation.automatic_task_created = accepted_model_tasks
-        .iter()
-        .any(|task_id| started_tasks.contains(task_id));
-    observation
-}
-
-fn increment(value: &mut u32) {
-    *value = value.saturating_add(1);
+    crate::orchestration_observation(session)
 }
 
 fn load_execution_session(execution: &ModelEvalRunExecution) -> Result<Session> {

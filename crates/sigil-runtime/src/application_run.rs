@@ -573,6 +573,18 @@ impl PreparedApplicationRun {
             ));
         }
 
+        self.execution
+            .conversation_coordinator
+            .enforce_orchestration_route_kill_switch(
+                &mut self.execution.session,
+                current_unix_time_ms(),
+            )
+            .map_err(|source| {
+                ApplicationQueuedRunPrepareError::promotion_commit(
+                    "orchestration_route_guard",
+                    source,
+                )
+            })?;
         let queued_input = self
             .execution
             .conversation_coordinator
@@ -1467,7 +1479,7 @@ async fn prepare_application_run_internal(
         session_path,
         session_lease,
         mutation_recorder,
-        session,
+        mut session,
         workspace_trust,
         cancellation_recorder,
         cancellation_owner,
@@ -1586,8 +1598,16 @@ async fn prepare_application_run_internal(
     let conversation_coordinator = crate::ConversationCoordinator::new(
         task_execution.is_some(),
         root_config.task.routing_policy,
-    );
+    )
+    .with_orchestration_route_guard(crate::OrchestrationRouteGuard::new(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+    ));
     if queued_first_request.is_none() && agent_invocation.is_none() {
+        conversation_coordinator
+            .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())
+            .map_err(ApplicationRunPrepareError::execution)?;
         input = conversation_coordinator
             .bind_conversation_input(
                 &session,

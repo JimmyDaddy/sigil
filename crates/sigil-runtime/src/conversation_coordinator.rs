@@ -30,6 +30,7 @@ pub struct ConversationSourceTurn {
 pub struct ConversationCoordinator {
     task_enabled: bool,
     routing_policy: TaskRoutingPolicy,
+    orchestration_route_guard: Option<crate::OrchestrationRouteGuard>,
 }
 
 impl ConversationCoordinator {
@@ -38,7 +39,33 @@ impl ConversationCoordinator {
         Self {
             task_enabled,
             routing_policy,
+            orchestration_route_guard: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_orchestration_route_guard(
+        mut self,
+        orchestration_route_guard: crate::OrchestrationRouteGuard,
+    ) -> Self {
+        self.orchestration_route_guard = Some(orchestration_route_guard);
+        self
+    }
+
+    /// Persists a route-local kill switch when durable facts expose a hard invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the disablement cannot be validated or durably appended.
+    pub fn enforce_orchestration_route_kill_switch(
+        &self,
+        session: &mut Session,
+        now_ms: u64,
+    ) -> Result<Option<sigil_kernel::OrchestrationRouteDisabledEntry>> {
+        let Some(guard) = &self.orchestration_route_guard else {
+            return Ok(None);
+        };
+        guard.enforce(session, now_ms)
     }
 
     /// Binds a root conversation run to its exact user turn and optional automatic handoff.
@@ -77,7 +104,11 @@ impl ConversationCoordinator {
             root_logical_run_id.clone(),
         )?;
         let effective_policy = if self.task_enabled {
-            self.routing_policy
+            self.orchestration_route_guard
+                .as_ref()
+                .map_or(self.routing_policy, |guard| {
+                    guard.effective_policy(session, self.routing_policy)
+                })
         } else {
             TaskRoutingPolicy::Manual
         };

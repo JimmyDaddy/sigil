@@ -386,6 +386,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.task_id.as_str(),
             truncate_session_view_text(&entry.message_id, 32)
         ),
+        ControlEntry::OrchestrationRouteDisabled(entry) => format!(
+            "[ctl] orchestration route disabled route={} build={} invariant={:?} report={}",
+            truncate_session_view_text(&entry.route_fingerprint, 23),
+            truncate_session_view_text(&entry.sigil_build, 32),
+            entry.invariant,
+            truncate_session_view_text(&entry.report_handle, 64)
+        ),
         ControlEntry::TaskChildSession(child) => format!(
             "[ctl] child {} v{}:{} status={}",
             child.task_id.as_str(),
