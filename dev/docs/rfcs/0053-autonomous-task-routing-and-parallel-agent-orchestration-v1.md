@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8b public protocol slice implemented，O8a、application parity、O8c-O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8a exact verification action、O8b public protocol slice implemented，O8a 其余部分、application parity、O8c-O8d deferred
 
 创建日期：2026-07-22
 
@@ -1657,6 +1657,16 @@ O8a：TUI product completion。
 - renderer 只消费 versioned ViewModel/cache；durable cursor 未变化时不重放全日志。增加长 task
   fixture，证明 frame render 不触发 session store scan 或完整 reducer replay。
 - 所有异步 modal/action 使用 request id + task id + plan version；迟到回包不能覆盖新状态。
+
+2026-07-25 已完成 O8a 的 exact verification action slice：
+
+- verification rerun request 同时绑定 deterministic request id、task id、plan version、step、
+  check spec/hash、policy hash 与 workspace snapshot；kernel 在写入 queued lifecycle 前重新计算
+  identity，并确认请求仍指向最新、未 supersede 且包含该 step 的 plan。
+- plan 更新、伪造/漂移 identity、step/check/policy/workspace snapshot 任一变化都会 fail closed；
+  TUI、HTTP、Desktop IPC 和 generated contract 复用同一 binding。
+
+这只收口 verification rerun 这一类异步 action，不代表 O8a 全部完成。
 
 O8b：typed public protocol 与 application parity。
 

@@ -2350,6 +2350,18 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             .expect("run required fields")
             .contains(&json!("prompt_preview"))
     );
+    let verification_rerun_required = document["components"]["schemas"]["VerificationRerunRequest"]
+        ["required"]
+        .as_array()
+        .expect("verification rerun required fields");
+    for field in ["request_id", "task_id", "plan_version", "step_id"] {
+        assert!(
+            verification_rerun_required
+                .iter()
+                .any(|value| value == field),
+            "missing verification rerun binding {field}"
+        );
+    }
     let command_required = document["components"]["schemas"]["CommandEnvelopeBase"]["required"]
         .as_array()
         .expect("command envelope required fields");
@@ -6139,14 +6151,15 @@ impl HttpRunDriver for RecordingRunDriver {
 }
 
 fn verification_rerun_request() -> TaskVerificationRerunRequest {
-    TaskVerificationRerunRequest {
-        task_id: TaskId::new("task_1").expect("task id"),
-        step_id: TaskStepId::new("verify_1").expect("step id"),
-        check_spec_id: "cargo-test".to_owned(),
-        check_spec_hash: "check-hash".to_owned(),
-        policy_hash: "policy-hash".to_owned(),
-        workspace_snapshot_id: "snapshot-1".to_owned(),
-    }
+    TaskVerificationRerunRequest::new(
+        TaskId::new("task_1").expect("task id"),
+        1,
+        TaskStepId::new("verify_1").expect("step id"),
+        "cargo-test".to_owned(),
+        "check-hash".to_owned(),
+        "policy-hash".to_owned(),
+        "snapshot-1".to_owned(),
+    )
 }
 
 fn verification_test_view(

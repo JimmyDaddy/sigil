@@ -922,7 +922,9 @@ fn task_verification_card_binds_exact_rerun_request_and_failure_evidence() {
     let VerificationCardAction::Rerun(request) = card.action.expect("exact rerun action") else {
         panic!("expected exact rerun action");
     };
+    assert!(request.has_exact_identity());
     assert_eq!(request.task_id.as_str(), "task_1");
+    assert_eq!(request.plan_version, 1);
     assert_eq!(request.step_id.as_str(), "fix_typo");
     assert_eq!(request.policy_hash, "policy-hash");
     assert_eq!(request.workspace_snapshot_id, "snapshot-1");

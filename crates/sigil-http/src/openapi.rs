@@ -2221,9 +2221,11 @@ pub fn http_openapi_document() -> Value {
                 "VerificationRerunRequest": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["task_id", "step_id", "check_spec_id", "check_spec_hash", "policy_hash", "workspace_snapshot_id"],
+                    "required": ["request_id", "task_id", "plan_version", "step_id", "check_spec_id", "check_spec_hash", "policy_hash", "workspace_snapshot_id"],
                     "properties": {
+                        "request_id": { "type": "string", "pattern": "^verification-rerun-[0-9a-f]{64}$" },
                         "task_id": { "type": "string" },
+                        "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 },
                         "step_id": { "type": "string" },
                         "check_spec_id": { "type": "string" },
                         "check_spec_hash": { "type": "string" },

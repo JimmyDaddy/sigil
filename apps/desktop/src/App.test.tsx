@@ -3571,7 +3571,9 @@ describe("desktop workspace and history shell", () => {
       action: {
         kind: "rerun" as const,
         request: {
+          requestId: `verification-rerun-${"a".repeat(64)}`,
           taskId: "task_1",
+          planVersion: 1,
           stepId: "verify_1",
           checkSpecId: "cargo-test",
           checkSpecHash: "check-hash",

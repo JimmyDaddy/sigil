@@ -108,6 +108,33 @@ pub async fn rerun_task_verification_check<H>(
 where
     H: EventHandler + Send,
 {
+    if !request.has_exact_identity() {
+        bail!("verification rerun request identity does not match its rendered binding");
+    }
+    let task_projection = session.task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(&request.task_id)
+        .ok_or_else(|| anyhow!("verification rerun task is no longer available"))?;
+    if task.latest_plan_version != Some(request.plan_version)
+        || task
+            .superseded_plan_versions
+            .contains(&request.plan_version)
+    {
+        bail!("verification task plan changed since the rerun action was rendered");
+    }
+    let plan = task
+        .plans
+        .get(&request.plan_version)
+        .ok_or_else(|| anyhow!("verification rerun plan is no longer available"))?;
+    if !plan
+        .steps
+        .iter()
+        .any(|step| step.step_id == request.step_id)
+    {
+        bail!("verification rerun step is not part of the rendered task plan");
+    }
+
     let projection = session.verification_state_projection();
     let step_scope = task_step_evidence_scope(&request.task_id, &request.step_id);
     let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());

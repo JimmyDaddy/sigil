@@ -337,14 +337,15 @@ fn plan_actions_map_to_worker_commands() {
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::RerunTaskVerification {
-            request: sigil_kernel::TaskVerificationRerunRequest {
-                task_id: sigil_kernel::TaskId::new("task_1").expect("task id"),
-                step_id: sigil_kernel::TaskStepId::new("step_1").expect("step id"),
-                check_spec_id: "cargo-test".to_owned(),
-                check_spec_hash: "check-hash".to_owned(),
-                policy_hash: "policy-hash".to_owned(),
-                workspace_snapshot_id: "snapshot-1".to_owned(),
-            },
+            request: sigil_kernel::TaskVerificationRerunRequest::new(
+                sigil_kernel::TaskId::new("task_1").expect("task id"),
+                1,
+                sigil_kernel::TaskStepId::new("step_1").expect("step id"),
+                "cargo-test".to_owned(),
+                "check-hash".to_owned(),
+                "policy-hash".to_owned(),
+                "snapshot-1".to_owned(),
+            ),
         }),
         WorkerCommand::RerunTaskVerification { ref request }
             if request.check_spec_id == "cargo-test"

@@ -1582,7 +1582,9 @@ pub struct DesktopApprovalCommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopVerificationRerunRequest {
+    pub request_id: String,
     pub task_id: String,
+    pub plan_version: u32,
     pub step_id: String,
     pub check_spec_id: String,
     pub check_spec_hash: String,

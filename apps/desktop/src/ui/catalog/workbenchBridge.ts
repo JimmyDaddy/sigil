@@ -289,7 +289,9 @@ const verification: VerificationSummary = {
   action: {
     kind: "rerun",
     request: {
+      requestId: `verification-rerun-${"a".repeat(64)}`,
       taskId: "catalog-task",
+      planVersion: 1,
       stepId: "catalog-verify",
       checkSpecId: "cargo-test-parser",
       checkSpecHash: "catalog-check-spec-hash",

@@ -1221,7 +1221,9 @@ pub(crate) struct DesktopApprovalDecisionSummary {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopVerificationRerunBinding {
+    pub(crate) request_id: String,
     pub(crate) task_id: String,
+    pub(crate) plan_version: u32,
     pub(crate) step_id: String,
     pub(crate) check_spec_id: String,
     pub(crate) check_spec_hash: String,
@@ -2247,7 +2249,9 @@ impl From<DesktopApprovalDecisionRecord> for DesktopApprovalDecisionSummary {
 impl From<DesktopVerificationRerunBinding> for DesktopVerificationRerunRequest {
     fn from(value: DesktopVerificationRerunBinding) -> Self {
         Self {
+            request_id: value.request_id,
             task_id: value.task_id,
+            plan_version: value.plan_version,
             step_id: value.step_id,
             check_spec_id: value.check_spec_id,
             check_spec_hash: value.check_spec_hash,
@@ -2260,7 +2264,9 @@ impl From<DesktopVerificationRerunBinding> for DesktopVerificationRerunRequest {
 impl From<DesktopVerificationRerunRequest> for DesktopVerificationRerunBinding {
     fn from(value: DesktopVerificationRerunRequest) -> Self {
         Self {
+            request_id: value.request_id,
             task_id: value.task_id,
+            plan_version: value.plan_version,
             step_id: value.step_id,
             check_spec_id: value.check_spec_id,
             check_spec_hash: value.check_spec_hash,

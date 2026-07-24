@@ -1632,7 +1632,22 @@ fn validate_recovery_token(value: &str) -> Result<(), DesktopCommandError> {
 fn validate_verification_rerun(
     input: &DesktopVerificationRerunInput,
 ) -> Result<(), DesktopCommandError> {
+    let request_digest = input.request.request_id.strip_prefix("verification-rerun-");
+    if input.request.plan_version == 0
+        || !request_digest.is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+    {
+        return Err(DesktopCommandError::new(
+            "verification_request_invalid",
+            "The verification recommendation is invalid or stale.",
+        ));
+    }
     for value in [
+        input.request.request_id.as_str(),
         input.request.task_id.as_str(),
         input.request.step_id.as_str(),
         input.request.check_spec_id.as_str(),

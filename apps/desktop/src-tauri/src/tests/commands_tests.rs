@@ -603,7 +603,9 @@ fn verification_rerun_requires_one_bounded_exact_binding() {
     let valid = DesktopVerificationRerunInput {
         session_id: "http-session-1".to_owned(),
         request: crate::ipc::DesktopVerificationRerunBinding {
+            request_id: format!("verification-rerun-{}", "a".repeat(64)),
             task_id: "task_1".to_owned(),
+            plan_version: 1,
             step_id: "verify_1".to_owned(),
             check_spec_id: "cargo-test".to_owned(),
             check_spec_hash: "check-hash".to_owned(),
@@ -614,6 +616,14 @@ fn verification_rerun_requires_one_bounded_exact_binding() {
     assert!(validate_verification_rerun(&valid).is_ok());
 
     let mut invalid = valid;
+    invalid.request.request_id = "verification-rerun-not-a-digest".to_owned();
+    assert!(validate_verification_rerun(&invalid).is_err());
+
+    invalid.request.request_id = format!("verification-rerun-{}", "a".repeat(64));
+    invalid.request.plan_version = 0;
+    assert!(validate_verification_rerun(&invalid).is_err());
+
+    invalid.request.plan_version = 1;
     invalid.request.policy_hash.clear();
     assert!(validate_verification_rerun(&invalid).is_err());
 }

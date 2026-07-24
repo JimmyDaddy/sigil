@@ -291,6 +291,30 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
     let workspace = std::fs::canonicalize(workspace)?;
     std::fs::write(workspace.join("note.txt"), "current\n")?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: task_request.parent_session_ref.clone(),
+        objective: task_request.objective.clone(),
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for verification".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Blocked,
+        title: Some(step.title.clone()),
+        summary: None,
+        reason: Some("verification missing".to_owned()),
+    }))?;
     let trusted = CandidateCheck {
         source: CheckDiscoverySource::UserExplicitConfig,
         command: CheckCommand {
@@ -350,18 +374,19 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
         &options,
     )?;
     session.append_control(ControlEntry::ReadinessEvaluated(readiness.clone()))?;
-    let request = TaskVerificationRerunRequest {
+    let request = TaskVerificationRerunRequest::new(
         task_id,
+        1,
         step_id,
-        check_spec_id: check_spec.check_spec_id,
-        check_spec_hash: check_spec.check_spec_hash,
-        policy_hash: readiness
+        check_spec.check_spec_id,
+        check_spec.check_spec_hash,
+        readiness
             .policy_hash
             .expect("task readiness should bind the policy"),
-        workspace_snapshot_id: readiness
+        readiness
             .workspace_snapshot_id
             .expect("changed task readiness should bind the workspace snapshot"),
-    };
+    );
     Ok(TaskVerificationRerunFixture {
         _temp: temp,
         workspace,
@@ -6368,6 +6393,7 @@ fn exact_task_verification_rerun_rejects_policy_and_spec_drift() -> Result<()> {
         mut request,
     } = task_verification_rerun_fixture()?;
     request.check_spec_hash = "stale-check-spec-hash".to_owned();
+    request.request_id = request.expected_request_id();
     let error = futures::executor::block_on(rerun_task_verification_check(
         &mut session,
         &mut handler,
@@ -6381,6 +6407,62 @@ fn exact_task_verification_rerun_rejects_policy_and_spec_drift() -> Result<()> {
         entry,
         SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
     )));
+    Ok(())
+}
+
+#[test]
+fn exact_task_verification_rerun_rejects_forged_identity_and_superseded_plan_before_queue()
+-> Result<()> {
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        mut request,
+    } = task_verification_rerun_fixture()?;
+    let mut handler = RecordingEventHandler::default();
+    let backend = FakeTaskExecutionBackend;
+
+    request.request_id.push_str("-forged");
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("forged request identity must fail before execution");
+    assert!(error.to_string().contains("request identity"));
+
+    request.request_id = request.expected_request_id();
+    let step = session
+        .task_state_projection()
+        .tasks
+        .get(&request.task_id)
+        .and_then(|task| task.plans.get(&request.plan_version))
+        .and_then(|plan| plan.steps.first())
+        .cloned()
+        .expect("fixture step");
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: request.task_id.clone(),
+        plan_version: 2,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step],
+        reason: Some("supersede verification action".to_owned()),
+    }))?;
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("superseded plan action must fail before execution");
+    assert!(error.to_string().contains("task plan changed"));
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
+    )));
+    assert!(handler.events.is_empty());
     Ok(())
 }
 

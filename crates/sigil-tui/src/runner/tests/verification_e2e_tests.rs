@@ -2,10 +2,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    Agent, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore, ReadinessEvaluatedEntry,
-    ReadinessEvaluation, RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, TaskId,
-    TaskStepId, TaskVerificationRerunRequest, ToolEffect, ToolRegistry, TrustedCheckSpec,
+    Agent, AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
+    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunEvent, RunStatus, Session,
+    SessionLogEntry, SessionRef, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskStepStatus, TaskVerificationRerunRequest, ToolEffect, ToolRegistry, TrustedCheckSpec,
     VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
@@ -29,6 +31,40 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
 
     let task_id = TaskId::new("task_1")?;
     let step_id = TaskStepId::new("step_1")?;
+    let step = TaskStepSpec {
+        step_id: step_id.clone(),
+        title: "Verify".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Verify),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "verify the workspace".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for verification".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Blocked,
+        title: Some(step.title),
+        summary: None,
+        reason: Some("verification missing".to_owned()),
+    }))?;
     let step_scope = EvidenceScope::Step("task_1:step_1".to_owned());
     let task_scope = EvidenceScope::Task(task_id.as_str().to_owned());
     let check_spec = CheckSpec::new(
@@ -85,14 +121,15 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
     }))?;
     drop(session);
 
-    let request = TaskVerificationRerunRequest {
+    let request = TaskVerificationRerunRequest::new(
         task_id,
+        1,
         step_id,
-        check_spec_id: check_spec.check_spec_id.clone(),
-        check_spec_hash: check_spec.check_spec_hash.clone(),
+        check_spec.check_spec_id.clone(),
+        check_spec.check_spec_hash.clone(),
         policy_hash,
-        workspace_snapshot_id: workspace_snapshot_id.clone(),
-    };
+        workspace_snapshot_id.clone(),
+    );
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let agent = Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;

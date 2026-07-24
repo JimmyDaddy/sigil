@@ -119,7 +119,9 @@ fn product_view_exposes_one_exact_rerun_binding() -> Result<()> {
     let VerificationProductAction::Rerun(request) = view.action.expect("rerun action") else {
         panic!("expected an exact rerun action");
     };
+    assert!(request.has_exact_identity());
     assert_eq!(request.task_id.as_str(), TASK_ID);
+    assert_eq!(request.plan_version, 1);
     assert_eq!(request.step_id.as_str(), STEP_ID);
     assert_eq!(request.check_spec_id, CHECK_ID);
     assert_eq!(

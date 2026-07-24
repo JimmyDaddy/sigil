@@ -241,12 +241,61 @@ pub struct SequentialTaskStepOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TaskVerificationRerunRequest {
+    pub request_id: String,
     pub task_id: TaskId,
+    pub plan_version: u32,
     pub step_id: TaskStepId,
     pub check_spec_id: CheckSpecId,
     pub check_spec_hash: String,
     pub policy_hash: PolicyHash,
     pub workspace_snapshot_id: WorkspaceSnapshotId,
+}
+
+impl TaskVerificationRerunRequest {
+    #[must_use]
+    pub fn new(
+        task_id: TaskId,
+        plan_version: u32,
+        step_id: TaskStepId,
+        check_spec_id: CheckSpecId,
+        check_spec_hash: String,
+        policy_hash: PolicyHash,
+        workspace_snapshot_id: WorkspaceSnapshotId,
+    ) -> Self {
+        let mut request = Self {
+            request_id: String::new(),
+            task_id,
+            plan_version,
+            step_id,
+            check_spec_id,
+            check_spec_hash,
+            policy_hash,
+            workspace_snapshot_id,
+        };
+        request.request_id = request.expected_request_id();
+        request
+    }
+
+    /// Deterministic identity of the exact rendered action binding.
+    #[must_use]
+    pub fn expected_request_id(&self) -> String {
+        let seed = serde_json::json!({
+            "task_id": self.task_id,
+            "plan_version": self.plan_version,
+            "step_id": self.step_id,
+            "check_spec_id": self.check_spec_id,
+            "check_spec_hash": self.check_spec_hash,
+            "policy_hash": self.policy_hash,
+            "workspace_snapshot_id": self.workspace_snapshot_id,
+        })
+        .to_string();
+        format!("verification-rerun-{}", crate::sha256_hex(seed.as_bytes()))
+    }
+
+    #[must_use]
+    pub fn has_exact_identity(&self) -> bool {
+        self.request_id == self.expected_request_id()
+    }
 }
 
 /// Durable terminal records produced by one exact task verification rerun.

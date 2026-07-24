@@ -2754,7 +2754,10 @@ export interface components {
         VerificationRerunRequest: {
             check_spec_hash: string;
             check_spec_id: string;
+            /** Format: uint32 */
+            plan_version: number;
             policy_hash: string;
+            request_id: string;
             step_id: string;
             task_id: string;
             workspace_snapshot_id: string;

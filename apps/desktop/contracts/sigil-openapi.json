@@ -5233,7 +5233,16 @@
           "check_spec_id": {
             "type": "string"
           },
+          "plan_version": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
           "policy_hash": {
+            "type": "string"
+          },
+          "request_id": {
+            "pattern": "^verification-rerun-[0-9a-f]{64}$",
             "type": "string"
           },
           "step_id": {
@@ -5247,7 +5256,9 @@
           }
         },
         "required": [
+          "request_id",
           "task_id",
+          "plan_version",
           "step_id",
           "check_spec_id",
           "check_spec_hash",

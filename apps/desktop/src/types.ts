@@ -819,7 +819,9 @@ export interface ApprovalDecisionSummary {
 }
 
 export interface VerificationRerunBinding {
+  requestId: string;
   taskId: string;
+  planVersion: number;
   stepId: string;
   checkSpecId: string;
   checkSpecHash: string;

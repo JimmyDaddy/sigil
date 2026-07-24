@@ -60,7 +60,7 @@ pub fn verification_product_view(entries: &[SessionLogEntry]) -> Option<Verifica
     let tasks = TaskStateProjection::from_entries(entries);
     let verification = VerificationStateProjection::from_entries(entries);
     let task = tasks.latest_task()?;
-    let (_, step, _) = focus_step(task)?;
+    let (plan_version, step, _) = focus_step(task)?;
     let scope = step_scope(task, &step.step_id);
     let readiness = verification.latest_readiness(&scope)?;
     let recommendation = recommendation(entries, task, &scope, readiness, &verification);
@@ -78,14 +78,15 @@ pub fn verification_product_view(entries: &[SessionLogEntry]) -> Option<Verifica
         }
         let trusted = trusted_check(&verification, task, &scope, &recommendation.check_spec_id)?;
         Some(VerificationProductAction::Rerun(
-            TaskVerificationRerunRequest {
-                task_id: task.task_id.clone(),
-                step_id: step.step_id.clone(),
-                check_spec_id: trusted.trusted_check.check_spec.check_spec_id.clone(),
-                check_spec_hash: trusted.trusted_check.check_spec.check_spec_hash.clone(),
-                policy_hash: readiness.policy_hash.clone()?,
-                workspace_snapshot_id: readiness.workspace_snapshot_id.clone()?,
-            },
+            TaskVerificationRerunRequest::new(
+                task.task_id.clone(),
+                plan_version,
+                step.step_id.clone(),
+                trusted.trusted_check.check_spec.check_spec_id.clone(),
+                trusted.trusted_check.check_spec.check_spec_hash.clone(),
+                readiness.policy_hash.clone()?,
+                readiness.workspace_snapshot_id.clone()?,
+            ),
         ))
     });
     let run = recommended_check_spec_id
@@ -356,18 +357,28 @@ fn check_status_label(status: VerificationCheckRunStatus) -> &'static str {
 }
 
 fn focus_step(task: &TaskRunProjection) -> Option<(u32, &TaskStepSpec, TaskStepStatus)> {
-    if let Some((plan_version, step_id)) = &task.current_step {
-        let plan = task.plans.get(plan_version)?;
+    let latest_plan_version = task.latest_plan_version?;
+    if let Some((plan_version, step_id)) = &task.current_step
+        && *plan_version == latest_plan_version
+    {
+        let plan = task.plans.get(&latest_plan_version)?;
         let step = plan.steps.iter().find(|step| step.step_id == *step_id)?;
-        return Some((*plan_version, step, step_status(task, *plan_version, step)));
+        return Some((
+            latest_plan_version,
+            step,
+            step_status(task, latest_plan_version, step),
+        ));
     }
-    for (plan_version, plan) in &task.plans {
-        if let Some(step) = plan.steps.iter().find(|step| {
-            task.active_steps
-                .contains(&(*plan_version, step.step_id.clone()))
-        }) {
-            return Some((*plan_version, step, step_status(task, *plan_version, step)));
-        }
+    let plan = task.plans.get(&latest_plan_version)?;
+    if let Some(step) = plan.steps.iter().find(|step| {
+        task.active_steps
+            .contains(&(latest_plan_version, step.step_id.clone()))
+    }) {
+        return Some((
+            latest_plan_version,
+            step,
+            step_status(task, latest_plan_version, step),
+        ));
     }
     last_problem_step(task).or_else(|| last_plan_step(task))
 }

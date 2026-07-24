@@ -48,7 +48,9 @@ fn verification_card_keyboard_focus_inspect_and_exact_action() {
     let AppAction::RerunTaskVerification { request } = action else {
         panic!("expected exact rerun action");
     };
+    assert!(request.has_exact_identity());
     assert_eq!(request.task_id.as_str(), "task_1");
+    assert_eq!(request.plan_version, 1);
     assert_eq!(request.step_id.as_str(), "step_1");
     assert_eq!(request.check_spec_id, "cargo-test");
     assert_eq!(request.policy_hash, "policy-hash");

@@ -342,14 +342,15 @@ model = "deepseek-v4-flash"
         Arc::new(RejectingDisclosurePresenter),
         Arc::clone(&lease_manager),
     );
-    let request = TaskVerificationRerunRequest {
-        task_id: TaskId::new("task_1")?,
-        step_id: TaskStepId::new("verify_1")?,
-        check_spec_id: "cargo-test".to_owned(),
-        check_spec_hash: "check-hash".to_owned(),
-        policy_hash: "policy-hash".to_owned(),
-        workspace_snapshot_id: "snapshot-1".to_owned(),
-    };
+    let request = TaskVerificationRerunRequest::new(
+        TaskId::new("task_1")?,
+        1,
+        TaskStepId::new("verify_1")?,
+        "cargo-test".to_owned(),
+        "check-hash".to_owned(),
+        "policy-hash".to_owned(),
+        "snapshot-1".to_owned(),
+    );
 
     let error = rerun_application_verification(
         &config_path,
