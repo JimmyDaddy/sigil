@@ -16,9 +16,9 @@ use sigil_kernel::{
     EgressDisclosurePresenter, JsonlSessionStore, ModelMessage, PreEgressDisclosure,
     PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig, RunCancellationOwner,
     RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, StartDurableTaskAction,
-    TaskHandoffId, TaskId, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess,
-    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    TaskHandoffId, TaskId, TaskRunEntry, TaskRunStatus, TaskStepId, TaskVerificationRerunRequest,
+    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
     conversation_run_lifecycle_record_from_stream,
 };
 
@@ -1146,6 +1146,63 @@ fn public_event_bridge_sequences_lifecycle_and_kernel_events() -> Result<()> {
         recorder.0[2].event,
         PublicRunEventKind::RunFinished { .. }
     ));
+    Ok(())
+}
+
+#[test]
+fn public_event_bridge_projects_task_controls_and_preserves_unknown_controls() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let mut recorder = Recorder::default();
+    let events = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder);
+    sigil_kernel::EventHandler::handle(
+        &mut bridge,
+        RunEvent::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: TaskId::new("task-1")?,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "private task objective".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+    )?;
+    sigil_kernel::EventHandler::handle(
+        &mut bridge,
+        RunEvent::Control(ControlEntry::Note {
+            kind: "diagnostic".to_owned(),
+            data: serde_json::json!({"value": 1}),
+        }),
+    )?;
+    drop(bridge);
+
+    assert!(matches!(
+        recorder.0[0].event,
+        PublicRunEventKind::TaskPhaseChanged {
+            task_id: Some(ref task_id),
+            ref status,
+            ..
+        } if task_id == "task-1" && status == "running"
+    ));
+    assert!(matches!(
+        recorder.0[1].event,
+        PublicRunEventKind::Control { .. }
+    ));
+    assert_eq!(
+        recorder
+            .0
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     Ok(())
 }
 

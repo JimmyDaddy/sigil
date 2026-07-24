@@ -15,8 +15,8 @@ use sigil_kernel::{
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, EgressDisclosurePresenter,
     EventHandler, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     McpServerStartup, MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler,
-    PermissionMode, PublicRunEvent, PublicRunEventKind, ReasoningEffort, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    PermissionMode, PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
+    RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
     Session, SessionLogEntry, SessionRef, TaskVerificationRerunRequest, ToolRegistryScope,
@@ -2703,6 +2703,7 @@ fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
 
 struct PublicApplicationEventBridge<'a, H> {
     events: ApplicationRunEventSequence,
+    task_events: PublicTaskEventProjector,
     handler: &'a mut H,
 }
 
@@ -2711,7 +2712,11 @@ where
     H: ApplicationRunEventHandler,
 {
     fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Self {
-        Self { events, handler }
+        Self {
+            events,
+            task_events: PublicTaskEventProjector::default(),
+            handler,
+        }
     }
 
     fn emit(&mut self, event: PublicRunEventKind) -> Result<()> {
@@ -2724,7 +2729,19 @@ where
     H: ApplicationRunEventHandler,
 {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
-        self.emit(event.into())
+        let RunEvent::Control(control) = event else {
+            return self.emit(event.into());
+        };
+        let task_events = self.task_events.project_control(&control);
+        if task_events.is_empty() {
+            return self.emit(PublicRunEventKind::Control {
+                control: control.into(),
+            });
+        }
+        for event in task_events {
+            self.emit(event)?;
+        }
+        Ok(())
     }
 }
 
