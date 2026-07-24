@@ -31,6 +31,7 @@ impl WorkerLoopState {
                 exact_prompts: ExactConversationPromptStore::new(),
                 pending_agent_result_continuations,
                 last_queued_pre_turn_block: None,
+                last_task_guidance_block: None,
                 pending_queued_pre_turn_preparation: None,
             },
             run: RunWorkerState {
@@ -88,6 +89,7 @@ pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) exact_prompts: ExactConversationPromptStore,
     pub(in crate::runner) pending_agent_result_continuations: Vec<AgentThreadId>,
     pub(in crate::runner) last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)>,
+    pub(in crate::runner) last_task_guidance_block: Option<(ConversationInputQueueId, String)>,
     pub(in crate::runner) pending_queued_pre_turn_preparation:
         Option<PreTurnV2CompactionPreparation>,
 }

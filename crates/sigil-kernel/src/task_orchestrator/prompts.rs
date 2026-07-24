@@ -14,10 +14,7 @@ pub(super) fn normalize_task_guidance(guidance: Option<String>) -> Option<String
 
 pub(super) fn task_continue_reason(plan_version: u32, guidance: Option<&str>) -> String {
     match guidance {
-        Some(value) => format!(
-            "continuing plan v{plan_version}; user guidance: {}",
-            value.trim()
-        ),
+        Some(_) => format!("continuing plan v{plan_version} with user guidance"),
         None => format!("continuing plan v{plan_version}"),
     }
 }

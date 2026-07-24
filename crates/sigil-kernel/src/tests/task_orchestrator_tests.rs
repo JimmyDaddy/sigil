@@ -2812,10 +2812,17 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
             SessionLogEntry::Control(ControlEntry::TaskRun(run))
                 if run.status == TaskRunStatus::Running
                     && run.reason.as_deref().is_some_and(|reason| {
-                        reason.contains("focus runtime state updates")
+                        reason == "continuing plan v1 with user guidance"
                     })
         )
     }));
+    assert!(session.entries().iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            if run.reason.as_deref().is_some_and(|reason| {
+                reason.contains("focus runtime state updates")
+            })
+    )));
     let requests = executor_requests
         .lock()
         .expect("executor request lock should not be poisoned");

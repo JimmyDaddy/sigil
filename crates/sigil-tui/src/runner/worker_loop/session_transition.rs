@@ -179,6 +179,7 @@ where
     state.compaction.idle_auto = IdleAutoCompactionState::default();
     state.session.pending_queued_pre_turn_preparation = None;
     state.session.last_queued_pre_turn_block = None;
+    state.session.last_task_guidance_block = None;
     state.session.pending_agent_result_continuations = pending_agent_result_continuations;
     state.session.detached_durable_controls.clear();
     if !same_logical_session {

@@ -71,6 +71,10 @@ where
             WorkerAdvancementControl::SkipCommandPoll
         )
         || matches!(
+            advance_task_guidance(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
             advance_pending_task_handoffs(context.reborrow()),
             WorkerAdvancementControl::SkipCommandPoll
         )
@@ -293,6 +297,233 @@ where
         image_attachment_resolver,
     });
     WorkerAdvancementControl::SkipCommandPoll
+}
+
+fn advance_task_guidance<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        runtime,
+        agent,
+        root_config,
+        options,
+        message_tx,
+        elicitation_handler,
+        role_provider_builder,
+        state,
+        ..
+    } = context;
+    if state.run.active.is_some() {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    let preparation = match state.session.current.as_ref() {
+        Some(session) => {
+            prepare_next_task_guidance_candidate(session, &state.session.exact_prompts)
+        }
+        None => Ok(TaskGuidancePreparation::NoQueuedGuidance),
+    };
+    let preparation = match preparation {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(error));
+            return WorkerAdvancementControl::PollCommand;
+        }
+    };
+    match preparation {
+        TaskGuidancePreparation::NoQueuedGuidance => {
+            state.session.last_task_guidance_block = None;
+            WorkerAdvancementControl::PollCommand
+        }
+        TaskGuidancePreparation::Waiting { queue_id, reason } => {
+            notify_task_guidance_block_once(message_tx, state, queue_id, reason);
+            WorkerAdvancementControl::PollCommand
+        }
+        TaskGuidancePreparation::Terminal {
+            queue_id,
+            status,
+            reason,
+        } => {
+            state.session.last_task_guidance_block = None;
+            state.session.exact_prompts.remove(&queue_id);
+            append_queue_status_and_notify(
+                &mut state.session.current,
+                message_tx,
+                queue_id,
+                status,
+                Some(reason),
+            );
+            WorkerAdvancementControl::SkipCommandPoll
+        }
+        TaskGuidancePreparation::Prepared(candidate) => {
+            if !root_config.task.enabled {
+                let queue_id = candidate.promotion.queue_id;
+                state.session.exact_prompts.remove(&queue_id);
+                append_queue_status_and_notify(
+                    &mut state.session.current,
+                    message_tx,
+                    queue_id,
+                    ConversationInputStatus::Rejected,
+                    Some(
+                        "task guidance cannot dispatch while task execution is disabled".to_owned(),
+                    ),
+                );
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+            let candidate = *candidate;
+            let Some(mut run_session) = state.session.current.take() else {
+                return WorkerAdvancementControl::PollCommand;
+            };
+            let task = run_session
+                .task_state_projection()
+                .tasks
+                .get(&candidate.promotion.task_id)
+                .cloned();
+            let Some(task) = task else {
+                state.session.current = Some(run_session);
+                return WorkerAdvancementControl::PollCommand;
+            };
+            let cancellation =
+                match prepare_task_run_cancellation(&mut run_session, &candidate.promotion.task_id)
+                {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        state.session.current = Some(run_session);
+                        notify_task_guidance_block_once(
+                            message_tx,
+                            state,
+                            candidate.promotion.queue_id,
+                            error,
+                        );
+                        return WorkerAdvancementControl::PollCommand;
+                    }
+                };
+            let store = match JsonlSessionStore::new(&state.session.log_path) {
+                Ok(store) => store,
+                Err(error) => {
+                    state.session.current = Some(run_session);
+                    notify_task_guidance_block_once(
+                        message_tx,
+                        state,
+                        candidate.promotion.queue_id,
+                        format!("failed to open task guidance promotion store: {error:#}"),
+                    );
+                    return WorkerAdvancementControl::PollCommand;
+                }
+            };
+            if let Err(error) = store.append_task_guidance_promoted(candidate.promotion.clone()) {
+                state.session.current = Some(run_session);
+                notify_task_guidance_block_once(
+                    message_tx,
+                    state,
+                    candidate.promotion.queue_id,
+                    format!("task guidance promotion compare-and-swap refused: {error:#}"),
+                );
+                return WorkerAdvancementControl::PollCommand;
+            }
+            run_session.record_durably_appended_controls([ControlEntry::TaskGuidancePromoted(
+                candidate.promotion.clone(),
+            )]);
+            send_conversation_queue_update(message_tx, run_session.entries());
+            let delivered = ConversationInputStatusEntry {
+                queue_id: candidate.promotion.queue_id.clone(),
+                status: ConversationInputStatus::Delivered,
+                reason: Some("task guidance accepted at scheduler safe point".to_owned()),
+                updated_at_ms: Some(current_unix_time_ms()),
+            };
+            if let Err(error) =
+                run_session.append_control(ControlEntry::ConversationInputStatusChanged(delivered))
+            {
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "task guidance was promoted but dispatch could not be committed: {error:#}"
+                )));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+            send_conversation_queue_update(message_tx, run_session.entries());
+            state.session.last_task_guidance_block = None;
+            state
+                .session
+                .exact_prompts
+                .remove(&candidate.promotion.queue_id);
+
+            let task_id = candidate.promotion.task_id;
+            let task_id_value = task_id.as_str().to_owned();
+            let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                task_id: task_id_value.clone(),
+                objective: sigil_kernel::safe_persistence_text(&task.objective),
+            });
+            let handler = ChannelEventHandler::new(message_tx.clone());
+            let (approval_tx, approval_rx) = mpsc::channel();
+            let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+            let run_id = state.run.next_id;
+            state.run.next_id = state.run.next_id.saturating_add(1);
+            let url_capability_registrar = run_session.user_url_capability_registrar();
+            let image_attachment_resolver = run_session.image_attachment_resolver();
+            let cancellation_target = RunCancellationTarget::Task {
+                task_id: task_id_value.clone(),
+            };
+            let (
+                cancellation_owner,
+                cancellation_recorder,
+                cancellation_handle,
+                cancellation_task_guard,
+            ) = cancellation;
+            let handle = spawn_task_continue(
+                runtime,
+                TaskContinueSpawn {
+                    run_id,
+                    session: run_session,
+                    task_id,
+                    task_id_value,
+                    parent_session_ref: task.parent_session_ref,
+                    objective: task.objective,
+                    guidance: Some(candidate.exact_guidance),
+                    root_config: root_config.clone(),
+                    options: options.clone(),
+                    base_registry: agent.tool_registry().clone(),
+                    agent_supervisor: state.agent.supervisor.clone(),
+                    role_provider_builder: Arc::clone(role_provider_builder),
+                    task_result_tx: state.run.result_tx.clone(),
+                    approval_rx,
+                    handler,
+                    elicitation_audit_buffer: Arc::clone(&elicitation_audit_buffer),
+                    cancellation_handle,
+                    cancellation_task_guard,
+                },
+            );
+            state.run.active = Some(ActiveRun {
+                run_id,
+                handle,
+                approval_tx,
+                elicitation_audit_buffer,
+                cancellation_owner,
+                cancellation_recorder,
+                cancellation_target,
+                url_capability_registrar,
+                image_attachment_resolver,
+            });
+            WorkerAdvancementControl::SkipCommandPoll
+        }
+    }
+}
+
+fn notify_task_guidance_block_once(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    state: &mut WorkerLoopState,
+    queue_id: ConversationInputQueueId,
+    reason: String,
+) {
+    let block = (queue_id, reason);
+    if state.session.last_task_guidance_block.as_ref() != Some(&block) {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "task guidance is waiting: {}",
+            block.1
+        )));
+    }
+    state.session.last_task_guidance_block = Some(block);
 }
 
 fn advance_refreshes<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl

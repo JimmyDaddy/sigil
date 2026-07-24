@@ -101,6 +101,134 @@ fn committed_queued_chat_candidate(
     Ok((restored, dispatch_run_id, frozen_fingerprint))
 }
 
+fn task_guidance_session(
+    store: &JsonlSessionStore,
+    status: TaskRunStatus,
+) -> Result<(Session, TaskId)> {
+    let task_id = TaskId::new("task_guidance_queue_driver")?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "exercise task guidance delivery".to_owned(),
+        status,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    Ok((session, task_id))
+}
+
+#[test]
+fn task_guidance_preparation_binds_exact_task_plan_without_writing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (session, task_id) = task_guidance_session(&store, TaskRunStatus::Paused)?;
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "prioritize the restart edge".to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task {
+            task_id: task_id.clone(),
+        },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+    let before = std::fs::read(store.path())?;
+
+    let preparation = prepare_next_task_guidance_candidate(&session, &exact_prompts)
+        .map_err(anyhow::Error::msg)?;
+    let TaskGuidancePreparation::Prepared(candidate) = preparation else {
+        panic!("accepted task guidance should prepare at an idle safe point");
+    };
+    assert_eq!(candidate.promotion.task_id, task_id);
+    assert_eq!(candidate.promotion.plan_version, 1);
+    assert_eq!(candidate.exact_guidance, "prioritize the restart edge");
+    assert_eq!(
+        candidate.promotion.source_turn.session_scope_id,
+        session.session_scope_id()
+    );
+    assert_eq!(std::fs::read(store.path())?, before);
+    Ok(())
+}
+
+#[test]
+fn restarted_sensitive_task_guidance_expires_without_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (session, task_id) = task_guidance_session(&store, TaskRunStatus::Paused)?;
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        RAW_PROMPT.to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task { task_id },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let restored = Session::load_from_store("test", "model", store.clone())?;
+    let before = std::fs::read(store.path())?;
+
+    let preparation =
+        prepare_next_task_guidance_candidate(&restored, &ExactConversationPromptStore::new())
+            .map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        preparation,
+        TaskGuidancePreparation::Terminal {
+            status: ConversationInputStatus::Stale,
+            ref reason,
+            ..
+        } if reason == "exact sensitive task guidance was lost after restart"
+    ));
+    assert_eq!(std::fs::read(store.path())?, before);
+    Ok(())
+}
+
+#[test]
+fn completed_task_guidance_is_rejected_instead_of_reviving_the_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (session, task_id) = task_guidance_session(&store, TaskRunStatus::Completed)?;
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "do one more thing".to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task { task_id },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+
+    let preparation = prepare_next_task_guidance_candidate(&session, &exact_prompts)
+        .map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        preparation,
+        TaskGuidancePreparation::Terminal {
+            status: ConversationInputStatus::Rejected,
+            ref reason,
+            ..
+        } if reason == "task guidance cannot revive a completed task"
+    ));
+    Ok(())
+}
+
 #[test]
 fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
     let temp = tempfile::tempdir().expect("temporary queue store should create");

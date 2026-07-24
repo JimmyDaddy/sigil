@@ -6,6 +6,176 @@ const EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
 pub(in crate::runner) type ExactConversationPromptStore =
     BTreeMap<ConversationInputQueueId, SecretString>;
 
+/// Scheduler-safe preparation for the oldest still-pending task guidance item.
+pub(in crate::runner) enum TaskGuidancePreparation {
+    NoQueuedGuidance,
+    Waiting {
+        queue_id: ConversationInputQueueId,
+        reason: String,
+    },
+    Terminal {
+        queue_id: ConversationInputQueueId,
+        status: ConversationInputStatus,
+        reason: String,
+    },
+    Prepared(Box<PreparedTaskGuidanceCandidate>),
+}
+
+/// Process-local exact guidance paired with its safe durable promotion binding.
+pub(in crate::runner) struct PreparedTaskGuidanceCandidate {
+    pub(in crate::runner) promotion: TaskGuidancePromotedEntry,
+    pub(in crate::runner) exact_guidance: String,
+}
+
+impl std::fmt::Debug for PreparedTaskGuidanceCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedTaskGuidanceCandidate")
+            .field("queue_id", &self.promotion.queue_id)
+            .field("task_id", &self.promotion.task_id)
+            .field("plan_version", &self.promotion.plan_version)
+            .field("dispatch_run_id", &self.promotion.dispatch_run_id)
+            .field("exact_guidance", &"<process-local>")
+            .finish()
+    }
+}
+
+/// Resolves the oldest task guidance item without persisting, promoting, or starting a provider.
+///
+/// The host validates identities and lifecycle only. It does not inspect guidance text to decide
+/// whether the model should supplement the accepted plan or request a typed replan.
+pub(in crate::runner) fn prepare_next_task_guidance_candidate(
+    session: &Session,
+    exact_prompts: &ExactConversationPromptStore,
+) -> std::result::Result<TaskGuidancePreparation, String> {
+    let durable = session
+        .try_conversation_queue_durable_projection_from_durable()
+        .map_err(|error| format!("failed to load durable task guidance queue: {error:#}"))?
+        .ok_or_else(|| "task guidance requires a durable session store".to_owned())?;
+    let Some(item) = durable.queue.items.iter().find(|item| {
+        item.status == ConversationInputStatus::Queued
+            && item.queued.kind == ConversationInputKind::TaskGuidance
+    }) else {
+        return Ok(TaskGuidancePreparation::NoQueuedGuidance);
+    };
+    let queue_id = item.queued.queue_id.clone();
+    let ConversationInputTarget::Task { task_id } = &item.queued.target else {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: "task guidance lost its typed task target".to_owned(),
+        });
+    };
+
+    let tasks = session.task_state_projection();
+    let Some(task) = tasks.tasks.get(task_id) else {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: "task guidance references a task that is not present in this session"
+                .to_owned(),
+        });
+    };
+    if matches!(
+        task.status,
+        TaskRunStatus::Completed | TaskRunStatus::Cancelled
+    ) {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: format!(
+                "task guidance cannot revive a {} task",
+                match task.status {
+                    TaskRunStatus::Completed => "completed",
+                    TaskRunStatus::Cancelled => "cancelled",
+                    _ => unreachable!("terminal task match is exhaustive"),
+                }
+            ),
+        });
+    }
+    let Some(plan_version) = task.latest_plan_version else {
+        return Ok(TaskGuidancePreparation::Waiting {
+            queue_id,
+            reason: "task guidance is waiting for an accepted task plan".to_owned(),
+        });
+    };
+    if !task
+        .plans
+        .get(&plan_version)
+        .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
+    {
+        return Ok(TaskGuidancePreparation::Waiting {
+            queue_id,
+            reason: "task guidance is waiting for the latest plan review".to_owned(),
+        });
+    }
+
+    let exact_guidance = match exact_prompts.get(&queue_id) {
+        Some(prompt) => prompt.expose_secret().to_owned(),
+        None if item
+            .queued
+            .prompt_hash
+            .starts_with(EXACT_PROMPT_REQUIRED_HASH_PREFIX) =>
+        {
+            return Ok(TaskGuidancePreparation::Terminal {
+                queue_id,
+                status: ConversationInputStatus::Stale,
+                reason: "exact sensitive task guidance was lost after restart".to_owned(),
+            });
+        }
+        None => item.queued.prompt.clone(),
+    };
+    let projected = sigil_kernel::project_conversation_prompt_for_persistence(&exact_guidance);
+    if projected.prompt_hash != item.queued.prompt_hash
+        || projected.safe_prompt != item.queued.prompt
+    {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Stale,
+            reason: "task guidance exact material no longer matches its durable projection"
+                .to_owned(),
+        });
+    }
+
+    let revision = durable.current_revision();
+    let seed = format!(
+        "{}:{}:{}:{}",
+        session.session_scope_id(),
+        item.queued.queue_id.as_str(),
+        task_id.as_str(),
+        revision.event_id
+    );
+    let dispatch_run_id = stable_event_uuid("sigil-task-guidance-dispatch", &seed);
+    let source_message_id = stable_event_uuid("sigil-task-guidance-message", &seed);
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        source_message_id,
+        dispatch_run_id.clone(),
+    )
+    .map_err(|error| format!("failed to bind task guidance source turn: {error:#}"))?;
+    let promotion = TaskGuidancePromotedEntry {
+        queue_id,
+        expected_queue_revision: revision,
+        task_id: task_id.clone(),
+        plan_version,
+        source_turn,
+        prompt_hash: item.queued.prompt_hash.clone(),
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: item.queued.prompt.clone(),
+        dispatch_run_id,
+        promoted_at_ms: current_unix_time_ms(),
+    };
+    promotion
+        .validate_for_session(session.session_scope_id())
+        .map_err(|error| format!("task guidance promotion candidate is invalid: {error:#}"))?;
+    Ok(TaskGuidancePreparation::Prepared(Box::new(
+        PreparedTaskGuidanceCandidate {
+            promotion,
+            exact_guidance,
+        },
+    )))
+}
+
 /// Durable terminal classification for a promoted queued input.
 ///
 /// `Stale` is deliberately non-replayable: it means a provider attempt may have consumed the

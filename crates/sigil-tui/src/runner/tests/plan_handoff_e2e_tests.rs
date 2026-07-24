@@ -3,13 +3,16 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunInput, AgentRunPurpose, ControlEntry, JsonlSessionStore,
-    ModelMessage, MultiAgentMode, PlanArtifactProjection, PlanDecision, PlanTaskStartMode,
-    ProviderChunk, ReasoningEffort, Session, SessionLogEntry, SessionRef, TaskAdmissionReason,
-    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskIsolationMode, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunStatus, TaskStepMode, TaskStepStatus, Tool, ToolAccess, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec,
+    Agent, AgentRole, AgentRunInput, AgentRunPurpose, ControlEntry, ConversationInputKind,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
+    ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
+    PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
+    Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
+    TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    project_conversation_prompt_for_persistence,
 };
 use tempfile::tempdir;
 
@@ -184,6 +187,125 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
         1,
         "automatic handoff must bind the task to its inherited root cancellation scope"
     );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-task-guidance-e2e.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let task_id = TaskId::new("task_guidance_e2e")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative(
+            session_log_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.jsonl"),
+        )?,
+        objective: "finish the recovered task".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting at a scheduler safe point".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("finish")?,
+            title: "Finish the pending work".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    }))?;
+    let queue_id = ConversationInputQueueId::new("queue_task_guidance_e2e")?;
+    let guidance = project_conversation_prompt_for_persistence("prioritize the restart edge");
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::Task {
+                task_id: task_id.clone(),
+            },
+            kind: ConversationInputKind::TaskGuidance,
+            prompt_hash: guidance.prompt_hash,
+            prompt: guidance.safe_prompt,
+            reasoning_effort: Some(ReasoningEffort::High),
+            created_at_ms: Some(1),
+        },
+    ))?;
+    drop(session);
+
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let role_provider_builder = planned_role_provider_builder(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("guided step completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("guided task synthesis completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path,
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::TaskRunFinished { .. })
+    })?;
+    let WorkerMessage::TaskRunFinished {
+        task_id: finished_task_id,
+        status,
+        entries,
+    } = finished
+    else {
+        unreachable!("recv_until only returns TaskRunFinished");
+    };
+    assert_eq!(finished_task_id, task_id.as_str());
+    assert_eq!(status, TaskRunStatus::Completed);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(promoted))
+                    if promoted.queue_id == queue_id && promoted.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(changed))
+            if changed.queue_id == queue_id && changed.status == ConversationInputStatus::Delivered
+    )));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, SessionLogEntry::User(_))),
+        "task guidance must remain transient instead of entering parent user history"
+    );
+    assert!(entries.iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            if run.reason.as_deref().is_some_and(|reason| reason.contains("prioritize the restart edge"))
+    )));
     worker.shutdown()?;
     Ok(())
 }

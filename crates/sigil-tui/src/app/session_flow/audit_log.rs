@@ -785,6 +785,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(&entry.dispatch_run_id, 24),
             entry.capability_descriptors.len()
         ),
+        ControlEntry::TaskGuidancePromoted(entry) => format!(
+            "[ctl] queue {} task guidance promoted task={} plan=v{} run={}",
+            entry.queue_id.as_str(),
+            entry.task_id.as_str(),
+            entry.plan_version,
+            truncate_session_view_text(&entry.dispatch_run_id, 24)
+        ),
         ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
     }
 }
