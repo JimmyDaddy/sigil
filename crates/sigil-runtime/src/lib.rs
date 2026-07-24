@@ -90,6 +90,7 @@ mod exa_text_v1;
 pub mod hosted_finalizer;
 mod hosted_web_search;
 pub mod image_attachment;
+pub mod integration_lanes;
 pub mod isolated_workspace;
 pub mod machine_protocol;
 pub mod mcp_declaration;

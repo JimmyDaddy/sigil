@@ -616,6 +616,59 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ControlEntry::AgentThreadClosed(entry) => {
             format!("[ctl] agent {} closed", entry.thread_id.as_str())
         }
+        ControlEntry::IntegrationPlanRecorded(entry) => format!(
+            "[ctl] integration plan {} task={} version={} proposals={} lanes={} conflicts={}",
+            entry.plan.plan_id.as_str(),
+            entry.plan.task_id.as_str(),
+            entry.plan.plan_version,
+            entry.plan.proposals.len(),
+            entry.plan.lanes.len(),
+            entry.plan.conflicts.len()
+        ),
+        ControlEntry::IntegrationLaneChanged(entry) => {
+            let candidate = match &entry.candidate {
+                Some(sigil_kernel::IntegrationLaneCandidate::ManagedRef { .. }) => "managed_ref",
+                Some(sigil_kernel::IntegrationLaneCandidate::SnapshotWorkspace { .. }) => {
+                    "snapshot_workspace"
+                }
+                None => "none",
+            };
+            format!(
+                "[ctl] integration lane {}/{} status={} candidate={} checks={} reason={}",
+                entry.plan_id.as_str(),
+                entry.lane_id.as_str(),
+                entry.status.as_str(),
+                candidate,
+                entry.verification_check_ids.len(),
+                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 96)
+            )
+        }
+        ControlEntry::IntegrationPromotionRecorded(entry) => {
+            let target = match &entry.target {
+                sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => {
+                    "workspace_apply"
+                }
+                sigil_kernel::IntegrationPromotionTarget::GitRefAdvance { .. } => "git_ref_advance",
+            };
+            let effect = match &entry.effect {
+                Some(sigil_kernel::IntegrationPromotionEffect::WorkspaceApplied { .. }) => {
+                    "workspace_applied"
+                }
+                Some(sigil_kernel::IntegrationPromotionEffect::GitRefAdvanced { .. }) => {
+                    "git_ref_advanced"
+                }
+                None => "none",
+            };
+            format!(
+                "[ctl] integration promotion {} status={} target={} effect={} preview={} reason={}",
+                entry.plan_id.as_str(),
+                entry.status.as_str(),
+                target,
+                effect,
+                truncate_session_view_text(&entry.preview_digest, 16),
+                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 96)
+            )
+        }
         ControlEntry::ConversationInputQueued(entry) => format!(
             "[ctl] queue {} kind={:?} prompt={}",
             entry.queue_id.as_str(),

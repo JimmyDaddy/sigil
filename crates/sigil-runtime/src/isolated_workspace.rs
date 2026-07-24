@@ -91,6 +91,18 @@ impl MaterializedGitWorktree {
         &self.base_commit
     }
 
+    /// Captures the current complete task verification snapshot for this exact worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the worktree can no longer be snapshotted completely.
+    pub async fn current_snapshot_id(&self) -> Result<String> {
+        task_workspace_snapshot(self.workspace_root.clone())
+            .await?
+            .workspace_snapshot_id
+            .ok_or_else(|| anyhow!("isolated worktree snapshot is incomplete"))
+    }
+
     /// Removes this exact worktree through Git and returns a bounded cleanup receipt.
     ///
     /// # Errors
@@ -1181,6 +1193,98 @@ async fn run_git_with_limit(
         anyhow!(
             "Git command timed out after {} seconds",
             GIT_COMMAND_TIMEOUT.as_secs()
+        )
+    })?
+    .with_context(|| format!("failed to collect Git command {}", display_git_args(&args)))?;
+    if output.stdout.truncated {
+        bail!(
+            "Git command {} exceeded the {} byte stdout limit",
+            display_git_args(&args),
+            stdout_limit
+        );
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+        let suffix = if output.stderr.truncated {
+            " [truncated]"
+        } else {
+            ""
+        };
+        bail!(
+            "Git command {} failed with status {}: {}{}",
+            display_git_args(&args),
+            output.status,
+            stderr.trim(),
+            suffix
+        );
+    }
+    Ok(output.stdout.bytes)
+}
+
+pub(crate) async fn run_git_bytes(
+    current_dir: &Path,
+    args: impl IntoIterator<Item = OsString>,
+    stdout_limit: usize,
+) -> Result<Vec<u8>> {
+    run_git_with_limit(current_dir, args, stdout_limit).await
+}
+
+pub(crate) async fn run_git_bytes_with_stdin(
+    current_dir: &Path,
+    args: impl IntoIterator<Item = OsString>,
+    stdin: &[u8],
+    stdout_limit: usize,
+) -> Result<Vec<u8>> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(current_dir)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start Git command {}", display_git_args(&args)))?;
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Git command stdin pipe is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Git command stdout pipe is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Git command stderr pipe is unavailable"))?;
+    let input = stdin.to_vec();
+    let output = tokio::time::timeout(GIT_COMMAND_TIMEOUT, async move {
+        let writer = async move {
+            use tokio::io::AsyncWriteExt;
+            child_stdin.write_all(&input).await?;
+            child_stdin.shutdown().await
+        };
+        let (_, stdout, stderr, status) = tokio::try_join!(
+            writer,
+            read_bounded_output(stdout, stdout_limit),
+            read_bounded_output(stderr, GIT_ERROR_OUTPUT_LIMIT),
+            child.wait()
+        )?;
+        Ok::<_, std::io::Error>(BoundedGitOutput {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "Git command timed out after {} seconds: {}",
+            GIT_COMMAND_TIMEOUT.as_secs(),
+            display_git_args(&args)
         )
     })?
     .with_context(|| format!("failed to collect Git command {}", display_git_args(&args)))?;

@@ -6,6 +6,12 @@ use super::*;
 /// session creation, profile snapshots, provider/tool assembly, and route-aware child lifecycle.
 #[async_trait]
 pub trait TaskChildSessionRunner: Send + Sync {
+    /// Reports whether the production runner can materialize private integration lanes.
+    #[must_use]
+    fn supports_integration_lanes(&self) -> bool {
+        false
+    }
+
     /// Runs the task planner in an isolated transcript and returns its accepted plan artifact.
     async fn run_planner_session<H, A>(
         &self,
@@ -82,6 +88,19 @@ pub trait TaskChildSessionRunner: Send + Sync {
             );
         }
         Ok(outputs)
+    }
+
+    /// Runs one already-recorded private integration plan.
+    async fn run_integration_lanes<H>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskIntegrationRunRequest,
+        _handler: &mut H,
+    ) -> Result<TaskIntegrationRunOutput>
+    where
+        H: EventHandler + Send,
+    {
+        bail!("task child session runner does not support integration lanes")
     }
 
     /// Runs final synthesis in an isolated read-only transcript.

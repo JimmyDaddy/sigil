@@ -61,11 +61,15 @@ fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     Ok(event_types)
 }
 
-fn append_merge_review_request(session: &mut Session, change_set_id: ChangeSetId) -> Result<()> {
+fn append_merge_review_request(
+    session: &mut Session,
+    change_set_id: ChangeSetId,
+    workspace_root: &std::path::Path,
+) -> Result<()> {
     session.append_control(ControlEntry::MergeReviewRequested(MergeReviewRequested {
         review_id: review_id(),
         changeset_id: change_set_id,
-        parent_workspace_snapshot_id: "snapshot-parent-before".to_owned(),
+        parent_workspace_snapshot_id: super::parent_workspace_snapshot_id(workspace_root)?,
     }))
 }
 
@@ -520,12 +524,14 @@ fn write_isolation_projection_rejects_unknown_critical_stream_event() -> Result<
 #[test]
 fn verification_merge_accepted_review_applies_parent_mutation_batch() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Session::new("deepseek", "model").with_store(store.clone());
     let change_set = note_change_set(change_set_id());
     session.append_control(ControlEntry::ChangeSetProposed(change_set.clone()))?;
-    append_merge_review_request(&mut session, change_set.id.clone())?;
+    append_merge_review_request(&mut session, change_set.id.clone(), &workspace_root)?;
 
     let outcome = resolve_merge_review_parent_mutation(
         &mut session,
@@ -535,13 +541,13 @@ fn verification_merge_accepted_review_applies_parent_mutation_batch() -> Result<
             reason: Some("approved".to_owned()),
             change_set: change_set.clone(),
             artifact_content: note_diff(),
-            workspace_root: temp.path().to_path_buf(),
+            workspace_root: workspace_root.clone(),
             tool_call_id: "merge-review-call".to_owned(),
         },
     )?;
 
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("note.txt"))?,
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
         "new\n"
     );
     assert_eq!(outcome.batch_status, Some(MutationBatchStatus::Applied));
@@ -575,11 +581,13 @@ fn verification_merge_accepted_review_applies_parent_mutation_batch() -> Result<
 #[test]
 fn rejected_merge_review_does_not_mutate_parent_or_emit_batch() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Session::new("deepseek", "model").with_store(store.clone());
     let change_set = note_change_set(change_set_id());
-    append_merge_review_request(&mut session, change_set.id.clone())?;
+    append_merge_review_request(&mut session, change_set.id.clone(), &workspace_root)?;
 
     let outcome = resolve_merge_review_parent_mutation(
         &mut session,
@@ -589,13 +597,13 @@ fn rejected_merge_review_does_not_mutate_parent_or_emit_batch() -> Result<()> {
             reason: Some("not needed".to_owned()),
             change_set,
             artifact_content: note_diff(),
-            workspace_root: temp.path().to_path_buf(),
+            workspace_root: workspace_root.clone(),
             tool_call_id: "merge-review-call".to_owned(),
         },
     )?;
 
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("note.txt"))?,
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
         "old\n"
     );
     assert!(outcome.change_set_result.is_none());
@@ -617,10 +625,57 @@ fn rejected_merge_review_does_not_mutate_parent_or_emit_batch() -> Result<()> {
 }
 
 #[test]
-fn accepted_merge_review_records_partial_batch_status() -> Result<()> {
+fn accepted_merge_review_stale_parent_snapshot_is_zero_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
-    std::fs::write(temp.path().join("conflict.txt"), b"actual\n")?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "model").with_store(store.clone());
+    let change_set = note_change_set(change_set_id());
+    session.append_control(ControlEntry::ChangeSetProposed(change_set.clone()))?;
+    append_merge_review_request(&mut session, change_set.id.clone(), &workspace_root)?;
+    std::fs::write(workspace_root.join("unrelated.txt"), b"user drift\n")?;
+
+    let outcome = resolve_merge_review_parent_mutation(
+        &mut session,
+        MergeReviewParentMutationRequest {
+            review_id: review_id(),
+            decision: MergeDecision::Accepted,
+            reason: Some("approved before parent drift".to_owned()),
+            change_set,
+            artifact_content: note_diff(),
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "merge-review-call".to_owned(),
+        },
+    )?;
+
+    assert_eq!(outcome.decision, MergeDecision::Conflict);
+    assert_eq!(outcome.batch_status, None);
+    assert!(outcome.change_set_result.is_none());
+    assert!(outcome.committed_operations.is_empty());
+    assert!(outcome.failed_operations.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "old\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("unrelated.txt"))?,
+        "user drift\n"
+    );
+    let event_types = stored_event_types(&store)?;
+    assert!(!event_types.contains(&DurableEventType::MutationBatchStarted.as_str().to_owned()));
+    assert!(!event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
+    Ok(())
+}
+
+#[test]
+fn accepted_merge_review_preflight_conflict_is_zero_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    std::fs::write(workspace_root.join("conflict.txt"), b"actual\n")?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Session::new("deepseek", "model").with_store(store.clone());
     let mut change_set = note_change_set(change_set_id());
@@ -636,7 +691,7 @@ fn accepted_merge_review_records_partial_batch_status() -> Result<()> {
         deletions: 1,
         validations: Vec::new(),
     });
-    append_merge_review_request(&mut session, change_set.id.clone())?;
+    append_merge_review_request(&mut session, change_set.id.clone(), &workspace_root)?;
     let artifact = format!(
         "{}{}",
         note_diff(),
@@ -651,38 +706,26 @@ fn accepted_merge_review_records_partial_batch_status() -> Result<()> {
             reason: Some("approved with one conflict".to_owned()),
             change_set,
             artifact_content: artifact,
-            workspace_root: temp.path().to_path_buf(),
+            workspace_root: workspace_root.clone(),
             tool_call_id: "merge-review-call".to_owned(),
         },
     )?;
 
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("note.txt"))?,
-        "new\n"
+        std::fs::read_to_string(workspace_root.join("note.txt"))?,
+        "old\n"
     );
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("conflict.txt"))?,
+        std::fs::read_to_string(workspace_root.join("conflict.txt"))?,
         "actual\n"
     );
-    assert_eq!(
-        outcome.batch_status,
-        Some(MutationBatchStatus::PartiallyApplied)
-    );
-    let result = outcome.change_set_result.expect("changeset result");
-    assert_eq!(result.status, ChangeSetResultStatus::PartiallyApplied);
-    assert_eq!(result.file_results.len(), 2);
-    assert_eq!(
-        result.file_results[0].status,
-        ChangeSetFileResultStatus::Applied
-    );
-    assert_eq!(
-        result.file_results[1].status,
-        ChangeSetFileResultStatus::Failed
-    );
-    assert_eq!(outcome.committed_operations.len(), 1);
-    assert_eq!(outcome.failed_operations.len(), 1);
+    assert_eq!(outcome.decision, MergeDecision::Conflict);
+    assert_eq!(outcome.batch_status, None);
+    assert!(outcome.change_set_result.is_none());
+    assert!(outcome.committed_operations.is_empty());
+    assert!(outcome.failed_operations.is_empty());
     let event_types = stored_event_types(&store)?;
-    assert!(event_types.contains(&DurableEventType::MutationBatchFinished.as_str().to_owned()));
-    assert!(event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
+    assert!(!event_types.contains(&DurableEventType::MutationBatchStarted.as_str().to_owned()));
+    assert!(!event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
     Ok(())
 }

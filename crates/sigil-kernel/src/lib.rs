@@ -17,6 +17,7 @@ pub mod execution_backend;
 pub mod external;
 pub mod hosted;
 pub mod image_attachment;
+pub mod integration;
 pub mod memory;
 pub mod mutation;
 pub mod permission;
@@ -237,6 +238,14 @@ pub use image_attachment::{
     resolve_request_image_attachments, strip_request_image_attachments_for_compaction,
     validate_image_input_capability, validate_message_image_attachments,
     validate_request_image_attachments,
+};
+pub use integration::{
+    IntegrationConflictEdge, IntegrationConflictReason, IntegrationEffect,
+    IntegrationLaneCandidate, IntegrationLaneChanged, IntegrationLaneId, IntegrationLaneSpec,
+    IntegrationLaneStatus, IntegrationPlan, IntegrationPlanId, IntegrationPlanRecorded,
+    IntegrationPlanState, IntegrationProjection, IntegrationPromotionEffect,
+    IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
+    IntegrationProposalSpec, build_integration_plan,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -485,7 +494,8 @@ pub use task_orchestrator::{
     SequentialTaskStepOutput, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
     TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchFuture,
     TaskChildSessionBatchPreparation, TaskChildSessionRunOutput, TaskChildSessionRunRequest,
-    TaskChildSessionRunner, TaskParticipantRetryError, TaskPlannerSessionRunOutput,
+    TaskChildSessionRunner, TaskIntegrationProposal, TaskIntegrationRunOutput,
+    TaskIntegrationRunRequest, TaskParticipantRetryError, TaskPlannerSessionRunOutput,
     TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
     TaskVerificationRerunOutput, TaskVerificationRerunRequest,
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,

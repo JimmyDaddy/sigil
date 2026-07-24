@@ -1409,6 +1409,19 @@ unsupported entry 不泄漏；worker 未修改 inherited dirty/untracked entry �
 
 O6d：parallel Worktree batch 与 deterministic conflict graph。
 
+当前实现检查点（不构成 O6d/O6e 完成）：
+
+- clean、无 overlay 的 Git base 已支持 homogeneous Worktree whole-batch：所有 owned worktree
+  materialize/Created 与 child Started 完成后才统一放行 provider；provider execution 可真实重叠，
+  parent workspace 不被 child 直接修改，terminal 后各自提取 proposal 并收口 cleanup。
+- kernel 已有 deterministic conflict graph，runtime 已有 clean-base managed-ref integration lane
+  substrate；disjoint lane 的 apply/structural check/private-ref CAS 可重叠，冲突 lane 不创建 ref。
+- lane candidate 与 final promotion target 已改为 tagged union，不能同时记录 snapshot workspace 与
+  managed ref，也不能在一次 promotion 中同时记录 workspace apply 与 Git ref advance。
+- 这些只证明 empty-overlay/managed-ref 安全子集。O1e、O6c dirty overlay、完整 effect facts、
+  snapshot-workspace lane、promotion authority、parent verification、恢复和 O6g 产品面仍未完成，
+  因而本 RFC 顶部状态继续保持 O6c-O8 deferred。
+
 1. scheduler 只把相互独立的 `SubagentWrite + Worktree` ready step 组成 homogeneous batch；
    coordinator 在启动前冻结同一 O6c base identity，并对 profile、permission、workspace、
    provider route、slot 和 owned-root capacity 做 whole-batch preflight。

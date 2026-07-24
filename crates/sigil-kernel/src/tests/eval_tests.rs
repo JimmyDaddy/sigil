@@ -3,20 +3,21 @@ use serde_json::json;
 
 use crate::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
-    DurableEventType, EvalCase, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceKind,
-    EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
-    EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
-    EvalRequiredActionKind, EvalResult, EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary,
-    EvalWorkspaceFixture, EventClass, JsonlSessionStore, MemoryConfig, MergeDecision,
-    MergeReviewId, MergeReviewParentMutationRequest, MergeReviewRequested, ModelEvalCostConfidence,
-    ModelEvalExecutionStatus, ModelEvalReportCampaignV3, ModelEvalReportRecordV3,
-    ModelEvalTrendEligibility, ModelEvalUsage, ModelMessage, MutationBatchStatus,
-    MutationEventRecorder, MutationObservedState, MutationReconciled, MutationResolution,
-    PermissionConfig, PermissionMode, PermissionPolicy, ProjectionCursor, RunStatus, Session,
-    SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess, ToolCategory,
-    ToolPreviewCapability, ToolSpec, ToolSubject, VerificationVerdict, VisibleCompletionState,
-    WorkspaceTrust, bytes_hash, resolve_merge_review_parent_mutation, write_eval_report_artifacts,
-    write_model_eval_report_v3,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EvalCase, EvalCaseRunner,
+    EvalCaseRunnerOptions, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind,
+    EvalFakeToolAction, EvalFakeToolRegistry, EvalOutcomeKind, EvalProviderScript,
+    EvalProviderStep, EvalRepoCheckPromotion, EvalRequiredActionKind, EvalResult, EvalRunMetadata,
+    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, EventClass, JsonlSessionStore,
+    MemoryConfig, MergeDecision, MergeReviewId, MergeReviewParentMutationRequest,
+    MergeReviewRequested, ModelEvalCostConfidence, ModelEvalExecutionStatus,
+    ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalTrendEligibility, ModelEvalUsage,
+    ModelMessage, MutationBatchStatus, MutationEventRecorder, MutationObservedState,
+    MutationReconciled, MutationResolution, PermissionConfig, PermissionMode, PermissionPolicy,
+    ProjectionCursor, RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent,
+    ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, VerificationScope,
+    VerificationVerdict, VisibleCompletionState, WorkspaceTrust, build_workspace_snapshot,
+    bytes_hash, resolve_merge_review_parent_mutation, stable_workspace_id,
+    write_eval_report_artifacts, write_model_eval_report_v3,
 };
 
 #[test]
@@ -1621,13 +1622,23 @@ fn active_merge_parent_mutation_handoff_result(
     let case_workspace = workspace_root.join(case_id);
     std::fs::create_dir_all(&case_workspace)?;
     std::fs::write(case_workspace.join("note.txt"), b"old\n")?;
-    let store = JsonlSessionStore::new(case_workspace.join("session.jsonl"))?;
+    let session_log_dir = workspace_root.join("session-logs");
+    std::fs::create_dir_all(&session_log_dir)?;
+    let store = JsonlSessionStore::new(session_log_dir.join(format!("{case_id}.jsonl")))?;
     let mut session = Session::new("fake", "deterministic").with_store(store.clone());
     let change_set = active_note_change_set(active_change_set_id()?);
+    let parent_workspace_snapshot_id = build_workspace_snapshot(
+        &case_workspace,
+        stable_workspace_id(&case_workspace)?,
+        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        0,
+    )?
+    .workspace_snapshot_id
+    .expect("deterministic eval workspace snapshot");
     session.append_control(ControlEntry::MergeReviewRequested(MergeReviewRequested {
         review_id: active_review_id()?,
         changeset_id: change_set.id.clone(),
-        parent_workspace_snapshot_id: "snapshot-parent-before".to_owned(),
+        parent_workspace_snapshot_id,
     }))?;
 
     let outcome = resolve_merge_review_parent_mutation(

@@ -900,6 +900,11 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::IsolatedChangeSetProduced(_) => DurableEventType::IsolatedChangeSetProduced,
         ControlEntry::MergeReviewRequested(_) => DurableEventType::MergeReviewRequested,
         ControlEntry::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,
+        ControlEntry::IntegrationPlanRecorded(_) => DurableEventType::IntegrationPlanRecorded,
+        ControlEntry::IntegrationLaneChanged(_) => DurableEventType::IntegrationLaneChanged,
+        ControlEntry::IntegrationPromotionRecorded(_) => {
+            DurableEventType::IntegrationPromotionRecorded
+        }
         ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::ContextAssemblySkipped(_) => DurableEventType::ContextSourceCaptured,

@@ -367,14 +367,17 @@ where
                         TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
                     ) && step.effective_isolation() == TaskIsolationMode::SharedReadOnly
                 });
-            let is_parallel_changeset_batch = runnable.steps.len() > 1
+            let is_parallel_isolated_write_batch = runnable.steps.len() > 1
                 && runnable.steps.iter().all(|step| {
                     step.role == AgentRole::SubagentWrite
                         && step.effective_mode() == TaskStepMode::Write
-                        && step.effective_isolation() == TaskIsolationMode::ChangesetOnly
+                        && matches!(
+                            step.effective_isolation(),
+                            TaskIsolationMode::ChangesetOnly | TaskIsolationMode::Worktree
+                        )
                 });
-            if is_parallel_read_batch || is_parallel_changeset_batch {
-                let changeset_batch_base_snapshot_id = if is_parallel_changeset_batch {
+            if is_parallel_read_batch || is_parallel_isolated_write_batch {
+                let changeset_batch_base_snapshot_id = if is_parallel_isolated_write_batch {
                     let first_step = runnable
                         .steps
                         .first()
@@ -514,6 +517,7 @@ where
 
                 let mut first_problem = None;
                 let mut retry_scheduled = false;
+                let mut integration_proposals = Vec::new();
                 for ((step, attempt, step_options, changeset_base_snapshot_id), child_result) in
                     batch_contexts.into_iter().zip(batch_results)
                 {
@@ -542,6 +546,14 @@ where
                                     base_snapshot_id,
                                     &step_output,
                                 )?;
+                                if let Some(proposal) = step_output.changeset_proposal.clone() {
+                                    integration_proposals.push(TaskIntegrationProposal {
+                                        step_id: step.step_id.clone(),
+                                        depends_on: step.depends_on.clone(),
+                                        base_snapshot_id: base_snapshot_id.to_owned(),
+                                        proposal,
+                                    });
+                                }
                             }
                             self.commit_step_output(
                                 session,
@@ -593,6 +605,15 @@ where
                     }
                     step_outputs.push(step_output);
                 }
+                self.integrate_isolated_batch(
+                    session,
+                    handler,
+                    &request,
+                    plan_version,
+                    &subagent_write_options,
+                    integration_proposals,
+                )
+                .await?;
                 if let Some((status, reason)) = first_problem {
                     append_task_run(session, handler, &request, status, Some(reason))?;
                     return Ok(SequentialTaskRunOutput {
@@ -1343,6 +1364,146 @@ where
             )?;
         }
         Ok(step_output)
+    }
+
+    async fn integrate_isolated_batch<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        request: &SequentialTaskRequest,
+        plan_version: u32,
+        options: &AgentRunOptions,
+        proposals: Vec<TaskIntegrationProposal>,
+    ) -> Result<()>
+    where
+        H: EventHandler + Send,
+    {
+        if proposals.len() < 2 || !self.child_runner.supports_integration_lanes() {
+            return Ok(());
+        }
+        let changeset_by_step = proposals
+            .iter()
+            .map(|proposal| {
+                (
+                    proposal.step_id.clone(),
+                    proposal.proposal.change_set.id.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let proposal_specs = proposals
+            .iter()
+            .map(|proposal| {
+                let (effect, generated_artifacts) =
+                    classify_integration_effect(&proposal.proposal.change_set);
+                let depends_on = proposal
+                    .depends_on
+                    .iter()
+                    .filter_map(|step_id| changeset_by_step.get(step_id).cloned())
+                    .collect();
+                IntegrationProposalSpec::from_changeset(
+                    &proposal.proposal.change_set,
+                    proposal.step_id.clone(),
+                    proposal.base_snapshot_id.clone(),
+                    depends_on,
+                    generated_artifacts,
+                    effect,
+                    DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let seed = format!(
+            "{}:{}:{}",
+            request.task_id.as_str(),
+            plan_version,
+            proposal_specs
+                .iter()
+                .map(|proposal| proposal.change_set_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let plan_id = IntegrationPlanId::new(format!(
+            "integration-{}",
+            stable_event_uuid("sigil-task-integration-plan", &seed)
+        ))?;
+        let plan = build_integration_plan(
+            plan_id.clone(),
+            request.task_id.clone(),
+            plan_version,
+            proposal_specs,
+        )?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::IntegrationPlanRecorded(IntegrationPlanRecorded { plan: plan.clone() }),
+        )?;
+        for lane in &plan.lanes {
+            append_task_control(
+                session,
+                handler,
+                ControlEntry::IntegrationLaneChanged(IntegrationLaneChanged {
+                    plan_id: plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    status: IntegrationLaneStatus::Pending,
+                    candidate: None,
+                    verification_check_ids: Vec::new(),
+                    reason: None,
+                }),
+            )?;
+        }
+        let output = self
+            .child_runner
+            .run_integration_lanes(
+                session,
+                TaskIntegrationRunRequest {
+                    plan: plan.clone(),
+                    workspace_root: options.workspace_root.clone(),
+                    proposals,
+                },
+                handler,
+            )
+            .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                let reason = format!("physical integration plan failed: {error:#}");
+                for lane in &plan.lanes {
+                    append_task_control(
+                        session,
+                        handler,
+                        ControlEntry::IntegrationLaneChanged(IntegrationLaneChanged {
+                            plan_id: plan_id.clone(),
+                            lane_id: lane.lane_id.clone(),
+                            status: IntegrationLaneStatus::Failed,
+                            candidate: None,
+                            verification_check_ids: Vec::new(),
+                            reason: Some(reason.clone()),
+                        }),
+                    )?;
+                }
+                let _ = handler.handle(RunEvent::Notice(reason));
+                return Ok(());
+            }
+        };
+        let expected_lane_ids = plan
+            .lanes
+            .iter()
+            .map(|lane| lane.lane_id.clone())
+            .collect::<BTreeSet<_>>();
+        let observed_lane_ids = output
+            .lanes
+            .iter()
+            .map(|lane| lane.lane_id.clone())
+            .collect::<BTreeSet<_>>();
+        if output.lanes.len() != expected_lane_ids.len()
+            || observed_lane_ids != expected_lane_ids
+            || output.lanes.iter().any(|lane| lane.plan_id != plan_id)
+        {
+            bail!("physical integration returned inconsistent lane identities");
+        }
+        for lane in output.lanes {
+            append_task_control(session, handler, ControlEntry::IntegrationLaneChanged(lane))?;
+        }
+        Ok(())
     }
 
     async fn complete_task_with_synthesis<H, A>(
@@ -2273,6 +2434,59 @@ where
             content_hash,
         }),
     )
+}
+
+fn classify_integration_effect(change_set: &ChangeSet) -> (IntegrationEffect, Vec<String>) {
+    let mut generated_artifacts = BTreeSet::new();
+    let mut global = false;
+    for file in &change_set.files {
+        let path = Path::new(&file.path);
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if matches!(
+            file_name,
+            "Cargo.toml"
+                | "Cargo.lock"
+                | "package.json"
+                | "package-lock.json"
+                | "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "bun.lock"
+                | "bun.lockb"
+                | "build.rs"
+                | "go.mod"
+                | "go.sum"
+                | "pyproject.toml"
+                | "uv.lock"
+                | "poetry.lock"
+        ) {
+            global = true;
+        }
+        if path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|part| matches!(part, "generated" | "gen"))
+        }) || file_name.contains(".generated.")
+        {
+            generated_artifacts.insert(file.path.clone());
+        }
+    }
+    if global {
+        (
+            IntegrationEffect::Global,
+            generated_artifacts.into_iter().collect(),
+        )
+    } else if generated_artifacts.is_empty() {
+        (IntegrationEffect::Files, Vec::new())
+    } else {
+        (
+            IntegrationEffect::GeneratedArtifacts,
+            generated_artifacts.into_iter().collect(),
+        )
+    }
 }
 
 fn participant_status_from_step_status(status: TaskStepStatus) -> TaskParticipantAttemptStatus {

@@ -212,6 +212,9 @@ durable_event_types! {
     IsolatedChangeSetProduced => ("isolated_changeset_produced", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MergeReviewRequested => ("merge_review_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MergeReviewResolved => ("merge_review_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationPlanRecorded => ("integration_plan_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLaneChanged => ("integration_lane_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseHeartbeatRecorded => ("step_lease_heartbeat_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -738,7 +741,10 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     | ControlEntry::IsolatedWorkspaceCleanupRecorded(_)
                     | ControlEntry::IsolatedChangeSetProduced(_)
                     | ControlEntry::MergeReviewRequested(_)
-                    | ControlEntry::MergeReviewResolved(_) => {
+                    | ControlEntry::MergeReviewResolved(_)
+                    | ControlEntry::IntegrationPlanRecorded(_)
+                    | ControlEntry::IntegrationLaneChanged(_)
+                    | ControlEntry::IntegrationPromotionRecorded(_) => {
                         TypedDomainEvent::WriteIsolation(control)
                     }
                     _ => typed_other_event(event_type, event)?,
@@ -851,6 +857,15 @@ fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {
         ) | (
             Some(DurableEventType::MergeReviewResolved),
             ControlEntry::MergeReviewResolved(_)
+        ) | (
+            Some(DurableEventType::IntegrationPlanRecorded),
+            ControlEntry::IntegrationPlanRecorded(_)
+        ) | (
+            Some(DurableEventType::IntegrationLaneChanged),
+            ControlEntry::IntegrationLaneChanged(_)
+        ) | (
+            Some(DurableEventType::IntegrationPromotionRecorded),
+            ControlEntry::IntegrationPromotionRecorded(_)
         )
     );
     if valid {
@@ -1406,6 +1421,9 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::IsolatedChangeSetProduced(_) => "isolated_changeset_produced",
         ControlEntry::MergeReviewRequested(_) => "merge_review_requested",
         ControlEntry::MergeReviewResolved(_) => "merge_review_resolved",
+        ControlEntry::IntegrationPlanRecorded(_) => "integration_plan_recorded",
+        ControlEntry::IntegrationLaneChanged(_) => "integration_lane_changed",
+        ControlEntry::IntegrationPromotionRecorded(_) => "integration_promotion_recorded",
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",
         ControlEntry::AgentProfilePolicyDecision(_) => "agent_profile_policy_decision",

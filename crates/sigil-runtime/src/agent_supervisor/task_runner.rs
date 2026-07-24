@@ -9,25 +9,30 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IsolatedWorkspaceBackend,
-    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
-    IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, ProviderCapabilities,
-    ProviderPhysicalAttemptOutcome, ProviderRequestRejection, ProviderRouteCooldownError, RunEvent,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SessionStats,
-    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
-    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskParticipantAttemptId, TaskParticipantRetryError,
-    TaskParticipantRetryProof, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
-    TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
-    ToolApproval, ToolCall, ToolErrorKind, ToolSpec, WriteIsolationMode,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
-    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
-    task_participant_logical_run_id, task_step_owner_agent_id,
+    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IntegrationLaneChanged,
+    IntegrationLaneStatus, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
+    IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
+    JsonlSessionStore, MultiAgentMode, ProviderCapabilities, ProviderPhysicalAttemptOutcome,
+    ProviderRequestRejection, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskParticipantAttemptId,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlannerSessionRunOutput,
+    TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskSynthesisSessionRunRequest, ToolApproval, ToolCall, ToolErrorKind, ToolSpec,
+    WriteIsolationMode, changeset_only_child_tool_registry, decode_changeset_only_child_output,
+    stable_event_uuid, stable_workspace_id, task_participant_child_task_id,
+    task_participant_input_hash, task_participant_logical_run_id, task_step_owner_agent_id,
 };
 
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
+    integration_lanes::{
+        GitIntegrationRunRequest, IntegrationArtifact, git_integration_workspace_id,
+        run_git_integration_lanes,
+    },
     isolated_workspace::{
         GitWorktreeMaterializationRequest, MaterializedGitWorktree, materialize_git_worktree,
     },
@@ -297,11 +302,14 @@ impl AgentSupervisorTaskChildRunner {
         request: TaskChildSessionRunRequest,
     ) -> Result<PreflightParallelTaskChild> {
         ParallelTaskBatchKind::for_step(&request.step)?;
-        if request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly
-            && request.isolated_base_snapshot_id.is_none()
+        if matches!(
+            request.step.effective_isolation(),
+            sigil_kernel::TaskIsolationMode::ChangesetOnly
+                | sigil_kernel::TaskIsolationMode::Worktree
+        ) && request.isolated_base_snapshot_id.is_none()
         {
             anyhow::bail!(
-                "parallel changeset-only task child {} is missing its parent base snapshot",
+                "parallel isolated task child {} is missing its parent base snapshot",
                 request.step.step_id.as_str()
             );
         }
@@ -343,6 +351,56 @@ impl AgentSupervisorTaskChildRunner {
             agent,
             start,
             child_session,
+        })
+    }
+
+    fn preflight_parallel_task_batch(
+        &self,
+        parent_session: &Session,
+        requests: &[TaskChildSessionRunRequest],
+    ) -> Result<PreflightParallelTaskBatch> {
+        let first = requests
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("parallel task child batch is empty"))?;
+        let task_id = first.task.task_id.clone();
+        let plan_version = first.plan_version;
+        let kind = ParallelTaskBatchKind::for_step(&first.step)?;
+        let base_snapshot_id = first.isolated_base_snapshot_id.clone();
+        let mut attempt_ids = BTreeSet::new();
+        for request in requests {
+            if request.task.task_id != task_id || request.plan_version != plan_version {
+                anyhow::bail!("parallel task child batch mixes task or plan identities");
+            }
+            if !attempt_ids.insert(request.attempt_id.clone()) {
+                anyhow::bail!(
+                    "parallel task child batch contains duplicate attempt {}",
+                    request.attempt_id.as_str()
+                );
+            }
+            let member_kind = ParallelTaskBatchKind::for_step(&request.step)?;
+            if member_kind != kind {
+                anyhow::bail!(
+                    "parallel task child batch mixes shared-read-only, changeset-only, or worktree steps"
+                );
+            }
+            if matches!(
+                kind,
+                ParallelTaskBatchKind::ChangesetOnly | ParallelTaskBatchKind::Worktree
+            ) && request.isolated_base_snapshot_id.as_deref() != base_snapshot_id.as_deref()
+            {
+                anyhow::bail!("parallel isolated task child batch mixes parent base snapshots");
+            }
+        }
+        let members = requests
+            .iter()
+            .cloned()
+            .map(|request| self.preflight_parallel_task_child(parent_session, request))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PreflightParallelTaskBatch {
+            kind,
+            task_id,
+            plan_version,
+            members,
         })
     }
 
@@ -391,6 +449,8 @@ impl AgentSupervisorTaskChildRunner {
             agent,
             child_thread,
             child_session,
+            worktree: None,
+            parent_options: None,
             _thread_release: thread_release,
         })
     }
@@ -425,20 +485,39 @@ impl AgentSupervisorTaskChildRunner {
             )
             .await
         };
-        let controls = route_handler.controls;
-        let result = match child_run {
+        let mut controls = route_handler.controls;
+        let mut result = match child_run {
             Ok(output) => {
                 async {
-                    let changeset_proposal = if prepared.request.step.effective_isolation()
-                        == sigil_kernel::TaskIsolationMode::ChangesetOnly
-                    {
-                        Some(decode_changeset_only_child_output(
-                            &output.result.final_text,
-                        )?)
-                    } else {
-                        None
+                    let changeset_proposal = match prepared.request.step.effective_isolation() {
+                        sigil_kernel::TaskIsolationMode::ChangesetOnly => Some(
+                            decode_changeset_only_child_output(&output.result.final_text)?,
+                        ),
+                        sigil_kernel::TaskIsolationMode::Worktree => {
+                            let worktree = prepared.worktree.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "parallel worktree task child lost its materialization receipt"
+                                )
+                            })?;
+                            Some(
+                                worktree
+                                    .extract_changeset(
+                                        task_worktree_changeset_id(&prepared.request)?,
+                                        prepared.request.step.title.clone(),
+                                        format!(
+                                            "Isolated worktree changes for task step {}",
+                                            prepared.request.step.step_id.as_str()
+                                        ),
+                                    )
+                                    .await?,
+                            )
+                        }
+                        _ => None,
                     };
-                    let outcome = output.outcome;
+                    let mut outcome = output.outcome;
+                    if prepared.worktree.is_some() {
+                        outcome.changed_files.clear();
+                    }
                     let materialized = materialize_child_agent_final_answer(
                         &mut prepared.child_session,
                         &prepared.child_session_ref,
@@ -462,10 +541,252 @@ impl AgentSupervisorTaskChildRunner {
                 error,
             )),
         };
+        if let Some(worktree) = prepared.worktree.take() {
+            let (cleanup, cleanup_error) = cleanup_task_worktree_detached(worktree).await;
+            controls.push(cleanup);
+            if let Some(cleanup_error) = cleanup_error {
+                let _ = handler.handle(RunEvent::Notice(cleanup_error.clone()));
+                if let Err(error) = result {
+                    result = Err(error.context(cleanup_error));
+                }
+            }
+        }
         ExecutedParallelTaskChild {
             prepared,
             controls,
             result,
+        }
+    }
+
+    fn detach_prepared_task_batch<'a, H, A>(
+        &'a self,
+        task_id: TaskId,
+        plan_version: u32,
+        prepared: Vec<PreparedParallelTaskChild>,
+        handler: &'a mut H,
+        approval_handler: &'a mut A,
+    ) -> Result<TaskChildSessionBatchPreparation<'a>>
+    where
+        H: EventHandler + Send + 'a,
+        A: ApprovalHandler + Send + 'a,
+    {
+        let member_count = prepared.len();
+        let completion_progress = prepared
+            .iter()
+            .map(|member| TaskCompletionProgressRegistration {
+                step_id: member.request.step.step_id.clone(),
+                title: member
+                    .request
+                    .step
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| member.request.step.title.clone()),
+            })
+            .collect::<Vec<_>>();
+        let shared_handler = SharedTaskEventHandler {
+            inner: Arc::new(Mutex::new(handler)),
+        };
+        let shared_approval = SharedTaskApprovalHandler {
+            inner: Arc::new(Mutex::new(approval_handler)),
+        };
+        let registrations = prepared
+            .into_iter()
+            .enumerate()
+            .map(|(request_index, member)| {
+                let key = member.request.attempt_id.clone();
+                let context = ParallelTaskCompletionContext { request_index };
+                let mut member_handler = shared_handler.clone();
+                let mut member_approval = shared_approval.clone();
+                AgentCompletionRegistration::new(key, request_index as u64, context, async move {
+                    Ok::<_, anyhow::Error>(
+                        self.execute_parallel_task_child(
+                            member,
+                            &mut member_handler,
+                            &mut member_approval,
+                        )
+                        .await,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let completion_hub = match AgentCompletionHub::from_batch(registrations) {
+            Ok(completion_hub) => completion_hub,
+            Err(rejection) => {
+                let (error, registrations) = rejection.into_parts();
+                drop(registrations);
+                drop(shared_handler);
+                drop(shared_approval);
+                return Err(anyhow::Error::new(error).context(
+                    "task completion registration violated prevalidated unique attempt identity",
+                ));
+            }
+        };
+        drop(shared_handler);
+        drop(shared_approval);
+        let progress_registry = self.supervisor.completion_progress().clone();
+        let generation = progress_registry.begin(&task_id, plan_version, completion_progress);
+        let supervisor = self.supervisor.clone();
+
+        Ok(TaskChildSessionBatchPreparation::Detached(Box::pin(
+            async move {
+                let mut completed = completion_hub
+                    .collect_with(|envelope| {
+                        let outcome = match envelope.result.as_ref() {
+                            Ok(executed) if executed.result.is_ok() => {
+                                TaskCompletionOutcome::Succeeded
+                            }
+                            Ok(_) | Err(_) => TaskCompletionOutcome::Failed,
+                        };
+                        progress_registry.record_arrival(
+                            generation,
+                            envelope.context.request_index,
+                            usize::try_from(envelope.completion_index).unwrap_or(usize::MAX),
+                            outcome,
+                        );
+                    })
+                    .await;
+                completed.sort_by_key(|envelope| envelope.sequence);
+                Ok(TaskChildSessionBatchCommitEnvelope::new(
+                    member_count,
+                    move |parent_session, handler| {
+                        Ok(completed
+                            .into_iter()
+                            .map(|envelope| {
+                                envelope.result.and_then(|executed| {
+                                    Self::commit_parallel_task_child(
+                                        &supervisor,
+                                        parent_session,
+                                        handler,
+                                        executed,
+                                    )
+                                })
+                            })
+                            .collect())
+                    },
+                ))
+            },
+        )))
+    }
+
+    async fn run_parallel_worktree_batch<H, A>(
+        &self,
+        parent_session: &mut Session,
+        requests: Vec<TaskChildSessionRunRequest>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let preflight = match self.preflight_parallel_task_batch(parent_session, &requests) {
+            Ok(preflight) if preflight.kind == ParallelTaskBatchKind::Worktree => preflight,
+            Ok(_) => {
+                return Ok(rejected_parallel_task_batch(
+                    &requests,
+                    anyhow::anyhow!("parallel worktree path received a non-worktree batch"),
+                ));
+            }
+            Err(error) => return Ok(rejected_parallel_task_batch(&requests, error)),
+        };
+        let starts = preflight
+            .members
+            .iter()
+            .map(|member| member.start.clone())
+            .collect::<Vec<_>>();
+        let reservation = match self.supervisor.reserve_task_child_batch(&starts) {
+            Ok(reservation) => reservation,
+            Err(error) => return Ok(rejected_parallel_task_batch(&requests, error)),
+        };
+
+        let mut materialized_members: Vec<PendingParallelWorktreeChild> =
+            Vec::with_capacity(preflight.members.len());
+        for mut member in preflight.members {
+            let parent_options = member.request.options.clone();
+            let worktree = match self
+                .prepare_task_worktree(parent_session, handler, &member.request)
+                .await
+            {
+                Ok(worktree) => worktree,
+                Err(error) => {
+                    for pending in materialized_members {
+                        let _ =
+                            cleanup_task_worktree(parent_session, handler, pending.worktree).await;
+                    }
+                    return Ok(rejected_parallel_task_batch(&requests, error));
+                }
+            };
+            member.request.options.workspace_root = worktree.workspace_root().to_path_buf();
+            member.request.options.permission_context.workspace_root =
+                worktree.workspace_root().to_path_buf();
+            member.start.workspace_root = worktree.workspace_root().to_path_buf();
+            member.start.isolated_workspace_id = Some(worktree.isolated_workspace_id().to_owned());
+            materialized_members.push(PendingParallelWorktreeChild {
+                preflight: member,
+                worktree,
+                parent_options,
+            });
+        }
+
+        let mut prepared = Vec::with_capacity(materialized_members.len());
+        while !materialized_members.is_empty() {
+            let pending = materialized_members.remove(0);
+            match self.start_parallel_task_child(parent_session, pending.preflight, handler) {
+                Ok(mut started) => {
+                    started.worktree = Some(pending.worktree);
+                    started.parent_options = Some(pending.parent_options);
+                    prepared.push(started);
+                }
+                Err(error) => {
+                    let reason = "parallel worktree task child batch start rolled back before provider dispatch";
+                    let _ = cleanup_task_worktree(parent_session, handler, pending.worktree).await;
+                    for pending in materialized_members {
+                        let _ =
+                            cleanup_task_worktree(parent_session, handler, pending.worktree).await;
+                    }
+                    for started in &mut prepared {
+                        let _ = append_task_child_session(
+                            parent_session,
+                            handler,
+                            &started.request,
+                            &started.child_task_id,
+                            &started.child_session_ref,
+                            TaskChildSessionStatus::Failed,
+                            None,
+                        );
+                        let _ = self.supervisor.record_task_child_failure(
+                            parent_session,
+                            handler,
+                            &started.child_thread,
+                            reason.to_owned(),
+                        );
+                        if let Some(worktree) = started.worktree.take() {
+                            let _ = cleanup_task_worktree(parent_session, handler, worktree).await;
+                        }
+                    }
+                    return Ok(rejected_parallel_task_batch(&requests, error));
+                }
+            }
+        }
+        reservation.commit();
+        let preparation = self.detach_prepared_task_batch(
+            preflight.task_id,
+            preflight.plan_version,
+            prepared,
+            handler,
+            approval_handler,
+        )?;
+        let settled = settle_runtime_task_child_batch(preparation).await?;
+        match settled {
+            SettledRuntimeTaskChildBatch::Detached(commit) => {
+                commit.commit(parent_session, handler)
+            }
+            SettledRuntimeTaskChildBatch::Fallback(_) => {
+                anyhow::bail!("parallel worktree batch unexpectedly returned fallback preparation")
+            }
         }
     }
 
@@ -642,7 +963,10 @@ impl AgentSupervisorTaskChildRunner {
                     &prepared.request.task,
                     prepared.request.plan_version,
                     &prepared.request.step,
-                    &prepared.request.options,
+                    prepared
+                        .parent_options
+                        .as_ref()
+                        .unwrap_or(&prepared.request.options),
                     base_snapshot_id,
                 ) {
                     Ok(snapshot_id) => Some(snapshot_id),
@@ -720,6 +1044,19 @@ struct PreflightParallelTaskChild {
     child_session: Session,
 }
 
+struct PreflightParallelTaskBatch {
+    kind: ParallelTaskBatchKind,
+    task_id: TaskId,
+    plan_version: u32,
+    members: Vec<PreflightParallelTaskChild>,
+}
+
+struct PendingParallelWorktreeChild {
+    preflight: PreflightParallelTaskChild,
+    worktree: MaterializedGitWorktree,
+    parent_options: AgentRunOptions,
+}
+
 fn task_worktree_id(request: &TaskChildSessionRunRequest) -> String {
     let seed = format!(
         "{}:{}:{}:{}",
@@ -785,6 +1122,31 @@ where
     }
 }
 
+async fn cleanup_task_worktree_detached(
+    materialized: MaterializedGitWorktree,
+) -> (ControlEntry, Option<String>) {
+    let isolated_workspace_id = materialized.isolated_workspace_id().to_owned();
+    match materialized.cleanup().await {
+        Ok(receipt) => (
+            ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                isolated_workspace_id,
+                status: receipt.status,
+            }),
+            None,
+        ),
+        Err(error) => {
+            let message = format!("isolated task worktree cleanup incomplete: {error:#}");
+            (
+                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                    isolated_workspace_id,
+                    status: IsolatedWorkspaceCleanupStatus::Failed,
+                }),
+                Some(message),
+            )
+        }
+    }
+}
+
 struct PreparedParallelTaskChild {
     request: TaskChildSessionRunRequest,
     child_task_id: TaskId,
@@ -792,6 +1154,8 @@ struct PreparedParallelTaskChild {
     agent: Arc<BoxedAgent>,
     child_thread: AgentTaskChildThread,
     child_session: Session,
+    worktree: Option<MaterializedGitWorktree>,
+    parent_options: Option<AgentRunOptions>,
     _thread_release: TaskChildThreadReleaseGuard,
 }
 
@@ -816,6 +1180,7 @@ struct ParallelTaskCompletionContext {
 enum ParallelTaskBatchKind {
     SharedReadOnly,
     ChangesetOnly,
+    Worktree,
 }
 
 impl ParallelTaskBatchKind {
@@ -827,14 +1192,17 @@ impl ParallelTaskBatchKind {
         {
             return Ok(Self::SharedReadOnly);
         }
-        if step.role == AgentRole::SubagentWrite
-            && step.effective_mode() == TaskStepMode::Write
-            && step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly
-        {
-            return Ok(Self::ChangesetOnly);
+        if step.role == AgentRole::SubagentWrite && step.effective_mode() == TaskStepMode::Write {
+            return match step.effective_isolation() {
+                sigil_kernel::TaskIsolationMode::ChangesetOnly => Ok(Self::ChangesetOnly),
+                sigil_kernel::TaskIsolationMode::Worktree => Ok(Self::Worktree),
+                _ => anyhow::bail!(
+                    "parallel task child writer requires changeset-only or worktree isolation"
+                ),
+            };
         }
         anyhow::bail!(
-            "parallel task child batch accepts only shared-read-only or changeset-only steps"
+            "parallel task child batch accepts only shared-read-only, changeset-only, or worktree steps"
         )
     }
 }
@@ -874,6 +1242,126 @@ fn participant_control_step(step_id: &str, title: &str, role: AgentRole) -> Resu
 
 #[async_trait]
 impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
+    fn supports_integration_lanes(&self) -> bool {
+        true
+    }
+
+    async fn run_integration_lanes<H>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskIntegrationRunRequest,
+        handler: &mut H,
+    ) -> Result<TaskIntegrationRunOutput>
+    where
+        H: EventHandler + Send,
+    {
+        let parent_workspace_id = stable_workspace_id(&request.workspace_root)?;
+        for lane in &request.plan.lanes {
+            let isolated_workspace_id =
+                git_integration_workspace_id(&request.plan.plan_id, &lane.lane_id);
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspacePrepared(IsolatedWorkspacePrepared {
+                    isolated_workspace_id,
+                    parent_workspace_id: parent_workspace_id.clone(),
+                    owner_agent_id: format!(
+                        "integration:{}:{}",
+                        request.plan.plan_id.as_str(),
+                        lane.lane_id.as_str()
+                    ),
+                    isolation_mode: WriteIsolationMode::Worktree,
+                    base_snapshot_id: request.plan.base_snapshot_id.clone(),
+                    backend: IsolatedWorkspaceBackend::GitWorktree,
+                }),
+            )?;
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IntegrationLaneChanged(IntegrationLaneChanged {
+                    plan_id: request.plan.plan_id.clone(),
+                    lane_id: lane.lane_id.clone(),
+                    status: IntegrationLaneStatus::Integrating,
+                    candidate: None,
+                    verification_check_ids: Vec::new(),
+                    reason: None,
+                }),
+            )?;
+        }
+        let artifacts = request
+            .proposals
+            .into_iter()
+            .map(|proposal| {
+                if proposal.proposal.artifact.media_type != "text/x-diff" {
+                    anyhow::bail!(
+                        "integration proposal {} has unsupported artifact media type {}",
+                        proposal.proposal.change_set.id.as_str(),
+                        proposal.proposal.artifact.media_type
+                    );
+                }
+                Ok(IntegrationArtifact {
+                    change_set: proposal.proposal.change_set,
+                    content: proposal.proposal.artifact.content,
+                    content_sha256: proposal.proposal.artifact.content_sha256,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let output = run_git_integration_lanes(GitIntegrationRunRequest {
+            parent_workspace_root: request.workspace_root,
+            plan: request.plan.clone(),
+            artifacts,
+        })
+        .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                for lane in &request.plan.lanes {
+                    append_control(
+                        parent_session,
+                        handler,
+                        ControlEntry::IsolatedWorkspaceCleanupRecorded(
+                            IsolatedWorkspaceCleanupRecorded {
+                                isolated_workspace_id: git_integration_workspace_id(
+                                    &request.plan.plan_id,
+                                    &lane.lane_id,
+                                ),
+                                status: IsolatedWorkspaceCleanupStatus::Failed,
+                            },
+                        ),
+                    )?;
+                }
+                return Err(error);
+            }
+        };
+        let mut lanes = Vec::with_capacity(output.lanes.len());
+        for lane in output.lanes {
+            append_control(
+                parent_session,
+                handler,
+                ControlEntry::IsolatedWorkspaceCleanupRecorded(IsolatedWorkspaceCleanupRecorded {
+                    isolated_workspace_id: git_integration_workspace_id(
+                        &lane.plan_id,
+                        &lane.lane_id,
+                    ),
+                    status: if lane.cleanup_error.is_some() {
+                        IsolatedWorkspaceCleanupStatus::Failed
+                    } else {
+                        IsolatedWorkspaceCleanupStatus::Removed
+                    },
+                }),
+            )?;
+            lanes.push(IntegrationLaneChanged {
+                plan_id: lane.plan_id,
+                lane_id: lane.lane_id,
+                status: lane.status,
+                candidate: lane.candidate,
+                verification_check_ids: lane.verification_check_ids,
+                reason: lane.reason,
+            });
+        }
+        Ok(TaskIntegrationRunOutput { lanes })
+    }
+
     async fn run_planner_session<H, A>(
         &self,
         parent_session: &mut Session,
@@ -1316,75 +1804,19 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         if requests.is_empty() {
             return Ok(detached_task_batch_results(Vec::new()));
         }
-        let member_count = requests.len();
-        let batch_task_id = requests[0].task.task_id.clone();
-        let batch_plan_version = requests[0].plan_version;
-        let batch_kind = match ParallelTaskBatchKind::for_step(&requests[0].step) {
-            Ok(kind) => kind,
+        let preflight = match self.preflight_parallel_task_batch(parent_session, &requests) {
+            Ok(preflight) => preflight,
             Err(error) => {
                 return Ok(detached_task_batch_results(rejected_parallel_task_batch(
                     &requests, error,
                 )));
             }
         };
-        let batch_changeset_base_snapshot_id = requests[0].isolated_base_snapshot_id.clone();
-        let mut attempt_ids = BTreeSet::new();
-        for request in &requests {
-            if request.task.task_id != batch_task_id || request.plan_version != batch_plan_version {
-                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                    &requests,
-                    anyhow::anyhow!("parallel task child batch mixes task or plan identities"),
-                )));
-            }
-            if !attempt_ids.insert(request.attempt_id.clone()) {
-                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                    &requests,
-                    anyhow::anyhow!(
-                        "parallel task child batch contains duplicate attempt {}",
-                        request.attempt_id.as_str()
-                    ),
-                )));
-            }
-            match ParallelTaskBatchKind::for_step(&request.step) {
-                Ok(kind) if kind == batch_kind => {}
-                Ok(_) => {
-                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                        &requests,
-                        anyhow::anyhow!(
-                            "parallel task child batch mixes shared-read-only and changeset-only steps"
-                        ),
-                    )));
-                }
-                Err(error) => {
-                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                        &requests, error,
-                    )));
-                }
-            }
-            if batch_kind == ParallelTaskBatchKind::ChangesetOnly
-                && request.isolated_base_snapshot_id.as_deref()
-                    != batch_changeset_base_snapshot_id.as_deref()
-            {
-                return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                    &requests,
-                    anyhow::anyhow!(
-                        "parallel changeset-only task child batch mixes parent base snapshots"
-                    ),
-                )));
-            }
-        }
-        let mut preflight = Vec::with_capacity(member_count);
-        for request in requests.iter().cloned() {
-            match self.preflight_parallel_task_child(parent_session, request) {
-                Ok(member) => preflight.push(member),
-                Err(error) => {
-                    return Ok(detached_task_batch_results(rejected_parallel_task_batch(
-                        &requests, error,
-                    )));
-                }
-            }
+        if preflight.kind == ParallelTaskBatchKind::Worktree {
+            return Ok(TaskChildSessionBatchPreparation::Fallback(requests));
         }
         let starts = preflight
+            .members
             .iter()
             .map(|member| member.start.clone())
             .collect::<Vec<_>>();
@@ -1396,8 +1828,8 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 )));
             }
         };
-        let mut prepared = Vec::with_capacity(member_count);
-        for member in preflight {
+        let mut prepared = Vec::with_capacity(preflight.members.len());
+        for member in preflight.members {
             match self.start_parallel_task_child(parent_session, member, handler) {
                 Ok(member) => prepared.push(member),
                 Err(error) => {
@@ -1427,102 +1859,13 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             }
         }
         reservation.commit();
-        let completion_progress = prepared
-            .iter()
-            .map(|member| TaskCompletionProgressRegistration {
-                step_id: member.request.step.step_id.clone(),
-                title: member
-                    .request
-                    .step
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| member.request.step.title.clone()),
-            })
-            .collect::<Vec<_>>();
-        let shared_handler = SharedTaskEventHandler {
-            inner: Arc::new(Mutex::new(handler)),
-        };
-        let shared_approval = SharedTaskApprovalHandler {
-            inner: Arc::new(Mutex::new(approval_handler)),
-        };
-        let registrations = prepared
-            .into_iter()
-            .enumerate()
-            .map(|(request_index, member)| {
-                let key = member.request.attempt_id.clone();
-                let context = ParallelTaskCompletionContext { request_index };
-                let mut member_handler = shared_handler.clone();
-                let mut member_approval = shared_approval.clone();
-                AgentCompletionRegistration::new(key, request_index as u64, context, async move {
-                    Ok::<_, anyhow::Error>(
-                        self.execute_parallel_task_child(
-                            member,
-                            &mut member_handler,
-                            &mut member_approval,
-                        )
-                        .await,
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let completion_hub = match AgentCompletionHub::from_batch(registrations) {
-            Ok(completion_hub) => completion_hub,
-            Err(rejection) => {
-                let (error, registrations) = rejection.into_parts();
-                drop(registrations);
-                drop(shared_handler);
-                drop(shared_approval);
-                return Err(anyhow::Error::new(error).context(
-                    "task completion registration violated prevalidated unique attempt identity",
-                ));
-            }
-        };
-        drop(shared_handler);
-        drop(shared_approval);
-        let progress_registry = self.supervisor.completion_progress().clone();
-        let generation =
-            progress_registry.begin(&batch_task_id, batch_plan_version, completion_progress);
-        let supervisor = self.supervisor.clone();
-
-        Ok(TaskChildSessionBatchPreparation::Detached(Box::pin(
-            async move {
-                let mut completed = completion_hub
-                    .collect_with(|envelope| {
-                        let outcome = match envelope.result.as_ref() {
-                            Ok(executed) if executed.result.is_ok() => {
-                                TaskCompletionOutcome::Succeeded
-                            }
-                            Ok(_) | Err(_) => TaskCompletionOutcome::Failed,
-                        };
-                        progress_registry.record_arrival(
-                            generation,
-                            envelope.context.request_index,
-                            usize::try_from(envelope.completion_index).unwrap_or(usize::MAX),
-                            outcome,
-                        );
-                    })
-                    .await;
-                completed.sort_by_key(|envelope| envelope.sequence);
-                Ok(TaskChildSessionBatchCommitEnvelope::new(
-                    member_count,
-                    move |parent_session, handler| {
-                        Ok(completed
-                            .into_iter()
-                            .map(|envelope| {
-                                envelope.result.and_then(|executed| {
-                                    Self::commit_parallel_task_child(
-                                        &supervisor,
-                                        parent_session,
-                                        handler,
-                                        executed,
-                                    )
-                                })
-                            })
-                            .collect())
-                    },
-                ))
-            },
-        )))
+        self.detach_prepared_task_batch(
+            preflight.task_id,
+            preflight.plan_version,
+            prepared,
+            handler,
+            approval_handler,
+        )
     }
 
     async fn run_child_session_batch<H, A>(
@@ -1544,6 +1887,18 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 commit.commit(parent_session, handler)
             }
             SettledRuntimeTaskChildBatch::Fallback(requests) => {
+                if requests.iter().all(|request| {
+                    request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::Worktree
+                }) {
+                    return self
+                        .run_parallel_worktree_batch(
+                            parent_session,
+                            requests,
+                            handler,
+                            approval_handler,
+                        )
+                        .await;
+                }
                 let mut outputs = Vec::with_capacity(requests.len());
                 for request in requests {
                     outputs.push(

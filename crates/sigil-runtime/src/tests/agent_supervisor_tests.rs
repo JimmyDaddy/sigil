@@ -114,6 +114,13 @@ struct ParallelChangesetChildProvider {
     completion_order: Arc<Mutex<Vec<String>>>,
 }
 
+struct ParallelWorktreeWriteProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+}
+
 struct RateLimitedTaskChildProvider {
     starts: Arc<AtomicUsize>,
     rate_limits_remaining: Arc<AtomicUsize>,
@@ -223,6 +230,84 @@ impl Provider for ParallelChangesetChildProvider {
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta(changeset_output(step_id))),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ParallelWorktreeWriteProvider {
+    fn name(&self) -> &str {
+        "parallel-worktree-write"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool))
+        {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "parallel isolated worktree edit complete".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let step_id = ["worktree_a", "worktree_b"]
+            .into_iter()
+            .find(|step_id| {
+                request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(step_id))
+                })
+            })
+            .ok_or_else(|| anyhow!("parallel worktree request did not identify a test step"))?;
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.barrier.wait().await;
+        if step_id == "worktree_a" {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        self.completion_order
+            .lock()
+            .expect("completion order should not be poisoned")
+            .push(step_id.to_owned());
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let path = if step_id == "worktree_a" {
+            "worktree_a.txt"
+        } else {
+            "worktree_b.txt"
+        };
+        let args = json!({
+            "path": path,
+            "content": format!("{step_id} isolated edit\n")
+        })
+        .to_string();
+        let call_id = format!("call-{step_id}");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: call_id.clone(),
+                name: "write_file".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: call_id.clone(),
+                delta: args.clone(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: call_id,
+                name: "write_file".to_owned(),
+                args_json: args,
+            })),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -3419,11 +3504,21 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
         .await?;
 
     assert_eq!(outputs.len(), 2);
-    assert!(outputs.iter().all(|output| {
-        output.as_ref().err().is_some_and(|error| {
-            format!("{error:#}").contains("accepts only shared-read-only or changeset-only steps")
+    let errors = outputs
+        .iter()
+        .map(|output| {
+            output
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "unexpected success".to_owned())
         })
-    }));
+        .collect::<Vec<_>>();
+    assert!(
+        errors.iter().all(|error| error
+            .contains("parallel task child writer requires changeset-only or worktree isolation")),
+        "unexpected batch errors: {errors:#?}"
+    );
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(session.agent_thread_state_projection().threads.is_empty());
     assert!(supervisor.active_profile_ids().is_empty());
@@ -4132,6 +4227,193 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
         task.child_sessions
             .values()
             .any(|child| child.status == sigil_kernel::TaskChildSessionStatus::Failed)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let repository_root = temp.path().join("repository");
+    initialize_worktree_test_repository(&repository_root)?;
+    let base_snapshot_id = worktree_test_snapshot_id(&repository_root)?;
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["write_file".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+    let mut write_tools = ToolRegistry::new();
+    write_tools.register(Arc::new(WorktreeWriteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(TextProvider {
+                text: "read complete",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(ParallelWorktreeWriteProvider {
+                barrier,
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                completion_order: Arc::clone(&completion_order),
+            }),
+            write_tools,
+        ),
+    );
+    let logs_root = temp.path().join("logs");
+    fs::create_dir(&logs_root)?;
+    let store = JsonlSessionStore::new(logs_root.join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let task_id = TaskId::new("task_parallel_worktree")?;
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit independent files in parallel worktrees".to_owned(),
+    };
+    let requests = ["worktree_a", "worktree_b"]
+        .into_iter()
+        .map(|step_id| {
+            let step = worktree_step(step_id)?;
+            let attempt_id = task_participant_attempt_id(
+                &task_id,
+                TaskParticipantPurpose::Step,
+                Some(1),
+                Some(&step.step_id),
+                1,
+            )?;
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step,
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                attempt_id,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("edit the isolated file for {step_id}")),
+                ]),
+                options: run_options(repository_root.clone()),
+                isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_attempts = requests
+        .iter()
+        .map(|request| request.attempt_id.clone())
+        .collect::<Vec<_>>();
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let outputs = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runner.run_child_session_batch(&mut session, requests, &mut handler, &mut approval),
+    )
+    .await
+    .expect("parallel worktree provider barrier should complete")?
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *completion_order
+            .lock()
+            .expect("completion order should not be poisoned"),
+        vec!["worktree_b", "worktree_a"]
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|output| output.attempt_id.clone())
+            .collect::<Vec<_>>(),
+        expected_attempts
+    );
+    assert!(outputs.iter().all(|output| {
+        output.outcome.changed_files.is_empty()
+            && output.isolated_parent_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
+            && output.changeset_proposal.is_some()
+    }));
+    assert!(
+        outputs[0]
+            .changeset_proposal
+            .as_ref()
+            .is_some_and(|proposal| proposal
+                .change_set
+                .files
+                .iter()
+                .any(|file| file.path == "worktree_a.txt"))
+    );
+    assert!(
+        outputs[1]
+            .changeset_proposal
+            .as_ref()
+            .is_some_and(|proposal| proposal
+                .change_set
+                .files
+                .iter()
+                .any(|file| file.path == "worktree_b.txt"))
+    );
+    assert_eq!(
+        fs::read_to_string(repository_root.join("base.txt"))?,
+        "base\n"
+    );
+    assert!(!repository_root.join("worktree_a.txt").exists());
+    assert!(!repository_root.join("worktree_b.txt").exists());
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(_))
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(_))
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
+                    cleanup
+                )) if cleanup.status == IsolatedWorkspaceCleanupStatus::Removed
+            ))
+            .count(),
+        2
+    );
+    assert!(
+        session
+            .write_isolation_projection()
+            .isolated_workspace_cleanup_inventory()
+            .is_empty()
+    );
+    assert!(
+        !repository_root
+            .join(".git/sigil-isolated-worktrees")
+            .exists()
     );
     Ok(())
 }

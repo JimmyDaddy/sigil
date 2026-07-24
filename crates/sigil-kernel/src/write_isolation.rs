@@ -16,12 +16,12 @@ use serde_json::json;
 
 use crate::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
-    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, DurableEventType, EventClass,
-    MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject, OperationId,
-    Session, WorkspaceId, WorkspaceSnapshotId, bytes_hash, delete_file_with_mutation_in_batch,
-    file_content_hash,
+    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    DurableEventType, EventClass, MutationBatchId, MutationBatchStatus, MutationEventRecorder,
+    MutationSubject, OperationId, Session, VerificationScope, WorkspaceId, WorkspaceSnapshotId,
+    build_workspace_snapshot, bytes_hash, delete_file_with_mutation_in_batch, file_content_hash,
     session::{ControlEntry, SessionLogEntry},
-    stable_event_uuid, write_file_with_mutation_in_batch,
+    stable_event_uuid, stable_workspace_id, write_file_with_mutation_in_batch,
 };
 
 pub type WriteIsolationAgentId = String;
@@ -323,9 +323,11 @@ pub struct MergeReviewParentMutationOutcome {
 
 /// Resolves a merge review and applies accepted changesets through RFC-0002 mutation evidence.
 ///
-/// Rejected, conflicted or cancelled decisions only append `MergeReviewResolved`. Accepted
-/// decisions require a durable session store and apply each changeset file through a mutation batch.
-/// The review artifact must contain a unified diff for the files being applied.
+/// Rejected, conflicted or cancelled decisions only append `MergeReviewResolved`. An accepted
+/// request first compares the exact current parent snapshot with the review precondition and
+/// preflights every file/hash/artifact operation. Snapshot drift or any preflight conflict resolves
+/// the review as `Conflict` with zero parent mutation. Only a fully preflighted request enters one
+/// RFC-0002 mutation batch.
 ///
 /// # Errors
 ///
@@ -388,6 +390,47 @@ pub fn resolve_merge_review_parent_mutation(
         .ok_or_else(|| anyhow::anyhow!("accepted merge review requires a durable session store"))?;
     let workspace_root = canonical_workspace_root(&request.workspace_root)?;
     let artifact = UnifiedDiffArtifact::parse(&request.artifact_content)?;
+    let observed_parent_snapshot_id = parent_workspace_snapshot_id(&workspace_root)?;
+    if observed_parent_snapshot_id != requested.parent_workspace_snapshot_id {
+        let reason = format!(
+            "stale parent workspace snapshot: expected {}, observed {}",
+            requested.parent_workspace_snapshot_id, observed_parent_snapshot_id
+        );
+        session.append_control(ControlEntry::MergeReviewResolved(MergeReviewResolved {
+            review_id: request.review_id.clone(),
+            decision: MergeDecision::Conflict,
+            reason: Some(reason),
+        }))?;
+        return Ok(MergeReviewParentMutationOutcome {
+            review_id: request.review_id,
+            decision: MergeDecision::Conflict,
+            change_set_result: None,
+            batch_id: None,
+            batch_status: None,
+            committed_operations: Vec::new(),
+            failed_operations: Vec::new(),
+        });
+    }
+    let prepared_files =
+        match prepare_changeset_files(&workspace_root, &request.change_set, &artifact) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                session.append_control(ControlEntry::MergeReviewResolved(MergeReviewResolved {
+                    review_id: request.review_id.clone(),
+                    decision: MergeDecision::Conflict,
+                    reason: Some(format!("changeset preflight conflict: {error:#}")),
+                }))?;
+                return Ok(MergeReviewParentMutationOutcome {
+                    review_id: request.review_id,
+                    decision: MergeDecision::Conflict,
+                    change_set_result: None,
+                    batch_id: None,
+                    batch_status: None,
+                    committed_operations: Vec::new(),
+                    failed_operations: Vec::new(),
+                });
+            }
+        };
     let batch_id = changeset_merge_batch_id(&request.review_id, &request.change_set.id);
     let batch_operation_id =
         changeset_merge_operation_id(&request.review_id, &request.change_set.id);
@@ -405,20 +448,20 @@ pub fn resolve_merge_review_parent_mutation(
     let mut failed_operations = Vec::new();
     let mut latest_snapshot_id = None;
 
-    for file in &request.change_set.files {
-        match apply_changeset_file_to_parent(
+    for prepared in prepared_files {
+        let file = prepared.file.clone();
+        match apply_prepared_changeset_file_to_parent(
             &recorder,
             &workspace_root,
             &request.tool_call_id,
             &batch_id,
-            file,
-            &artifact,
+            prepared,
         ) {
             Ok(applied) => {
                 latest_snapshot_id = Some(applied.workspace_snapshot_id);
                 committed_operations.push(applied.operation_id);
                 file_results.push(ChangeSetFileResult {
-                    path: file.path.clone(),
+                    path: file.path,
                     action: file.action,
                     status: ChangeSetFileResultStatus::Applied,
                     message: None,
@@ -430,7 +473,7 @@ pub fn resolve_merge_review_parent_mutation(
                     failed_changeset_file_operation_id(&batch_id, &file.path, file.action);
                 failed_operations.push(operation_id);
                 file_results.push(ChangeSetFileResult {
-                    path: file.path.clone(),
+                    path: file.path,
                     action: file.action,
                     status: ChangeSetFileResultStatus::Failed,
                     message: Some(error.to_string()),
@@ -454,7 +497,8 @@ pub fn resolve_merge_review_parent_mutation(
         message: Some("parent merge applied through RFC-0002 mutation batch".to_owned()),
     };
     session.append_control(ControlEntry::ChangeSetApplied(result.clone()))?;
-    if let Some(after_snapshot_id) = latest_snapshot_id {
+    if latest_snapshot_id.is_some() {
+        let after_snapshot_id = parent_workspace_snapshot_id(&workspace_root)?;
         session.append_durable_event(
             DurableEventType::ChildChangesetMerged,
             EventClass::Critical,
@@ -855,6 +899,19 @@ fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf> {
     })
 }
 
+fn parent_workspace_snapshot_id(workspace_root: &Path) -> Result<WorkspaceSnapshotId> {
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    let snapshot = build_workspace_snapshot(
+        workspace_root,
+        workspace_id,
+        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        0,
+    )?;
+    snapshot
+        .workspace_snapshot_id
+        .ok_or_else(|| anyhow::anyhow!("parent workspace snapshot is incomplete"))
+}
+
 fn changeset_merge_batch_id(review_id: &MergeReviewId, change_set_id: &ChangeSetId) -> String {
     format!(
         "merge-batch-{}",
@@ -902,49 +959,74 @@ fn changeset_touched_subjects(change_set: &ChangeSet) -> Result<Vec<MutationSubj
         .collect()
 }
 
-fn apply_changeset_file_to_parent(
-    recorder: &MutationEventRecorder,
+fn prepare_changeset_files(
     workspace_root: &Path,
-    tool_call_id: &str,
-    batch_id: &str,
+    change_set: &ChangeSet,
+    artifact: &UnifiedDiffArtifact,
+) -> Result<Vec<PreparedChangeSetFile>> {
+    change_set
+        .files
+        .iter()
+        .map(|file| prepare_changeset_file(workspace_root, file, artifact))
+        .collect()
+}
+
+fn prepare_changeset_file(
+    workspace_root: &Path,
     file: &ChangeSetFile,
     artifact: &UnifiedDiffArtifact,
-) -> Result<AppliedChangeSetFile> {
+) -> Result<PreparedChangeSetFile> {
     let relative_path = changeset_relative_path(&file.path)?;
     let absolute_path = workspace_root.join(&relative_path);
     validate_declared_before_hash(file, &absolute_path)?;
-    match file.action {
+    let operation = match file.action {
         ChangeSetFileAction::Create => {
             if file_content_hash(&absolute_path)?.is_some() {
                 bail!("changeset create target already exists: {}", file.path);
             }
             let content = artifact.materialize(&relative_path, &absolute_path, true)?;
             validate_declared_after_hash(file, Some(&content))?;
-            let committed = write_file_with_mutation_in_batch(
-                Some(recorder),
-                workspace_root,
-                tool_call_id,
-                Some(batch_id.to_owned()),
-                relative_path,
-                absolute_path,
-                &content,
-            )?
-            .ok_or_else(|| anyhow::anyhow!("durable recorder did not return mutation commit"))?;
-            Ok(AppliedChangeSetFile {
-                operation_id: committed.operation_id,
-                workspace_snapshot_id: committed.workspace_snapshot_id,
-            })
+            PreparedChangeSetFileOperation::Write(content)
         }
         ChangeSetFileAction::Update => {
             let content = artifact.materialize(&relative_path, &absolute_path, false)?;
             validate_declared_after_hash(file, Some(&content))?;
+            PreparedChangeSetFileOperation::Write(content)
+        }
+        ChangeSetFileAction::Delete => {
+            validate_declared_after_hash(file, None)?;
+            let _ = artifact.materialize(&relative_path, &absolute_path, false)?;
+            PreparedChangeSetFileOperation::Delete
+        }
+        ChangeSetFileAction::Rename => {
+            bail!("changeset rename apply is not supported in changeset-only merge handoff")
+        }
+    };
+    Ok(PreparedChangeSetFile {
+        file: file.clone(),
+        relative_path,
+        absolute_path,
+        operation,
+    })
+}
+
+fn apply_prepared_changeset_file_to_parent(
+    recorder: &MutationEventRecorder,
+    workspace_root: &Path,
+    tool_call_id: &str,
+    batch_id: &str,
+    prepared: PreparedChangeSetFile,
+) -> Result<AppliedChangeSetFile> {
+    validate_declared_before_hash(&prepared.file, &prepared.absolute_path)?;
+    match prepared.operation {
+        PreparedChangeSetFileOperation::Write(content) => {
             let committed = write_file_with_mutation_in_batch(
                 Some(recorder),
                 workspace_root,
                 tool_call_id,
                 Some(batch_id.to_owned()),
-                relative_path,
-                absolute_path,
+                prepared.relative_path,
+                prepared.absolute_path,
                 &content,
             )?
             .ok_or_else(|| anyhow::anyhow!("durable recorder did not return mutation commit"))?;
@@ -953,15 +1035,14 @@ fn apply_changeset_file_to_parent(
                 workspace_snapshot_id: committed.workspace_snapshot_id,
             })
         }
-        ChangeSetFileAction::Delete => {
-            validate_declared_after_hash(file, None)?;
+        PreparedChangeSetFileOperation::Delete => {
             let committed = delete_file_with_mutation_in_batch(
                 Some(recorder),
                 workspace_root,
                 tool_call_id,
                 Some(batch_id.to_owned()),
-                relative_path,
-                absolute_path,
+                prepared.relative_path,
+                prepared.absolute_path,
             )?
             .ok_or_else(|| anyhow::anyhow!("durable recorder did not return mutation commit"))?;
             Ok(AppliedChangeSetFile {
@@ -969,10 +1050,21 @@ fn apply_changeset_file_to_parent(
                 workspace_snapshot_id: committed.workspace_snapshot_id,
             })
         }
-        ChangeSetFileAction::Rename => {
-            bail!("changeset rename apply is not supported in changeset-only merge handoff")
-        }
     }
+}
+
+#[derive(Debug)]
+struct PreparedChangeSetFile {
+    file: ChangeSetFile,
+    relative_path: PathBuf,
+    absolute_path: PathBuf,
+    operation: PreparedChangeSetFileOperation,
+}
+
+#[derive(Debug)]
+enum PreparedChangeSetFileOperation {
+    Write(Vec<u8>),
+    Delete,
 }
 
 #[derive(Debug)]

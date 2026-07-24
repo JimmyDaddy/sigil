@@ -336,6 +336,29 @@ pub struct TaskChildChangeSetArtifact {
     pub content_sha256: String,
 }
 
+/// One successful isolated writer result admitted to integration-lane planning.
+#[derive(Debug, Clone)]
+pub struct TaskIntegrationProposal {
+    pub step_id: TaskStepId,
+    pub depends_on: Vec<TaskStepId>,
+    pub base_snapshot_id: WorkspaceSnapshotId,
+    pub proposal: TaskChildChangeSetProposal,
+}
+
+/// Runtime request for physical private-lane integration.
+#[derive(Debug, Clone)]
+pub struct TaskIntegrationRunRequest {
+    pub plan: crate::IntegrationPlan,
+    pub workspace_root: PathBuf,
+    pub proposals: Vec<TaskIntegrationProposal>,
+}
+
+/// Runtime-owned terminal lane transitions returned to the parent single-writer boundary.
+#[derive(Debug, Clone)]
+pub struct TaskIntegrationRunOutput {
+    pub lanes: Vec<crate::IntegrationLaneChanged>,
+}
+
 #[derive(Clone)]
 pub(super) struct StepRunOutput {
     pub(super) final_text: String,

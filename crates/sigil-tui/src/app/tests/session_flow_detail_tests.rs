@@ -87,6 +87,67 @@ fn isolated_workspace_lifecycle_has_bounded_audit_lines() {
 }
 
 #[test]
+fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
+    let plan_id = sigil_kernel::IntegrationPlanId::new("plan-audit")?;
+    let plan = render_control_entry_line(&ControlEntry::IntegrationPlanRecorded(
+        sigil_kernel::IntegrationPlanRecorded {
+            plan: sigil_kernel::IntegrationPlan {
+                plan_id: plan_id.clone(),
+                task_id: sigil_kernel::TaskId::new("task_audit")?,
+                plan_version: 2,
+                base_snapshot_id: "snapshot-base".to_owned(),
+                proposals: Vec::new(),
+                conflicts: Vec::new(),
+                lanes: Vec::new(),
+            },
+        },
+    ));
+    assert_eq!(
+        plan,
+        "[ctl] integration plan plan-audit task=task_audit version=2 proposals=0 lanes=0 conflicts=0"
+    );
+
+    let lane = render_control_entry_line(&ControlEntry::IntegrationLaneChanged(
+        sigil_kernel::IntegrationLaneChanged {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            status: sigil_kernel::IntegrationLaneStatus::Ready,
+            candidate: Some(sigil_kernel::IntegrationLaneCandidate::ManagedRef {
+                private_ref: "refs/sigil/integration/plan-audit/lane-1".to_owned(),
+                base_commit: "b".repeat(40),
+                candidate_commit: "a".repeat(40),
+                workspace_snapshot_id: "snapshot-lane".to_owned(),
+            }),
+            verification_check_ids: vec!["git-diff-check".to_owned()],
+            reason: None,
+        },
+    ));
+    assert_eq!(
+        lane,
+        "[ctl] integration lane plan-audit/lane-1 status=ready candidate=managed_ref checks=1 reason=-"
+    );
+
+    let promotion = render_control_entry_line(&ControlEntry::IntegrationPromotionRecorded(
+        sigil_kernel::IntegrationPromotionRecorded {
+            plan_id,
+            status: sigil_kernel::IntegrationPromotionStatus::Prepared,
+            preview_digest: "preview-sha256".to_owned(),
+            target: sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {
+                expected_snapshot_id: "snapshot-base".to_owned(),
+                expected_revision: 3,
+            },
+            effect: None,
+            reason: None,
+        },
+    ));
+    assert_eq!(
+        promotion,
+        "[ctl] integration promotion plan-audit status=prepared target=workspace_apply effect=none preview=preview-sha256 reason=-"
+    );
+    Ok(())
+}
+
+#[test]
 fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_audit_result")?;
     let attempt_id = sigil_kernel::task_participant_attempt_id(
