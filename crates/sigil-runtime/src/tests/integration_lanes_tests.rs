@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, IntegrationEffect, IntegrationLaneCandidate,
-    IntegrationLaneStatus, IntegrationPlanId, IntegrationProposalSpec, TaskId, TaskStepId,
-    VerificationScope, build_integration_plan, build_workspace_snapshot, stable_workspace_id,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, IntegrationBaseRepresentation, IntegrationContentClass,
+    IntegrationEffect, IntegrationLaneCandidate, IntegrationLaneStatus, IntegrationPlanId,
+    IntegrationProposalFacts, IntegrationProposalSpec, TaskId, TaskStepId, VerificationScope,
+    build_integration_plan, build_workspace_snapshot, stable_workspace_id,
 };
 
 use super::{GitIntegrationRunRequest, IntegrationArtifact, run_git_integration_lanes};
@@ -17,6 +18,7 @@ async fn disjoint_git_integration_lanes_overlap_and_preserve_parent() -> Result<
     let root = temp.path().join("repo");
     initialize_repository(&root, &[("a.txt", "old-a\n"), ("b.txt", "old-b\n")])?;
     let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
     let change_a = change_set("change-a", "a.txt")?;
     let change_b = change_set("change-b", "b.txt")?;
     let plan = build_integration_plan(
@@ -24,8 +26,8 @@ async fn disjoint_git_integration_lanes_overlap_and_preserve_parent() -> Result<
         TaskId::new("task_parallel")?,
         1,
         vec![
-            proposal(&change_a, "step_a", &base_snapshot_id)?,
-            proposal(&change_b, "step_b", &base_snapshot_id)?,
+            proposal(&change_a, "step_a", &base_snapshot_id, &base_commit)?,
+            proposal(&change_b, "step_b", &base_snapshot_id, &base_commit)?,
         ],
     )?;
     assert_eq!(plan.lanes.len(), 2);
@@ -108,6 +110,7 @@ async fn conflicting_lane_fails_without_private_ref_or_parent_mutation() -> Resu
     let root = temp.path().join("repo");
     initialize_repository(&root, &[("shared.txt", "old\n")])?;
     let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
     let first = change_set("change-first", "shared.txt")?;
     let second = change_set("change-second", "shared.txt")?;
     let plan = build_integration_plan(
@@ -115,8 +118,8 @@ async fn conflicting_lane_fails_without_private_ref_or_parent_mutation() -> Resu
         TaskId::new("task_conflict")?,
         1,
         vec![
-            proposal(&first, "step_first", &base_snapshot_id)?,
-            proposal(&second, "step_second", &base_snapshot_id)?,
+            proposal(&first, "step_first", &base_snapshot_id, &base_commit)?,
+            proposal(&second, "step_second", &base_snapshot_id, &base_commit)?,
         ],
     )?;
     assert_eq!(plan.lanes.len(), 1);
@@ -148,11 +151,109 @@ async fn conflicting_lane_fails_without_private_ref_or_parent_mutation() -> Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn overlay_plan_is_rejected_before_managed_ref_materialization() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let base_commit = git(&root, &["rev-parse", "HEAD"])?;
+    let change = change_set("change-overlay", "a.txt")?;
+    let mut proposal = proposal(&change, "step_overlay", &base_snapshot_id, &base_commit)?;
+    proposal.facts.base_representation = IntegrationBaseRepresentation::SnapshotWorkspace {
+        base_commit: git(&root, &["rev-parse", "HEAD"])?,
+        overlay_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-overlay")?,
+        TaskId::new("task_overlay")?,
+        1,
+        vec![proposal],
+    )?;
+    let error = run_git_integration_lanes(GitIntegrationRunRequest {
+        parent_workspace_root: root.clone(),
+        plan,
+        artifacts: vec![artifact(
+            change,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+        )],
+    })
+    .await
+    .expect_err("overlay plans must not enter managed-ref integration");
+
+    assert!(
+        error
+            .to_string()
+            .contains("managed-ref integration requires complete facts")
+    );
+    assert_eq!(std::fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    assert!(!git_ref_exists(
+        &root,
+        "refs/sigil/integration/plan-overlay/lane-1"
+    )?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_ref_plan_rejects_base_commit_drift_before_ref_creation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("repo");
+    initialize_repository(&root, &[("a.txt", "old-a\n")])?;
+    let base_snapshot_id = workspace_snapshot_id(&root)?;
+    let change = change_set("change-stale-base", "a.txt")?;
+    let proposal = proposal(
+        &change,
+        "step_stale_base",
+        &base_snapshot_id,
+        &"a".repeat(40),
+    )?;
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-stale-base")?,
+        TaskId::new("task_stale_base")?,
+        1,
+        vec![proposal],
+    )?;
+    let error = run_git_integration_lanes(GitIntegrationRunRequest {
+        parent_workspace_root: root.clone(),
+        plan,
+        artifacts: vec![artifact(
+            change,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
+        )],
+    })
+    .await
+    .expect_err("base commit drift must reject managed-ref integration");
+
+    assert!(
+        error
+            .to_string()
+            .contains("integration base commit drifted")
+    );
+    assert_eq!(std::fs::read_to_string(root.join("a.txt"))?, "old-a\n");
+    assert!(!git_ref_exists(
+        &root,
+        "refs/sigil/integration/plan-stale-base/lane-1"
+    )?);
+    Ok(())
+}
+
 fn proposal(
     change_set: &ChangeSet,
     step_id: &str,
     base_snapshot_id: &str,
+    base_commit: &str,
 ) -> Result<IntegrationProposalSpec> {
+    let facts = IntegrationProposalFacts::from_changeset(
+        change_set,
+        IntegrationBaseRepresentation::CleanCommit {
+            base_commit: base_commit.to_owned(),
+        },
+        IntegrationContentClass::Text,
+        IntegrationEffect::Files,
+        Vec::new(),
+        format!("artifact-{}", change_set.id.as_str()),
+        Vec::new(),
+    )?;
     IntegrationProposalSpec::from_changeset(
         change_set,
         TaskStepId::new(step_id)?,
@@ -161,6 +262,7 @@ fn proposal(
         Vec::new(),
         IntegrationEffect::Files,
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        facts,
     )
 }
 
@@ -183,8 +285,8 @@ fn change_set(id: &str, path: &str) -> Result<ChangeSet> {
             previous_path: None,
             action: ChangeSetFileAction::Update,
             risk: ChangeSetRisk::Medium,
-            before_hash: None,
-            after_hash: None,
+            before_hash: Some(format!("before-{id}-{path}")),
+            after_hash: Some(format!("after-{id}-{path}")),
             diff_hash: None,
             additions: 1,
             deletions: 1,

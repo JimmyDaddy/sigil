@@ -233,6 +233,7 @@ where
             source_isolation: proposal.source_isolation,
             artifact_ref: Some(proposal.artifact_ref.clone()),
             touched_subjects,
+            integration_facts: proposal.integration_facts.clone(),
         }),
     )?;
     append_task_control(
@@ -339,6 +340,7 @@ impl TaskChildChangeSetProposalEnvelope {
             },
             source_isolation: WriteIsolationMode::ChangesetOnly,
             child_snapshot_id: None,
+            integration_facts: crate::IntegrationProposalFacts::default(),
         })
     }
 }

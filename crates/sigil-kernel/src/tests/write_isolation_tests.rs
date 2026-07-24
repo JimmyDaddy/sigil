@@ -165,6 +165,7 @@ fn write_isolation_projection_tracks_lease_and_merge_review_state() {
             path: "src/lib.rs".into(),
             file_type: crate::FileType::File,
         }],
+        integration_facts: crate::IntegrationProposalFacts::default(),
     };
     let requested = MergeReviewRequested {
         review_id: review_id(),

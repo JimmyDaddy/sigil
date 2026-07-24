@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IntegrationLaneChanged,
-    IntegrationLaneStatus, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
+    ApprovalHandler, ChangeSetId, ControlEntry, EventHandler, IntegrationContentClass,
+    IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus, IntegrationObservedEffect,
+    IntegrationProposalFacts, IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded,
     IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
     JsonlSessionStore, MultiAgentMode, MutationEventRecorder, ProviderCapabilities,
     ProviderPhysicalAttemptOutcome, ProviderRequestRejection, ProviderRouteCooldownError, RunEvent,
@@ -22,10 +23,10 @@ use sigil_kernel::{
     TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskRouteId, TaskRouteStatus,
     TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
     TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
-    ToolErrorKind, ToolSpec, WriteIsolationMode, changeset_only_child_tool_registry,
-    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
-    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
-    task_step_owner_agent_id,
+    ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec, WriteIsolationMode,
+    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
+    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
+    task_participant_logical_run_id, task_step_owner_agent_id,
 };
 
 use crate::{
@@ -568,7 +569,7 @@ impl AgentSupervisorTaskChildRunner {
         let mut result = match child_run {
             Ok(output) => {
                 async {
-                    let changeset_proposal = match prepared.request.step.effective_isolation() {
+                    let mut changeset_proposal = match prepared.request.step.effective_isolation() {
                         sigil_kernel::TaskIsolationMode::ChangesetOnly => Some(
                             decode_changeset_only_child_output(&output.result.final_text)?,
                         ),
@@ -591,6 +592,9 @@ impl AgentSupervisorTaskChildRunner {
                         }
                         _ => None,
                     };
+                    if let Some(proposal) = &mut changeset_proposal {
+                        bind_child_integration_facts(&prepared.child_session, proposal)?;
+                    }
                     let mut outcome = output.outcome;
                     if prepared.worktree.is_some() {
                         outcome.changed_files.clear();
@@ -1175,6 +1179,113 @@ fn task_worktree_changeset_id(request: &TaskChildSessionRunRequest) -> Result<Ch
     ))
 }
 
+pub(super) fn bind_child_integration_facts(
+    child_session: &Session,
+    proposal: &mut sigil_kernel::TaskChildChangeSetProposal,
+) -> Result<()> {
+    let completed_calls = child_session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.status == ToolExecutionStatus::Completed =>
+            {
+                Some((execution.call_id.clone(), execution.tool_name.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let operations = child_session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if completed_calls.contains_key(&approval.call_id) =>
+            {
+                approval
+                    .operation
+                    .map(|operation| (approval.call_id.clone(), operation))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut observed_effects = proposal
+        .integration_facts
+        .observed_effects
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for (call_id, tool_name) in &completed_calls {
+        match operations.get(call_id) {
+            Some(
+                ToolOperation::ExecuteUnknownCommand
+                | ToolOperation::ExecuteMutatingCommand
+                | ToolOperation::ExecuteDestructiveCommand
+                | ToolOperation::SendTerminalInput,
+            ) => {
+                observed_effects.insert(IntegrationObservedEffect::UnknownShell);
+            }
+            None if matches!(
+                tool_name.as_str(),
+                "bash" | "terminal_start" | "terminal_input"
+            ) =>
+            {
+                observed_effects.insert(IntegrationObservedEffect::UnknownShell);
+            }
+            Some(ToolOperation::ExecuteWorkspaceCheckCommand) => {
+                observed_effects.insert(IntegrationObservedEffect::Build);
+            }
+            Some(ToolOperation::InvokePlugin) => {
+                observed_effects.insert(IntegrationObservedEffect::Unknown);
+            }
+            _ => {}
+        }
+    }
+    let child_verification_refs = child_session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded)) => {
+                Some(recorded.receipt.receipt.receipt_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let declared_effect = if observed_effects.iter().any(|effect| {
+        matches!(
+            effect,
+            IntegrationObservedEffect::Package
+                | IntegrationObservedEffect::Build
+                | IntegrationObservedEffect::Git
+                | IntegrationObservedEffect::Formatter
+                | IntegrationObservedEffect::Codegen
+                | IntegrationObservedEffect::UnknownShell
+                | IntegrationObservedEffect::Unknown
+        )
+    }) {
+        IntegrationEffect::Global
+    } else if observed_effects.contains(&IntegrationObservedEffect::SharedGeneratedRoot) {
+        IntegrationEffect::GeneratedArtifacts
+    } else {
+        proposal.integration_facts.declared_effect
+    };
+    let content_class = if proposal.source_isolation == WriteIsolationMode::Worktree {
+        IntegrationContentClass::Text
+    } else {
+        IntegrationContentClass::Unknown
+    };
+    proposal.integration_facts = IntegrationProposalFacts::from_changeset(
+        &proposal.change_set,
+        proposal.integration_facts.base_representation.clone(),
+        content_class,
+        declared_effect,
+        observed_effects.into_iter().collect(),
+        proposal.artifact_ref.clone(),
+        child_verification_refs,
+    )?;
+    Ok(())
+}
+
 async fn cleanup_task_worktree<H>(
     parent_session: &mut Session,
     handler: &mut H,
@@ -1756,7 +1867,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 }
             };
             let postprocessed = async {
-                let changeset_proposal = match request.step.effective_isolation() {
+                let mut changeset_proposal = match request.step.effective_isolation() {
                     sigil_kernel::TaskIsolationMode::ChangesetOnly => Some(
                         decode_changeset_only_child_output(&output.result.final_text)?,
                     ),
@@ -1777,6 +1888,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     }
                     _ => None,
                 };
+                if let Some(proposal) = &mut changeset_proposal {
+                    bind_child_integration_facts(&child_session, proposal)?;
+                }
                 let isolated_parent_snapshot_id =
                     if let Some(base_snapshot_id) = request.isolated_base_snapshot_id.as_deref() {
                         Some(

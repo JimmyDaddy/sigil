@@ -22,29 +22,31 @@ use sigil_kernel::{
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
     ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthority,
-    DelegationAuthorityRecord, EventHandler, InteractionMode, IsolatedWorkspaceCleanupStatus,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MultiAgentMode, NetworkPolicy,
-    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
-    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
+    DelegationAuthorityRecord, EventHandler, IntegrationEffect, IntegrationObservedEffect,
+    InteractionMode, IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole,
+    ModelMessage, MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport,
+    RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry,
+    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptId,
     TaskParticipantPurpose, TaskParticipantRetryError, TaskParticipantRetryProof,
     TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepMode,
     TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
-    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_workspace_snapshot,
-    child_session_ref, stable_workspace_id, task_participant_attempt_id,
-    task_participant_logical_run_id, task_participant_session_ref,
+    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
+    build_workspace_snapshot, child_session_ref, decode_changeset_only_child_output,
+    stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
+    task_participant_session_ref,
 };
 
 use super::{
     AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
     AgentResultMaterialization, AgentSupervisor, AgentSupervisorTaskChildRunner,
     AgentTaskChildStart, REQUEST_TASK_DISCOVERY_TOOL_NAME, agent_terminal_status_from_task_child,
-    task_child_status_from_outcome, tool_scope_is_write_capable,
+    task_child_status_from_outcome, task_runner::bind_child_integration_facts,
+    tool_scope_is_write_capable,
 };
 use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
 
@@ -4813,6 +4815,60 @@ async fn cancelled_worktree_child_still_records_terminal_cleanup() -> Result<()>
         !repository_root
             .join(".git/sigil-isolated-worktrees")
             .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn child_terminal_facts_treat_unclassified_shell_as_global() -> Result<()> {
+    let mut child_session = Session::new("deepseek", "deepseek-v4-flash");
+    child_session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-shell".to_owned(),
+        tool_name: "bash".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(1),
+        subjects: Vec::new(),
+        changed_files: vec!["src/lib.rs".to_owned()],
+        metadata: ToolResultMeta::default(),
+        error: None,
+        model_content_hash: Some("sha256-shell-result".to_owned()),
+    })))?;
+    let mut proposal = decode_changeset_only_child_output(
+        r#"{
+            "change_set": {
+                "id": "change-shell",
+                "title": "shell change",
+                "summary": "shell change",
+                "risk": "medium",
+                "files": [{
+                    "path": "src/lib.rs",
+                    "action": "update",
+                    "risk": "medium",
+                    "before_hash": "before",
+                    "after_hash": "after",
+                    "additions": 1,
+                    "deletions": 1
+                }],
+                "validations": []
+            },
+            "artifact": {
+                "media_type": "text/x-diff",
+                "content": "--- a/src/lib.rs\n+++ b/src/lib.rs\n"
+            }
+        }"#,
+    )?;
+
+    bind_child_integration_facts(&child_session, &mut proposal)?;
+
+    assert_eq!(
+        proposal.integration_facts.declared_effect,
+        IntegrationEffect::Global
+    );
+    assert!(
+        proposal
+            .integration_facts
+            .observed_effects
+            .contains(&IntegrationObservedEffect::UnknownShell)
     );
     Ok(())
 }

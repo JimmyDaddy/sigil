@@ -1202,6 +1202,7 @@ fn prepare_chat_changeset_only_child_controls(
             source_isolation: WriteIsolationMode::ChangesetOnly,
             artifact_ref: Some(proposal.artifact_ref),
             touched_subjects,
+            integration_facts: proposal.integration_facts,
         },
         merge_review: MergeReviewRequested {
             review_id: merge_review_id,

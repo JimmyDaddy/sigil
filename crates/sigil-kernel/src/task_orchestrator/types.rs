@@ -326,6 +326,7 @@ pub struct TaskChildChangeSetProposal {
     pub artifact: TaskChildChangeSetArtifact,
     pub source_isolation: WriteIsolationMode,
     pub child_snapshot_id: Option<WorkspaceSnapshotId>,
+    pub integration_facts: crate::IntegrationProposalFacts,
 }
 
 /// Reviewable artifact material emitted by an isolated child writer.

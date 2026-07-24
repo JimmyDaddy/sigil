@@ -67,6 +67,11 @@ fn isolated_workspace_lifecycle_has_bounded_audit_lines() {
             isolation_mode: sigil_kernel::WriteIsolationMode::Worktree,
             base_snapshot_id: "snapshot-base".to_owned(),
             backend: sigil_kernel::IsolatedWorkspaceBackend::GitWorktree,
+            base_commit: None,
+            overlay_digest: None,
+            overlay_artifact_ref: None,
+            overlay_content_artifact_refs: Vec::new(),
+            overlay_entry_count: 0,
         },
     ));
     assert_eq!(
@@ -96,6 +101,7 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
                 task_id: sigil_kernel::TaskId::new("task_audit")?,
                 plan_version: 2,
                 base_snapshot_id: "snapshot-base".to_owned(),
+                base_representation: sigil_kernel::IntegrationBaseRepresentation::Unknown,
                 proposals: Vec::new(),
                 conflicts: Vec::new(),
                 lanes: Vec::new(),

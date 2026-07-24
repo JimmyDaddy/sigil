@@ -8,9 +8,10 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSetFileAction, ChangeSetId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
-    IsolatedWorkspacePrepared, JsonlSessionStore, MutationEventRecorder, Session,
-    VerificationScope, WriteIsolationMode, build_workspace_snapshot, stable_workspace_id,
+    IntegrationBaseRepresentation, IntegrationContentClass, IsolatedWorkspaceBackend,
+    IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated, IsolatedWorkspacePrepared,
+    JsonlSessionStore, MutationEventRecorder, Session, VerificationScope, WriteIsolationMode,
+    build_workspace_snapshot, stable_workspace_id,
 };
 use tempfile::TempDir;
 
@@ -110,6 +111,22 @@ async fn git_worktree_extracts_bounded_review_artifact_without_mutating_parent()
 
     assert_eq!(proposal.source_isolation, WriteIsolationMode::Worktree);
     assert!(proposal.child_snapshot_id.is_some());
+    assert!(matches!(
+        &proposal.integration_facts.base_representation,
+        IntegrationBaseRepresentation::CleanCommit { .. }
+    ));
+    assert!(
+        proposal.integration_facts.gaps.is_empty(),
+        "{:?}",
+        proposal.integration_facts.gaps
+    );
+    assert!(
+        proposal
+            .integration_facts
+            .paths
+            .iter()
+            .all(|fact| fact.content_class == IntegrationContentClass::Text)
+    );
     assert_eq!(proposal.change_set.files.len(), 2);
     assert!(
         proposal
@@ -225,6 +242,13 @@ async fn frozen_dirty_overlay_is_shared_by_value_and_becomes_the_delta_baseline(
         .iter()
         .find(|file| file.path == "base.txt")
         .expect("base file proposal");
+    assert!(matches!(
+        &proposal.integration_facts.base_representation,
+        IntegrationBaseRepresentation::SnapshotWorkspace {
+            overlay_digest,
+            ..
+        } if overlay_digest == frozen.overlay_digest()
+    ));
     assert_eq!(
         base_file.before_hash.as_deref(),
         Some(hex_sha256(b"user edit\n").as_str())

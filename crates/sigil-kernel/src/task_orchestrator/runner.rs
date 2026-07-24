@@ -1393,8 +1393,8 @@ where
         let proposal_specs = proposals
             .iter()
             .map(|proposal| {
-                let (effect, generated_artifacts) =
-                    classify_integration_effect(&proposal.proposal.change_set);
+                let generated_artifacts =
+                    generated_integration_roots(&proposal.proposal.integration_facts);
                 let depends_on = proposal
                     .depends_on
                     .iter()
@@ -1406,20 +1406,22 @@ where
                     proposal.base_snapshot_id.clone(),
                     depends_on,
                     generated_artifacts,
-                    effect,
+                    proposal.proposal.integration_facts.declared_effect,
                     DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+                    proposal.proposal.integration_facts.clone(),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut stable_changeset_ids = proposal_specs
+            .iter()
+            .map(|proposal| proposal.change_set_id.as_str())
+            .collect::<Vec<_>>();
+        stable_changeset_ids.sort_unstable();
         let seed = format!(
             "{}:{}:{}",
             request.task_id.as_str(),
             plan_version,
-            proposal_specs
-                .iter()
-                .map(|proposal| proposal.change_set_id.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
+            stable_changeset_ids.join(",")
         );
         let plan_id = IntegrationPlanId::new(format!(
             "integration-{}",
@@ -1449,6 +1451,32 @@ where
                     reason: None,
                 }),
             )?;
+        }
+        if plan.requires_manual_review() {
+            let reason = if matches!(
+                plan.base_representation,
+                crate::IntegrationBaseRepresentation::SnapshotWorkspace { .. }
+            ) {
+                "integration requires the snapshot-workspace lane; clean-ref integration was not started"
+            } else {
+                "integration facts are incomplete or unsupported; proposals require serial manual review"
+            };
+            for lane in &plan.lanes {
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::IntegrationLaneChanged(IntegrationLaneChanged {
+                        plan_id: plan_id.clone(),
+                        lane_id: lane.lane_id.clone(),
+                        status: IntegrationLaneStatus::Pending,
+                        candidate: None,
+                        verification_check_ids: Vec::new(),
+                        reason: Some(reason.to_owned()),
+                    }),
+                )?;
+            }
+            let _ = handler.handle(RunEvent::Notice(reason.to_owned()));
+            return Ok(());
         }
         let output = self
             .child_runner
@@ -2436,57 +2464,38 @@ where
     )
 }
 
-fn classify_integration_effect(change_set: &ChangeSet) -> (IntegrationEffect, Vec<String>) {
-    let mut generated_artifacts = BTreeSet::new();
-    let mut global = false;
-    for file in &change_set.files {
-        let path = Path::new(&file.path);
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if matches!(
-            file_name,
-            "Cargo.toml"
-                | "Cargo.lock"
-                | "package.json"
-                | "package-lock.json"
-                | "pnpm-lock.yaml"
-                | "yarn.lock"
-                | "bun.lock"
-                | "bun.lockb"
-                | "build.rs"
-                | "go.mod"
-                | "go.sum"
-                | "pyproject.toml"
-                | "uv.lock"
-                | "poetry.lock"
-        ) {
-            global = true;
-        }
-        if path.components().any(|component| {
-            component
-                .as_os_str()
-                .to_str()
-                .is_some_and(|part| matches!(part, "generated" | "gen"))
-        }) || file_name.contains(".generated.")
-        {
-            generated_artifacts.insert(file.path.clone());
-        }
+fn generated_integration_roots(facts: &crate::IntegrationProposalFacts) -> Vec<String> {
+    if !facts
+        .observed_effects
+        .contains(&crate::IntegrationObservedEffect::SharedGeneratedRoot)
+    {
+        return Vec::new();
     }
-    if global {
-        (
-            IntegrationEffect::Global,
-            generated_artifacts.into_iter().collect(),
-        )
-    } else if generated_artifacts.is_empty() {
-        (IntegrationEffect::Files, Vec::new())
-    } else {
-        (
-            IntegrationEffect::GeneratedArtifacts,
-            generated_artifacts.into_iter().collect(),
-        )
-    }
+    facts
+        .paths
+        .iter()
+        .filter_map(|fact| {
+            let path = Path::new(&fact.path);
+            let mut root = PathBuf::new();
+            for component in path.components() {
+                root.push(component.as_os_str());
+                if component
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|part| matches!(part, "generated" | "gen"))
+                {
+                    return Some(root.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.contains(".generated."))
+                .and_then(|_| path.parent())
+                .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn participant_status_from_step_status(status: TaskStepStatus) -> TaskParticipantAttemptStatus {

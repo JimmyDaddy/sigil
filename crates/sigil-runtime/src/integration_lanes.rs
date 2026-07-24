@@ -15,8 +15,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::future::join_all;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ChangeSet, IntegrationLaneCandidate, IntegrationLaneId, IntegrationLaneStatus, IntegrationPlan,
-    IntegrationPlanId, WorkspaceSnapshotId,
+    ChangeSet, IntegrationBaseRepresentation, IntegrationLaneCandidate, IntegrationLaneId,
+    IntegrationLaneStatus, IntegrationPlan, IntegrationPlanId, WorkspaceSnapshotId,
 };
 
 use crate::isolated_workspace::{
@@ -80,6 +80,13 @@ pub async fn run_git_integration_lanes(
     request: GitIntegrationRunRequest,
 ) -> Result<GitIntegrationRunOutput> {
     validate_integration_request(&request)?;
+    let IntegrationBaseRepresentation::CleanCommit {
+        base_commit: planned_base_commit,
+    } = &request.plan.base_representation
+    else {
+        bail!("managed-ref integration requires a clean commit base");
+    };
+    let planned_base_commit = planned_base_commit.clone();
     let artifacts = request
         .artifacts
         .into_iter()
@@ -113,6 +120,16 @@ pub async fn run_git_integration_lanes(
                 return Err(error);
             }
         };
+        if workspace.base_commit() != planned_base_commit {
+            let observed_base_commit = workspace.base_commit().to_owned();
+            let _ = workspace.cleanup().await;
+            for (_, _, workspace, _) in materialized {
+                let _ = workspace.cleanup().await;
+            }
+            bail!(
+                "integration base commit drifted: expected {planned_base_commit}, observed {observed_base_commit}"
+            );
+        }
         let lane_artifacts = lane
             .proposals
             .iter()
@@ -331,6 +348,17 @@ async fn advance_private_ref(root: &std::path::Path, reference: &str, commit: &s
 fn validate_integration_request(request: &GitIntegrationRunRequest) -> Result<()> {
     if request.plan.lanes.is_empty() {
         bail!("physical integration requires at least one lane");
+    }
+    for proposal in &request.plan.proposals {
+        proposal.validate()?;
+    }
+    if request.plan.requires_manual_review()
+        || !matches!(
+            request.plan.base_representation,
+            IntegrationBaseRepresentation::CleanCommit { .. }
+        )
+    {
+        bail!("managed-ref integration requires complete facts from one clean commit base");
     }
     let expected = request
         .plan

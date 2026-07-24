@@ -309,6 +309,11 @@ pub struct IsolatedChangeSetProduced {
     pub artifact_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub touched_subjects: Vec<MutationSubject>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::IntegrationProposalFacts::is_empty"
+    )]
+    pub integration_facts: crate::IntegrationProposalFacts,
 }
 
 /// Durable fact emitted when parent review is requested for one isolated changeset.

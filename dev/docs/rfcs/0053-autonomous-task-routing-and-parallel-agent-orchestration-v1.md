@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6c implemented；O6d-O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6d implemented；O6e-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1409,7 +1409,7 @@ unsupported entry 不泄漏；worker 未修改 inherited dirty/untracked entry �
 
 O6d：parallel Worktree batch 与 deterministic conflict graph。
 
-当前实现检查点（不构成 O6d/O6e 完成）：
+当前实现检查点（O6d 已完成；不构成 O6e 完成）：
 
 - clean、无 overlay 的 Git base 已支持 homogeneous Worktree whole-batch：所有 owned worktree
   materialize/Created 与 child Started 完成后才统一放行 provider；provider execution 可真实重叠，
@@ -1421,11 +1421,19 @@ O6d：parallel Worktree batch 与 deterministic conflict graph。
   retention 与 crash cleanup。
 - kernel 已有 deterministic conflict graph，runtime 已有 clean-base managed-ref integration lane
   substrate；disjoint lane 的 apply/structural check/private-ref CAS 可重叠，冲突 lane 不创建 ref。
+- child terminal proposal 已携带 content-bound base representation、changed-path、before/after hash、
+  rename/content classification、declared/observed effect、artifact 与 verification refs；缺失、
+  unknown 或 unsupported fact 一律保留 typed gap 并转 serial/manual review。graph 对 Task DAG、
+  path/rename、generated root、package/build/Git/global effect、base 与 verification scope 生成稳定
+  edge reason，反向 completion 不改变 plan/lane identity。
+- clean commit 与 O6c snapshot-overlay 已成为互斥 base representation。managed-ref runtime 会在
+  materialization 后复核 exact base commit；overlay 或 mixed/incomplete base 在任何 clean-ref
+  effect 前拒绝，等待 O6e snapshot-workspace lane，不会丢失 inherited bytes。
 - lane candidate 与 final promotion target 已改为 tagged union，不能同时记录 snapshot workspace 与
   managed ref，也不能在一次 promotion 中同时记录 workspace apply 与 Git ref advance。
-- O1e explicit invocation grant 与 O6c dirty overlay 已完成。完整 effect facts、deterministic
-  conflict graph、snapshot-workspace lane、promotion authority、parent verification、恢复和 O6g
-  产品面仍未完成，因而本 RFC 顶部状态继续保持 O6d-O8 deferred。
+- O1e explicit invocation grant、O6c dirty overlay 与 O6d deterministic conflict graph 已完成。
+  snapshot-workspace lane、promotion authority、parent verification、恢复和 O6g 产品面仍未完成，
+  因而本 RFC 顶部状态继续保持 O6e-O8 deferred。
 
 1. scheduler 只把相互独立的 `SubagentWrite + Worktree` ready step 组成 homogeneous batch；
    coordinator 在启动前冻结同一 O6c base identity，并对 profile、permission、workspace、

@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    ChangeSet, ChangeSetId, TaskId, TaskStepId, WorkspaceSnapshotId,
+    ChangeSet, ChangeSetFileAction, ChangeSetId, TaskId, TaskStepId, WorkspaceSnapshotId,
     session::{ControlEntry, SessionLogEntry},
 };
 
@@ -86,8 +86,10 @@ impl<'de> Deserialize<'de> for IntegrationLaneId {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationEffect {
-    /// Ordinary isolated file changes.
+    /// The child did not provide enough structured evidence to classify its effect.
     #[default]
+    Unknown,
+    /// Ordinary isolated file changes.
     Files,
     /// A proposal touches one or more declared generated artifacts.
     GeneratedArtifacts,
@@ -99,10 +101,284 @@ impl IntegrationEffect {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::Files => "files",
             Self::GeneratedArtifacts => "generated_artifacts",
             Self::Global => "global",
         }
+    }
+}
+
+/// Exact representation used to materialize every proposal in one integration batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IntegrationBaseRepresentation {
+    /// Legacy or incomplete proposal that cannot be admitted to an automatic lane.
+    #[default]
+    Unknown,
+    /// Clean Git commit with no inherited overlay.
+    CleanCommit { base_commit: String },
+    /// Frozen post-overlay snapshot that cannot be represented by the base commit alone.
+    SnapshotWorkspace {
+        base_commit: String,
+        overlay_digest: String,
+    },
+}
+
+impl IntegrationBaseRepresentation {
+    #[must_use]
+    pub fn is_automatic_lane_eligible(&self) -> bool {
+        matches!(self, Self::CleanCommit { .. })
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Unknown => Ok(()),
+            Self::CleanCommit { base_commit } => {
+                validate_git_object_id("integration base commit", base_commit)
+            }
+            Self::SnapshotWorkspace {
+                base_commit,
+                overlay_digest,
+            } => {
+                validate_git_object_id("integration base commit", base_commit)?;
+                validate_sha256_digest("integration overlay digest", overlay_digest)
+            }
+        }
+    }
+}
+
+/// Materialized content classification for one changed path.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationContentClass {
+    Text,
+    Binary,
+    Special,
+    #[default]
+    Unknown,
+}
+
+/// One materialized per-file before/after fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationPathFact {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    pub action: ChangeSetFileAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_hash: Option<String>,
+    #[serde(default)]
+    pub content_class: IntegrationContentClass,
+}
+
+/// Observed repository-wide effect derived from structured tool and materialization evidence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationObservedEffect {
+    Package,
+    Build,
+    Git,
+    Formatter,
+    Codegen,
+    UnknownShell,
+    SharedGeneratedRoot,
+    Unknown,
+}
+
+/// Why one proposal cannot enter an automatic parallel integration lane.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationFactGap {
+    UnknownBaseRepresentation,
+    MissingArtifactRef,
+    MissingBeforeHash,
+    MissingAfterHash,
+    MissingRenameSource,
+    UnknownContentClass,
+    UnsupportedContentClass,
+    UnknownDeclaredEffect,
+    UnknownObservedEffect,
+}
+
+/// Content-bound terminal facts carried by one isolated child proposal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationProposalFacts {
+    #[serde(default)]
+    pub base_representation: IntegrationBaseRepresentation,
+    #[serde(default)]
+    pub paths: Vec<IntegrationPathFact>,
+    #[serde(default)]
+    pub declared_effect: IntegrationEffect,
+    #[serde(default)]
+    pub observed_effects: Vec<IntegrationObservedEffect>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub changeset_artifact_ref: String,
+    #[serde(default)]
+    pub child_verification_refs: Vec<String>,
+    #[serde(default)]
+    pub gaps: Vec<IntegrationFactGap>,
+}
+
+impl IntegrationProposalFacts {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Builds normalized facts from a materialized changeset and explicit runtime evidence.
+    ///
+    /// Missing facts are retained as typed gaps instead of being guessed safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe paths or duplicate changed-path identities.
+    pub fn from_changeset(
+        change_set: &ChangeSet,
+        base_representation: IntegrationBaseRepresentation,
+        content_class: IntegrationContentClass,
+        declared_effect: IntegrationEffect,
+        observed_effects: Vec<IntegrationObservedEffect>,
+        changeset_artifact_ref: impl Into<String>,
+        child_verification_refs: Vec<String>,
+    ) -> Result<Self> {
+        base_representation.validate()?;
+        let mut paths = Vec::with_capacity(change_set.files.len());
+        let mut identities = BTreeSet::new();
+        let mut gaps = BTreeSet::new();
+        if matches!(base_representation, IntegrationBaseRepresentation::Unknown) {
+            gaps.insert(IntegrationFactGap::UnknownBaseRepresentation);
+        }
+        let changeset_artifact_ref = changeset_artifact_ref.into();
+        if changeset_artifact_ref.trim().is_empty() {
+            gaps.insert(IntegrationFactGap::MissingArtifactRef);
+        }
+        if declared_effect == IntegrationEffect::Unknown {
+            gaps.insert(IntegrationFactGap::UnknownDeclaredEffect);
+        }
+        if observed_effects.contains(&IntegrationObservedEffect::Unknown) {
+            gaps.insert(IntegrationFactGap::UnknownObservedEffect);
+        }
+        match content_class {
+            IntegrationContentClass::Unknown => {
+                gaps.insert(IntegrationFactGap::UnknownContentClass);
+            }
+            IntegrationContentClass::Binary | IntegrationContentClass::Special => {
+                gaps.insert(IntegrationFactGap::UnsupportedContentClass);
+            }
+            IntegrationContentClass::Text => {}
+        }
+        for file in &change_set.files {
+            let path = normalized_relative_path(&file.path)?;
+            let previous_path = file
+                .previous_path
+                .as_deref()
+                .map(normalized_relative_path)
+                .transpose()?;
+            if !identities.insert((path.clone(), previous_path.clone())) {
+                bail!(
+                    "integration proposal {} contains duplicate changed-path facts",
+                    change_set.id.as_str()
+                );
+            }
+            match file.action {
+                ChangeSetFileAction::Create => {
+                    if file.after_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingAfterHash);
+                    }
+                }
+                ChangeSetFileAction::Update => {
+                    if file.before_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingBeforeHash);
+                    }
+                    if file.after_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingAfterHash);
+                    }
+                }
+                ChangeSetFileAction::Delete => {
+                    if file.before_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingBeforeHash);
+                    }
+                }
+                ChangeSetFileAction::Rename => {
+                    if previous_path.is_none() {
+                        gaps.insert(IntegrationFactGap::MissingRenameSource);
+                    }
+                    if file.before_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingBeforeHash);
+                    }
+                    if file.after_hash.as_deref().is_none_or(str::is_empty) {
+                        gaps.insert(IntegrationFactGap::MissingAfterHash);
+                    }
+                }
+            }
+            paths.push(IntegrationPathFact {
+                path,
+                previous_path,
+                action: file.action,
+                before_hash: file.before_hash.clone(),
+                after_hash: file.after_hash.clone(),
+                content_class,
+            });
+        }
+        paths.sort_by(|left, right| {
+            (&left.path, &left.previous_path).cmp(&(&right.path, &right.previous_path))
+        });
+        let observed_effects = observed_effects
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let child_verification_refs = child_verification_refs
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(Self {
+            base_representation,
+            paths,
+            declared_effect,
+            observed_effects,
+            changeset_artifact_ref,
+            child_verification_refs,
+            gaps: gaps.into_iter().collect(),
+        })
+    }
+
+    #[must_use]
+    pub fn requires_manual_review(&self) -> bool {
+        !self.gaps.is_empty()
+            || !self.base_representation.is_automatic_lane_eligible()
+            || self.changeset_artifact_ref.trim().is_empty()
+            || self.declared_effect == IntegrationEffect::Unknown
+            || self
+                .observed_effects
+                .contains(&IntegrationObservedEffect::Unknown)
+            || self.paths.iter().any(|fact| {
+                fact.content_class != IntegrationContentClass::Text
+                    || match fact.action {
+                        ChangeSetFileAction::Create => {
+                            fact.after_hash.as_deref().is_none_or(str::is_empty)
+                        }
+                        ChangeSetFileAction::Update => {
+                            fact.before_hash.as_deref().is_none_or(str::is_empty)
+                                || fact.after_hash.as_deref().is_none_or(str::is_empty)
+                        }
+                        ChangeSetFileAction::Delete => {
+                            fact.before_hash.as_deref().is_none_or(str::is_empty)
+                        }
+                        ChangeSetFileAction::Rename => {
+                            fact.previous_path.is_none()
+                                || fact.before_hash.as_deref().is_none_or(str::is_empty)
+                                || fact.after_hash.as_deref().is_none_or(str::is_empty)
+                        }
+                    }
+            })
     }
 }
 
@@ -122,9 +398,83 @@ pub struct IntegrationProposalSpec {
     #[serde(default)]
     pub effect: IntegrationEffect,
     pub verification_scope_hash: String,
+    #[serde(default)]
+    pub facts: IntegrationProposalFacts,
 }
 
 impl IntegrationProposalSpec {
+    /// Revalidates durable proposal facts before graph or physical-lane admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when normalized paths, declared effects, or base identities disagree.
+    pub fn validate(&self) -> Result<()> {
+        if self.base_snapshot_id.trim().is_empty() {
+            bail!("integration proposal base snapshot id must not be empty");
+        }
+        if self.verification_scope_hash.trim().is_empty() {
+            bail!("integration proposal verification scope hash must not be empty");
+        }
+        self.facts.base_representation.validate()?;
+        let requires_manual_review = self.facts.requires_manual_review();
+        if !requires_manual_review && self.effect != self.facts.declared_effect {
+            bail!("integration proposal declared effect disagrees with terminal facts");
+        }
+        let changed_paths = self
+            .changed_paths
+            .iter()
+            .map(|path| normalized_relative_path(path))
+            .collect::<Result<BTreeSet<_>>>()?;
+        if changed_paths.len() != self.changed_paths.len() || changed_paths.is_empty() {
+            bail!("integration proposal changed-path facts are empty or duplicated");
+        }
+        let fact_paths = self
+            .facts
+            .paths
+            .iter()
+            .flat_map(|fact| [Some(fact.path.as_str()), fact.previous_path.as_deref()])
+            .flatten()
+            .map(normalized_relative_path)
+            .collect::<Result<BTreeSet<_>>>()?;
+        if !requires_manual_review && fact_paths != changed_paths {
+            bail!("integration proposal changed paths disagree with terminal path facts");
+        }
+        let generated_artifacts = self
+            .generated_artifacts
+            .iter()
+            .map(|path| normalized_relative_path(path))
+            .collect::<Result<BTreeSet<_>>>()?;
+        if generated_artifacts.len() != self.generated_artifacts.len() {
+            bail!("integration proposal generated-artifact facts are duplicated");
+        }
+        let has_global_effect = self.facts.observed_effects.iter().any(|effect| {
+            matches!(
+                effect,
+                IntegrationObservedEffect::Package
+                    | IntegrationObservedEffect::Build
+                    | IntegrationObservedEffect::Git
+                    | IntegrationObservedEffect::Formatter
+                    | IntegrationObservedEffect::Codegen
+                    | IntegrationObservedEffect::UnknownShell
+                    | IntegrationObservedEffect::Unknown
+            )
+        });
+        if !requires_manual_review && has_global_effect && self.effect != IntegrationEffect::Global
+        {
+            bail!("integration proposal global effect was not declared global");
+        }
+        if !requires_manual_review
+            && self
+                .facts
+                .observed_effects
+                .contains(&IntegrationObservedEffect::SharedGeneratedRoot)
+            && self.effect == IntegrationEffect::Files
+        {
+            bail!("integration proposal generated effect was declared as ordinary files");
+        }
+        Ok(())
+    }
+
     /// Builds a normalized proposal from a changeset and task-DAG facts.
     ///
     /// # Errors
@@ -138,6 +488,7 @@ impl IntegrationProposalSpec {
         generated_artifacts: Vec<String>,
         effect: IntegrationEffect,
         verification_scope_hash: impl Into<String>,
+        facts: IntegrationProposalFacts,
     ) -> Result<Self> {
         if base_snapshot_id.trim().is_empty() {
             bail!("integration proposal base snapshot id must not be empty");
@@ -172,7 +523,7 @@ impl IntegrationProposalSpec {
                 change_set.id.as_str()
             );
         }
-        Ok(Self {
+        let proposal = Self {
             change_set_id: change_set.id.clone(),
             step_id,
             base_snapshot_id,
@@ -181,7 +532,10 @@ impl IntegrationProposalSpec {
             generated_artifacts,
             effect,
             verification_scope_hash,
-        })
+            facts,
+        };
+        proposal.validate()?;
+        Ok(proposal)
     }
 }
 
@@ -190,10 +544,16 @@ impl IntegrationProposalSpec {
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationConflictReason {
     BaseSnapshotMismatch,
+    BaseRepresentationMismatch,
     ChangedPathOverlap,
     TaskDependency,
     GeneratedArtifactOverlap,
+    VerificationScopeMismatch,
+    PackageEffect,
+    BuildEffect,
+    GitEffect,
     GlobalEffect,
+    IncompleteEffectFacts,
 }
 
 impl IntegrationConflictReason {
@@ -201,10 +561,16 @@ impl IntegrationConflictReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BaseSnapshotMismatch => "base_snapshot_mismatch",
+            Self::BaseRepresentationMismatch => "base_representation_mismatch",
             Self::ChangedPathOverlap => "changed_path_overlap",
             Self::TaskDependency => "task_dependency",
             Self::GeneratedArtifactOverlap => "generated_artifact_overlap",
+            Self::VerificationScopeMismatch => "verification_scope_mismatch",
+            Self::PackageEffect => "package_effect",
+            Self::BuildEffect => "build_effect",
+            Self::GitEffect => "git_effect",
             Self::GlobalEffect => "global_effect",
+            Self::IncompleteEffectFacts => "incomplete_effect_facts",
         }
     }
 }
@@ -236,9 +602,21 @@ pub struct IntegrationPlan {
     pub task_id: TaskId,
     pub plan_version: u32,
     pub base_snapshot_id: WorkspaceSnapshotId,
+    pub base_representation: IntegrationBaseRepresentation,
     pub proposals: Vec<IntegrationProposalSpec>,
     pub conflicts: Vec<IntegrationConflictEdge>,
     pub lanes: Vec<IntegrationLaneSpec>,
+}
+
+impl IntegrationPlan {
+    #[must_use]
+    pub fn requires_manual_review(&self) -> bool {
+        self.proposals.iter().any(|proposal| {
+            proposal.facts.requires_manual_review()
+                || proposal.base_snapshot_id != self.base_snapshot_id
+                || proposal.facts.base_representation != self.base_representation
+        })
+    }
 }
 
 /// Builds deterministic conflict components for a same-task proposal batch.
@@ -261,6 +639,7 @@ pub fn build_integration_plan(
     }
     let mut proposals_by_id = BTreeMap::new();
     for proposal in proposals {
+        proposal.validate()?;
         if proposals_by_id
             .insert(proposal.change_set_id.clone(), proposal)
             .is_some()
@@ -270,6 +649,7 @@ pub fn build_integration_plan(
     }
     let ordered = proposals_by_id.into_values().collect::<Vec<_>>();
     let base_snapshot_id = ordered[0].base_snapshot_id.clone();
+    let base_representation = ordered[0].facts.base_representation.clone();
     let mut conflicts = Vec::new();
     let mut adjacency = BTreeMap::<ChangeSetId, BTreeSet<ChangeSetId>>::new();
     for proposal in &ordered {
@@ -343,6 +723,7 @@ pub fn build_integration_plan(
         task_id,
         plan_version,
         base_snapshot_id,
+        base_representation,
         proposals: ordered,
         conflicts,
         lanes,
@@ -618,6 +999,9 @@ fn conflict_reasons(
     if left.base_snapshot_id != right.base_snapshot_id {
         reasons.insert(IntegrationConflictReason::BaseSnapshotMismatch);
     }
+    if left.facts.base_representation != right.facts.base_representation {
+        reasons.insert(IntegrationConflictReason::BaseRepresentationMismatch);
+    }
     if sets_overlap(&left.changed_paths, &right.changed_paths) {
         reasons.insert(IntegrationConflictReason::ChangedPathOverlap);
     }
@@ -629,8 +1013,41 @@ fn conflict_reasons(
     if sets_overlap(&left.generated_artifacts, &right.generated_artifacts) {
         reasons.insert(IntegrationConflictReason::GeneratedArtifactOverlap);
     }
-    if left.effect == IntegrationEffect::Global || right.effect == IntegrationEffect::Global {
+    if left.verification_scope_hash != right.verification_scope_hash {
+        reasons.insert(IntegrationConflictReason::VerificationScopeMismatch);
+    }
+    let observed_effects = left
+        .facts
+        .observed_effects
+        .iter()
+        .chain(&right.facts.observed_effects)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if observed_effects.contains(&IntegrationObservedEffect::Package) {
+        reasons.insert(IntegrationConflictReason::PackageEffect);
+    }
+    if observed_effects.contains(&IntegrationObservedEffect::Build) {
+        reasons.insert(IntegrationConflictReason::BuildEffect);
+    }
+    if observed_effects.contains(&IntegrationObservedEffect::Git) {
+        reasons.insert(IntegrationConflictReason::GitEffect);
+    }
+    if left.effect == IntegrationEffect::Global
+        || right.effect == IntegrationEffect::Global
+        || observed_effects.iter().any(|effect| {
+            matches!(
+                effect,
+                IntegrationObservedEffect::Formatter
+                    | IntegrationObservedEffect::Codegen
+                    | IntegrationObservedEffect::UnknownShell
+                    | IntegrationObservedEffect::Unknown
+            )
+        })
+    {
         reasons.insert(IntegrationConflictReason::GlobalEffect);
+    }
+    if left.facts.requires_manual_review() || right.facts.requires_manual_review() {
+        reasons.insert(IntegrationConflictReason::IncompleteEffectFacts);
     }
     reasons.into_iter().collect()
 }
@@ -698,6 +1115,23 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
         bail!("{label} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_git_object_id(label: &str, value: &str) -> Result<()> {
+    if !(40..=64).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must be a 40 to 64 character hexadecimal object id");
+    }
+    Ok(())
+}
+
+fn validate_sha256_digest(label: &str, value: &str) -> Result<()> {
+    let Some(value) = value.strip_prefix("sha256:") else {
+        bail!("{label} must use the sha256 prefix");
+    };
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must contain exactly 64 hexadecimal characters");
     }
     Ok(())
 }

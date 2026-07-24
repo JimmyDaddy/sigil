@@ -242,12 +242,14 @@ pub use image_attachment::{
     validate_request_image_attachments,
 };
 pub use integration::{
-    IntegrationConflictEdge, IntegrationConflictReason, IntegrationEffect,
-    IntegrationLaneCandidate, IntegrationLaneChanged, IntegrationLaneId, IntegrationLaneSpec,
-    IntegrationLaneStatus, IntegrationPlan, IntegrationPlanId, IntegrationPlanRecorded,
-    IntegrationPlanState, IntegrationProjection, IntegrationPromotionEffect,
-    IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
-    IntegrationProposalSpec, build_integration_plan,
+    IntegrationBaseRepresentation, IntegrationConflictEdge, IntegrationConflictReason,
+    IntegrationContentClass, IntegrationEffect, IntegrationFactGap, IntegrationLaneCandidate,
+    IntegrationLaneChanged, IntegrationLaneId, IntegrationLaneSpec, IntegrationLaneStatus,
+    IntegrationObservedEffect, IntegrationPathFact, IntegrationPlan, IntegrationPlanId,
+    IntegrationPlanRecorded, IntegrationPlanState, IntegrationProjection,
+    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
+    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec,
+    build_integration_plan,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{

@@ -18,11 +18,12 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, ControlEntry,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, IsolatedWorkspaceBackend,
-    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, MutationArtifactId,
-    MutationEventRecorder, Session, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
-    VerificationScope, WorkspaceSnapshotBuild, WriteIsolationMode, build_workspace_snapshot,
-    is_sensitive_mutation_artifact_path, stable_workspace_id,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, IntegrationBaseRepresentation, IntegrationContentClass,
+    IntegrationEffect, IntegrationObservedEffect, IntegrationProposalFacts,
+    IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus,
+    MutationArtifactId, MutationEventRecorder, Session, TaskChildChangeSetArtifact,
+    TaskChildChangeSetProposal, VerificationScope, WorkspaceSnapshotBuild, WriteIsolationMode,
+    build_workspace_snapshot, is_sensitive_mutation_artifact_path, stable_workspace_id,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -1347,16 +1348,37 @@ async fn extract_git_worktree_changeset(
         .await?
         .workspace_snapshot_id
         .ok_or_else(|| anyhow!("isolated child snapshot is incomplete after changes"))?;
-    Ok(Some(TaskChildChangeSetProposal {
-        change_set: ChangeSet {
-            id: change_set_id,
-            title,
-            summary,
-            risk: ChangeSetRisk::Medium,
-            files,
-            validations: isolated_file_validations(),
+    let change_set = ChangeSet {
+        id: change_set_id,
+        title,
+        summary,
+        risk: ChangeSetRisk::Medium,
+        files,
+        validations: isolated_file_validations(),
+    };
+    let artifact_ref = format!("inline:sha256:{content_sha256}");
+    let (declared_effect, observed_effects) = materialized_integration_effect(&change_set);
+    let base_representation = match materialized.overlay_digest() {
+        Some(overlay_digest) => IntegrationBaseRepresentation::SnapshotWorkspace {
+            base_commit: materialized.base_commit().to_owned(),
+            overlay_digest: overlay_digest.to_owned(),
         },
-        artifact_ref: format!("inline:sha256:{content_sha256}"),
+        None => IntegrationBaseRepresentation::CleanCommit {
+            base_commit: materialized.base_commit().to_owned(),
+        },
+    };
+    let integration_facts = IntegrationProposalFacts::from_changeset(
+        &change_set,
+        base_representation,
+        IntegrationContentClass::Text,
+        declared_effect,
+        observed_effects,
+        artifact_ref.clone(),
+        Vec::new(),
+    )?;
+    Ok(Some(TaskChildChangeSetProposal {
+        change_set,
+        artifact_ref,
         artifact: TaskChildChangeSetArtifact {
             media_type: "text/x-diff".to_owned(),
             content: artifact_content,
@@ -1364,7 +1386,71 @@ async fn extract_git_worktree_changeset(
         },
         source_isolation: WriteIsolationMode::Worktree,
         child_snapshot_id: Some(child_snapshot_id),
+        integration_facts,
     }))
+}
+
+fn materialized_integration_effect(
+    change_set: &ChangeSet,
+) -> (IntegrationEffect, Vec<IntegrationObservedEffect>) {
+    let mut observed = BTreeSet::new();
+    for file in &change_set.files {
+        let path = Path::new(&file.path);
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if matches!(
+            file_name,
+            "Cargo.toml"
+                | "Cargo.lock"
+                | "package.json"
+                | "package-lock.json"
+                | "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "bun.lock"
+                | "bun.lockb"
+                | "go.mod"
+                | "go.sum"
+                | "pyproject.toml"
+                | "uv.lock"
+                | "poetry.lock"
+        ) {
+            observed.insert(IntegrationObservedEffect::Package);
+        }
+        if file_name == "build.rs"
+            || path.components().any(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|part| matches!(part, "build" | "dist" | "target"))
+            })
+        {
+            observed.insert(IntegrationObservedEffect::Build);
+        }
+        if path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|part| matches!(part, "generated" | "gen"))
+        }) || file_name.contains(".generated.")
+        {
+            observed.insert(IntegrationObservedEffect::SharedGeneratedRoot);
+        }
+    }
+    let declared_effect = if observed.iter().any(|effect| {
+        matches!(
+            effect,
+            IntegrationObservedEffect::Package | IntegrationObservedEffect::Build
+        )
+    }) {
+        IntegrationEffect::Global
+    } else if observed.contains(&IntegrationObservedEffect::SharedGeneratedRoot) {
+        IntegrationEffect::GeneratedArtifacts
+    } else {
+        IntegrationEffect::Files
+    };
+    (declared_effect, observed.into_iter().collect())
 }
 
 async fn validate_git_repository_root(parent_workspace_root: &Path) -> Result<()> {
