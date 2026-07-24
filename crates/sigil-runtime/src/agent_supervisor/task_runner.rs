@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
     AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
@@ -447,6 +448,8 @@ impl AgentSupervisorTaskChildRunner {
             );
         }
         let agent = self.agent_for_step(&request.step)?;
+        let changeset_artifact_store =
+            changeset_artifact_store(parent_session, &request.options.workspace_root, &request)?;
         let child_task_id =
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
@@ -484,6 +487,7 @@ impl AgentSupervisorTaskChildRunner {
             agent,
             start,
             child_session,
+            changeset_artifact_store,
         })
     }
 
@@ -559,6 +563,7 @@ impl AgentSupervisorTaskChildRunner {
             agent,
             start,
             child_session,
+            changeset_artifact_store,
         } = preflight;
         let child_thread =
             self.supervisor
@@ -590,6 +595,7 @@ impl AgentSupervisorTaskChildRunner {
             child_session,
             worktree: None,
             parent_options: None,
+            changeset_artifact_store,
             _thread_release: thread_release,
         })
     }
@@ -652,6 +658,12 @@ impl AgentSupervisorTaskChildRunner {
                         _ => None,
                     };
                     if let Some(proposal) = &mut changeset_proposal {
+                        persist_changeset_artifact(
+                            prepared.changeset_artifact_store.as_ref(),
+                            &prepared.request,
+                            proposal,
+                        )
+                        .await?;
                         bind_child_integration_facts(&prepared.child_session, proposal)?;
                     }
                     let mut outcome = output.outcome;
@@ -1195,6 +1207,7 @@ struct PreflightParallelTaskChild {
     agent: Arc<BoxedAgent>,
     start: AgentTaskChildStart,
     child_session: Session,
+    changeset_artifact_store: Option<ChangesetArtifactStore>,
 }
 
 struct PreflightParallelTaskBatch {
@@ -1208,6 +1221,77 @@ struct PendingParallelWorktreeChild {
     preflight: PreflightParallelTaskChild,
     worktree: MaterializedGitWorktree,
     parent_options: AgentRunOptions,
+}
+
+#[derive(Clone)]
+struct ChangesetArtifactStore {
+    recorder: MutationEventRecorder,
+    workspace_id: String,
+}
+
+fn changeset_artifact_store(
+    parent_session: &Session,
+    parent_workspace_root: &Path,
+    request: &TaskChildSessionRunRequest,
+) -> Result<Option<ChangesetArtifactStore>> {
+    if !matches!(
+        request.step.effective_isolation(),
+        sigil_kernel::TaskIsolationMode::ChangesetOnly | sigil_kernel::TaskIsolationMode::Worktree
+    ) {
+        return Ok(None);
+    }
+    let Some(recorder) = parent_session.mutation_event_recorder() else {
+        return Ok(None);
+    };
+    Ok(Some(ChangesetArtifactStore {
+        recorder,
+        workspace_id: stable_workspace_id(parent_workspace_root)?,
+    }))
+}
+
+async fn persist_changeset_artifact(
+    store: Option<&ChangesetArtifactStore>,
+    request: &TaskChildSessionRunRequest,
+    proposal: &mut sigil_kernel::TaskChildChangeSetProposal,
+) -> Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let observed_digest = format!("{:x}", Sha256::digest(proposal.artifact.content.as_bytes()));
+    if observed_digest != proposal.artifact.content_sha256 {
+        anyhow::bail!(
+            "task changeset {} artifact digest changed before persistence",
+            proposal.change_set.id.as_str()
+        );
+    }
+    let operation_seed = format!(
+        "{}:{}:{}:{}",
+        request.task.task_id.as_str(),
+        request.plan_version,
+        request.step.step_id.as_str(),
+        proposal.change_set.id.as_str()
+    );
+    let operation_id = format!(
+        "task-changeset-artifact-{}",
+        stable_event_uuid("sigil-task-changeset-artifact", &operation_seed)
+    );
+    let source_path = std::path::PathBuf::from(".sigil-task-artifacts")
+        .join(format!("{}.diff", proposal.change_set.id.as_str()));
+    let recorder = store.recorder.clone();
+    let workspace_id = store.workspace_id.clone();
+    let bytes = proposal.artifact.content.as_bytes().to_vec();
+    let artifact_ref = tokio::task::spawn_blocking(move || {
+        recorder.capture_immutable_content_artifact(
+            &workspace_id,
+            &operation_id,
+            &source_path,
+            &bytes,
+        )
+    })
+    .await
+    .context("task changeset artifact persistence task failed")??;
+    proposal.artifact_ref = artifact_ref;
+    Ok(())
 }
 
 fn task_worktree_id(request: &TaskChildSessionRunRequest) -> String {
@@ -1416,6 +1500,7 @@ struct PreparedParallelTaskChild {
     child_session: Session,
     worktree: Option<MaterializedGitWorktree>,
     parent_options: Option<AgentRunOptions>,
+    changeset_artifact_store: Option<ChangesetArtifactStore>,
     _thread_release: TaskChildThreadReleaseGuard,
 }
 
@@ -1984,6 +2069,8 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
     {
         let mut request = request;
         let parent_options = request.options.clone();
+        let changeset_artifact_store =
+            changeset_artifact_store(parent_session, &parent_options.workspace_root, &request)?;
         let worktree =
             if request.step.effective_isolation() == sigil_kernel::TaskIsolationMode::Worktree {
                 if request.step.role != AgentRole::SubagentWrite
@@ -2144,6 +2231,12 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     _ => None,
                 };
                 if let Some(proposal) = &mut changeset_proposal {
+                    persist_changeset_artifact(
+                        changeset_artifact_store.as_ref(),
+                        &request,
+                        proposal,
+                    )
+                    .await?;
                     bind_child_integration_facts(&child_session, proposal)?;
                 }
                 let isolated_parent_snapshot_id =

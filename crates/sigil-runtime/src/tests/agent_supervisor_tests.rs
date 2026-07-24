@@ -3229,6 +3229,7 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
 async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_proposals() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
+    let logs = tempfile::tempdir()?;
     std::fs::write(temp.path().join("base.txt"), "unchanged\n")?;
     let workspace_id = sigil_kernel::stable_workspace_id(temp.path())?;
     let base_snapshot_id = sigil_kernel::build_workspace_snapshot(
@@ -3288,7 +3289,8 @@ async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_prop
         .iter()
         .map(|request| request.attempt_id.clone())
         .collect::<Vec<_>>();
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let parent_store = JsonlSessionStore::new(logs.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", parent_store)?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -3323,6 +3325,28 @@ async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_prop
         output.changeset_proposal.is_some()
             && output.isolated_parent_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
     }));
+    let artifact_recorder = session
+        .mutation_event_recorder()
+        .expect("parallel changeset task should own a mutation artifact recorder");
+    for output in &outputs {
+        let proposal = output
+            .changeset_proposal
+            .as_ref()
+            .expect("parallel changeset child should return a proposal");
+        assert!(
+            proposal
+                .artifact_ref
+                .starts_with("mutation-artifact:sha256:")
+        );
+        assert_eq!(
+            artifact_recorder.read_immutable_content_artifact(&proposal.artifact_ref)?,
+            proposal.artifact.content.as_bytes()
+        );
+        assert_eq!(
+            proposal.integration_facts.changeset_artifact_ref,
+            proposal.artifact_ref
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(temp.path().join("base.txt"))?,
         "unchanged\n"
@@ -4436,6 +4460,24 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
             && output.isolated_parent_snapshot_id.as_deref() == Some(base_snapshot_id.as_str())
             && output.changeset_proposal.is_some()
     }));
+    let artifact_recorder = session
+        .mutation_event_recorder()
+        .expect("parallel durable task should own a mutation artifact recorder");
+    for output in &outputs {
+        let proposal = output
+            .changeset_proposal
+            .as_ref()
+            .expect("parallel worktree child should return a proposal");
+        assert!(
+            proposal
+                .artifact_ref
+                .starts_with("mutation-artifact:sha256:")
+        );
+        assert_eq!(
+            artifact_recorder.read_immutable_content_artifact(&proposal.artifact_ref)?,
+            proposal.artifact.content.as_bytes()
+        );
+    }
     assert!(
         outputs[0]
             .changeset_proposal
@@ -4664,6 +4706,24 @@ async fn worktree_child_writes_only_inside_bound_workspace_and_returns_review_ar
             .any(|file| file.path == "base.txt")
     );
     assert!(proposal.artifact.content.contains("isolated edit"));
+    assert!(
+        proposal
+            .artifact_ref
+            .starts_with("mutation-artifact:sha256:")
+    );
+    let persisted_artifact = session
+        .mutation_event_recorder()
+        .expect("durable parent session should own a mutation artifact recorder")
+        .read_immutable_content_artifact(&proposal.artifact_ref)?;
+    assert_eq!(
+        persisted_artifact,
+        proposal.artifact.content.as_bytes(),
+        "the durable review artifact must preserve the exact extracted diff"
+    );
+    assert_eq!(
+        proposal.integration_facts.changeset_artifact_ref, proposal.artifact_ref,
+        "integration facts must bind the durable artifact rather than the transient inline ref"
+    );
 
     let prepared_index = session
         .entries()
