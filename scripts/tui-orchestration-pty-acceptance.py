@@ -35,6 +35,9 @@ APPROVAL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-3597"
 APPROVAL_PATH = "approval-note.txt"
 APPROVAL_CONTENT = "approved task write\n"
 APPROVAL_TOOL_CALL_ID = "approval-write-call"
+CONTINUE_FINAL_CANARY = "ORCHESTRATION-PTY-CONTINUE-FINAL-9531"
+CONTINUE_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-4608"
+CANCEL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-5719"
 READ_STEP_IDS = ("inspect_kernel", "inspect_runtime")
 READ_STEP_TITLES = ("Inspect kernel route", "Inspect runtime route")
 PLAN_ARGS = json.dumps(
@@ -84,6 +87,38 @@ APPROVAL_WRITE_ARGS = json.dumps(
     {"path": APPROVAL_PATH, "content": APPROVAL_CONTENT},
     separators=(",", ":"),
 )
+CONTINUE_PLAN_ARGS = json.dumps(
+    {
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [
+            {
+                "step_id": "continue_after_crash",
+                "title": "Continue after crash",
+                "role": "executor",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
+CANCEL_PLAN_ARGS = json.dumps(
+    {
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [
+            {
+                "step_id": "cancel_in_flight",
+                "title": "Cancel in-flight task",
+                "role": "executor",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
 
 
 class AcceptanceError(RuntimeError):
@@ -96,9 +131,13 @@ class SessionAudit:
     completed_steps: tuple[str, ...]
     final_answer_count: int
     approval_final_answer_count: int
+    continue_final_answer_count: int
     task_final_count: int
     approval_route_resolved_count: int
     approved_tool_call_count: int
+    paused_task_run_count: int
+    interrupted_step_count: int
+    cancelled_task_run_count: int
     failed_run_count: int
 
 
@@ -109,6 +148,10 @@ class FixtureState:
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
     active_reads: int = 0
     max_concurrent_reads: int = 0
+    expected_disconnects: int = 0
+    crash_release: threading.Event = dataclasses.field(default_factory=threading.Event)
+    cancel_release: threading.Event = dataclasses.field(default_factory=threading.Event)
+    cancel_settled: threading.Event = dataclasses.field(default_factory=threading.Event)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
     def start_request(self, kind: str) -> int:
@@ -134,10 +177,25 @@ class FixtureState:
         with self.lock:
             self.protocol_errors.append(f"{type(error).__name__}: {error}")
 
+    def record_expected_disconnect(self) -> None:
+        with self.lock:
+            self.expected_disconnects += 1
+
 
 class FixtureServer(ThreadingHTTPServer):
     daemon_threads = True
     fixture: FixtureState
+
+    def handle_error(
+        self,
+        request: object,
+        client_address: tuple[str, int],
+    ) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            self.fixture.record_expected_disconnect()
+            return
+        super().handle_error(request, client_address)
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -154,6 +212,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract.
         kind = ""
+        request_number = 0
         try:
             payload = self._read_json()
             if not self.path.endswith("/chat/completions"):
@@ -167,7 +226,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     HANDOFF_ARGS,
                 )
             elif kind == "planner":
-                arguments = PLAN_ARGS if request_number == 1 else APPROVAL_PLAN_ARGS
+                arguments = {
+                    1: PLAN_ARGS,
+                    2: APPROVAL_PLAN_ARGS,
+                    3: CONTINUE_PLAN_ARGS,
+                    4: CANCEL_PLAN_ARGS,
+                }.get(request_number)
+                if arguments is None:
+                    raise AcceptanceError(
+                        f"unexpected planner request {request_number}"
+                    )
                 self._send_tool_call(
                     f"task-plan-call-{request_number}",
                     "task_plan_update",
@@ -185,17 +253,49 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 )
             elif kind == "write:after_tool":
                 self._send_text("approved write completed")
+            elif kind == "continue:step":
+                if request_number == 1:
+                    if not self.fixture.crash_release.wait(timeout=30):
+                        raise TimeoutError("crash fixture was not released")
+                    self._send_text("obsolete pre-crash response")
+                else:
+                    self._send_text("resumed step completed")
+            elif kind == "cancel:step":
+                if not self.fixture.cancel_release.wait(timeout=30):
+                    raise TimeoutError("cancel fixture was not released")
+                self._send_text("obsolete cancelled response")
             elif kind == "synthesis":
-                final = FINAL_CANARY if request_number == 1 else APPROVAL_FINAL_CANARY
+                final = {
+                    1: FINAL_CANARY,
+                    2: APPROVAL_FINAL_CANARY,
+                    3: CONTINUE_FINAL_CANARY,
+                }.get(request_number)
+                if final is None:
+                    raise AcceptanceError(
+                        f"unexpected synthesis request {request_number}"
+                    )
                 self._send_text(final)
             else:
                 raise AcceptanceError(f"unsupported request kind {kind}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
-            self.fixture.record_error(error)
-            self._send_json({"error": f"fixture failure: {error}"}, status=500)
+            expected_disconnect = (
+                kind in {"continue:step", "cancel:step"}
+                and request_number == 1
+                and isinstance(error, (BrokenPipeError, ConnectionResetError))
+            )
+            if expected_disconnect:
+                self.fixture.record_expected_disconnect()
+            else:
+                self.fixture.record_error(error)
+                try:
+                    self._send_json({"error": f"fixture failure: {error}"}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
         finally:
             if kind:
                 self.fixture.finish_request(kind)
+            if kind == "cancel:step":
+                self.fixture.cancel_settled.set()
 
     def _read_json(self) -> object:
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -350,6 +450,10 @@ def classify_request(payload: object) -> str:
         if has_tool_result(payload, APPROVAL_TOOL_CALL_ID):
             return "write:after_tool"
         return "write:request"
+    if "Step: continue_after_crash" in text and "Role: executor" in text:
+        return "continue:step"
+    if "Step: cancel_in_flight" in text and "Role: executor" in text:
+        return "cancel:step"
     raise AcceptanceError("provider request does not match a production orchestration role")
 
 
@@ -413,9 +517,13 @@ def read_session_audit(path: Path) -> SessionAudit:
     completed_steps: list[str] = []
     final_answer_count = 0
     approval_final_answer_count = 0
+    continue_final_answer_count = 0
     task_final_count = 0
     approval_route_resolved_count = 0
     approved_tool_call_count = 0
+    paused_task_run_count = 0
+    interrupted_step_count = 0
+    cancelled_task_run_count = 0
     approval_child_refs: set[str] = set()
     failed_run_count = 0
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -440,6 +548,8 @@ def read_session_audit(path: Path) -> SessionAudit:
                 final_answer_count += 1
             elif assistant.get("content") == APPROVAL_FINAL_CANARY:
                 approval_final_answer_count += 1
+            elif assistant.get("content") == CONTINUE_FINAL_CANARY:
+                continue_final_answer_count += 1
         control = entry.get("control")
         if not isinstance(control, dict):
             continue
@@ -450,8 +560,15 @@ def read_session_audit(path: Path) -> SessionAudit:
             and isinstance(step.get("step_id"), str)
         ):
             completed_steps.append(step["step_id"])
+        if isinstance(step, dict) and step.get("status") == "interrupted":
+            interrupted_step_count += 1
         if isinstance(control.get("task_final_answer_committed"), dict):
             task_final_count += 1
+        task_run = control.get("task_run")
+        if isinstance(task_run, dict) and task_run.get("status") == "paused":
+            paused_task_run_count += 1
+        if isinstance(task_run, dict) and task_run.get("status") == "cancelled":
+            cancelled_task_run_count += 1
         approval_route = control.get("task_subagent_approval_route")
         if (
             isinstance(approval_route, dict)
@@ -483,9 +600,13 @@ def read_session_audit(path: Path) -> SessionAudit:
         completed_steps=tuple(completed_steps),
         final_answer_count=final_answer_count,
         approval_final_answer_count=approval_final_answer_count,
+        continue_final_answer_count=continue_final_answer_count,
         task_final_count=task_final_count,
         approval_route_resolved_count=approval_route_resolved_count,
         approved_tool_call_count=approved_tool_call_count,
+        paused_task_run_count=paused_task_run_count,
+        interrupted_step_count=interrupted_step_count,
+        cancelled_task_run_count=cancelled_task_run_count,
         failed_run_count=failed_run_count,
     )
 
@@ -593,6 +714,63 @@ def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         )
 
 
+def validate_continue_audit(audit: SessionAudit, fixture: FixtureState) -> None:
+    if audit.paused_task_run_count != 1 or audit.interrupted_step_count != 1:
+        raise AcceptanceError(
+            "crashed task did not persist one paused task and one interrupted step"
+        )
+    if audit.completed_steps.count("continue_after_crash") != 1:
+        raise AcceptanceError("continued task did not complete its interrupted step")
+    if audit.continue_final_answer_count != 1 or audit.task_final_count != 3:
+        raise AcceptanceError("continued task did not commit one unique parent final")
+    if fixture.request_counts.get("continue:step") != 2:
+        raise AcceptanceError("continued task did not dispatch once before and once after crash")
+    if fixture.request_counts.get("synthesis") != 3:
+        raise AcceptanceError("continued task synthesis did not run exactly once")
+
+
+def validate_cancel_audit(audit: SessionAudit, fixture: FixtureState) -> None:
+    if audit.cancelled_task_run_count != 1:
+        raise AcceptanceError("cancelled task did not persist exactly one cancelled terminal")
+    if audit.completed_steps.count("cancel_in_flight") != 0:
+        raise AcceptanceError("cancelled in-flight step was incorrectly committed")
+    if audit.task_final_count != 3:
+        raise AcceptanceError("cancelled task incorrectly committed a parent final")
+    if fixture.request_counts.get("cancel:step") != 1:
+        raise AcceptanceError("cancelled task provider dispatch count is not exactly one")
+    if fixture.request_counts.get("synthesis") != 3:
+        raise AcceptanceError("cancelled task incorrectly reached synthesis")
+
+
+def wait_for_fixture_request(
+    fixture: FixtureState,
+    kind: str,
+    count: int,
+    runner: object,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        runner.read_available(0.01)
+        with fixture.lock:
+            observed = fixture.request_counts.get(kind, 0)
+            errors = tuple(fixture.protocol_errors)
+        if errors:
+            raise AcceptanceError(f"fixture protocol errors: {errors}")
+        if observed >= count:
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"timed out waiting for fixture request {kind} #{count}")
+
+
+def submit_user_prompt(runner: object, prompt: str) -> None:
+    # Completed tool activity retains focus so ordinary characters do not
+    # accidentally edit the composer. Esc returns an idle TUI to the composer.
+    runner.send(b"\x1b")
+    runner.type_text(prompt)
+    runner.send("\r")
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -651,8 +829,7 @@ def main() -> int:
         )
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
-        runner.type_text(USER_PROMPT)
-        runner.send("\r")
+        submit_user_prompt(runner, USER_PROMPT)
         session_path, audit = wait_for_audit(
             session_dir,
             runner,
@@ -675,8 +852,7 @@ def main() -> int:
             raise AcceptanceError("TUI never rendered the parallel task batch progress")
         validate_audit(audit, fixture)
 
-        runner.type_text(APPROVAL_USER_PROMPT)
-        runner.send("\r")
+        submit_user_prompt(runner, APPROVAL_USER_PROMPT)
         runner.wait_until(
             lambda text: "Review Tool Call" in text
             and "write_file" in text
@@ -706,6 +882,92 @@ def main() -> int:
         if (workspace / APPROVAL_PATH).read_text(encoding="utf-8") != APPROVAL_CONTENT:
             raise AcceptanceError("approved task write did not reach the workspace")
         validate_approval_audit(approval_audit, fixture)
+
+        submit_user_prompt(runner, CONTINUE_USER_PROMPT)
+        wait_for_fixture_request(
+            fixture,
+            "continue:step",
+            1,
+            runner,
+            deadline.remaining(),
+        )
+        runner.stop()
+        runner = None
+        fixture.crash_release.set()
+
+        runner = SUPPORT.PtyRunner(
+            [
+                str(frozen_binary),
+                "--config",
+                str(config_path),
+                "resume",
+                str(session_path),
+            ],
+            workspace,
+            env,
+            output_dir / "resume-process.log",
+        )
+        runner.start()
+        SUPPORT.wait_for_main_tui(runner, deadline.remaining())
+        session_path, interrupted_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.paused_task_run_count == 1
+            and value.interrupted_step_count == 1,
+            deadline.remaining(),
+        )
+        if interrupted_audit.task_final_count != 2:
+            raise AcceptanceError("crash-interrupted task committed a final before continue")
+        runner.type_text("/task continue")
+        runner.send("\r")
+        session_path, continue_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.continue_final_answer_count == 1
+            and value.task_final_count == 3,
+            deadline.remaining(),
+        )
+        continued_screen = runner.wait_until(
+            lambda text: CONTINUE_FINAL_CANARY in text
+            and "Thinking..." not in text
+            and "Replying..." not in text,
+            deadline.remaining(),
+            "settled continued task final answer",
+            final_screen=True,
+        )
+        if continued_screen.count(CONTINUE_FINAL_CANARY) != 1:
+            raise AcceptanceError("TUI rendered the continued task final more than once")
+        validate_continue_audit(continue_audit, fixture)
+
+        submit_user_prompt(runner, CANCEL_USER_PROMPT)
+        wait_for_fixture_request(
+            fixture,
+            "cancel:step",
+            1,
+            runner,
+            deadline.remaining(),
+        )
+        runner.send(b"\x1b")
+        session_path, cancel_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.cancelled_task_run_count == 1,
+            deadline.remaining(),
+        )
+        fixture.cancel_release.set()
+        if not fixture.cancel_settled.wait(timeout=deadline.remaining(5.0)):
+            raise AcceptanceError("cancelled provider request did not settle")
+        validate_cancel_audit(cancel_audit, fixture)
+        if fixture.protocol_errors:
+            raise AcceptanceError(
+                f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+            )
+        runner.wait_until(
+            lambda text: "cancelled" in text.lower(),
+            deadline.remaining(),
+            "visible cancelled task state",
+            final_screen=True,
+        )
         runner.quit(timeout=deadline.remaining(10.0))
         runner.stop()
         runner = None
@@ -728,7 +990,11 @@ def main() -> int:
                 "completed_step_count": len(audit.completed_steps),
                 "unique_parent_final_count": audit.final_answer_count,
                 "approved_write_count": approval_audit.approved_tool_call_count,
-                "completed_task_count": approval_audit.task_final_count,
+                "continued_task_interruption_count": (
+                    continue_audit.interrupted_step_count
+                ),
+                "cancelled_task_count": cancel_audit.cancelled_task_run_count,
+                "completed_task_count": continue_audit.task_final_count,
                 "route_kill_switch_count": audit.event_counts.get(
                     "orchestration_route_disabled",
                     0,
@@ -736,6 +1002,7 @@ def main() -> int:
             },
             "evidence": {
                 "pty_log": "tui-process.log",
+                "resume_pty_log": "resume-process.log",
                 "session": "sessions/parent.jsonl",
             },
             "privacy": {
