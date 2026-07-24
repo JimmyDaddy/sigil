@@ -463,20 +463,57 @@ fn resolve_model_eval_fixture_roots(launch_cwd: &Path, cases: &[String]) -> Resu
         anyhow::bail!("model eval requires at least one --case");
     }
     let fixture_root = launch_cwd.join("dev/evals/model-fixtures");
-    cases
-        .iter()
-        .map(|case| {
-            let relative = Path::new(case);
-            if relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                anyhow::bail!("model eval case must be a safe relative fixture path: {case}");
+    let mut fixture_roots = Vec::new();
+    for case in cases {
+        if case == "orchestration-v1" {
+            fixture_roots.extend(resolve_frozen_orchestration_fixture_roots(&fixture_root)?);
+            continue;
+        }
+        let relative = Path::new(case);
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            anyhow::bail!("model eval case must be a safe relative fixture path: {case}");
+        }
+        fixture_roots.push(fixture_root.join(relative));
+    }
+    Ok(fixture_roots)
+}
+
+fn resolve_frozen_orchestration_fixture_roots(fixture_root: &Path) -> Result<Vec<PathBuf>> {
+    let corpus_root = fixture_root.join("orchestration-v1");
+    let mut fixture_roots = Vec::new();
+    for case_class in ["negative", "positive"] {
+        let class_root = corpus_root.join(case_class);
+        let metadata = std::fs::symlink_metadata(&class_root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!(
+                "orchestration-v1 case class must be a regular directory: {}",
+                class_root.display()
+            );
+        }
+        for entry in std::fs::read_dir(&class_root)? {
+            let entry = entry?;
+            let metadata = entry.file_type()?;
+            if metadata.is_symlink() || !metadata.is_dir() {
+                anyhow::bail!(
+                    "orchestration-v1 case must be a regular directory: {}",
+                    entry.path().display()
+                );
             }
-            Ok(fixture_root.join(relative))
-        })
-        .collect()
+            fixture_roots.push(entry.path());
+        }
+    }
+    fixture_roots.sort();
+    if fixture_roots.len() != 30 {
+        anyhow::bail!(
+            "orchestration-v1 corpus must contain exactly 30 cases, found {}",
+            fixture_roots.len()
+        );
+    }
+    Ok(fixture_roots)
 }
 
 fn parse_model_eval_cost_microusd(raw: &str) -> Result<u64> {
