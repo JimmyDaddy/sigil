@@ -1565,6 +1565,20 @@ where
             return Ok(TaskRunStatus::Completed);
         }
 
+        if let Some(reason) =
+            integration_synthesis_block_reason(session, &request.task_id, plan_version)
+        {
+            append_task_run(
+                session,
+                handler,
+                request,
+                TaskRunStatus::Paused,
+                Some(reason.clone()),
+            )?;
+            let _ = handler.handle(RunEvent::Notice(reason));
+            return Ok(TaskRunStatus::Paused);
+        }
+
         if let Some((attempt, result)) = latest_completed_synthesis_result(task, plan_version) {
             let recovered_final_text = load_participant_final_answer(session, result)?;
             commit_task_final_answer(
@@ -1740,6 +1754,29 @@ where
             return Ok(TaskRunStatus::Completed);
         }
     }
+}
+
+fn integration_synthesis_block_reason(
+    session: &Session,
+    task_id: &TaskId,
+    plan_version: u32,
+) -> Option<String> {
+    let projection = IntegrationProjection::from_entries(session.entries());
+    for state in projection.plans.values().filter(|state| {
+        state.recorded.plan.task_id == *task_id && state.recorded.plan.plan_version == plan_version
+    }) {
+        if state.inconsistent {
+            return Some(format!(
+                "integration state is inconsistent for plan v{plan_version}; resolve integration audit before synthesis"
+            ));
+        }
+        if state.synthesis_ready_attempt().is_none() {
+            return Some(format!(
+                "integration review, promotion, and authoritative parent verification are incomplete for plan v{plan_version}"
+            ));
+        }
+    }
+    None
 }
 
 enum SettledTaskChildSessionBatch {

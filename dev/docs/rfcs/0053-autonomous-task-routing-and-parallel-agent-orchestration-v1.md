@@ -1520,8 +1520,11 @@ O6f 协议检查点（尚不构成 O6f 完成）：
   `GitRefAdvance` 只在 clean repo、目标 ref 未 checkout、expected-old 仍匹配且 candidate 为其后代
   时执行单次 CAS，不修改用户 worktree。authority consumed 与 Prepared 都要求 durable ack；
   parent/ref drift、checked-out ref、ack 拒绝和 digest/file preflight mismatch 均在首个目标 effect
-  前 fail closed，private candidate 会清理。parent-check runner、promotion recovery reconciliation
-  与 task runner synthesis gate 仍属于后续 O6f 切片。
+  前 fail closed，private candidate 会清理。parent-check runner 现在会校验 preview-bound policy，
+  在同一 policy scope 的 authoritative target snapshot 上复用 RFC-0003 checks；GitRef checkout
+  保留到检查 terminal 后再清理。task runner 只在当前版本全部 integration plans 都返回
+  `synthesis_ready_attempt` 后启动 Synthesis。promotion recovery reconciliation 仍属于后续 O6f
+  切片。
 
 O6f：promotion barrier、parent mutation 与 final verification。
 

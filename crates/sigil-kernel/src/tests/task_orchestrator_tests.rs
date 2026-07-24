@@ -18,25 +18,26 @@ use crate::{
     CheckpointRestored, CompletionRequest, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DurableEventType, EventClass, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionFuture, ExecutionMutationProfile, ExecutionReceipt,
-    ExecutionRequest, FileType, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass,
-    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
-    ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-    TaskVerificationRerunRequest, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
-    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
-    WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id, task_participant_attempt_id,
-    task_participant_input_hash, task_participant_session_ref, write_file_with_mutation,
+    ExecutionRequest, FileType, IntegrationPlanId, IntegrationPlanRecorded, InteractionMode,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
+    MutationPrepared, MutationSubject, MutationSyncClass, PermissionConfig, Provider,
+    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
+    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId,
+    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceSnapshotId,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id,
+    task_participant_attempt_id, task_participant_input_hash, task_participant_session_ref,
+    write_file_with_mutation,
 };
 
 use super::{
@@ -1301,6 +1302,78 @@ async fn synthesis_rate_limit_pauses_after_bounded_retry_budget() -> Result<()> 
             .filter(|schedule| schedule.purpose == TaskParticipantPurpose::Synthesis)
             .count(),
         2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn synthesis_does_not_start_before_integration_parent_verification() -> Result<()> {
+    let synthesis_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedControlChildRunner {
+            planner_calls: Arc::new(AtomicUsize::new(0)),
+            synthesis_calls: Arc::clone(&synthesis_calls),
+            planner_succeeds: true,
+        });
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let mut session = Session::new("fixture", "model");
+    seed_single_step_task(&mut session, crate::AgentRole::Executor)?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id,
+        role: crate::AgentRole::Executor,
+        status: TaskStepStatus::Completed,
+        title: Some("single step".to_owned()),
+        summary: Some("step complete".to_owned()),
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::IntegrationPlanRecorded(
+        IntegrationPlanRecorded {
+            plan: crate::IntegrationPlan {
+                plan_id: IntegrationPlanId::new("plan-synthesis-gate")?,
+                task_id: task_id.clone(),
+                plan_version: 1,
+                base_snapshot_id: "snapshot-synthesis-gate".to_owned(),
+                base_representation: crate::IntegrationBaseRepresentation::Unknown,
+                proposals: Vec::new(),
+                conflicts: Vec::new(),
+                lanes: Vec::new(),
+            },
+        },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "do not synthesize before parent checks".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(synthesis_calls.load(Ordering::SeqCst), 0);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert!(task.reason.as_deref().is_some_and(|reason| {
+        reason.contains("authoritative parent verification are incomplete")
+    }));
+    assert!(
+        task.participant_attempts_for(TaskParticipantPurpose::Synthesis, Some(1), None)
+            .is_empty()
     );
     Ok(())
 }
