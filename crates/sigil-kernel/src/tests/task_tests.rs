@@ -83,6 +83,19 @@ fn changeset_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec>
     })
 }
 
+fn worktree_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: step_id(id)?,
+        title: format!("Edit {id} in worktree"),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentWrite,
+        depends_on,
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::Worktree),
+    })
+}
+
 fn step_projection(
     task_id: TaskId,
     plan_version: u32,
@@ -840,6 +853,48 @@ fn task_dag_changeset_ready_queue_batches_independent_proposals() -> Result<()> 
     assert!(queue.deferred.iter().any(|step| {
         step.step_id.as_str() == "workspace_write"
             && step.reason == TaskReadyDeferredReason::RunningChangesetOnly
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_dag_worktree_ready_queue_batches_independent_writers() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            worktree_step("worktree_a", Vec::new())?,
+            worktree_step("worktree_b", Vec::new())?,
+            worktree_step("worktree_c", Vec::new())?,
+            write_step("workspace_write", Vec::new())?,
+        ],
+        reason: None,
+    })?;
+
+    let queue = graph.ready_queue(
+        &std::collections::BTreeMap::new(),
+        TaskReadyQueueOptions::new(4).with_max_concurrent_changeset_only(2),
+    );
+
+    assert!(queue.read_only_batch.is_empty());
+    assert!(queue.changeset_only_batch.is_empty());
+    assert_eq!(
+        queue
+            .worktree_batch
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["worktree_a", "worktree_b"]
+    );
+    assert!(queue.sequential_step.is_none());
+    assert!(queue.deferred.iter().any(|step| {
+        step.step_id.as_str() == "worktree_c"
+            && step.reason == TaskReadyDeferredReason::ConcurrencyBudget
+    }));
+    assert!(queue.deferred.iter().any(|step| {
+        step.step_id.as_str() == "workspace_write"
+            && step.reason == TaskReadyDeferredReason::RunningWorktree
     }));
     Ok(())
 }

@@ -312,6 +312,58 @@ async fn frozen_dirty_overlay_restores_from_exact_durable_artifact_bindings() ->
 }
 
 #[tokio::test]
+async fn frozen_clean_base_restores_empty_overlay_and_remains_a_clean_commit() -> Result<()> {
+    let repository = TestRepository::new()?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let recorder = repository.mutation_recorder()?;
+    let frozen = freeze_git_worktree_base(GitWorktreeBaseFreezeRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id: base_snapshot_id.clone(),
+        operation_id: "clean-overlay-durable-restore".to_owned(),
+        artifact_recorder: recorder.clone(),
+    })
+    .await?;
+    assert_eq!(frozen.overlay_entry_count(), 0);
+
+    let restored = restore_frozen_git_worktree_base(FrozenGitWorktreeBaseRestoreRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        base_snapshot_id,
+        base_commit: frozen.base_commit().to_owned(),
+        overlay_digest: frozen.overlay_digest().to_owned(),
+        overlay_artifact_ref: frozen.overlay_artifact_ref().clone(),
+        overlay_content_artifact_refs: Vec::new(),
+        overlay_entry_count: 0,
+        artifact_recorder: recorder,
+    })
+    .await?;
+    let materialized =
+        materialize_git_worktree_from_frozen_base(&restored, "clean-restored-child").await?;
+    assert_eq!(
+        materialized.overlay_digest(),
+        Some(frozen.overlay_digest()),
+        "the durable empty overlay binding remains available for recovery"
+    );
+    fs::write(
+        materialized.workspace_root().join("created.txt"),
+        "created\n",
+    )?;
+    let proposal = materialized
+        .extract_changeset(
+            ChangeSetId::new("changeset-clean-restored")?,
+            "Clean base edit",
+            "Classify an empty overlay as a clean commit",
+        )
+        .await?
+        .expect("worker edit should produce a proposal");
+    assert!(matches!(
+        proposal.integration_facts.base_representation,
+        IntegrationBaseRepresentation::CleanCommit { .. }
+    ));
+    materialized.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn frozen_overlay_rejects_secret_paths_before_owned_workspace_creation() -> Result<()> {
     let repository = TestRepository::new()?;
     fs::write(

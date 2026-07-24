@@ -76,6 +76,12 @@ pub(super) fn runnable_steps_for_continue(
             .iter()
             .map(|step| step.step_id.clone())
             .collect::<Vec<_>>()
+    } else if !queue.worktree_batch.is_empty() {
+        queue
+            .worktree_batch
+            .iter()
+            .map(|step| step.step_id.clone())
+            .collect::<Vec<_>>()
     } else if let Some(step) = queue.sequential_step.as_ref() {
         vec![step.step_id.clone()]
     } else {
@@ -132,6 +138,7 @@ pub(super) fn task_ready_deferred_reason_label(reason: TaskReadyDeferredReason) 
         TaskReadyDeferredReason::ConcurrencyBudget => "concurrency_budget",
         TaskReadyDeferredReason::RunningReadOnly => "running_read_only",
         TaskReadyDeferredReason::RunningChangesetOnly => "running_changeset_only",
+        TaskReadyDeferredReason::RunningWorktree => "running_worktree",
         TaskReadyDeferredReason::RunningWrite => "running_write",
         TaskReadyDeferredReason::SequentialWrite => "sequential_write",
     }

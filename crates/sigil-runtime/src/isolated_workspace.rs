@@ -397,7 +397,6 @@ pub async fn restore_frozen_git_worktree_base(
         || request.base_commit.trim().is_empty()
         || request.overlay_digest.trim().is_empty()
         || request.overlay_artifact_ref.trim().is_empty()
-        || request.overlay_entry_count == 0
     {
         bail!("frozen Git worktree restore binding is incomplete");
     }
@@ -1474,14 +1473,20 @@ async fn extract_git_worktree_changeset(
     };
     let artifact_ref = format!("inline:sha256:{content_sha256}");
     let (declared_effect, observed_effects) = materialized_integration_effect(&change_set);
-    let base_representation = match materialized.overlay_digest() {
-        Some(overlay_digest) => IntegrationBaseRepresentation::SnapshotWorkspace {
+    let base_representation = match (
+        materialized.overlay_entry_count(),
+        materialized.overlay_digest(),
+    ) {
+        (1.., Some(overlay_digest)) => IntegrationBaseRepresentation::SnapshotWorkspace {
             base_commit: materialized.base_commit().to_owned(),
             overlay_digest: overlay_digest.to_owned(),
         },
-        None => IntegrationBaseRepresentation::CleanCommit {
+        (0, _) => IntegrationBaseRepresentation::CleanCommit {
             base_commit: materialized.base_commit().to_owned(),
         },
+        (_, None) => {
+            bail!("isolated worktree overlay entries are missing their durable digest");
+        }
     };
     let integration_facts = IntegrationProposalFacts::from_changeset(
         &change_set,

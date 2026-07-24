@@ -1387,6 +1387,129 @@ async fn synthesis_does_not_start_before_integration_parent_verification() -> Re
 }
 
 #[test]
+fn promoted_integration_reconciles_blocked_source_step_once() -> Result<()> {
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let plan_id = IntegrationPlanId::new("plan-promoted-step")?;
+    let attempt_id = crate::IntegrationPromotionAttemptId::new("attempt-promoted-step-reconcile")?;
+    let preview_digest = format!("sha256:{}", "a".repeat(64));
+    let mut session = Session::new("fixture", "model");
+    seed_single_step_task(&mut session, crate::AgentRole::SubagentWrite)?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_id.clone(),
+        role: crate::AgentRole::SubagentWrite,
+        status: TaskStepStatus::Blocked,
+        title: Some("single step".to_owned()),
+        summary: Some("isolated proposal ready".to_owned()),
+        reason: Some("integration review required".to_owned()),
+    }))?;
+
+    let plan = crate::IntegrationPlan {
+        plan_id: plan_id.clone(),
+        task_id: task_id.clone(),
+        plan_version: 1,
+        base_snapshot_id: "snapshot-promoted-step".to_owned(),
+        base_representation: crate::IntegrationBaseRepresentation::CleanCommit {
+            base_commit: "b".repeat(40),
+        },
+        proposals: vec![crate::IntegrationProposalSpec {
+            change_set_id: crate::ChangeSetId::new("changeset-promoted-step")?,
+            step_id: step_id.clone(),
+            base_snapshot_id: "snapshot-promoted-step".to_owned(),
+            changed_paths: vec!["src/lib.rs".to_owned()],
+            depends_on: Vec::new(),
+            generated_artifacts: Vec::new(),
+            effect: crate::IntegrationEffect::Files,
+            verification_scope_hash: DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned(),
+            facts: crate::IntegrationProposalFacts::default(),
+        }],
+        conflicts: Vec::new(),
+        lanes: Vec::new(),
+    };
+    let promotion = crate::IntegrationPromotionRecorded {
+        plan_id: plan_id.clone(),
+        attempt_id: Some(attempt_id.clone()),
+        status: crate::IntegrationPromotionStatus::Promoted,
+        preview_digest: preview_digest.clone(),
+        target: crate::IntegrationPromotionTarget::WorkspaceApply {
+            expected_snapshot_id: "snapshot-promoted-step".to_owned(),
+            expected_revision: 0,
+        },
+        authority_nonce: Some("nonce-promoted-step".to_owned()),
+        effect: Some(crate::IntegrationPromotionEffect::WorkspaceApplied {
+            promoted_snapshot_id: "snapshot-parent-promoted-step".to_owned(),
+            promoted_revision: 1,
+        }),
+        recovery_binding: None,
+        reason: None,
+        recorded_at_unix_ms: 1,
+    };
+    let verification = crate::TaskParentVerificationRecorded {
+        attempt_id: attempt_id.clone(),
+        plan_id: plan_id.clone(),
+        preview_digest,
+        promoted_snapshot_id: "snapshot-parent-promoted-step".to_owned(),
+        policy_digest: format!("sha256:{}", "c".repeat(64)),
+        verdict: VerificationVerdict::NotApplicable,
+        receipts: Vec::new(),
+        reason: Some("no parent checks required".to_owned()),
+        recorded_at_unix_ms: 2,
+    };
+    let integration = crate::IntegrationProjection {
+        plans: BTreeMap::from([(
+            plan_id,
+            crate::IntegrationPlanState {
+                recorded: IntegrationPlanRecorded { plan },
+                lanes: BTreeMap::new(),
+                lifecycle_lanes: BTreeMap::new(),
+                promotion_previews: BTreeMap::new(),
+                consumed_promotion_authorities: BTreeMap::new(),
+                promotions: vec![promotion],
+                parent_verifications: BTreeMap::from([(attempt_id, verification)]),
+                inconsistent: false,
+            },
+        )]),
+        latest_plan_id: None,
+    };
+    let mut handler = RecordingEventHandler::default();
+
+    assert_eq!(
+        super::runner::reconcile_promoted_integration_steps(
+            &mut session,
+            &mut handler,
+            &task_id,
+            &integration,
+        )?,
+        1
+    );
+    assert_eq!(
+        super::runner::reconcile_promoted_integration_steps(
+            &mut session,
+            &mut handler,
+            &task_id,
+            &integration,
+        )?,
+        0
+    );
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    let step = task
+        .steps
+        .get(&(1, step_id))
+        .expect("source step was projected");
+    assert_eq!(step.status, TaskStepStatus::Completed);
+    assert_eq!(step.summary.as_deref(), Some("isolated proposal ready"));
+    assert!(
+        step.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("passed parent verification"))
+    );
+    Ok(())
+}
+
+#[test]
 fn integration_output_appends_the_exact_runtime_promotion_preview() -> Result<()> {
     let task_id = TaskId::new("task_integration_output")?;
     let plan_id = IntegrationPlanId::new("plan-integration-output")?;

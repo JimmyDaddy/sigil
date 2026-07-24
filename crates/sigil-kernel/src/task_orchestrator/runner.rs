@@ -606,6 +606,13 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let integration_projection = IntegrationProjection::from_entries(session.entries());
+        reconcile_promoted_integration_steps(
+            session,
+            handler,
+            &request.task_id,
+            &integration_projection,
+        )?;
         let projection = session.task_state_projection();
         let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
             anyhow!(
@@ -2184,6 +2191,113 @@ where
             return Ok(TaskRunStatus::Completed);
         }
     }
+}
+
+pub(super) fn reconcile_promoted_integration_steps<H>(
+    session: &mut Session,
+    handler: &mut H,
+    task_id: &TaskId,
+    integration: &IntegrationProjection,
+) -> Result<usize>
+where
+    H: EventHandler + Send,
+{
+    let task_projection = session.task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("task is missing during promoted integration reconciliation"))?;
+    let mut bindings =
+        BTreeMap::<TaskStepId, (IntegrationPlanId, crate::IntegrationPromotionAttemptId)>::new();
+    for state in integration.plans.values().filter(|state| {
+        state.recorded.plan.task_id == *task_id
+            && task.latest_plan_version == Some(state.recorded.plan.plan_version)
+    }) {
+        let Some(attempt_id) = state.synthesis_ready_attempt() else {
+            continue;
+        };
+        for proposal in &state.recorded.plan.proposals {
+            let binding = (state.recorded.plan.plan_id.clone(), attempt_id.clone());
+            if bindings
+                .insert(proposal.step_id.clone(), binding.clone())
+                .is_some_and(|existing| existing != binding)
+            {
+                bail!(
+                    "task step {} belongs to multiple promoted integration plans",
+                    proposal.step_id.as_str()
+                );
+            }
+        }
+    }
+    if bindings.is_empty() {
+        return Ok(0);
+    }
+
+    let plan_version = task
+        .latest_plan_version
+        .ok_or_else(|| anyhow!("promoted integration task has no accepted plan"))?;
+    let plan = task
+        .plans
+        .get(&plan_version)
+        .ok_or_else(|| anyhow!("promoted integration task plan v{plan_version} is missing"))?;
+    let mut completions = Vec::new();
+    for (step_id, (plan_id, attempt_id)) in bindings {
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "promoted integration plan {} references task step {} outside accepted plan v{}",
+                    plan_id.as_str(),
+                    step_id.as_str(),
+                    plan_version
+                )
+            })?;
+        let projected = task
+            .steps
+            .get(&(plan_version, step_id.clone()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "promoted integration source step {} has no durable task status",
+                    step_id.as_str()
+                )
+            })?;
+        match projected.status {
+            TaskStepStatus::Completed => {}
+            TaskStepStatus::Blocked => completions.push((
+                step,
+                projected.summary.clone(),
+                format!(
+                    "integration plan {} was promoted by attempt {} and passed parent verification",
+                    plan_id.as_str(),
+                    attempt_id.as_str()
+                ),
+            )),
+            status => {
+                bail!(
+                    "promoted integration source step {} must be blocked or completed, observed {}",
+                    step_id.as_str(),
+                    super::scheduler::task_step_status_label(status)
+                );
+            }
+        }
+    }
+    let count = completions.len();
+    for (step, summary, reason) in completions {
+        append_task_step(
+            session,
+            handler,
+            task_id,
+            plan_version,
+            &step,
+            TaskStepStatus::Completed,
+            summary,
+            Some(reason),
+        )?;
+    }
+    Ok(count)
 }
 
 fn integration_synthesis_block_reason(

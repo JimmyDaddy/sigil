@@ -2181,6 +2181,7 @@ impl TaskGraphProjection {
             return TaskReadyQueue {
                 read_only_batch: Vec::new(),
                 changeset_only_batch: Vec::new(),
+                worktree_batch: Vec::new(),
                 sequential_step: None,
                 deferred: ready_steps
                     .into_iter()
@@ -2192,13 +2193,16 @@ impl TaskGraphProjection {
             };
         }
         let running_steps = self.running_steps(statuses);
-        let running_exclusive_write = running_steps
-            .iter()
-            .any(|step| !step.is_parallel_read_only() && !step.is_parallel_changeset_only());
+        let running_exclusive_write = running_steps.iter().any(|step| {
+            !step.is_parallel_read_only()
+                && !step.is_parallel_changeset_only()
+                && !step.is_parallel_worktree()
+        });
         if running_exclusive_write {
             return TaskReadyQueue {
                 read_only_batch: Vec::new(),
                 changeset_only_batch: Vec::new(),
+                worktree_batch: Vec::new(),
                 sequential_step: None,
                 deferred: ready_steps
                     .into_iter()
@@ -2218,14 +2222,22 @@ impl TaskGraphProjection {
             .iter()
             .filter(|step| step.is_parallel_changeset_only())
             .count();
+        let running_worktree = running_steps
+            .iter()
+            .filter(|step| step.is_parallel_worktree())
+            .count();
         let read_only_capacity = options
             .max_concurrent_read_only
             .saturating_sub(running_read_only);
         let changeset_only_capacity = options
             .max_concurrent_changeset_only
             .saturating_sub(running_changeset_only);
+        let worktree_capacity = options
+            .max_concurrent_changeset_only
+            .saturating_sub(running_worktree);
         let mut ready_read_only = Vec::new();
         let mut ready_changeset_only = Vec::new();
+        let mut ready_worktree = Vec::new();
         let mut ready_write_steps = Vec::new();
 
         for step in ready_steps {
@@ -2233,6 +2245,8 @@ impl TaskGraphProjection {
                 ready_read_only.push(step);
             } else if step.is_parallel_changeset_only() {
                 ready_changeset_only.push(step);
+            } else if step.is_parallel_worktree() {
+                ready_worktree.push(step);
             } else {
                 ready_write_steps.push(step);
             }
@@ -2240,7 +2254,7 @@ impl TaskGraphProjection {
 
         let mut deferred = Vec::new();
         let mut read_only_batch = Vec::new();
-        if running_changeset_only == 0 {
+        if running_changeset_only == 0 && running_worktree == 0 {
             for step in ready_read_only {
                 if read_only_batch.len() < read_only_capacity {
                     read_only_batch.push(step.clone());
@@ -2257,12 +2271,17 @@ impl TaskGraphProjection {
                     .into_iter()
                     .map(|step| TaskReadyDeferredStep {
                         step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::RunningChangesetOnly,
+                        reason: if running_changeset_only > 0 {
+                            TaskReadyDeferredReason::RunningChangesetOnly
+                        } else {
+                            TaskReadyDeferredReason::RunningWorktree
+                        },
                     }),
             );
         }
 
-        let may_start_changeset = read_only_batch.is_empty() && running_read_only == 0;
+        let may_start_changeset =
+            read_only_batch.is_empty() && running_read_only == 0 && running_worktree == 0;
         let mut changeset_only_batch = Vec::new();
         if may_start_changeset {
             for step in ready_changeset_only {
@@ -2286,10 +2305,43 @@ impl TaskGraphProjection {
             );
         }
 
-        let may_start_write = read_only_batch.is_empty()
+        let may_start_worktree = read_only_batch.is_empty()
             && changeset_only_batch.is_empty()
             && running_read_only == 0
             && running_changeset_only == 0;
+        let mut worktree_batch = Vec::new();
+        if may_start_worktree {
+            for step in ready_worktree {
+                if worktree_batch.len() < worktree_capacity {
+                    worktree_batch.push(step.clone());
+                } else {
+                    deferred.push(TaskReadyDeferredStep {
+                        step_id: step.step_id.clone(),
+                        reason: TaskReadyDeferredReason::ConcurrencyBudget,
+                    });
+                }
+            }
+        } else {
+            deferred.extend(
+                ready_worktree
+                    .into_iter()
+                    .map(|step| TaskReadyDeferredStep {
+                        step_id: step.step_id.clone(),
+                        reason: if running_changeset_only > 0 || !changeset_only_batch.is_empty() {
+                            TaskReadyDeferredReason::RunningChangesetOnly
+                        } else {
+                            TaskReadyDeferredReason::RunningReadOnly
+                        },
+                    }),
+            );
+        }
+
+        let may_start_write = read_only_batch.is_empty()
+            && changeset_only_batch.is_empty()
+            && worktree_batch.is_empty()
+            && running_read_only == 0
+            && running_changeset_only == 0
+            && running_worktree == 0;
         let mut sequential_step = None;
         if may_start_write {
             sequential_step = ready_write_steps.first().map(|step| (*step).clone());
@@ -2304,6 +2356,8 @@ impl TaskGraphProjection {
                     TaskReadyDeferredReason::RunningReadOnly
                 } else if running_changeset_only > 0 || !changeset_only_batch.is_empty() {
                     TaskReadyDeferredReason::RunningChangesetOnly
+                } else if running_worktree > 0 || !worktree_batch.is_empty() {
+                    TaskReadyDeferredReason::RunningWorktree
                 } else {
                     TaskReadyDeferredReason::SequentialWrite
                 },
@@ -2313,6 +2367,7 @@ impl TaskGraphProjection {
         TaskReadyQueue {
             read_only_batch,
             changeset_only_batch,
+            worktree_batch,
             sequential_step,
             deferred,
         }
@@ -2366,6 +2421,11 @@ impl TaskGraphStepProjection {
     pub fn is_parallel_changeset_only(&self) -> bool {
         self.mode == TaskStepMode::Write && self.isolation == TaskIsolationMode::ChangesetOnly
     }
+
+    #[must_use]
+    pub fn is_parallel_worktree(&self) -> bool {
+        self.mode == TaskStepMode::Write && self.isolation == TaskIsolationMode::Worktree
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2397,6 +2457,7 @@ impl TaskReadyQueueOptions {
 pub struct TaskReadyQueue {
     pub read_only_batch: Vec<TaskGraphStepProjection>,
     pub changeset_only_batch: Vec<TaskGraphStepProjection>,
+    pub worktree_batch: Vec<TaskGraphStepProjection>,
     pub sequential_step: Option<TaskGraphStepProjection>,
     pub deferred: Vec<TaskReadyDeferredStep>,
 }
@@ -2413,6 +2474,7 @@ pub enum TaskReadyDeferredReason {
     ConcurrencyBudget,
     RunningReadOnly,
     RunningChangesetOnly,
+    RunningWorktree,
     RunningWrite,
     SequentialWrite,
 }
