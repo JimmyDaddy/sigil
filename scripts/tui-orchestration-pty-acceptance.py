@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -38,6 +39,10 @@ APPROVAL_TOOL_CALL_ID = "approval-write-call"
 CONTINUE_FINAL_CANARY = "ORCHESTRATION-PTY-CONTINUE-FINAL-9531"
 CONTINUE_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-4608"
 CANCEL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-5719"
+INTEGRATION_FINAL_CANARY = "ORCHESTRATION-PTY-INTEGRATION-FINAL-6842"
+INTEGRATION_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-6820"
+INTEGRATION_PATHS = ("integration-a.txt", "integration-b.txt")
+INTEGRATION_TOOL_CALL_IDS = ("integration-write-a", "integration-write-b")
 READ_STEP_IDS = ("inspect_kernel", "inspect_runtime")
 READ_STEP_TITLES = ("Inspect kernel route", "Inspect runtime route")
 PLAN_ARGS = json.dumps(
@@ -119,6 +124,38 @@ CANCEL_PLAN_ARGS = json.dumps(
     },
     separators=(",", ":"),
 )
+INTEGRATION_PLAN_ARGS = json.dumps(
+    {
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [
+            {
+                "step_id": "integrate_a",
+                "title": "Propose integration A",
+                "role": "subagent_write",
+                "mode": "write",
+                "isolation": "worktree",
+            },
+            {
+                "step_id": "integrate_b",
+                "title": "Propose integration B",
+                "role": "subagent_write",
+                "mode": "write",
+                "isolation": "worktree",
+            },
+        ],
+    },
+    separators=(",", ":"),
+)
+
+
+INTEGRATION_WRITE_ARGS = tuple(
+    json.dumps(
+        {"path": path, "content": f"integrated {suffix}\n"},
+        separators=(",", ":"),
+    )
+    for path, suffix in zip(INTEGRATION_PATHS, ("a", "b"), strict=True)
+)
 
 
 class AcceptanceError(RuntimeError):
@@ -132,12 +169,17 @@ class SessionAudit:
     final_answer_count: int
     approval_final_answer_count: int
     continue_final_answer_count: int
+    integration_final_answer_count: int
     task_final_count: int
     approval_route_resolved_count: int
     approved_tool_call_count: int
     paused_task_run_count: int
     interrupted_step_count: int
     cancelled_task_run_count: int
+    promotion_preview_count: int
+    promotion_authority_count: int
+    promoted_integration_count: int
+    parent_verification_count: int
     failed_run_count: int
 
 
@@ -231,6 +273,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     2: APPROVAL_PLAN_ARGS,
                     3: CONTINUE_PLAN_ARGS,
                     4: CANCEL_PLAN_ARGS,
+                    5: INTEGRATION_PLAN_ARGS,
                 }.get(request_number)
                 if arguments is None:
                     raise AcceptanceError(
@@ -264,11 +307,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 if not self.fixture.cancel_release.wait(timeout=30):
                     raise TimeoutError("cancel fixture was not released")
                 self._send_text("obsolete cancelled response")
+            elif kind.startswith("integration:step:"):
+                suffix = kind.removeprefix("integration:step:")
+                index = {"a": 0, "b": 1}.get(suffix)
+                if index is None:
+                    raise AcceptanceError(f"unexpected integration step {kind}")
+                if has_tool_result(payload, INTEGRATION_TOOL_CALL_IDS[index]):
+                    self._send_text(f"integration step {suffix} complete")
+                else:
+                    self._send_tool_call(
+                        INTEGRATION_TOOL_CALL_IDS[index],
+                        "write_file",
+                        INTEGRATION_WRITE_ARGS[index],
+                    )
             elif kind == "synthesis":
                 final = {
                     1: FINAL_CANARY,
                     2: APPROVAL_FINAL_CANARY,
                     3: CONTINUE_FINAL_CANARY,
+                    4: INTEGRATION_FINAL_CANARY,
                 }.get(request_number)
                 if final is None:
                     raise AcceptanceError(
@@ -454,6 +511,10 @@ def classify_request(payload: object) -> str:
         return "continue:step"
     if "Step: cancel_in_flight" in text and "Role: executor" in text:
         return "cancel:step"
+    if "Step: integrate_a" in text and "Role: subagent_write" in text:
+        return "integration:step:a"
+    if "Step: integrate_b" in text and "Role: subagent_write" in text:
+        return "integration:step:b"
     raise AcceptanceError("provider request does not match a production orchestration role")
 
 
@@ -494,13 +555,20 @@ routing_policy = "auto"
 multi_agent_mode = "proactive"
 max_subagents = 4
 max_parallel_read_steps = 2
+max_parallel_changeset_steps = 2
+allow_write_subagents = true
 
 [permission]
 mode = "manual"
 
+[[permission.rules]]
+tool_name = "write_file"
+subject_glob = "integration-*.txt"
+mode = "allow"
+
 [terminal]
 keyboard_enhancement = "off"
-mouse_capture = false
+mouse_capture = true
 osc52_clipboard = false
 
 [providers.openai_compat]
@@ -518,12 +586,17 @@ def read_session_audit(path: Path) -> SessionAudit:
     final_answer_count = 0
     approval_final_answer_count = 0
     continue_final_answer_count = 0
+    integration_final_answer_count = 0
     task_final_count = 0
     approval_route_resolved_count = 0
     approved_tool_call_count = 0
     paused_task_run_count = 0
     interrupted_step_count = 0
     cancelled_task_run_count = 0
+    promotion_preview_count = 0
+    promotion_authority_count = 0
+    promoted_integration_count = 0
+    parent_verification_count = 0
     approval_child_refs: set[str] = set()
     failed_run_count = 0
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -550,6 +623,8 @@ def read_session_audit(path: Path) -> SessionAudit:
                 approval_final_answer_count += 1
             elif assistant.get("content") == CONTINUE_FINAL_CANARY:
                 continue_final_answer_count += 1
+            elif assistant.get("content") == INTEGRATION_FINAL_CANARY:
+                integration_final_answer_count += 1
         control = entry.get("control")
         if not isinstance(control, dict):
             continue
@@ -569,6 +644,15 @@ def read_session_audit(path: Path) -> SessionAudit:
             paused_task_run_count += 1
         if isinstance(task_run, dict) and task_run.get("status") == "cancelled":
             cancelled_task_run_count += 1
+        if isinstance(control.get("task_promotion_preview_recorded"), dict):
+            promotion_preview_count += 1
+        if isinstance(control.get("task_promotion_authority_consumed"), dict):
+            promotion_authority_count += 1
+        promotion = control.get("integration_promotion_recorded")
+        if isinstance(promotion, dict) and promotion.get("status") == "promoted":
+            promoted_integration_count += 1
+        if isinstance(control.get("task_parent_verification_recorded"), dict):
+            parent_verification_count += 1
         approval_route = control.get("task_subagent_approval_route")
         if (
             isinstance(approval_route, dict)
@@ -601,12 +685,17 @@ def read_session_audit(path: Path) -> SessionAudit:
         final_answer_count=final_answer_count,
         approval_final_answer_count=approval_final_answer_count,
         continue_final_answer_count=continue_final_answer_count,
+        integration_final_answer_count=integration_final_answer_count,
         task_final_count=task_final_count,
         approval_route_resolved_count=approval_route_resolved_count,
         approved_tool_call_count=approved_tool_call_count,
         paused_task_run_count=paused_task_run_count,
         interrupted_step_count=interrupted_step_count,
         cancelled_task_run_count=cancelled_task_run_count,
+        promotion_preview_count=promotion_preview_count,
+        promotion_authority_count=promotion_authority_count,
+        promoted_integration_count=promoted_integration_count,
+        parent_verification_count=parent_verification_count,
         failed_run_count=failed_run_count,
     )
 
@@ -742,6 +831,23 @@ def validate_cancel_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         raise AcceptanceError("cancelled task incorrectly reached synthesis")
 
 
+def validate_integration_audit(audit: SessionAudit, fixture: FixtureState) -> None:
+    if audit.promotion_preview_count != 1:
+        raise AcceptanceError("integration task did not produce one exact promotion preview")
+    if audit.promotion_authority_count != 1 or audit.promoted_integration_count != 1:
+        raise AcceptanceError("reviewed integration was not promoted by one exact authority")
+    if audit.parent_verification_count != 1:
+        raise AcceptanceError("reviewed integration has no authoritative parent verification")
+    if audit.integration_final_answer_count != 1 or audit.task_final_count != 4:
+        raise AcceptanceError("reviewed integration did not commit one unique parent final")
+    if fixture.request_counts.get("integration:step:a") != 2:
+        raise AcceptanceError("integration step A did not run one tool turn and one final turn")
+    if fixture.request_counts.get("integration:step:b") != 2:
+        raise AcceptanceError("integration step B did not run one tool turn and one final turn")
+    if fixture.request_counts.get("synthesis") != 4:
+        raise AcceptanceError("reviewed integration synthesis did not run exactly once")
+
+
 def wait_for_fixture_request(
     fixture: FixtureState,
     kind: str,
@@ -769,6 +875,78 @@ def submit_user_prompt(runner: object, prompt: str) -> None:
     runner.send(b"\x1b")
     runner.type_text(prompt)
     runner.send("\r")
+
+
+def click_screen_text(runner: object, screen: str, needle: str) -> None:
+    for row, line in enumerate(screen.splitlines(), start=1):
+        column = line.find(needle)
+        if column < 0:
+            continue
+        column += 1
+        runner.send(f"\x1b[<0;{column};{row}M")
+        runner.send(f"\x1b[<0;{column};{row}m")
+        return
+    raise AcceptanceError(f"cannot click missing screen text {needle!r}")
+
+
+def activate_screen_text_until(
+    runner: object,
+    needle: str,
+    predicate: Callable[[str], bool],
+    timeout: float,
+    description: str,
+) -> str:
+    """Activate a moving TUI card through its real mouse/key path until its response is visible."""
+    deadline = time.monotonic() + timeout
+    next_activation = 0.0
+    while time.monotonic() < deadline:
+        runner.read_available(0.05)
+        screen = runner.screen()
+        if predicate(screen):
+            return screen
+        now = time.monotonic()
+        if needle in screen and now >= next_activation:
+            click_screen_text(runner, screen, needle)
+            runner.read_available(0.02)
+            runner.send("\r")
+            # The card may become visible one redraw before the root run releases its busy
+            # ownership. Retry from fresh coordinates instead of depending on that race.
+            next_activation = now + 0.5
+        time.sleep(0.02)
+    raise TimeoutError(f"timed out waiting for {description}")
+
+
+def run_git(workspace: Path, env: dict[str, str], *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=workspace,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise AcceptanceError(f"git {' '.join(args)} failed: {detail}")
+    return result.stdout
+
+
+def initialize_git_workspace(workspace: Path, env: dict[str, str]) -> None:
+    for path, content in zip(INTEGRATION_PATHS, ("old a\n", "old b\n"), strict=True):
+        (workspace / path).write_text(content, encoding="utf-8")
+    run_git(workspace, env, "init", "-q")
+    run_git(workspace, env, "config", "user.name", "Sigil PTY Fixture")
+    run_git(workspace, env, "config", "user.email", "sigil-pty@example.invalid")
+    run_git(workspace, env, "add", "--all")
+    run_git(workspace, env, "commit", "-qm", "initialize PTY fixture")
+
+
+def checkpoint_workspace(workspace: Path, env: dict[str, str], message: str) -> None:
+    run_git(workspace, env, "add", "--all")
+    run_git(workspace, env, "commit", "-qm", message)
+    if run_git(workspace, env, "status", "--porcelain").strip():
+        raise AcceptanceError("integration fixture workspace is not clean after checkpoint")
 
 
 def utc_now() -> str:
@@ -807,6 +985,7 @@ def main() -> int:
             directory.mkdir()
         (workspace / "README.md").write_text("orchestration fixture\n", encoding="utf-8")
         env = SUPPORT.isolated_environment(fixture_root)
+        initialize_git_workspace(workspace, env)
         fixture = FixtureState()
         server = FixtureServer(("127.0.0.1", 0), FixtureHandler)
         server.fixture = fixture
@@ -882,6 +1061,7 @@ def main() -> int:
         if (workspace / APPROVAL_PATH).read_text(encoding="utf-8") != APPROVAL_CONTENT:
             raise AcceptanceError("approved task write did not reach the workspace")
         validate_approval_audit(approval_audit, fixture)
+        checkpoint_workspace(workspace, env, "record approved write fixture")
 
         submit_user_prompt(runner, CONTINUE_USER_PROMPT)
         wait_for_fixture_request(
@@ -968,6 +1148,65 @@ def main() -> int:
             "visible cancelled task state",
             final_screen=True,
         )
+
+        submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
+        session_path, review_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.promotion_preview_count == 1,
+            deadline.remaining(),
+        )
+        if (
+            review_audit.integration_final_answer_count != 0
+            or review_audit.task_final_count != 3
+            or review_audit.promotion_authority_count != 0
+        ):
+            raise AcceptanceError(
+                "integration task advanced past the exact user review boundary"
+            )
+        runner.wait_until(
+            lambda text: "Integration review" in text
+            and "ready · exact target bound" in text
+            and "review diff" in text,
+            deadline.remaining(),
+            "visible integration review card",
+            final_screen=True,
+        )
+        activate_screen_text_until(
+            runner,
+            "Integration review",
+            lambda text: "reviewed · exact diff loaded" in text
+            and "Enter accept integration" in text,
+            deadline.remaining(),
+            "loaded exact integration diff",
+        )
+        runner.send("\r")
+        session_path, integration_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.integration_final_answer_count == 1
+            and value.task_final_count == 4,
+            deadline.remaining(),
+        )
+        integration_screen = runner.wait_until(
+            lambda text: INTEGRATION_FINAL_CANARY in text
+            and "Thinking..." not in text
+            and "Replying..." not in text,
+            deadline.remaining(),
+            "settled integration task final answer",
+            final_screen=True,
+        )
+        if integration_screen.count(INTEGRATION_FINAL_CANARY) != 1:
+            raise AcceptanceError("TUI rendered the integration task final more than once")
+        validate_integration_audit(integration_audit, fixture)
+        for path, expected in zip(
+            INTEGRATION_PATHS,
+            ("integrated a\n", "integrated b\n"),
+            strict=True,
+        ):
+            if (workspace / path).read_text(encoding="utf-8") != expected:
+                raise AcceptanceError(f"reviewed integration did not promote {path}")
+
         runner.quit(timeout=deadline.remaining(10.0))
         runner.stop()
         runner = None
@@ -994,7 +1233,10 @@ def main() -> int:
                     continue_audit.interrupted_step_count
                 ),
                 "cancelled_task_count": cancel_audit.cancelled_task_run_count,
-                "completed_task_count": continue_audit.task_final_count,
+                "reviewed_integration_promotion_count": (
+                    integration_audit.promoted_integration_count
+                ),
+                "completed_task_count": integration_audit.task_final_count,
                 "route_kill_switch_count": audit.event_counts.get(
                     "orchestration_route_disabled",
                     0,
@@ -1028,6 +1270,17 @@ def main() -> int:
         json.JSONDecodeError,
     ) as error:
         print(f"orchestration PTY acceptance failed: {error}", file=sys.stderr)
+        if runner is not None:
+            try:
+                runner.read_available(0.0)
+                (output_dir / "failure-screen.txt").write_text(
+                    runner.screen() + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+        if args.keep_fixture and fixture_root is not None:
+            print(f"retained fixture: {fixture_root}", file=sys.stderr)
         return 1
     finally:
         if runner is not None:

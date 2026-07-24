@@ -22,6 +22,25 @@ def tool(name: str) -> dict[str, object]:
 
 
 class OrchestrationPtyAcceptanceTests(unittest.TestCase):
+    def test_screen_text_click_uses_one_based_sgr_coordinates(self) -> None:
+        class Runner:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            def send(self, value: str) -> None:
+                self.sent.append(value)
+
+        runner = Runner()
+        MODULE.click_screen_text(
+            runner,
+            "first row\n   Integration review\nlast row",
+            "Integration review",
+        )
+        self.assertEqual(
+            runner.sent,
+            ["\x1b[<0;4;2M", "\x1b[<0;4;2m"],
+        )
+
     def test_request_classification_uses_typed_tools_and_role_contracts(self) -> None:
         self.assertEqual(
             MODULE.classify_request(
@@ -133,6 +152,40 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             ),
             "cancel:step",
         )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Execute task step.\n"
+                                "Step: integrate_a\nRole: subagent_write"
+                            ),
+                        }
+                    ],
+                    "tools": [],
+                }
+            ),
+            "integration:step:a",
+        )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Execute task step.\n"
+                                "Step: integrate_b\nRole: subagent_write"
+                            ),
+                        }
+                    ],
+                    "tools": [],
+                }
+            ),
+            "integration:step:b",
+        )
 
     def test_unknown_request_fails_closed(self) -> None:
         with self.assertRaises(MODULE.AcceptanceError):
@@ -153,12 +206,17 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             final_answer_count=1,
             approval_final_answer_count=0,
             continue_final_answer_count=0,
+            integration_final_answer_count=0,
             task_final_count=1,
             approval_route_resolved_count=0,
             approved_tool_call_count=0,
             paused_task_run_count=0,
             interrupted_step_count=0,
             cancelled_task_run_count=0,
+            promotion_preview_count=0,
+            promotion_authority_count=0,
+            promoted_integration_count=0,
+            parent_verification_count=0,
             failed_run_count=0,
         )
         fixture = MODULE.FixtureState(
