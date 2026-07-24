@@ -418,6 +418,7 @@ fn append_approval_route(
             child_session_ref: child_session_ref.clone(),
             call_id: call.id.clone(),
             tool_name: call.name.clone(),
+            binding: None,
             status,
         },
     ))

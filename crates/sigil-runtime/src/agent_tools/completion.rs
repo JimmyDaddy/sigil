@@ -138,6 +138,7 @@ impl AgentToolRuntime {
                 continue;
             }
             let thread_id = completion_thread_id;
+            let mut blocked_for_approval = false;
             let commit_result = if cancellation_requested {
                 append_joined_child_interrupted(
                     session,
@@ -182,18 +183,28 @@ impl AgentToolRuntime {
                         result
                     }
                     Err(error) => {
-                        let reason = format!("{error:#}");
-                        let result = self.supervisor.record_chat_child_failure(
-                            session,
-                            handler,
-                            &thread,
-                            reason.clone(),
-                        );
-                        let _ = handler.handle(RunEvent::Notice(format!(
-                            "joined agent {} failed: {reason}",
-                            thread_id.as_str()
-                        )));
-                        result
+                        if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>() {
+                            blocked_for_approval = true;
+                            self.supervisor.record_chat_child_blocked_for_approval(
+                                session,
+                                handler,
+                                &thread,
+                                blocked.route(),
+                            )
+                        } else {
+                            let reason = format!("{error:#}");
+                            let result = self.supervisor.record_chat_child_failure(
+                                session,
+                                handler,
+                                &thread,
+                                reason.clone(),
+                            );
+                            let _ = handler.handle(RunEvent::Notice(format!(
+                                "joined agent {} failed: {reason}",
+                                thread_id.as_str()
+                            )));
+                            result
+                        }
                     }
                 }
             };
@@ -215,6 +226,8 @@ impl AgentToolRuntime {
             }
             let continuation_status = if cancellation_requested {
                 AgentResultContinuationStatus::Cancelled
+            } else if blocked_for_approval {
+                AgentResultContinuationStatus::Pending
             } else {
                 AgentResultContinuationStatus::Started
             };
@@ -230,6 +243,15 @@ impl AgentToolRuntime {
                         "failed to commit joined agent continuation {}",
                         thread_id.as_str()
                     )));
+                }
+                continue;
+            }
+            if blocked_for_approval {
+                if first_commit_error.is_none() {
+                    first_commit_error = Some(anyhow!(
+                        "joined agent {} is blocked waiting for approval",
+                        thread_id.as_str()
+                    ));
                 }
                 continue;
             }

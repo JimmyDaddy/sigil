@@ -27,6 +27,7 @@ use crate::{
         AgentThreadStateProjection, AgentThreadStatusChangedEntry, closed_agent_routes,
         interrupted_agent_attempts, interrupted_agent_mailbox_messages,
         interrupted_agent_result_continuations, interrupted_agent_threads,
+        stale_expired_agent_approval_routes,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     context_engine::{
@@ -73,7 +74,7 @@ use crate::{
         TaskParticipantAttemptEntry, TaskParticipantResultEntry,
         TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskRunCancellationScopeBoundEntry,
         TaskRunEntry, TaskStateProjection, TaskStepEntry, TaskSubagentApprovalRouteEntry,
-        TaskSubagentElicitationRouteEntry,
+        TaskSubagentElicitationRouteEntry, stale_task_approval_routes_for_restore,
     },
     task_handoff::{TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry},
     task_memory::{TaskMemoryV1, task_memory_context_items},

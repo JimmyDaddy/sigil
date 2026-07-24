@@ -1426,6 +1426,21 @@ pub struct AgentThreadDisplayNameEntry {
 /// Append-only approval route from a source agent to a pending decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct AgentApprovalRouteBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<AgentBatchId>,
+    pub attempt_id: AgentRunAttemptId,
+    pub permission_signature: String,
+    pub policy_fingerprint: String,
+    pub source_workspace_id: String,
+    pub isolation: crate::TaskIsolationMode,
+    pub requested_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+/// Append-only approval route from a source agent to a pending decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct AgentApprovalRouteEntry {
     pub route_id: AgentRouteId,
     pub source_thread_id: AgentThreadId,
@@ -1433,6 +1448,8 @@ pub struct AgentApprovalRouteEntry {
     pub target_thread_id: Option<AgentThreadId>,
     pub call_id: String,
     pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<AgentApprovalRouteBinding>,
     pub status: AgentRouteStatus,
 }
 
@@ -2315,6 +2332,32 @@ pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedE
                     reason: "agent route closed during session restore".to_owned(),
                 },
             )
+        })
+        .collect()
+}
+
+/// Returns stale terminals for expired approval routes before generic restore closure runs.
+///
+/// Expired approval decisions are never replayable capabilities. Recovery records `Stale` so a
+/// later child attempt must materialize a fresh preview and permission signature.
+pub fn stale_expired_agent_approval_routes(
+    entries: &[SessionLogEntry],
+    recovered_at_ms: u64,
+) -> Vec<AgentApprovalRouteEntry> {
+    let projection = AgentThreadStateProjection::from_entries(entries);
+    projection
+        .approval_routes
+        .into_values()
+        .filter_map(|mut route| {
+            let expired = route.binding.as_ref().is_some_and(|binding| {
+                binding.expires_at_ms <= recovered_at_ms
+                    || binding.expires_at_ms <= binding.requested_at_ms
+            });
+            if route.status != AgentRouteStatus::Requested || !expired {
+                return None;
+            }
+            route.status = AgentRouteStatus::Stale;
+            Some(route)
         })
         .collect()
 }

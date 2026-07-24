@@ -12,11 +12,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentApprovalRouteEntry, AgentBatchId, AgentDelegationRunContext, AgentInvocationGrant,
-    AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentInvocationMode,
-    AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId,
-    AgentProfileSource, AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
-    AgentRouteId, AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,
+    Agent, AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId,
+    AgentDelegationRunContext, AgentInvocationGrant, AgentInvocationGrantBinding,
+    AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationSource,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentProfileSource,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRouteId,
+    AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,
     AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection,
     AgentThreadResult, AgentThreadResultDeliveredEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
@@ -28,12 +29,13 @@ use sigil_kernel::{
     RunCancellationOwner, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, Session, SessionLogEntry,
     SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    VerificationScope, WriteIsolationMode, build_workspace_snapshot_for_event,
-    changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
-    decode_changeset_only_child_output, saturating_elapsed, stable_event_uuid, stable_workspace_id,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalContext,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, VerificationScope, WriteIsolationMode,
+    build_workspace_snapshot_for_event, changeset_only_child_contract_prompt,
+    changeset_only_child_tool_registry, decode_changeset_only_child_output, saturating_elapsed,
+    stable_event_uuid, stable_workspace_id,
 };
 
 use crate::{
@@ -117,8 +119,8 @@ use chat::close_agent_from_args;
 use chat::wait_throttle_remaining_for_elapsed;
 use completion::append_agent_result_continuation;
 use handlers::{
-    BackgroundApprovalHandler, ChatAgentApprovalRouteHandler, ChatChildEventHandler,
-    ChatChildThreadGuard,
+    BackgroundApprovalHandler, BackgroundApprovalRequired, ChatAgentApprovalRouteHandler,
+    ChatChildEventHandler, ChatChildThreadGuard,
 };
 pub(crate) use permissions::tool_registry_is_safe_readonly_for_auto_spawn;
 use permissions::{

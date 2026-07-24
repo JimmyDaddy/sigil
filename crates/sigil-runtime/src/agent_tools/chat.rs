@@ -182,17 +182,30 @@ impl AgentToolRuntime {
                 )));
             }
             Ok(Err(error)) => {
-                let reason = format!("{error:#}");
-                self.supervisor.record_chat_child_failure(
-                    session,
-                    handler,
-                    &thread,
-                    reason.clone(),
-                )?;
-                let _ = handler.handle(RunEvent::Notice(format!(
-                    "agent {} failed: {reason}",
-                    thread_id.as_str()
-                )));
+                if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>() {
+                    self.supervisor.record_chat_child_blocked_for_approval(
+                        session,
+                        handler,
+                        &thread,
+                        blocked.route(),
+                    )?;
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent {} is blocked waiting for approval",
+                        thread_id.as_str()
+                    )));
+                } else {
+                    let reason = format!("{error:#}");
+                    self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &thread,
+                        reason.clone(),
+                    )?;
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent {} failed: {reason}",
+                        thread_id.as_str()
+                    )));
+                }
             }
             Err(error) => {
                 let reason = format!("background child agent join failed: {error}");

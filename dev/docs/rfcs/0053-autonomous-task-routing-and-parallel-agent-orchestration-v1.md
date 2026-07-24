@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g implemented；O7-O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8 deferred
 
 创建日期：2026-07-22
 
@@ -1636,6 +1636,17 @@ O7c：cancel、quiescence 与 restart reconciliation。
 
 O7 退出条件：resume 后不重复 plan/spawn/merge；cancel 后晚到结果不会复活 task；approval
 能定位到 exact agent/batch/tool；dispatched follow-up 不再显示 pending。
+
+2026-07-25 落地的 O7b 以 `ToolApprovalContext` 固化 permission signature、policy fingerprint
+与五分钟有效期。并行 Task participant 的 batch id 由 exact attempt set 稳定派生；只有 batch、
+permission/policy、workspace 与 isolation 全部相同的 Ask 才进入同一 decision group。Parent
+只展示一个安全 preview，但每个 child 都分别追加带 task/thread/attempt/tool 绑定的
+requested/resolved route。展示失败或 decision 过期会唤醒全部 follower 并 fail closed。
+Background child 没有交互 owner 时追加 exact route 并进入 `Blocked`，不再静默 deny 或等待；
+restart 会把未决 Task route 标记为 stale、关闭丢失的 live route，已过期 Agent route 先标记
+stale，后续只能由新 attempt 重新 preview。O7a 的 typed guidance promotion 与 O7c 的
+cancellation terminal ownership、late-result fencing、restart reconciliation 已由前序 slice
+完成。
 
 ### O8: TUI polish, public protocol and model eval
 

@@ -2,6 +2,18 @@ use anyhow::Result;
 
 use crate::{ToolCall, ToolSpec};
 
+/// Exact, secret-free permission identity attached to an interactive approval request.
+///
+/// The signature binds the raw tool-call digest, policy snapshot, subjects, risk and preview
+/// identity without exposing any of those potentially sensitive values to routing adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolApprovalContext {
+    pub permission_signature: String,
+    pub policy_fingerprint: String,
+    pub requested_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
 /// Decision returned by an approval policy for one tool call.
 #[derive(Debug, Clone)]
 pub enum ToolApproval {
@@ -27,6 +39,44 @@ pub trait ApprovalHandler {
     /// Returns an error when approval state cannot be produced, such as channel shutdown,
     /// UI failure, or policy backend failure.
     fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval>;
+
+    /// Returns whether this exact approval route should emit an interactive presenter event.
+    ///
+    /// Parallel coordinators may return `false` only after atomically attaching the call to an
+    /// already-presented exact aggregation group. The subsequent contextual approval call must
+    /// still resolve independently for this route.
+    fn should_present_tool_approval(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &ToolSpec,
+        _context: &ToolApprovalContext,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Releases any exact aggregation claim when the presenter cannot surface the request.
+    fn tool_approval_presentation_failed(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &ToolSpec,
+        _context: &ToolApprovalContext,
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Resolves one tool call while preserving its exact permission identity for route adapters.
+    ///
+    /// Existing handlers remain source compatible through the default implementation. Wrappers
+    /// that persist or aggregate approval routes must override this method and forward `context`.
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        _context: &ToolApprovalContext,
+    ) -> Result<ToolApproval> {
+        self.approve_tool_call(call, spec)
+    }
 
     /// Reports whether approvals returned by this handler represent an explicit user action.
     ///

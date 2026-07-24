@@ -33,6 +33,7 @@ use sigil_kernel::{
     ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
     ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
     ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    stable_workspace_id,
 };
 
 use super::{
@@ -117,6 +118,38 @@ fn permission_test_invocation_grant(
 struct ContractTestTool {
     spec: ToolSpec,
     mutation_tracking: ToolMutationTracking,
+}
+
+#[derive(Clone)]
+struct ApprovalRequiredReadTool;
+
+#[async_trait]
+impl Tool for ApprovalRequiredReadTool {
+    fn spec(&self) -> ToolSpec {
+        contract_test_spec("read_file", ToolAccess::Read)
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Ask))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "read_file",
+            "should not execute without approval",
+            ToolResultMeta::default(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -1365,6 +1398,52 @@ impl Provider for ParentReadAgentResultProvider {
 }
 
 struct StaticProviderFactory;
+
+struct ApprovalRequestProviderFactory;
+
+struct ApprovalRequestProvider;
+
+impl AgentToolProviderFactory for ApprovalRequestProviderFactory {
+    fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(ApprovalRequestProvider))
+    }
+}
+
+#[async_trait]
+impl Provider for ApprovalRequestProvider {
+    fn name(&self) -> &str {
+        "approval-request"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request_contains_tool_result(&request, "call-child-approval") {
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::TextDelta("unexpected execution".to_owned()),
+                ProviderChunk::Done,
+            ]));
+        }
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-child-approval".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: json!({"path": "README.md"}).to_string(),
+            }),
+            ProviderChunk::Done,
+        ]))
+    }
+}
 
 impl AgentToolProviderFactory for StaticProviderFactory {
     fn build_provider(
@@ -3280,10 +3359,12 @@ async fn spawn_agents_background_registration_failure_dispatches_no_provider() -
             thread: BackgroundChatAgentThreadRecord {
                 thread_id: existing_thread_id.clone(),
                 attempt_id: AgentRunAttemptId::new("attempt-existing-background")?,
+                batch_id: None,
                 profile_id: AgentProfileId::new("explore")?,
                 parent_thread_id: AgentThreadId::new("main")?,
                 child_session_ref: SessionRef::new_relative("children/existing-background.jsonl")?,
                 budget_scope_id: TaskId::new("existing_background_budget")?,
+                isolation: TaskIsolationMode::SharedReadOnly,
             },
             handle: existing_handle,
             cancellation_owner: existing_cancellation,
@@ -5510,6 +5591,118 @@ async fn background_agent_can_be_collected_by_later_runtime() -> Result<()> {
             "agent result should not mention stale budget field {stale_field}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_agent_approval_is_blocked_with_an_exact_route() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ApprovalRequiredReadTool));
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let background_runs = AgentToolBackgroundRuns::default();
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor.clone(),
+        config,
+        registry,
+        Arc::new(ApprovalRequestProviderFactory),
+    )
+    .with_background_runs(background_runs.clone());
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id = chat_agent_thread_id_for_call(
+        "call-background-approval",
+        &AgentProfileId::new("explore")?,
+    )?;
+    let options = run_options(temp.path().to_path_buf());
+
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-background-approval".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect approval routing",
+                    "prompt": "read the workspace",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("background spawn handled");
+    assert!(!spawn.is_error());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !background_runs.has_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval-blocked child should stop instead of waiting forever");
+    let collected = runtime
+        .collect_finished_background_runs(&mut session, &mut handler)
+        .await?;
+    assert_eq!(collected, vec![thread_id.clone()]);
+    assert!(!background_runs.has_any());
+
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("blocked thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Blocked);
+    assert_eq!(projection.approval_routes.len(), 1);
+    let route = projection
+        .approval_routes
+        .values()
+        .next()
+        .expect("approval route should be projected");
+    assert_eq!(route.source_thread_id, thread_id);
+    assert_eq!(route.status, sigil_kernel::AgentRouteStatus::Requested);
+    let binding = route
+        .binding
+        .as_ref()
+        .expect("background approval route should have an exact binding");
+    assert!(binding.batch_id.is_none());
+    assert!(thread.attempts.contains_key(&binding.attempt_id));
+    assert!(binding.permission_signature.starts_with("sha256:"));
+    assert!(binding.policy_fingerprint.starts_with("sha256:"));
+    assert_eq!(
+        binding.source_workspace_id,
+        stable_workspace_id(temp.path())?
+    );
+    assert_eq!(binding.isolation, TaskIsolationMode::SharedReadOnly);
+    assert!(binding.expires_at_ms > binding.requested_at_ms);
+
+    let listed = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-list-blocked".to_owned(),
+                name: LIST_AGENTS_TOOL_NAME.to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("list_agents handled");
+    let listed: serde_json::Value = serde_json::from_str(&listed.content)?;
+    assert_eq!(listed["agents"][0]["status"], "blocked");
+    assert_eq!(listed["agents"][0]["approval_pending"], true);
+    assert_eq!(listed["agents"][0]["messageable"], false);
+    assert_eq!(listed["agents"][0]["cancelable"], false);
+    assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }
 

@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
 use sigil_kernel::{
     AgentBatchId, AgentDelegationAdmissionEntry, AgentInvocationGrant, AgentInvocationMode,
     AgentInvocationSource, AgentProfileId, AgentRole, AgentRouteId, AgentRunAttemptId,
-    AgentRunInput, AgentThreadId, ProviderCapabilities, SessionRef, TaskId, TaskStepSpec,
+    AgentRunInput, AgentThreadId, ProviderCapabilities, SessionRef, TaskId, TaskIsolationMode,
+    TaskStepSpec,
 };
 
 /// Result of cancelling only the foreground parent run.
@@ -98,9 +99,11 @@ pub struct AgentChatChildStart {
 pub struct AgentChatChildThread {
     pub thread_id: AgentThreadId,
     pub attempt_id: AgentRunAttemptId,
+    pub batch_id: Option<AgentBatchId>,
     pub profile_id: AgentProfileId,
     pub parent_thread_id: AgentThreadId,
     pub child_session_ref: SessionRef,
     pub budget_scope_id: TaskId,
+    pub isolation: TaskIsolationMode,
     pub mailbox_rx: Option<mpsc::Receiver<AgentMailboxMessage>>,
 }

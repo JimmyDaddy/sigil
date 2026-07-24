@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::Digest;
 
 use crate::{
-    AgentArtifactRef, AgentFinalAnswerRef,
+    AgentArtifactRef, AgentFinalAnswerRef, AgentThreadId,
     provider::ToolCall,
     session::{ControlEntry, SessionLogEntry},
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
@@ -1490,6 +1490,22 @@ pub struct TaskChildSessionDisplayNameEntry {
     pub display_name: String,
 }
 
+/// Exact, secret-free identity binding for one subagent approval route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskApprovalRouteBinding {
+    pub batch_id: String,
+    pub source_thread_id: AgentThreadId,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub permission_signature: String,
+    pub policy_fingerprint: String,
+    pub aggregation_signature: String,
+    pub source_workspace_id: String,
+    pub isolation: TaskIsolationMode,
+    pub requested_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
 /// Append-only parent record for a subagent approval route.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1502,6 +1518,8 @@ pub struct TaskSubagentApprovalRouteEntry {
     pub child_session_ref: SessionRef,
     pub call_id: String,
     pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<TaskApprovalRouteBinding>,
     pub status: TaskRouteStatus,
 }
 
@@ -1843,6 +1861,18 @@ impl TaskStateProjection {
                 && child.child_session_ref == entry.child_session_ref
         });
         if !child_matches {
+            task.route_unverified = true;
+        }
+        if entry.binding.as_ref().is_none_or(|binding| {
+            binding.batch_id.trim().is_empty()
+                || binding.source_thread_id.as_str().trim().is_empty()
+                || binding.attempt_id.as_str().trim().is_empty()
+                || !binding.permission_signature.starts_with("sha256:")
+                || !binding.policy_fingerprint.starts_with("sha256:")
+                || !binding.aggregation_signature.starts_with("sha256:")
+                || !binding.source_workspace_id.starts_with("workspace:")
+                || binding.expires_at_ms <= binding.requested_at_ms
+        }) {
             task.route_unverified = true;
         }
         task.approval_routes
@@ -2575,6 +2605,35 @@ pub fn normalize_task_agent_display_name(value: &str) -> Result<String> {
         bail!("agent display name contains control characters");
     }
     Ok(value.to_owned())
+}
+
+/// Returns stale terminals for task approval routes that lost their live interaction owner.
+///
+/// Recovery never replays the prior decision or preview. A resumed participant must ask again,
+/// producing a new attempt identity and a fresh permission signature.
+pub fn stale_task_approval_routes_for_restore(
+    entries: &[SessionLogEntry],
+) -> Vec<TaskSubagentApprovalRouteEntry> {
+    let mut routes = BTreeMap::<TaskRouteId, TaskSubagentApprovalRouteEntry>::new();
+    for entry in entries {
+        let SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(route)) = entry else {
+            continue;
+        };
+        routes.insert(route.route_id.clone(), route.clone());
+    }
+    routes
+        .into_values()
+        .filter_map(|mut route| {
+            if !matches!(
+                route.status,
+                TaskRouteStatus::Registered | TaskRouteStatus::Requested
+            ) {
+                return None;
+            }
+            route.status = TaskRouteStatus::Stale;
+            Some(route)
+        })
+        .collect()
 }
 
 fn child_session_projection_key(

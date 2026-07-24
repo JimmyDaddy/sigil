@@ -56,13 +56,16 @@ pub(super) struct BackgroundCancellationOutcome {
     pub(super) active_tasks: usize,
 }
 
+#[derive(Clone)]
 pub(super) struct BackgroundChatAgentThreadRecord {
     pub(super) thread_id: AgentThreadId,
     pub(super) attempt_id: sigil_kernel::AgentRunAttemptId,
+    pub(super) batch_id: Option<AgentBatchId>,
     pub(super) profile_id: AgentProfileId,
     pub(super) parent_thread_id: AgentThreadId,
     pub(super) child_session_ref: SessionRef,
     pub(super) budget_scope_id: TaskId,
+    pub(super) isolation: TaskIsolationMode,
 }
 
 impl BackgroundChatAgentThreadRecord {
@@ -70,10 +73,12 @@ impl BackgroundChatAgentThreadRecord {
         Self {
             thread_id: thread.thread_id.clone(),
             attempt_id: thread.attempt_id.clone(),
+            batch_id: thread.batch_id.clone(),
             profile_id: thread.profile_id.clone(),
             parent_thread_id: thread.parent_thread_id.clone(),
             child_session_ref: thread.child_session_ref.clone(),
             budget_scope_id: thread.budget_scope_id.clone(),
+            isolation: thread.isolation,
         }
     }
 
@@ -81,10 +86,12 @@ impl BackgroundChatAgentThreadRecord {
         crate::AgentChatChildThread {
             thread_id: self.thread_id.clone(),
             attempt_id: self.attempt_id.clone(),
+            batch_id: self.batch_id.clone(),
             profile_id: self.profile_id.clone(),
             parent_thread_id: self.parent_thread_id.clone(),
             child_session_ref: self.child_session_ref.clone(),
             budget_scope_id: self.budget_scope_id.clone(),
+            isolation: self.isolation,
             mailbox_rx: None,
         }
     }
@@ -316,7 +323,7 @@ impl AgentToolBackgroundRuns {
 }
 
 pub(super) async fn run_background_chat_agent(
-    thread_id: AgentThreadId,
+    thread: BackgroundChatAgentThreadRecord,
     child_agent: Agent<Box<dyn Provider>>,
     mut child_session: Session,
     child_session_ref: SessionRef,
@@ -325,12 +332,14 @@ pub(super) async fn run_background_chat_agent(
     mailbox_rx: mpsc::Receiver<AgentMailboxMessage>,
     event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
+    let thread_id = thread.thread_id.clone();
     let web_task_tree_budget = initial_input.web_task_tree_budget();
     let mut handler = BackgroundChatChildEventHandler {
         thread_id: thread_id.clone(),
         sink: event_sink.clone(),
     };
-    let mut approval_handler = BackgroundApprovalHandler;
+    let mut approval_handler =
+        BackgroundApprovalHandler::new(thread, &child_options.workspace_root)?;
     let mut latest_output = match child_agent
         .run_with_approval_input(
             &mut child_session,
@@ -343,12 +352,7 @@ pub(super) async fn run_background_chat_agent(
     {
         Ok(output) => output,
         Err(error) => {
-            emit_background_agent_status(
-                event_sink.as_ref(),
-                &thread_id,
-                AgentThreadStatus::Failed,
-                Some(format!("{error:#}")),
-            );
+            emit_background_agent_error_status(event_sink.as_ref(), &thread_id, &error);
             return Err(error);
         }
     };
@@ -387,12 +391,7 @@ pub(super) async fn run_background_chat_agent(
         {
             Ok(output) => output,
             Err(error) => {
-                emit_background_agent_status(
-                    event_sink.as_ref(),
-                    &thread_id,
-                    AgentThreadStatus::Failed,
-                    Some(format!("{error:#}")),
-                );
+                emit_background_agent_error_status(event_sink.as_ref(), &thread_id, &error);
                 return Err(error);
             }
         };
@@ -431,10 +430,40 @@ struct BackgroundChatChildEventHandler {
 impl EventHandler for BackgroundChatChildEventHandler {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         if let Some(sink) = self.sink.as_ref() {
-            sink.handle_agent_event(&self.thread_id, event);
+            if matches!(event, RunEvent::ToolApprovalRequested { .. }) {
+                sink.handle_agent_event(
+                    &self.thread_id,
+                    RunEvent::Notice(format!(
+                        "agent {} paused because a tool requires approval; inspect the agent route to resume with a fresh preview",
+                        self.thread_id.as_str()
+                    )),
+                );
+            } else {
+                sink.handle_agent_event(&self.thread_id, event);
+            }
         }
         Ok(())
     }
+}
+
+fn emit_background_agent_error_status(
+    sink: Option<&Arc<dyn AgentToolBackgroundEventSink>>,
+    thread_id: &AgentThreadId,
+    error: &anyhow::Error,
+) {
+    let (status, reason) = if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>()
+    {
+        (
+            AgentThreadStatus::Blocked,
+            format!(
+                "blocked_needs_approval:{}",
+                blocked.route().route_id.as_str()
+            ),
+        )
+    } else {
+        (AgentThreadStatus::Failed, format!("{error:#}"))
+    };
+    emit_background_agent_status(sink, thread_id, status, Some(reason));
 }
 
 fn emit_background_agent_status(

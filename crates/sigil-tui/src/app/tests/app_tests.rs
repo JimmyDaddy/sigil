@@ -1264,6 +1264,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
                 child_session_ref: child_ref.clone(),
                 call_id: "call-1".to_owned(),
                 tool_name: "write_file".to_owned(),
+                binding: None,
                 status: sigil_kernel::TaskRouteStatus::Requested,
             },
         )),

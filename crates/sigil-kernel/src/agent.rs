@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     FrozenProviderRequestMaterial, RuntimeContextCandidates,
-    approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
+    approval::{ApprovalHandler, AutoApproveHandler, ToolApproval, ToolApprovalContext},
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
     event::{EventHandler, RunEvent},
@@ -63,10 +63,10 @@ use approval_policy::{
 };
 use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
 use preview::{
-    capture_tool_preview_for_decision, pending_interactive_approval_identity,
-    preparation_plan_approval_identity, preparation_policy_approval_identity,
-    preparation_policy_fingerprint, preparation_session_grant_identity,
-    resolved_interactive_approval_identity,
+    approval_permission_signature, capture_tool_preview_for_decision,
+    pending_interactive_approval_identity, preparation_plan_approval_identity,
+    preparation_policy_approval_identity, preparation_policy_fingerprint,
+    preparation_session_grant_identity, resolved_interactive_approval_identity,
 };
 use provider_stream::collect_provider_turn;
 pub use readiness::projected_agent_run_readiness;
@@ -2232,6 +2232,22 @@ where
             ApprovalMode::Ask => {
                 let preview = preview_capture.preview.clone();
                 let preview_hash = preview_capture.preview_hash.clone();
+                let policy_fingerprint = preparation_policy_fingerprint(&decision)?;
+                let requested_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let approval_context = ToolApprovalContext {
+                    permission_signature: approval_permission_signature(
+                        &call,
+                        spec,
+                        &policy_fingerprint,
+                        preview_hash.as_deref(),
+                    )?,
+                    policy_fingerprint,
+                    requested_at_ms,
+                    expires_at_ms: requested_at_ms.saturating_add(5 * 60 * 1_000),
+                };
                 append_tool_approval_audit(
                     session,
                     &call,
@@ -2241,23 +2257,42 @@ where
                     None,
                     preview_hash.clone(),
                 )?;
-                handler.handle(RunEvent::ToolApprovalRequested {
-                    call: safe_call.clone(),
-                    spec: spec.clone(),
-                    subjects: decision.subjects.clone(),
-                    network_effect: decision.network_effect,
-                    local_policy_decision: decision.local_policy_decision,
-                    network_policy_decision: decision.network_policy_decision,
-                    source_policy_decision: decision.source_policy_decision,
-                    operation: decision.operation,
-                    risk: decision.risk,
-                    subject_zones: decision.subject_zones.clone(),
-                    confirmation: decision.confirmation.clone(),
-                    snapshot_required: decision.snapshot_required,
-                    command_permission_matches: decision.command_permission_matches.clone(),
-                    preview,
-                })?;
-                let approval = approval_handler.approve_tool_call(&safe_call, spec)?;
+                if approval_handler.should_present_tool_approval(
+                    &safe_call,
+                    spec,
+                    &approval_context,
+                )? {
+                    let presentation = handler.handle(RunEvent::ToolApprovalRequested {
+                        call: safe_call.clone(),
+                        spec: spec.clone(),
+                        subjects: decision.subjects.clone(),
+                        network_effect: decision.network_effect,
+                        local_policy_decision: decision.local_policy_decision,
+                        network_policy_decision: decision.network_policy_decision,
+                        source_policy_decision: decision.source_policy_decision,
+                        operation: decision.operation,
+                        risk: decision.risk,
+                        subject_zones: decision.subject_zones.clone(),
+                        confirmation: decision.confirmation.clone(),
+                        snapshot_required: decision.snapshot_required,
+                        command_permission_matches: decision.command_permission_matches.clone(),
+                        preview,
+                    });
+                    if let Err(error) = presentation {
+                        approval_handler.tool_approval_presentation_failed(
+                            &safe_call,
+                            spec,
+                            &approval_context,
+                            &format!("{error:#}"),
+                        )?;
+                        return Err(error);
+                    }
+                }
+                let approval = approval_handler.approve_tool_call_with_context(
+                    &safe_call,
+                    spec,
+                    &approval_context,
+                )?;
                 let approval_is_explicit_user_action =
                     approval_handler.approval_is_explicit_user_action();
                 let approval_would_allow = matches!(

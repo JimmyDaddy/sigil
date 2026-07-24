@@ -414,6 +414,10 @@ impl JsonlSessionStore {
             .unwrap_or((fallback_provider_name, fallback_model_name));
 
         let mut reconciled_entries = Vec::new();
+        let recovered_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         if !has_session_identity(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
@@ -450,8 +454,21 @@ impl JsonlSessionStore {
             reconciled_entries.push(entry);
         }
 
+        for stale_route in stale_expired_agent_approval_routes(&entries, recovered_at_ms) {
+            let entry = SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(stale_route));
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
         for closed_route in closed_agent_routes(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
+        for stale_route in stale_task_approval_routes_for_restore(&entries) {
+            let entry =
+                SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(stale_route));
             entries.push(entry.clone());
             reconciled_entries.push(entry);
         }

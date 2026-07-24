@@ -4,22 +4,23 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentFinalAnswerRef, AgentRole, ControlEntry, ConversationInputQueueId, Session,
+    AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId, Session,
     SessionLogEntry, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
     TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
-    TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGuidanceApplyReason,
-    TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskApprovalRouteBinding, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
+    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
+    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
+    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
+    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
+    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    normalize_task_agent_display_name, task_final_message_id, task_guidance_applied_entry,
-    task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_session_ref,
-    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
-    validate_task_plan_graph_steps,
+    normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
+    task_final_message_id, task_guidance_applied_entry, task_guidance_apply_tool_spec,
+    task_participant_attempt_id, task_participant_session_ref, task_plan_update_entry,
+    task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
 
 fn task_id(value: &str) -> Result<TaskId> {
@@ -32,6 +33,21 @@ fn step_id(value: &str) -> Result<TaskStepId> {
 
 fn session_ref(value: &str) -> Result<SessionRef> {
     SessionRef::new_relative(value)
+}
+
+fn approval_binding() -> Result<TaskApprovalRouteBinding> {
+    Ok(TaskApprovalRouteBinding {
+        batch_id: "batch_1".to_owned(),
+        source_thread_id: AgentThreadId::new("thread_1")?,
+        attempt_id: TaskParticipantAttemptId::new("attempt_1")?,
+        permission_signature: format!("sha256:{}", "a".repeat(64)),
+        policy_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        aggregation_signature: format!("sha256:{}", "d".repeat(64)),
+        source_workspace_id: format!("workspace:{}", "c".repeat(64)),
+        isolation: TaskIsolationMode::SequentialWorkspaceWrite,
+        requested_at_ms: 10,
+        expires_at_ms: 20,
+    })
 }
 
 fn run_entry(status: TaskRunStatus) -> Result<ControlEntry> {
@@ -1592,6 +1608,7 @@ fn task_projection_marks_unverified_routes_and_unavailable_children() -> Result<
                 child_session_ref: session_ref("children/task_1/step_1-child_1.jsonl")?,
                 call_id: "call-1".to_owned(),
                 tool_name: "write_file".to_owned(),
+                binding: None,
                 status: TaskRouteStatus::Requested,
             },
         )),
@@ -1655,6 +1672,7 @@ fn task_projection_keeps_verified_subagent_routes_clean() -> Result<()> {
                 child_session_ref: child_ref,
                 call_id: "call-1".to_owned(),
                 tool_name: "write_file".to_owned(),
+                binding: Some(approval_binding()?),
                 status: TaskRouteStatus::Resolved,
             },
         )),
@@ -1666,6 +1684,30 @@ fn task_projection_keeps_verified_subagent_routes_clean() -> Result<()> {
 
     assert!(!task.route_unverified);
     assert_eq!(task.approval_routes.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn task_approval_restore_marks_pending_route_stale_without_reusing_binding() -> Result<()> {
+    let route = TaskSubagentApprovalRouteEntry {
+        route_id: TaskRouteId::new("route_1")?,
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        step_id: step_id("step_1")?,
+        role: AgentRole::SubagentWrite,
+        child_session_ref: session_ref("children/task_1/step_1-child_1.jsonl")?,
+        call_id: "call-1".to_owned(),
+        tool_name: "write_file".to_owned(),
+        binding: Some(approval_binding()?),
+        status: TaskRouteStatus::Requested,
+    };
+    let stale = stale_task_approval_routes_for_restore(&[SessionLogEntry::Control(
+        ControlEntry::TaskSubagentApprovalRoute(route.clone()),
+    )]);
+
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].status, TaskRouteStatus::Stale);
+    assert_eq!(stale[0].binding, route.binding);
     Ok(())
 }
 

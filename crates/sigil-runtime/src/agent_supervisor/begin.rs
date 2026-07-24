@@ -336,10 +336,12 @@ impl AgentSupervisor {
         Ok(AgentChatChildThread {
             thread_id,
             attempt_id,
+            batch_id: start.batch_id,
             profile_id: start.profile_id,
             parent_thread_id: start.parent_thread_id,
             child_session_ref: start.child_session_ref,
             budget_scope_id: start.budget_scope_id,
+            isolation: durable_grant.isolation,
             mailbox_rx,
         })
     }

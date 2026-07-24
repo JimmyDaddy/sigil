@@ -1,34 +1,35 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Condvar, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentRole,
-    AgentRouteStatus, AgentRunInput, AgentRunOptions, AgentThreadId, AgentUsageSummary,
-    ApprovalHandler, ChangeSetId, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler,
-    EvidenceScope, ExecutionBackend, IntegrationContentClass, IntegrationEffect,
-    IntegrationLaneChanged, IntegrationLaneStatus, IntegrationObservedEffect,
-    IntegrationProjection, IntegrationProposalFacts, IsolatedWorkspaceBackend,
-    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
-    IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, MutationEventRecorder,
-    ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
-    ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
-    SessionRef, SessionStats, TaskChildSessionBatchCommitEnvelope,
-    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskParticipantAttemptId,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
-    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval, ToolCall,
-    ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec, VerificationPolicy,
-    WriteIsolationMode, build_task_promotion_preview, changeset_only_child_tool_registry,
+    AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId, AgentInvocationMode,
+    AgentInvocationSource, AgentRole, AgentRouteStatus, AgentRunAttemptId, AgentRunInput,
+    AgentRunOptions, AgentThreadId, AgentUsageSummary, ApprovalHandler, ChangeSetId, ControlEntry,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope, ExecutionBackend,
+    IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
+    IntegrationObservedEffect, IntegrationProjection, IntegrationProposalFacts,
+    IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus,
+    IsolatedWorkspaceCreated, IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode,
+    MutationEventRecorder, ProviderCapabilities, ProviderPhysicalAttemptOutcome,
+    ProviderRequestRejection, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SessionStats, TaskApprovalRouteBinding,
+    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
+    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
+    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskPromotionPreview,
+    TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskSynthesisSessionRunRequest, ToolApproval, ToolApprovalContext, ToolCall, ToolErrorKind,
+    ToolExecutionStatus, ToolOperation, ToolSpec, VerificationPolicy, WriteIsolationMode,
+    build_task_promotion_preview, changeset_only_child_tool_registry,
     decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
     task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
     task_step_owner_agent_id,
@@ -610,6 +611,8 @@ impl AgentSupervisorTaskChildRunner {
         mut prepared: PreparedParallelTaskChild,
         handler: &mut H,
         approval_handler: &mut A,
+        approval_broker: TaskApprovalDecisionBroker,
+        approval_batch_id: String,
     ) -> ExecutedParallelTaskChild
     where
         H: EventHandler + Send,
@@ -620,6 +623,9 @@ impl AgentSupervisorTaskChildRunner {
             task_request: &prepared.request,
             child_session_ref: &prepared.child_session_ref,
             source_thread_id: &prepared.child_thread.thread_id,
+            source_agent_attempt_id: &prepared.child_thread.attempt_id,
+            approval_broker,
+            approval_batch_id,
             controls: Vec::new(),
         };
         let child_run = {
@@ -746,6 +752,8 @@ impl AgentSupervisorTaskChildRunner {
         let shared_approval = SharedTaskApprovalHandler {
             inner: Arc::new(Mutex::new(approval_handler)),
         };
+        let approval_broker = TaskApprovalDecisionBroker::default();
+        let approval_batch_id = task_parallel_approval_batch_id(&prepared)?;
         let registrations = prepared
             .into_iter()
             .enumerate()
@@ -754,12 +762,16 @@ impl AgentSupervisorTaskChildRunner {
                 let context = ParallelTaskCompletionContext { request_index };
                 let mut member_handler = shared_handler.clone();
                 let mut member_approval = shared_approval.clone();
+                let member_approval_broker = approval_broker.clone();
+                let member_approval_batch_id = approval_batch_id.clone();
                 AgentCompletionRegistration::new(key, request_index as u64, context, async move {
                     Ok::<_, anyhow::Error>(
                         self.execute_parallel_task_child(
                             member,
                             &mut member_handler,
                             &mut member_approval,
+                            member_approval_broker,
+                            member_approval_batch_id,
                         )
                         .await,
                     )
@@ -2347,6 +2359,8 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 task_request: &request,
                 child_session_ref: &child_session_ref,
                 source_thread_id: &child_thread.thread_id,
+                source_agent_attempt_id: &child_thread.attempt_id,
+                approval_batch_id: task_single_approval_batch_id(&request)?,
             };
             let child_input = request.child_input.clone();
             let options = request.options.clone();
@@ -2903,6 +2917,43 @@ where
             .approve_tool_call(call, spec)
     }
 
+    fn should_present_tool_approval(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<bool> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval handler lock poisoned"))?
+            .should_present_tool_approval(call, spec, context)
+    }
+
+    fn tool_approval_presentation_failed(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+        reason: &str,
+    ) -> Result<()> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval handler lock poisoned"))?
+            .tool_approval_presentation_failed(call, spec, context, reason)
+    }
+
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<ToolApproval> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval handler lock poisoned"))?
+            .approve_tool_call_with_context(call, spec, context)
+    }
+
     fn approval_is_explicit_user_action(&self) -> bool {
         self.inner
             .lock()
@@ -2950,11 +3001,145 @@ where
     }
 }
 
+#[derive(Clone, Default)]
+struct TaskApprovalDecisionBroker {
+    state: Arc<(Mutex<BTreeMap<String, TaskApprovalGroupState>>, Condvar)>,
+}
+
+enum TaskApprovalGroupState {
+    Pending { leader_call_id: String },
+    Resolved(ToolApproval),
+    Failed(String),
+}
+
+impl TaskApprovalDecisionBroker {
+    fn should_present(&self, group_id: &str, call_id: &str) -> Result<bool> {
+        let (state, _) = self.state.as_ref();
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))?;
+        if state.contains_key(group_id) {
+            return Ok(false);
+        }
+        state.insert(
+            group_id.to_owned(),
+            TaskApprovalGroupState::Pending {
+                leader_call_id: call_id.to_owned(),
+            },
+        );
+        Ok(true)
+    }
+
+    fn resolve(
+        &self,
+        group_id: &str,
+        call_id: &str,
+        expires_at_ms: u64,
+        resolver: impl FnOnce() -> Result<ToolApproval>,
+    ) -> Result<ToolApproval> {
+        let (state, changed) = self.state.as_ref();
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))?;
+        loop {
+            match state.get(group_id) {
+                Some(TaskApprovalGroupState::Resolved(approval)) => return Ok(approval.clone()),
+                Some(TaskApprovalGroupState::Failed(reason)) => {
+                    anyhow::bail!("aggregated task approval failed: {reason}")
+                }
+                Some(TaskApprovalGroupState::Pending { leader_call_id })
+                    if leader_call_id != call_id =>
+                {
+                    let remaining = approval_time_remaining(expires_at_ms);
+                    if remaining.is_zero() {
+                        anyhow::bail!("aggregated task approval expired before resolution");
+                    }
+                    let (next_state, wait) = changed
+                        .wait_timeout(state, remaining)
+                        .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))?;
+                    state = next_state;
+                    if wait.timed_out() {
+                        anyhow::bail!("aggregated task approval expired before resolution");
+                    }
+                }
+                Some(TaskApprovalGroupState::Pending { .. }) => break,
+                None => {
+                    state.insert(
+                        group_id.to_owned(),
+                        TaskApprovalGroupState::Pending {
+                            leader_call_id: call_id.to_owned(),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+        drop(state);
+
+        let resolved = resolver();
+        let mut state = state_lock(self.state.as_ref())?;
+        match &resolved {
+            Ok(approval) => {
+                state.insert(
+                    group_id.to_owned(),
+                    TaskApprovalGroupState::Resolved(approval.clone()),
+                );
+            }
+            Err(error) => {
+                state.insert(
+                    group_id.to_owned(),
+                    TaskApprovalGroupState::Failed(format!("{error:#}")),
+                );
+            }
+        }
+        changed.notify_all();
+        resolved
+    }
+
+    fn fail_presentation(&self, group_id: &str, call_id: &str, reason: &str) -> Result<()> {
+        let (state, changed) = self.state.as_ref();
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))?;
+        if matches!(
+            state.get(group_id),
+            Some(TaskApprovalGroupState::Pending { leader_call_id }) if leader_call_id == call_id
+        ) {
+            state.insert(
+                group_id.to_owned(),
+                TaskApprovalGroupState::Failed(reason.to_owned()),
+            );
+            changed.notify_all();
+        }
+        Ok(())
+    }
+}
+
+fn approval_time_remaining(expires_at_ms: u64) -> Duration {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    Duration::from_millis(expires_at_ms.saturating_sub(now_ms))
+}
+
+fn state_lock(
+    state: &(Mutex<BTreeMap<String, TaskApprovalGroupState>>, Condvar),
+) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, TaskApprovalGroupState>>> {
+    state
+        .0
+        .lock()
+        .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))
+}
+
 struct BufferedSupervisorTaskApprovalRouteHandler<'a, A> {
     inner: &'a mut A,
     task_request: &'a TaskChildSessionRunRequest,
     child_session_ref: &'a SessionRef,
     source_thread_id: &'a AgentThreadId,
+    source_agent_attempt_id: &'a AgentRunAttemptId,
+    approval_broker: TaskApprovalDecisionBroker,
+    approval_batch_id: String,
     controls: Vec<ControlEntry>,
 }
 
@@ -2966,7 +3151,46 @@ where
         self.inner.approval_is_explicit_user_action()
     }
 
-    fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
+    fn approve_tool_call(&mut self, _call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        anyhow::bail!("task approval routing requires an exact permission context")
+    }
+
+    fn should_present_tool_approval(
+        &mut self,
+        call: &ToolCall,
+        _spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<bool> {
+        let group_id = task_approval_aggregation_signature(
+            self.task_request,
+            &self.approval_batch_id,
+            context,
+        )?;
+        self.approval_broker.should_present(&group_id, &call.id)
+    }
+
+    fn tool_approval_presentation_failed(
+        &mut self,
+        call: &ToolCall,
+        _spec: &ToolSpec,
+        context: &ToolApprovalContext,
+        reason: &str,
+    ) -> Result<()> {
+        let group_id = task_approval_aggregation_signature(
+            self.task_request,
+            &self.approval_batch_id,
+            context,
+        )?;
+        self.approval_broker
+            .fail_presentation(&group_id, &call.id, reason)
+    }
+
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<ToolApproval> {
         let task_route_id = task_route_id_for_call(
             &self.task_request.task.task_id,
             &self.task_request.step.step_id,
@@ -2977,20 +3201,39 @@ where
             task_approval_route_control(
                 self.task_request,
                 self.child_session_ref,
+                self.source_thread_id,
+                &self.approval_batch_id,
                 task_route_id.clone(),
                 call,
+                context,
                 TaskRouteStatus::Requested,
-            ),
+            )?,
             ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
                 route_id: agent_route_id.clone(),
                 source_thread_id: self.source_thread_id.clone(),
                 target_thread_id: None,
                 call_id: call.id.clone(),
                 tool_name: call.name.clone(),
+                binding: Some(agent_approval_route_binding(
+                    self.task_request,
+                    self.source_agent_attempt_id,
+                    &self.approval_batch_id,
+                    context,
+                )?),
                 status: AgentRouteStatus::Requested,
             }),
         ]);
-        let approval = self.inner.approve_tool_call(call, spec)?;
+        let group_id = task_approval_aggregation_signature(
+            self.task_request,
+            &self.approval_batch_id,
+            context,
+        )?;
+        let approval =
+            self.approval_broker
+                .resolve(&group_id, &call.id, context.expires_at_ms, || {
+                    self.inner
+                        .approve_tool_call_with_context(call, spec, context)
+                })?;
         let (task_status, agent_status) = match approval {
             ToolApproval::Approve
             | ToolApproval::ApproveForSession
@@ -3003,16 +3246,25 @@ where
             task_approval_route_control(
                 self.task_request,
                 self.child_session_ref,
+                self.source_thread_id,
+                &self.approval_batch_id,
                 task_route_id,
                 call,
+                context,
                 task_status,
-            ),
+            )?,
             ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
                 route_id: agent_route_id,
                 source_thread_id: self.source_thread_id.clone(),
                 target_thread_id: None,
                 call_id: call.id.clone(),
                 tool_name: call.name.clone(),
+                binding: Some(agent_approval_route_binding(
+                    self.task_request,
+                    self.source_agent_attempt_id,
+                    &self.approval_batch_id,
+                    context,
+                )?),
                 status: agent_status,
             }),
         ]);
@@ -3026,6 +3278,8 @@ struct SupervisorTaskApprovalRouteHandler<'a, A> {
     task_request: &'a TaskChildSessionRunRequest,
     child_session_ref: &'a SessionRef,
     source_thread_id: &'a AgentThreadId,
+    source_agent_attempt_id: &'a AgentRunAttemptId,
+    approval_batch_id: String,
 }
 
 impl<A> ApprovalHandler for SupervisorTaskApprovalRouteHandler<'_, A>
@@ -3036,7 +3290,36 @@ where
         self.inner.approval_is_explicit_user_action()
     }
 
-    fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
+    fn approve_tool_call(&mut self, _call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        anyhow::bail!("task approval routing requires an exact permission context")
+    }
+
+    fn should_present_tool_approval(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<bool> {
+        self.inner.should_present_tool_approval(call, spec, context)
+    }
+
+    fn tool_approval_presentation_failed(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+        reason: &str,
+    ) -> Result<()> {
+        self.inner
+            .tool_approval_presentation_failed(call, spec, context, reason)
+    }
+
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<ToolApproval> {
         let task_route_id = task_route_id_for_call(
             &self.task_request.task.task_id,
             &self.task_request.step.step_id,
@@ -3047,8 +3330,11 @@ where
             self.parent_session,
             self.task_request,
             self.child_session_ref,
+            self.source_thread_id,
+            &self.approval_batch_id,
             &task_route_id,
             call,
+            context,
             TaskRouteStatus::Requested,
         )?;
         self.parent_session
@@ -3058,9 +3344,17 @@ where
                 target_thread_id: None,
                 call_id: call.id.clone(),
                 tool_name: call.name.clone(),
+                binding: Some(agent_approval_route_binding(
+                    self.task_request,
+                    self.source_agent_attempt_id,
+                    &self.approval_batch_id,
+                    context,
+                )?),
                 status: AgentRouteStatus::Requested,
             }))?;
-        let approval = self.inner.approve_tool_call(call, spec)?;
+        let approval = self
+            .inner
+            .approve_tool_call_with_context(call, spec, context)?;
         let (task_status, agent_status) = match approval {
             ToolApproval::Approve
             | ToolApproval::ApproveForSession
@@ -3073,8 +3367,11 @@ where
             self.parent_session,
             self.task_request,
             self.child_session_ref,
+            self.source_thread_id,
+            &self.approval_batch_id,
             &task_route_id,
             call,
+            context,
             task_status,
         )?;
         self.parent_session
@@ -3084,6 +3381,12 @@ where
                 target_thread_id: None,
                 call_id: call.id.clone(),
                 tool_name: call.name.clone(),
+                binding: Some(agent_approval_route_binding(
+                    self.task_request,
+                    self.source_agent_attempt_id,
+                    &self.approval_batch_id,
+                    context,
+                )?),
                 status: agent_status,
             }))?;
         Ok(approval)
@@ -3122,36 +3425,145 @@ fn append_task_approval_route(
     session: &mut Session,
     request: &TaskChildSessionRunRequest,
     child_session_ref: &SessionRef,
+    source_thread_id: &AgentThreadId,
+    approval_batch_id: &str,
     route_id: &TaskRouteId,
     call: &ToolCall,
+    context: &ToolApprovalContext,
     status: TaskRouteStatus,
 ) -> Result<()> {
     session.append_control(task_approval_route_control(
         request,
         child_session_ref,
+        source_thread_id,
+        approval_batch_id,
         route_id.clone(),
         call,
+        context,
         status,
-    ))
+    )?)
+}
+
+fn task_single_approval_batch_id(request: &TaskChildSessionRunRequest) -> Result<String> {
+    task_approval_batch_id_for_attempts(
+        &request.task.task_id,
+        request.plan_version,
+        std::iter::once(&request.attempt_id),
+    )
+}
+
+fn task_parallel_approval_batch_id(prepared: &[PreparedParallelTaskChild]) -> Result<String> {
+    let first = prepared
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("parallel approval batch is empty"))?;
+    task_approval_batch_id_for_attempts(
+        &first.request.task.task_id,
+        first.request.plan_version,
+        prepared.iter().map(|member| &member.request.attempt_id),
+    )
+}
+
+fn task_approval_batch_id_for_attempts<'a>(
+    task_id: &TaskId,
+    plan_version: u32,
+    attempt_ids: impl IntoIterator<Item = &'a TaskParticipantAttemptId>,
+) -> Result<String> {
+    let attempt_ids = attempt_ids
+        .into_iter()
+        .map(TaskParticipantAttemptId::as_str)
+        .collect::<BTreeSet<_>>();
+    if attempt_ids.is_empty() {
+        anyhow::bail!("task approval batch has no participant attempts");
+    }
+    let material = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "task_id": task_id.as_str(),
+        "plan_version": plan_version,
+        "attempt_ids": attempt_ids,
+    }))?;
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-task-approval-batch-v1\0");
+    digest.update(material);
+    Ok(format!("task_approval_batch_v1_{:x}", digest.finalize()))
+}
+
+fn task_approval_aggregation_signature(
+    request: &TaskChildSessionRunRequest,
+    approval_batch_id: &str,
+    context: &ToolApprovalContext,
+) -> Result<String> {
+    let material = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "task_id": request.task.task_id.as_str(),
+        "plan_version": request.plan_version,
+        "batch_id": approval_batch_id,
+        "permission_signature": context.permission_signature,
+        "policy_fingerprint": context.policy_fingerprint,
+        "source_workspace_id": stable_workspace_id(&request.options.workspace_root)?,
+        "isolation": request.step.effective_isolation(),
+    }))?;
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-task-approval-aggregation-v1\0");
+    digest.update(material);
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 fn task_approval_route_control(
     request: &TaskChildSessionRunRequest,
     child_session_ref: &SessionRef,
+    source_thread_id: &AgentThreadId,
+    approval_batch_id: &str,
     route_id: TaskRouteId,
     call: &ToolCall,
+    context: &ToolApprovalContext,
     status: TaskRouteStatus,
-) -> ControlEntry {
-    ControlEntry::TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry {
-        route_id,
-        task_id: request.task.task_id.clone(),
-        plan_version: request.plan_version,
-        step_id: request.step.step_id.clone(),
-        role: request.step.role,
-        child_session_ref: child_session_ref.clone(),
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        status,
+) -> Result<ControlEntry> {
+    Ok(ControlEntry::TaskSubagentApprovalRoute(
+        TaskSubagentApprovalRouteEntry {
+            route_id,
+            task_id: request.task.task_id.clone(),
+            plan_version: request.plan_version,
+            step_id: request.step.step_id.clone(),
+            role: request.step.role,
+            child_session_ref: child_session_ref.clone(),
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            binding: Some(TaskApprovalRouteBinding {
+                batch_id: approval_batch_id.to_owned(),
+                source_thread_id: source_thread_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                permission_signature: context.permission_signature.clone(),
+                policy_fingerprint: context.policy_fingerprint.clone(),
+                aggregation_signature: task_approval_aggregation_signature(
+                    request,
+                    approval_batch_id,
+                    context,
+                )?,
+                source_workspace_id: stable_workspace_id(&request.options.workspace_root)?,
+                isolation: request.step.effective_isolation(),
+                requested_at_ms: context.requested_at_ms,
+                expires_at_ms: context.expires_at_ms,
+            }),
+            status,
+        },
+    ))
+}
+
+fn agent_approval_route_binding(
+    request: &TaskChildSessionRunRequest,
+    source_agent_attempt_id: &AgentRunAttemptId,
+    approval_batch_id: &str,
+    context: &ToolApprovalContext,
+) -> Result<AgentApprovalRouteBinding> {
+    Ok(AgentApprovalRouteBinding {
+        batch_id: Some(AgentBatchId::new(approval_batch_id.to_owned())?),
+        attempt_id: source_agent_attempt_id.clone(),
+        permission_signature: context.permission_signature.clone(),
+        policy_fingerprint: context.policy_fingerprint.clone(),
+        source_workspace_id: stable_workspace_id(&request.options.workspace_root)?,
+        isolation: request.step.effective_isolation(),
+        requested_at_ms: context.requested_at_ms,
+        expires_at_ms: context.expires_at_ms,
     })
 }
 

@@ -572,7 +572,7 @@ impl AgentToolRuntime {
                 .register_task()
                 .expect("new background batch cancellation owner must admit its first task");
             let child_input = child_input.with_cancellation(cancellation_handle);
-            let run_thread_id = thread_id.clone();
+            let run_thread = thread_record.clone();
             let child_session_ref = child_thread.child_session_ref.clone();
             let event_sink = self.background_runs.event_sink();
             let (start_tx, start_rx) = tokio::sync::oneshot::channel();
@@ -582,7 +582,7 @@ impl AgentToolRuntime {
                     .await
                     .map_err(|_| anyhow!("background batch start gate was cancelled"))?;
                 run_background_chat_agent(
-                    run_thread_id,
+                    run_thread,
                     child_agent,
                     child_session,
                     child_session_ref,

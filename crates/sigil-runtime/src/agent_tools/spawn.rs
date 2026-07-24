@@ -304,14 +304,14 @@ impl AgentToolRuntime {
                 .register_task()
                 .expect("new background cancellation owner must admit its first task");
             let child_input = child_input.with_cancellation(cancellation_handle);
-            let run_thread_id = thread_id.clone();
             let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
+            let run_thread = thread_record.clone();
             let child_session_ref = child_thread.child_session_ref.clone();
             let event_sink = self.background_runs.event_sink();
             let handle = tokio::spawn(async move {
                 let _cancellation_task_guard = cancellation_task_guard;
                 run_background_chat_agent(
-                    run_thread_id,
+                    run_thread,
                     child_agent,
                     child_session,
                     child_session_ref,
@@ -637,7 +637,7 @@ impl AgentToolRuntime {
         }
         let (_mailbox_tx, mailbox_rx) = mpsc::channel();
         let child_input = child_input.with_child_cancellation(root_cancellation.clone());
-        let run_thread_id = thread_id.clone();
+        let run_thread = thread_record.clone();
         let child_session_ref = child_thread.child_session_ref.clone();
         let event_sink = self.background_runs.event_sink();
         let future = Box::pin(async move {
@@ -646,7 +646,7 @@ impl AgentToolRuntime {
                 .map_err(|error| anyhow!("root run cancelled before child join start: {error}"))?;
             let _cancellation_task_guard = cancellation_task_guard;
             run_background_chat_agent(
-                run_thread_id,
+                run_thread,
                 child_agent,
                 child_session,
                 child_session_ref,
@@ -724,13 +724,13 @@ impl AgentToolRuntime {
             .register_task()
             .expect("new background cancellation owner must admit its first task");
         let child_input = child_input.with_cancellation(cancellation_handle);
-        let run_thread_id = thread_id.clone();
+        let run_thread = thread_record.clone();
         let child_session_ref = child_thread.child_session_ref.clone();
         let event_sink = self.background_runs.event_sink();
         let handle = tokio::spawn(async move {
             let _cancellation_task_guard = cancellation_task_guard;
             run_background_chat_agent(
-                run_thread_id,
+                run_thread,
                 child_agent,
                 child_session,
                 child_session_ref,

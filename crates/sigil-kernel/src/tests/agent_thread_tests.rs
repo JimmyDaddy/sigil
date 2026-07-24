@@ -1,23 +1,23 @@
 use anyhow::Result;
 
 use crate::{
-    AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId, AgentDelegationAdmissionEntry,
-    AgentElicitationRouteEntry, AgentInvocationGrant, AgentInvocationGrantBinding,
-    AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationSource,
-    AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentProfile,
-    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
-    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentResultPolicy, AgentRole, AgentRouteClosedEntry,
-    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
-    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
-    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultDeliveredEntry,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
-    ApprovalMode, ControlEntry, DelegationAuthority, DelegationAuthorityRecord, JsonlSessionStore,
-    ModelMessage, NetworkPolicy, PermissionConfig, PermissionMode, Session, SessionLogEntry,
-    SessionRef, TaskIsolationMode, WorkspaceRootSnapshot,
+    AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId,
+    AgentDelegationAdmissionEntry, AgentElicitationRouteEntry, AgentInvocationGrant,
+    AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentInvocationMode,
+    AgentInvocationPolicy, AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus,
+    AgentMergeSafePointEntry, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationStatus,
+    AgentResultPolicy, AgentRole, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus,
+    AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
+    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, ApprovalMode, ControlEntry, DelegationAuthority, DelegationAuthorityRecord,
+    JsonlSessionStore, ModelMessage, NetworkPolicy, PermissionConfig, PermissionMode, Session,
+    SessionLogEntry, SessionRef, TaskIsolationMode, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -426,6 +426,7 @@ fn agent_control_entries_roundtrip() -> Result<()> {
             target_thread_id: Some(thread_id("main")?),
             call_id: "call-1".to_owned(),
             tool_name: "read_file".to_owned(),
+            binding: None,
             status: AgentRouteStatus::Requested,
         }),
         ControlEntry::AgentElicitationRoute(AgentElicitationRouteEntry {
@@ -1478,6 +1479,7 @@ fn load_from_store_closes_orphan_agent_routes() -> Result<()> {
             target_thread_id: None,
             call_id: "call-1".to_owned(),
             tool_name: "write_file".to_owned(),
+            binding: None,
             status: AgentRouteStatus::Requested,
         },
     )))?;
@@ -1532,6 +1534,48 @@ fn load_from_store_closes_orphan_agent_routes() -> Result<()> {
 }
 
 #[test]
+fn load_from_store_marks_expired_agent_approval_stale_before_route_closure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+        AgentApprovalRouteEntry {
+            route_id: route_id("route_expired")?,
+            source_thread_id: thread_id("thread_1")?,
+            target_thread_id: Some(thread_id("main")?),
+            call_id: "call-expired".to_owned(),
+            tool_name: "read_file".to_owned(),
+            binding: Some(AgentApprovalRouteBinding {
+                batch_id: None,
+                attempt_id: attempt_id("attempt_1")?,
+                permission_signature: format!("sha256:{}", "a".repeat(64)),
+                policy_fingerprint: format!("sha256:{}", "b".repeat(64)),
+                source_workspace_id: format!("workspace:{}", "c".repeat(64)),
+                isolation: TaskIsolationMode::SharedReadOnly,
+                requested_at_ms: 1,
+                expires_at_ms: 2,
+            }),
+            status: AgentRouteStatus::Requested,
+        },
+    )))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-pro", store)?;
+    let projection = session.agent_thread_state_projection();
+    let route = projection
+        .approval_routes
+        .get(&route_id("route_expired")?)
+        .expect("expired route should remain auditable");
+
+    assert_eq!(route.status, AgentRouteStatus::Stale);
+    assert!(
+        !projection
+            .closed_routes
+            .contains_key(&route_id("route_expired")?)
+    );
+    Ok(())
+}
+
+#[test]
 fn closed_agent_routes_skip_terminal_and_already_closed_routes() -> Result<()> {
     let entries = vec![
         SessionLogEntry::User(ModelMessage::user("ignored")),
@@ -1541,6 +1585,7 @@ fn closed_agent_routes_skip_terminal_and_already_closed_routes() -> Result<()> {
             target_thread_id: None,
             call_id: "call-terminal".to_owned(),
             tool_name: "read_file".to_owned(),
+            binding: None,
             status: AgentRouteStatus::Resolved,
         })),
         SessionLogEntry::Control(ControlEntry::AgentElicitationRoute(

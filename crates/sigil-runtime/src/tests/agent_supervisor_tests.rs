@@ -67,6 +67,41 @@ impl EventHandler for RecordingEventHandler {
     }
 }
 
+#[derive(Default)]
+struct RejectApprovalPresentationHandler {
+    requests: usize,
+}
+
+impl EventHandler for RejectApprovalPresentationHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if matches!(event, RunEvent::ToolApprovalRequested { .. }) {
+            self.requests = self.requests.saturating_add(1);
+            anyhow::bail!("approval presenter unavailable");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CountingApprovalHandler {
+    decisions: usize,
+}
+
+impl sigil_kernel::ApprovalHandler for CountingApprovalHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &ToolSpec,
+    ) -> Result<sigil_kernel::ToolApproval> {
+        self.decisions = self.decisions.saturating_add(1);
+        Ok(sigil_kernel::ToolApproval::Approve)
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
+    }
+}
+
 fn participant_attempt_id_for(step_id: &str) -> Result<TaskParticipantAttemptId> {
     task_participant_attempt_id(
         &TaskId::new("task_1")?,
@@ -720,6 +755,7 @@ impl Provider for FailingProvider {
 
 struct UsageProvider;
 struct ToolCallingChildProvider;
+struct DistinctToolCallingChildProvider;
 struct ApprovalRouteTool;
 struct WorktreeWriteProvider;
 struct WorktreeWriteTool;
@@ -789,6 +825,51 @@ impl Provider for ToolCallingChildProvider {
                 id: "call-read-1".to_owned(),
                 name: "read_file".to_owned(),
                 args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for DistinctToolCallingChildProvider {
+    fn name(&self) -> &str {
+        "distinct-tool-calling-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool))
+        {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("distinct route done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let path = if request.messages.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("read_a"))
+        }) {
+            "README.md"
+        } else {
+            "Cargo.toml"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-read-distinct".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: json!({"path": path}).to_string(),
             })),
             Ok(ProviderChunk::Done),
         ])))
@@ -1168,6 +1249,19 @@ fn agent_route_statuses(session: &Session) -> Vec<sigil_kernel::AgentRouteStatus
         .collect()
 }
 
+fn agent_approval_routes(session: &Session) -> Vec<&sigil_kernel::AgentApprovalRouteEntry> {
+    session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(sigil_kernel::ControlEntry::AgentApprovalRoute(route)) => {
+                Some(route)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn task_route_statuses(session: &Session) -> Vec<TaskRouteStatus> {
     session
         .entries()
@@ -1176,6 +1270,19 @@ fn task_route_statuses(session: &Session) -> Vec<TaskRouteStatus> {
             SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskSubagentApprovalRoute(
                 TaskSubagentApprovalRouteEntry { status, .. },
             )) => Some(*status),
+            _ => None,
+        })
+        .collect()
+}
+
+fn task_approval_routes(session: &Session) -> Vec<&TaskSubagentApprovalRouteEntry> {
+    session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskSubagentApprovalRoute(
+                route,
+            )) => Some(route),
             _ => None,
         })
         .collect()
@@ -3365,6 +3472,310 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
 }
 
 #[tokio::test]
+async fn task_parallel_approval_aggregates_only_exact_matching_routes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(Box::new(ToolCallingChildProvider), tools),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_approval_batch")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect identical inputs in parallel".to_owned(),
+    };
+    let requests = ["read_a", "read_b"]
+        .into_iter()
+        .map(|step_id| {
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: step(step_id)?,
+                attempt_id: task_participant_attempt_id(
+                    &task.task_id,
+                    TaskParticipantPurpose::Step,
+                    Some(1),
+                    Some(&TaskStepId::new(step_id)?),
+                    1,
+                )?,
+                child_session_ref: task_participant_session_ref(
+                    &task.task_id,
+                    &task_participant_attempt_id(
+                        &task.task_id,
+                        TaskParticipantPurpose::Step,
+                        Some(1),
+                        Some(&TaskStepId::new(step_id)?),
+                        1,
+                    )?,
+                )?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {step_id}")),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                isolated_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = CountingApprovalHandler::default();
+
+    let preparation =
+        runner.prepare_child_session_batch(&mut session, requests, &mut handler, &mut approval)?;
+    let commit = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        expect_detached_task_batch(preparation),
+    )
+    .await
+    .expect("aggregated approvals should not leave a follower waiting")?;
+    commit
+        .commit(&mut session, &mut handler)?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(approval.decisions, 1);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+            .count(),
+        1
+    );
+    let routes = task_approval_routes(&session);
+    assert_eq!(routes.len(), 4);
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|route| route.status == TaskRouteStatus::Requested)
+            .count(),
+        2
+    );
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|route| route.status == TaskRouteStatus::Resolved)
+            .count(),
+        2
+    );
+    let bindings = routes
+        .iter()
+        .map(|route| route.binding.as_ref().expect("exact route binding"))
+        .collect::<Vec<_>>();
+    assert!(bindings.iter().all(|binding| {
+        binding.batch_id == bindings[0].batch_id
+            && binding.batch_id.starts_with("task_approval_batch_v1_")
+            && binding.batch_id.len() == "task_approval_batch_v1_".len() + 64
+            && binding.permission_signature == bindings[0].permission_signature
+            && binding.policy_fingerprint == bindings[0].policy_fingerprint
+            && binding.aggregation_signature == bindings[0].aggregation_signature
+    }));
+    assert_eq!(
+        bindings
+            .iter()
+            .map(|binding| binding.source_thread_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    assert_eq!(
+        bindings
+            .iter()
+            .map(|binding| binding.attempt_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    let agent_bindings = agent_approval_routes(&session)
+        .into_iter()
+        .map(|route| route.binding.as_ref().expect("exact agent route binding"))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_bindings.len(), 4);
+    assert!(agent_bindings.iter().all(|binding| {
+        binding
+            .batch_id
+            .as_ref()
+            .is_some_and(|batch_id| batch_id.as_str() == bindings[0].batch_id)
+            && binding.permission_signature == bindings[0].permission_signature
+            && binding.policy_fingerprint == bindings[0].policy_fingerprint
+            && binding.source_workspace_id == bindings[0].source_workspace_id
+            && binding.isolation == bindings[0].isolation
+    }));
+    assert_eq!(
+        agent_bindings
+            .iter()
+            .map(|binding| binding.attempt_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_parallel_approval_does_not_aggregate_distinct_tool_arguments() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(Box::new(DistinctToolCallingChildProvider), tools),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_distinct_approval_batch")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect distinct inputs in parallel".to_owned(),
+    };
+    let requests = ["read_a", "read_b"]
+        .into_iter()
+        .map(|step_id| {
+            let step_id = TaskStepId::new(step_id)?;
+            let attempt_id = task_participant_attempt_id(
+                &task.task_id,
+                TaskParticipantPurpose::Step,
+                Some(1),
+                Some(&step_id),
+                1,
+            )?;
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: step(step_id.as_str())?,
+                child_session_ref: task_participant_session_ref(&task.task_id, &attempt_id)?,
+                attempt_id,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {}", step_id.as_str())),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                isolated_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = CountingApprovalHandler::default();
+
+    let preparation =
+        runner.prepare_child_session_batch(&mut session, requests, &mut handler, &mut approval)?;
+    let commit = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        expect_detached_task_batch(preparation),
+    )
+    .await
+    .expect("distinct approvals should both resolve")?;
+    commit
+        .commit(&mut session, &mut handler)?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(approval.decisions, 2);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        task_approval_routes(&session)
+            .iter()
+            .filter_map(|route| {
+                route
+                    .binding
+                    .as_ref()
+                    .map(|binding| binding.aggregation_signature.as_str())
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_parallel_approval_releases_followers_when_presentation_fails() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ApprovalRouteTool));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(Box::new(ToolCallingChildProvider), tools),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: TaskId::new("task_failed_approval_presenter")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "fail the shared presenter".to_owned(),
+    };
+    let requests = ["read_a", "read_b"]
+        .into_iter()
+        .map(|step_id| {
+            let step_id = TaskStepId::new(step_id)?;
+            let attempt_id = task_participant_attempt_id(
+                &task.task_id,
+                TaskParticipantPurpose::Step,
+                Some(1),
+                Some(&step_id),
+                1,
+            )?;
+            Ok(TaskChildSessionRunRequest {
+                task: task.clone(),
+                plan_version: 1,
+                step: step(step_id.as_str())?,
+                child_session_ref: task_participant_session_ref(&task.task_id, &attempt_id)?,
+                attempt_id,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user(format!("inspect {}", step_id.as_str())),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+                isolated_base_snapshot_id: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RejectApprovalPresentationHandler::default();
+    let mut approval = CountingApprovalHandler::default();
+
+    let preparation =
+        runner.prepare_child_session_batch(&mut session, requests, &mut handler, &mut approval)?;
+    let commit = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        expect_detached_task_batch(preparation),
+    )
+    .await
+    .expect("a failed leader presenter must wake every aggregated follower")?;
+    let outputs = commit.commit(&mut session, &mut handler)?;
+
+    assert_eq!(handler.requests, 1);
+    assert_eq!(approval.decisions, 0);
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.into_iter().all(|output| output.is_err()));
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_proposals() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
@@ -4412,6 +4823,77 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
     let task_statuses = task_route_statuses(&session);
     assert!(task_statuses.contains(&TaskRouteStatus::Requested));
     assert!(task_statuses.contains(&TaskRouteStatus::Resolved));
+    let task_routes = task_approval_routes(&session);
+    assert_eq!(task_routes.len(), 2);
+    let requested_binding = task_routes[0]
+        .binding
+        .as_ref()
+        .expect("requested approval route has an exact binding");
+    let resolved_binding = task_routes[1]
+        .binding
+        .as_ref()
+        .expect("resolved approval route has an exact binding");
+    assert_eq!(requested_binding, resolved_binding);
+    assert!(
+        requested_binding
+            .batch_id
+            .starts_with("task_approval_batch_v1_")
+    );
+    assert_eq!(
+        requested_binding.batch_id.len(),
+        "task_approval_batch_v1_".len() + 64
+    );
+    assert_eq!(
+        requested_binding.attempt_id,
+        participant_attempt_id_for("approval_route")?
+    );
+    assert!(
+        requested_binding
+            .source_thread_id
+            .as_str()
+            .starts_with("agent_v1_")
+    );
+    assert!(
+        requested_binding
+            .permission_signature
+            .starts_with("sha256:")
+    );
+    assert!(requested_binding.policy_fingerprint.starts_with("sha256:"));
+    assert_eq!(
+        requested_binding.source_workspace_id,
+        stable_workspace_id(temp.path())?
+    );
+    assert_eq!(
+        requested_binding.isolation,
+        TaskIsolationMode::SharedReadOnly
+    );
+    let agent_routes = agent_approval_routes(&session);
+    assert_eq!(agent_routes.len(), 2);
+    let agent_requested_binding = agent_routes[0]
+        .binding
+        .as_ref()
+        .expect("requested agent route has an exact binding");
+    let agent_resolved_binding = agent_routes[1]
+        .binding
+        .as_ref()
+        .expect("resolved agent route has an exact binding");
+    assert_eq!(agent_requested_binding, agent_resolved_binding);
+    assert_eq!(
+        agent_requested_binding
+            .batch_id
+            .as_ref()
+            .expect("task agent route batch")
+            .as_str(),
+        requested_binding.batch_id
+    );
+    assert_eq!(
+        agent_requested_binding.permission_signature,
+        requested_binding.permission_signature
+    );
+    assert_eq!(
+        agent_requested_binding.source_workspace_id,
+        requested_binding.source_workspace_id
+    );
     assert!(
         participant_session_ref_for("approval_route")?
             .resolve(temp.path())

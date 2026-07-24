@@ -52,6 +52,24 @@ pub(super) fn preparation_policy_fingerprint(decision: &PermissionDecision) -> R
     .map(|digest| format!("sha256:{digest}"))
 }
 
+pub(super) fn approval_permission_signature(
+    call: &ToolCall,
+    spec: &ToolSpec,
+    policy_fingerprint: &str,
+    preview_hash: Option<&str>,
+) -> Result<String> {
+    stable_json_hash(&json!({
+        "schema_version": 1,
+        "tool_name": call.name,
+        "raw_args": call.args_json,
+        "access": spec.access,
+        "declared_network_effect": spec.network_effect,
+        "policy_fingerprint": policy_fingerprint,
+        "preview_hash": preview_hash,
+    }))
+    .map(|digest| format!("sha256:{digest}"))
+}
+
 pub(super) fn preparation_policy_approval_identity(policy_fingerprint: &str) -> String {
     format!("policy:{policy_fingerprint}")
 }

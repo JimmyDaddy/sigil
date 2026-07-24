@@ -1,8 +1,9 @@
 use anyhow::Result;
 use sigil_kernel::{
-    AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentRouteId,
-    AgentThreadResultRecordedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentUsageSummary, ControlEntry, EventHandler, Session, SessionRef, TaskChildSessionStatus,
+    AgentApprovalRouteEntry, AgentMailboxMessageEntry, AgentMailboxStatus,
+    AgentMergeSafePointEntry, AgentRouteId, AgentThreadResultRecordedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentUsageSummary, ControlEntry, EventHandler, Session,
+    SessionRef, TaskChildSessionStatus,
 };
 
 use super::{
@@ -162,6 +163,49 @@ impl AgentSupervisor {
                 thread_id: thread.thread_id.clone(),
                 status: AgentThreadStatus::Failed,
                 reason: Some(reason),
+                updated_at_ms: None,
+            }),
+        )?;
+        self.release_thread(&thread.thread_id);
+        Ok(())
+    }
+
+    pub(crate) fn record_chat_child_blocked_for_approval<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        thread: &AgentChatChildThread,
+        route: &AgentApprovalRouteEntry,
+    ) -> Result<()>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        let binding = route
+            .binding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("background approval route is missing its binding"))?;
+        if route.source_thread_id != thread.thread_id
+            || binding.attempt_id != thread.attempt_id
+            || binding.batch_id != thread.batch_id
+            || binding.isolation != thread.isolation
+        {
+            anyhow::bail!("background approval route binding does not match its child thread");
+        }
+        append_control(
+            session,
+            handler,
+            ControlEntry::AgentApprovalRoute(route.clone()),
+        )?;
+        append_control(
+            session,
+            handler,
+            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: thread.thread_id.clone(),
+                status: AgentThreadStatus::Blocked,
+                reason: Some(format!(
+                    "blocked_needs_approval:{}",
+                    route.route_id.as_str()
+                )),
                 updated_at_ms: None,
             }),
         )?;
