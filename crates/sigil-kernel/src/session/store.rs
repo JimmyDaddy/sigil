@@ -902,6 +902,17 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,
         ControlEntry::IntegrationPlanRecorded(_) => DurableEventType::IntegrationPlanRecorded,
         ControlEntry::IntegrationLaneChanged(_) => DurableEventType::IntegrationLaneChanged,
+        ControlEntry::IntegrationLanePrepared(_) => DurableEventType::IntegrationLanePrepared,
+        ControlEntry::IntegrationLaneMemberApplied(_) => {
+            DurableEventType::IntegrationLaneMemberApplied
+        }
+        ControlEntry::IntegrationLaneVerificationLinked(_) => {
+            DurableEventType::IntegrationLaneVerificationLinked
+        }
+        ControlEntry::IntegrationLaneTerminal(_) => DurableEventType::IntegrationLaneTerminal,
+        ControlEntry::IntegrationLaneCleanupRecorded(_) => {
+            DurableEventType::IntegrationLaneCleanupRecorded
+        }
         ControlEntry::IntegrationPromotionRecorded(_) => {
             DurableEventType::IntegrationPromotionRecorded
         }

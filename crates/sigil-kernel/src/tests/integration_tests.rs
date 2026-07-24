@@ -4,10 +4,13 @@ use crate::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
     IntegrationBaseRepresentation, IntegrationConflictReason, IntegrationContentClass,
     IntegrationEffect, IntegrationFactGap, IntegrationLaneCandidate, IntegrationLaneChanged,
-    IntegrationLaneStatus, IntegrationObservedEffect, IntegrationPlanId, IntegrationPlanRecorded,
-    IntegrationProjection, IntegrationPromotionEffect, IntegrationPromotionRecorded,
-    IntegrationPromotionStatus, IntegrationPromotionTarget, IntegrationProposalFacts,
-    IntegrationProposalSpec, SessionLogEntry, TaskId, TaskStepId, build_integration_plan,
+    IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus, IntegrationLaneMemberApplied,
+    IntegrationLaneMemberEffect, IntegrationLanePrepared, IntegrationLaneStatus,
+    IntegrationLaneTarget, IntegrationLaneTerminal, IntegrationLaneVerificationLinked,
+    IntegrationObservedEffect, IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
+    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
+    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec, SessionLogEntry,
+    TaskId, TaskStepId, build_integration_plan,
 };
 
 fn change_set(id: &str, paths: &[&str]) -> Result<ChangeSet> {
@@ -486,6 +489,165 @@ fn integration_projection_replays_lane_and_promotion_state() -> Result<()> {
     assert_eq!(
         state.promotions.last().map(|promotion| promotion.status),
         Some(IntegrationPromotionStatus::Promoted)
+    );
+    Ok(())
+}
+
+#[test]
+fn integration_projection_rebuilds_recovery_critical_lane_lifecycle() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-lifecycle")?,
+        TaskId::new("task_lifecycle")?,
+        1,
+        vec![proposal(
+            "change-lifecycle",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let lane = &plan.lanes[0];
+    let lane_id = lane.lane_id.clone();
+    let candidate = IntegrationLaneCandidate::ManagedRef {
+        private_ref: "refs/sigil/integration/plan-lifecycle/lane-1".to_owned(),
+        base_commit: "b".repeat(40),
+        candidate_commit: "a".repeat(40),
+        workspace_snapshot_id: "snapshot-lane".to_owned(),
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
+            IntegrationPlanRecorded { plan: plan.clone() },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+            IntegrationLanePrepared {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                target: IntegrationLaneTarget::ManagedRef {
+                    expected_oid: "b".repeat(40),
+                    private_ref: "refs/sigil/integration/plan-lifecycle/lane-1".to_owned(),
+                },
+                owned_workspace_id: "integration-plan-lifecycle-lane-1".to_owned(),
+                ordered_members: lane.proposals.clone(),
+                prepared_at_unix_ms: 1,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(
+            IntegrationLaneMemberApplied {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                change_set_id: lane.proposals[0].clone(),
+                member_index: 0,
+                effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                    expected_old_oid: "b".repeat(40),
+                    new_oid: "a".repeat(40),
+                    candidate_snapshot_id: "snapshot-lane".to_owned(),
+                },
+                applied_at_unix_ms: 2,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneVerificationLinked(
+            IntegrationLaneVerificationLinked {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                candidate: candidate.clone(),
+                verification_check_ids: vec!["git-diff-check".to_owned()],
+                verification_scope_hashes: lane.verification_scope_hashes.clone(),
+                linked_at_unix_ms: 3,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneTerminal(
+            IntegrationLaneTerminal {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                status: IntegrationLaneStatus::Ready,
+                candidate: Some(candidate),
+                reason: None,
+                terminal_at_unix_ms: 4,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneCleanupRecorded(
+            IntegrationLaneCleanupRecorded {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                owned_workspace_id: "integration-plan-lifecycle-lane-1".to_owned(),
+                status: IntegrationLaneCleanupStatus::Removed,
+                recorded_at_unix_ms: 5,
+            },
+        )),
+    ];
+
+    let projection = IntegrationProjection::from_entries(&entries);
+    let state = projection.latest().expect("integration state");
+    let lifecycle = state.lifecycle_lanes.get(&lane_id).expect("lane lifecycle");
+    assert!(!state.inconsistent);
+    assert!(!lifecycle.inconsistent);
+    assert_eq!(lifecycle.applied_members.len(), 1);
+    assert!(lifecycle.verification.is_some());
+    assert_eq!(
+        lifecycle.terminal.as_ref().map(|entry| entry.status),
+        Some(IntegrationLaneStatus::Ready)
+    );
+    assert_eq!(
+        lifecycle.cleanup.as_ref().map(|entry| entry.status),
+        Some(IntegrationLaneCleanupStatus::Removed)
+    );
+    Ok(())
+}
+
+#[test]
+fn integration_projection_rejects_out_of_order_lane_member_receipt() -> Result<()> {
+    let plan = build_integration_plan(
+        IntegrationPlanId::new("plan-member-order")?,
+        TaskId::new("task_member_order")?,
+        1,
+        vec![proposal(
+            "change-member-order",
+            &["src/lib.rs"],
+            &[],
+            &[],
+            IntegrationEffect::Files,
+        )?],
+    )?;
+    let lane = &plan.lanes[0];
+    let lane_id = lane.lane_id.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::IntegrationPlanRecorded(
+            IntegrationPlanRecorded { plan: plan.clone() },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLanePrepared(
+            IntegrationLanePrepared {
+                plan_id: plan.plan_id.clone(),
+                lane_id: lane_id.clone(),
+                target: IntegrationLaneTarget::ManagedRef {
+                    expected_oid: "b".repeat(40),
+                    private_ref: "refs/sigil/integration/plan-member-order/lane-1".to_owned(),
+                },
+                owned_workspace_id: "integration-plan-member-order-lane-1".to_owned(),
+                ordered_members: lane.proposals.clone(),
+                prepared_at_unix_ms: 1,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::IntegrationLaneMemberApplied(
+            IntegrationLaneMemberApplied {
+                plan_id: plan.plan_id,
+                lane_id,
+                change_set_id: lane.proposals[0].clone(),
+                member_index: 1,
+                effect: IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                    expected_old_oid: "b".repeat(40),
+                    new_oid: "a".repeat(40),
+                    candidate_snapshot_id: "snapshot-lane".to_owned(),
+                },
+                applied_at_unix_ms: 2,
+            },
+        )),
+    ];
+
+    assert!(
+        IntegrationProjection::from_entries(&entries)
+            .latest()
+            .is_some_and(|state| state.inconsistent)
     );
     Ok(())
 }

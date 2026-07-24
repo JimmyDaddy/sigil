@@ -244,12 +244,15 @@ pub use image_attachment::{
 pub use integration::{
     IntegrationBaseRepresentation, IntegrationConflictEdge, IntegrationConflictReason,
     IntegrationContentClass, IntegrationEffect, IntegrationFactGap, IntegrationLaneCandidate,
-    IntegrationLaneChanged, IntegrationLaneId, IntegrationLaneSpec, IntegrationLaneStatus,
-    IntegrationObservedEffect, IntegrationPathFact, IntegrationPlan, IntegrationPlanId,
-    IntegrationPlanRecorded, IntegrationPlanState, IntegrationProjection,
-    IntegrationPromotionEffect, IntegrationPromotionRecorded, IntegrationPromotionStatus,
-    IntegrationPromotionTarget, IntegrationProposalFacts, IntegrationProposalSpec,
-    build_integration_plan,
+    IntegrationLaneChanged, IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus,
+    IntegrationLaneId, IntegrationLaneLifecycleState, IntegrationLaneMemberApplied,
+    IntegrationLaneMemberEffect, IntegrationLanePrepared, IntegrationLaneSpec,
+    IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
+    IntegrationLaneVerificationLinked, IntegrationObservedEffect, IntegrationPathFact,
+    IntegrationPlan, IntegrationPlanId, IntegrationPlanRecorded, IntegrationPlanState,
+    IntegrationProjection, IntegrationPromotionEffect, IntegrationPromotionRecorded,
+    IntegrationPromotionStatus, IntegrationPromotionTarget, IntegrationProposalFacts,
+    IntegrationProposalSpec, build_integration_plan,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{

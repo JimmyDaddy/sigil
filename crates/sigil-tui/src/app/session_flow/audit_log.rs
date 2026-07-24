@@ -643,6 +643,59 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 96)
             )
         }
+        ControlEntry::IntegrationLanePrepared(entry) => {
+            let target = match &entry.target {
+                sigil_kernel::IntegrationLaneTarget::ManagedRef { .. } => "managed_ref",
+                sigil_kernel::IntegrationLaneTarget::SnapshotWorkspace { .. } => {
+                    "snapshot_workspace"
+                }
+            };
+            format!(
+                "[ctl] integration lane {}/{} prepared target={} members={}",
+                entry.plan_id.as_str(),
+                entry.lane_id.as_str(),
+                target,
+                entry.ordered_members.len()
+            )
+        }
+        ControlEntry::IntegrationLaneMemberApplied(entry) => {
+            let effect = match &entry.effect {
+                sigil_kernel::IntegrationLaneMemberEffect::ManagedRefAdvanced { .. } => {
+                    "managed_ref_advanced"
+                }
+                sigil_kernel::IntegrationLaneMemberEffect::SnapshotWorkspaceApplied { .. } => {
+                    "snapshot_workspace_applied"
+                }
+            };
+            format!(
+                "[ctl] integration lane {}/{} member={} index={} effect={}",
+                entry.plan_id.as_str(),
+                entry.lane_id.as_str(),
+                entry.change_set_id.as_str(),
+                entry.member_index,
+                effect
+            )
+        }
+        ControlEntry::IntegrationLaneVerificationLinked(entry) => format!(
+            "[ctl] integration lane {}/{} verification checks={} scopes={}",
+            entry.plan_id.as_str(),
+            entry.lane_id.as_str(),
+            entry.verification_check_ids.len(),
+            entry.verification_scope_hashes.len()
+        ),
+        ControlEntry::IntegrationLaneTerminal(entry) => format!(
+            "[ctl] integration lane {}/{} terminal status={} reason={}",
+            entry.plan_id.as_str(),
+            entry.lane_id.as_str(),
+            entry.status.as_str(),
+            truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 96)
+        ),
+        ControlEntry::IntegrationLaneCleanupRecorded(entry) => format!(
+            "[ctl] integration lane {}/{} cleanup={}",
+            entry.plan_id.as_str(),
+            entry.lane_id.as_str(),
+            entry.status.as_str()
+        ),
         ControlEntry::IntegrationPromotionRecorded(entry) => {
             let target = match &entry.target {
                 sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => {

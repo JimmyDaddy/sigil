@@ -214,6 +214,11 @@ durable_event_types! {
     MergeReviewResolved => ("merge_review_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationPlanRecorded => ("integration_plan_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationLaneChanged => ("integration_lane_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLanePrepared => ("integration_lane_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLaneMemberApplied => ("integration_lane_member_applied", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLaneVerificationLinked => ("integration_lane_verification_linked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLaneTerminal => ("integration_lane_terminal", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntegrationLaneCleanupRecorded => ("integration_lane_cleanup_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -744,6 +749,11 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     | ControlEntry::MergeReviewResolved(_)
                     | ControlEntry::IntegrationPlanRecorded(_)
                     | ControlEntry::IntegrationLaneChanged(_)
+                    | ControlEntry::IntegrationLanePrepared(_)
+                    | ControlEntry::IntegrationLaneMemberApplied(_)
+                    | ControlEntry::IntegrationLaneVerificationLinked(_)
+                    | ControlEntry::IntegrationLaneTerminal(_)
+                    | ControlEntry::IntegrationLaneCleanupRecorded(_)
                     | ControlEntry::IntegrationPromotionRecorded(_) => {
                         TypedDomainEvent::WriteIsolation(control)
                     }
@@ -863,6 +873,21 @@ fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {
         ) | (
             Some(DurableEventType::IntegrationLaneChanged),
             ControlEntry::IntegrationLaneChanged(_)
+        ) | (
+            Some(DurableEventType::IntegrationLanePrepared),
+            ControlEntry::IntegrationLanePrepared(_)
+        ) | (
+            Some(DurableEventType::IntegrationLaneMemberApplied),
+            ControlEntry::IntegrationLaneMemberApplied(_)
+        ) | (
+            Some(DurableEventType::IntegrationLaneVerificationLinked),
+            ControlEntry::IntegrationLaneVerificationLinked(_)
+        ) | (
+            Some(DurableEventType::IntegrationLaneTerminal),
+            ControlEntry::IntegrationLaneTerminal(_)
+        ) | (
+            Some(DurableEventType::IntegrationLaneCleanupRecorded),
+            ControlEntry::IntegrationLaneCleanupRecorded(_)
         ) | (
             Some(DurableEventType::IntegrationPromotionRecorded),
             ControlEntry::IntegrationPromotionRecorded(_)
@@ -1423,6 +1448,13 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::MergeReviewResolved(_) => "merge_review_resolved",
         ControlEntry::IntegrationPlanRecorded(_) => "integration_plan_recorded",
         ControlEntry::IntegrationLaneChanged(_) => "integration_lane_changed",
+        ControlEntry::IntegrationLanePrepared(_) => "integration_lane_prepared",
+        ControlEntry::IntegrationLaneMemberApplied(_) => "integration_lane_member_applied",
+        ControlEntry::IntegrationLaneVerificationLinked(_) => {
+            "integration_lane_verification_linked"
+        }
+        ControlEntry::IntegrationLaneTerminal(_) => "integration_lane_terminal",
+        ControlEntry::IntegrationLaneCleanupRecorded(_) => "integration_lane_cleanup_recorded",
         ControlEntry::IntegrationPromotionRecorded(_) => "integration_promotion_recorded",
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",

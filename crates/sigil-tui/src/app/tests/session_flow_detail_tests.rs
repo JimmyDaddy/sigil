@@ -133,6 +133,92 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
         "[ctl] integration lane plan-audit/lane-1 status=ready candidate=managed_ref checks=1 reason=-"
     );
 
+    let prepared = render_control_entry_line(&ControlEntry::IntegrationLanePrepared(
+        sigil_kernel::IntegrationLanePrepared {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            target: sigil_kernel::IntegrationLaneTarget::ManagedRef {
+                expected_oid: "b".repeat(40),
+                private_ref: "refs/sigil/integration/plan-audit/lane-1".to_owned(),
+            },
+            owned_workspace_id: "integration-plan-audit-lane-1".to_owned(),
+            ordered_members: vec![sigil_kernel::ChangeSetId::new("change-audit")?],
+            prepared_at_unix_ms: 1,
+        },
+    ));
+    assert_eq!(
+        prepared,
+        "[ctl] integration lane plan-audit/lane-1 prepared target=managed_ref members=1"
+    );
+
+    let member = render_control_entry_line(&ControlEntry::IntegrationLaneMemberApplied(
+        sigil_kernel::IntegrationLaneMemberApplied {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            change_set_id: sigil_kernel::ChangeSetId::new("change-audit")?,
+            member_index: 0,
+            effect: sigil_kernel::IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                expected_old_oid: "b".repeat(40),
+                new_oid: "a".repeat(40),
+                candidate_snapshot_id: "snapshot-lane".to_owned(),
+            },
+            applied_at_unix_ms: 2,
+        },
+    ));
+    assert_eq!(
+        member,
+        "[ctl] integration lane plan-audit/lane-1 member=change-audit index=0 effect=managed_ref_advanced"
+    );
+
+    let verification = render_control_entry_line(&ControlEntry::IntegrationLaneVerificationLinked(
+        sigil_kernel::IntegrationLaneVerificationLinked {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            candidate: sigil_kernel::IntegrationLaneCandidate::ManagedRef {
+                private_ref: "refs/sigil/integration/plan-audit/lane-1".to_owned(),
+                base_commit: "b".repeat(40),
+                candidate_commit: "a".repeat(40),
+                workspace_snapshot_id: "snapshot-lane".to_owned(),
+            },
+            verification_check_ids: vec!["git-diff-check".to_owned()],
+            verification_scope_hashes: vec!["scope-audit".to_owned()],
+            linked_at_unix_ms: 3,
+        },
+    ));
+    assert_eq!(
+        verification,
+        "[ctl] integration lane plan-audit/lane-1 verification checks=1 scopes=1"
+    );
+
+    let terminal = render_control_entry_line(&ControlEntry::IntegrationLaneTerminal(
+        sigil_kernel::IntegrationLaneTerminal {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            status: sigil_kernel::IntegrationLaneStatus::Ready,
+            candidate: None,
+            reason: None,
+            terminal_at_unix_ms: 4,
+        },
+    ));
+    assert_eq!(
+        terminal,
+        "[ctl] integration lane plan-audit/lane-1 terminal status=ready reason=-"
+    );
+
+    let cleanup = render_control_entry_line(&ControlEntry::IntegrationLaneCleanupRecorded(
+        sigil_kernel::IntegrationLaneCleanupRecorded {
+            plan_id: plan_id.clone(),
+            lane_id: sigil_kernel::IntegrationLaneId::new("lane-1")?,
+            owned_workspace_id: "integration-plan-audit-lane-1".to_owned(),
+            status: sigil_kernel::IntegrationLaneCleanupStatus::Removed,
+            recorded_at_unix_ms: 5,
+        },
+    ));
+    assert_eq!(
+        cleanup,
+        "[ctl] integration lane plan-audit/lane-1 cleanup=removed"
+    );
+
     let promotion = render_control_entry_line(&ControlEntry::IntegrationPromotionRecorded(
         sigil_kernel::IntegrationPromotionRecorded {
             plan_id,

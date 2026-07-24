@@ -1,7 +1,11 @@
 use super::*;
 use crate::{
     CommandPermissionMatch,
-    integration::{IntegrationLaneChanged, IntegrationPlanRecorded, IntegrationPromotionRecorded},
+    integration::{
+        IntegrationLaneChanged, IntegrationLaneCleanupRecorded, IntegrationLaneMemberApplied,
+        IntegrationLanePrepared, IntegrationLaneTerminal, IntegrationLaneVerificationLinked,
+        IntegrationPlanRecorded, IntegrationPromotionRecorded,
+    },
 };
 
 /// Append-only session log entry stored in the durable JSONL session file.
@@ -239,6 +243,11 @@ pub enum ControlEntry {
     MergeReviewResolved(MergeReviewResolved),
     IntegrationPlanRecorded(IntegrationPlanRecorded),
     IntegrationLaneChanged(IntegrationLaneChanged),
+    IntegrationLanePrepared(IntegrationLanePrepared),
+    IntegrationLaneMemberApplied(IntegrationLaneMemberApplied),
+    IntegrationLaneVerificationLinked(IntegrationLaneVerificationLinked),
+    IntegrationLaneTerminal(IntegrationLaneTerminal),
+    IntegrationLaneCleanupRecorded(IntegrationLaneCleanupRecorded),
     IntegrationPromotionRecorded(IntegrationPromotionRecorded),
     AgentProfileCaptured(AgentProfileCapturedEntry),
     AgentProfileTrustDecision(AgentProfileTrustEntry),

@@ -128,7 +128,10 @@ pub enum IntegrationBaseRepresentation {
 impl IntegrationBaseRepresentation {
     #[must_use]
     pub fn is_automatic_lane_eligible(&self) -> bool {
-        matches!(self, Self::CleanCommit { .. })
+        matches!(
+            self,
+            Self::CleanCommit { .. } | Self::SnapshotWorkspace { .. }
+        )
     }
 
     fn validate(&self) -> Result<()> {
@@ -797,6 +800,125 @@ pub struct IntegrationLaneChanged {
     pub reason: Option<String>,
 }
 
+/// Runtime-owned physical target prepared for one integration lane.
+///
+/// Callers outside the runtime may display the target kind, but must not accept path/ref values
+/// from a model or planner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IntegrationLaneTarget {
+    ManagedRef {
+        expected_oid: String,
+        private_ref: String,
+    },
+    SnapshotWorkspace {
+        base_snapshot_id: WorkspaceSnapshotId,
+        overlay_digest: String,
+        revision: u64,
+        owned_workspace_id: String,
+    },
+}
+
+/// Recovery-critical fact recorded after a lane target is materialized and before member apply.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationLanePrepared {
+    pub plan_id: IntegrationPlanId,
+    pub lane_id: IntegrationLaneId,
+    pub target: IntegrationLaneTarget,
+    pub owned_workspace_id: String,
+    pub ordered_members: Vec<ChangeSetId>,
+    pub prepared_at_unix_ms: u64,
+}
+
+/// Exact target transition produced by one ordered lane member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IntegrationLaneMemberEffect {
+    ManagedRefAdvanced {
+        expected_old_oid: String,
+        new_oid: String,
+        candidate_snapshot_id: WorkspaceSnapshotId,
+    },
+    SnapshotWorkspaceApplied {
+        expected_snapshot_id: WorkspaceSnapshotId,
+        expected_revision: u64,
+        candidate_snapshot_id: WorkspaceSnapshotId,
+        candidate_revision: u64,
+    },
+}
+
+/// Recovery-critical ordered member-apply receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationLaneMemberApplied {
+    pub plan_id: IntegrationPlanId,
+    pub lane_id: IntegrationLaneId,
+    pub change_set_id: ChangeSetId,
+    pub member_index: u32,
+    pub effect: IntegrationLaneMemberEffect,
+    pub applied_at_unix_ms: u64,
+}
+
+/// Recovery-critical link between scoped verification and an exact lane candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationLaneVerificationLinked {
+    pub plan_id: IntegrationPlanId,
+    pub lane_id: IntegrationLaneId,
+    pub candidate: IntegrationLaneCandidate,
+    pub verification_check_ids: Vec<String>,
+    pub verification_scope_hashes: Vec<String>,
+    pub linked_at_unix_ms: u64,
+}
+
+/// Recovery-critical terminal outcome for one physical lane attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationLaneTerminal {
+    pub plan_id: IntegrationPlanId,
+    pub lane_id: IntegrationLaneId,
+    pub status: IntegrationLaneStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<IntegrationLaneCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub terminal_at_unix_ms: u64,
+}
+
+/// Cleanup or retention disposition for one runtime-owned integration workspace.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationLaneCleanupStatus {
+    Retained,
+    Removed,
+    AlreadyMissing,
+    Failed,
+}
+
+impl IntegrationLaneCleanupStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retained => "retained",
+            Self::Removed => "removed",
+            Self::AlreadyMissing => "already_missing",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Recovery-critical cleanup inventory for one lane-owned workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct IntegrationLaneCleanupRecorded {
+    pub plan_id: IntegrationPlanId,
+    pub lane_id: IntegrationLaneId,
+    pub owned_workspace_id: String,
+    pub status: IntegrationLaneCleanupStatus,
+    pub recorded_at_unix_ms: u64,
+}
+
 /// Exact runtime-owned candidate target produced by one integration lane.
 ///
 /// Managed refs are valid only for clean commit bases. Snapshot workspaces preserve an inherited
@@ -893,8 +1015,33 @@ pub struct IntegrationPromotionRecorded {
 pub struct IntegrationPlanState {
     pub recorded: IntegrationPlanRecorded,
     pub lanes: BTreeMap<IntegrationLaneId, IntegrationLaneChanged>,
+    pub lifecycle_lanes: BTreeMap<IntegrationLaneId, IntegrationLaneLifecycleState>,
     pub promotions: Vec<IntegrationPromotionRecorded>,
     pub inconsistent: bool,
+}
+
+/// Replayed recovery-critical state for one integration lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationLaneLifecycleState {
+    pub prepared: Option<IntegrationLanePrepared>,
+    pub applied_members: BTreeMap<ChangeSetId, IntegrationLaneMemberApplied>,
+    pub verification: Option<IntegrationLaneVerificationLinked>,
+    pub terminal: Option<IntegrationLaneTerminal>,
+    pub cleanup: Option<IntegrationLaneCleanupRecorded>,
+    pub inconsistent: bool,
+}
+
+impl IntegrationLaneLifecycleState {
+    fn new() -> Self {
+        Self {
+            prepared: None,
+            applied_members: BTreeMap::new(),
+            verification: None,
+            terminal: None,
+            cleanup: None,
+            inconsistent: false,
+        }
+    }
 }
 
 /// Reconstructed integration state from append-only control entries.
@@ -929,6 +1076,7 @@ impl IntegrationProjection {
                             IntegrationPlanState {
                                 recorded: entry.clone(),
                                 lanes: BTreeMap::new(),
+                                lifecycle_lanes: BTreeMap::new(),
                                 promotions: Vec::new(),
                                 inconsistent: false,
                             },
@@ -952,6 +1100,175 @@ impl IntegrationProjection {
                 }
                 state.lanes.insert(entry.lane_id.clone(), entry.clone());
             }
+            ControlEntry::IntegrationLanePrepared(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let Some(spec) = state
+                    .recorded
+                    .plan
+                    .lanes
+                    .iter()
+                    .find(|lane| lane.lane_id == entry.lane_id)
+                else {
+                    state.inconsistent = true;
+                    return;
+                };
+                let lifecycle = state
+                    .lifecycle_lanes
+                    .entry(entry.lane_id.clone())
+                    .or_insert_with(IntegrationLaneLifecycleState::new);
+                if entry.ordered_members != spec.proposals
+                    || !lane_target_matches_plan(&state.recorded.plan, &entry.target)
+                    || entry.owned_workspace_id.trim().is_empty()
+                    || matches!(
+                        &entry.target,
+                        IntegrationLaneTarget::SnapshotWorkspace {
+                            owned_workspace_id,
+                            ..
+                        } if owned_workspace_id != &entry.owned_workspace_id
+                    )
+                    || entry.prepared_at_unix_ms == 0
+                {
+                    lifecycle.inconsistent = true;
+                    state.inconsistent = true;
+                }
+                match &lifecycle.prepared {
+                    Some(existing) if existing != entry => {
+                        lifecycle.inconsistent = true;
+                        state.inconsistent = true;
+                    }
+                    Some(_) => {}
+                    None => lifecycle.prepared = Some(entry.clone()),
+                }
+            }
+            ControlEntry::IntegrationLaneMemberApplied(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let lifecycle = state
+                    .lifecycle_lanes
+                    .entry(entry.lane_id.clone())
+                    .or_insert_with(IntegrationLaneLifecycleState::new);
+                if let Some(existing) = lifecycle.applied_members.get(&entry.change_set_id) {
+                    if existing != entry {
+                        lifecycle.inconsistent = true;
+                        state.inconsistent = true;
+                    }
+                    return;
+                }
+                let valid = lifecycle
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|prepared| member_apply_matches(prepared, lifecycle, entry));
+                if !valid {
+                    lifecycle.inconsistent = true;
+                    state.inconsistent = true;
+                }
+                lifecycle
+                    .applied_members
+                    .insert(entry.change_set_id.clone(), entry.clone());
+            }
+            ControlEntry::IntegrationLaneVerificationLinked(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let Some(spec) = state
+                    .recorded
+                    .plan
+                    .lanes
+                    .iter()
+                    .find(|lane| lane.lane_id == entry.lane_id)
+                else {
+                    state.inconsistent = true;
+                    return;
+                };
+                let lifecycle = state
+                    .lifecycle_lanes
+                    .entry(entry.lane_id.clone())
+                    .or_insert_with(IntegrationLaneLifecycleState::new);
+                let candidate = latest_lifecycle_candidate(lifecycle);
+                if entry.verification_check_ids.is_empty()
+                    || entry.verification_scope_hashes != spec.verification_scope_hashes
+                    || candidate.as_ref() != Some(&entry.candidate)
+                    || entry.linked_at_unix_ms == 0
+                {
+                    lifecycle.inconsistent = true;
+                    state.inconsistent = true;
+                }
+                match &lifecycle.verification {
+                    Some(existing) if existing != entry => {
+                        lifecycle.inconsistent = true;
+                        state.inconsistent = true;
+                    }
+                    Some(_) => {}
+                    None => lifecycle.verification = Some(entry.clone()),
+                }
+            }
+            ControlEntry::IntegrationLaneTerminal(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let lifecycle = state
+                    .lifecycle_lanes
+                    .entry(entry.lane_id.clone())
+                    .or_insert_with(IntegrationLaneLifecycleState::new);
+                let ready_matches = entry.status != IntegrationLaneStatus::Ready
+                    || lifecycle.verification.as_ref().is_some_and(|verification| {
+                        entry.candidate.as_ref() == Some(&verification.candidate)
+                    });
+                if lifecycle.prepared.is_none()
+                    || !entry.status.is_terminal()
+                    || !ready_matches
+                    || entry.terminal_at_unix_ms == 0
+                {
+                    lifecycle.inconsistent = true;
+                    state.inconsistent = true;
+                }
+                match &lifecycle.terminal {
+                    Some(existing) if existing != entry => {
+                        lifecycle.inconsistent = true;
+                        state.inconsistent = true;
+                    }
+                    Some(_) => {}
+                    None => lifecycle.terminal = Some(entry.clone()),
+                }
+            }
+            ControlEntry::IntegrationLaneCleanupRecorded(entry) => {
+                let Some(state) = self.plans.get_mut(&entry.plan_id) else {
+                    return;
+                };
+                let lifecycle = state
+                    .lifecycle_lanes
+                    .entry(entry.lane_id.clone())
+                    .or_insert_with(IntegrationLaneLifecycleState::new);
+                let valid = lifecycle.prepared.as_ref().is_some_and(|prepared| {
+                    prepared.owned_workspace_id == entry.owned_workspace_id
+                }) && entry.recorded_at_unix_ms > 0;
+                if !valid {
+                    lifecycle.inconsistent = true;
+                    state.inconsistent = true;
+                }
+                match &lifecycle.cleanup {
+                    Some(existing) if existing == entry => {}
+                    Some(existing)
+                        if existing.status == IntegrationLaneCleanupStatus::Retained
+                            && matches!(
+                                entry.status,
+                                IntegrationLaneCleanupStatus::Removed
+                                    | IntegrationLaneCleanupStatus::AlreadyMissing
+                                    | IntegrationLaneCleanupStatus::Failed
+                            ) =>
+                    {
+                        lifecycle.cleanup = Some(entry.clone());
+                    }
+                    Some(_) => {
+                        lifecycle.inconsistent = true;
+                        state.inconsistent = true;
+                    }
+                    None => lifecycle.cleanup = Some(entry.clone()),
+                }
+            }
             ControlEntry::IntegrationPromotionRecorded(entry) => {
                 let Some(state) = self.plans.get_mut(&entry.plan_id) else {
                     return;
@@ -971,6 +1288,159 @@ impl IntegrationProjection {
         self.latest_plan_id
             .as_ref()
             .and_then(|plan_id| self.plans.get(plan_id))
+    }
+}
+
+fn lane_target_matches_plan(plan: &IntegrationPlan, target: &IntegrationLaneTarget) -> bool {
+    match (&plan.base_representation, target) {
+        (
+            IntegrationBaseRepresentation::CleanCommit { base_commit },
+            IntegrationLaneTarget::ManagedRef {
+                expected_oid,
+                private_ref,
+            },
+        ) => base_commit == expected_oid && !private_ref.trim().is_empty(),
+        (
+            IntegrationBaseRepresentation::SnapshotWorkspace { overlay_digest, .. },
+            IntegrationLaneTarget::SnapshotWorkspace {
+                base_snapshot_id,
+                overlay_digest: target_overlay,
+                revision,
+                owned_workspace_id,
+            },
+        ) => {
+            &plan.base_snapshot_id == base_snapshot_id
+                && overlay_digest == target_overlay
+                && *revision == 0
+                && !owned_workspace_id.trim().is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn member_apply_matches(
+    prepared: &IntegrationLanePrepared,
+    lifecycle: &IntegrationLaneLifecycleState,
+    entry: &IntegrationLaneMemberApplied,
+) -> bool {
+    let Ok(member_index) = usize::try_from(entry.member_index) else {
+        return false;
+    };
+    if prepared.ordered_members.get(member_index) != Some(&entry.change_set_id)
+        || lifecycle.applied_members.len() != member_index
+        || entry.applied_at_unix_ms == 0
+    {
+        return false;
+    }
+    let previous = member_index.checked_sub(1).and_then(|index| {
+        prepared
+            .ordered_members
+            .get(index)
+            .and_then(|id| lifecycle.applied_members.get(id))
+    });
+    match (&prepared.target, previous, &entry.effect) {
+        (
+            IntegrationLaneTarget::ManagedRef { expected_oid, .. },
+            None,
+            IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                expected_old_oid, ..
+            },
+        ) => expected_oid == expected_old_oid,
+        (
+            IntegrationLaneTarget::ManagedRef { .. },
+            Some(previous),
+            IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                expected_old_oid, ..
+            },
+        ) => matches!(
+            &previous.effect,
+            IntegrationLaneMemberEffect::ManagedRefAdvanced { new_oid, .. }
+                if new_oid == expected_old_oid
+        ),
+        (
+            IntegrationLaneTarget::SnapshotWorkspace {
+                base_snapshot_id,
+                revision,
+                ..
+            },
+            None,
+            IntegrationLaneMemberEffect::SnapshotWorkspaceApplied {
+                expected_snapshot_id,
+                expected_revision,
+                candidate_revision,
+                ..
+            },
+        ) => {
+            base_snapshot_id == expected_snapshot_id
+                && revision == expected_revision
+                && *candidate_revision == expected_revision.saturating_add(1)
+        }
+        (
+            IntegrationLaneTarget::SnapshotWorkspace { .. },
+            Some(previous),
+            IntegrationLaneMemberEffect::SnapshotWorkspaceApplied {
+                expected_snapshot_id,
+                expected_revision,
+                candidate_revision,
+                ..
+            },
+        ) => matches!(
+            &previous.effect,
+            IntegrationLaneMemberEffect::SnapshotWorkspaceApplied {
+                candidate_snapshot_id,
+                candidate_revision: previous_revision,
+                ..
+            } if candidate_snapshot_id == expected_snapshot_id
+                && previous_revision == expected_revision
+                && *candidate_revision == expected_revision.saturating_add(1)
+        ),
+        _ => false,
+    }
+}
+
+fn latest_lifecycle_candidate(
+    lifecycle: &IntegrationLaneLifecycleState,
+) -> Option<IntegrationLaneCandidate> {
+    let prepared = lifecycle.prepared.as_ref()?;
+    let last_id = prepared.ordered_members.last()?;
+    let applied = lifecycle.applied_members.get(last_id)?;
+    match (&prepared.target, &applied.effect) {
+        (
+            IntegrationLaneTarget::ManagedRef {
+                expected_oid,
+                private_ref,
+            },
+            IntegrationLaneMemberEffect::ManagedRefAdvanced {
+                new_oid,
+                candidate_snapshot_id,
+                ..
+            },
+        ) => Some(IntegrationLaneCandidate::ManagedRef {
+            private_ref: private_ref.clone(),
+            base_commit: expected_oid.clone(),
+            candidate_commit: new_oid.clone(),
+            workspace_snapshot_id: candidate_snapshot_id.clone(),
+        }),
+        (
+            IntegrationLaneTarget::SnapshotWorkspace {
+                base_snapshot_id,
+                overlay_digest,
+                owned_workspace_id,
+                ..
+            },
+            IntegrationLaneMemberEffect::SnapshotWorkspaceApplied {
+                candidate_snapshot_id,
+                candidate_revision,
+                ..
+            },
+        ) => Some(IntegrationLaneCandidate::SnapshotWorkspace {
+            owned_workspace_id: owned_workspace_id.clone(),
+            base_snapshot_id: base_snapshot_id.clone(),
+            overlay_digest: overlay_digest.clone(),
+            revision: *candidate_revision,
+            candidate_snapshot_id: candidate_snapshot_id.clone(),
+        }),
+        _ => None,
     }
 }
 
