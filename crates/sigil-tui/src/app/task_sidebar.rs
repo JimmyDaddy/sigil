@@ -504,12 +504,25 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
 
 fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCardView> {
     if let Some(product) = task_integration_review_product(entries) {
+        let integration = sigil_kernel::IntegrationProjection::from_entries(entries);
+        let plan = integration
+            .plans
+            .get(&product.preview.plan_id)
+            .map(|state| &state.recorded.plan);
         let receipt_count = product
             .preview
             .ordered_lane_candidates
             .iter()
             .map(|lane| lane.verification_receipt_ids.len())
             .sum::<usize>();
+        let child_receipt_count = plan
+            .map(|plan| {
+                plan.proposals
+                    .iter()
+                    .map(|proposal| proposal.facts.child_verification_refs.len())
+                    .sum::<usize>()
+            })
+            .unwrap_or_default();
         let target = match &product.preview.target {
             sigil_kernel::IntegrationPromotionTarget::WorkspaceApply { .. } => "workspace apply",
             sigil_kernel::IntegrationPromotionTarget::GitRefAdvance { .. } => "git ref advance",
@@ -525,7 +538,43 @@ fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCar
                 "Lanes: {} · receipts: {receipt_count}",
                 product.preview.ordered_lane_candidates.len()
             ),
+            format!(
+                "Verification stages: child {child_receipt_count} receipt(s) · lane {receipt_count} receipt(s) · parent pending after promotion"
+            ),
+            format!(
+                "Preview: {}",
+                truncate_session_view_text(&product.preview.preview_digest, 72)
+            ),
         ];
+        for lane in &product.preview.ordered_lane_candidates {
+            let candidate_kind = match &lane.candidate {
+                sigil_kernel::IntegrationLaneCandidate::ManagedRef { .. } => "managed ref",
+                sigil_kernel::IntegrationLaneCandidate::SnapshotWorkspace { .. } => {
+                    "snapshot workspace"
+                }
+            };
+            let proposal_count = plan
+                .and_then(|plan| plan.lanes.iter().find(|spec| spec.lane_id == lane.lane_id))
+                .map_or(0, |spec| spec.proposals.len());
+            inspect_lines.push(format!(
+                "Lane {}: {proposal_count} proposal(s) · {candidate_kind} · {} lane receipt(s)",
+                lane.lane_id.as_str(),
+                lane.verification_receipt_ids.len()
+            ));
+        }
+        let mut conflict_reasons = plan
+            .into_iter()
+            .flat_map(|plan| &plan.conflicts)
+            .flat_map(|conflict| conflict.reasons.iter())
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>();
+        conflict_reasons.sort_unstable();
+        conflict_reasons.dedup();
+        inspect_lines.push(if conflict_reasons.is_empty() {
+            "Conflict graph: no serialized conflicts".to_owned()
+        } else {
+            format!("Conflict reasons: {}", conflict_reasons.join(", "))
+        });
         if product.preview.verification_invalidation.is_empty() {
             inspect_lines.push("Parent verification invalidation: none".to_owned());
         } else {

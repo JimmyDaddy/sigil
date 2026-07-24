@@ -1046,6 +1046,19 @@ fn task_integration_review_card_preempts_verification_with_one_exact_action() ->
             .iter()
             .any(|line| line == "Lanes: 1 · receipts: 1")
     );
+    assert!(card.inspect_lines.iter().any(|line| {
+        line == "Verification stages: child 0 receipt(s) · lane 1 receipt(s) · parent pending after promotion"
+    }));
+    assert!(
+        card.inspect_lines.iter().any(|line| {
+            line == "Lane lane-1: 1 proposal(s) · managed ref · 1 lane receipt(s)"
+        })
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Conflict graph: no serialized conflicts")
+    );
     assert!(
         card.inspect_lines
             .iter()

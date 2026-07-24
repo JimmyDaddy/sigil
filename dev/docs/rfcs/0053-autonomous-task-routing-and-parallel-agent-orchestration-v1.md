@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6e implemented；O6f in progress；O6g-O8 deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g implemented；O7-O8 deferred
 
 创建日期：2026-07-22
 
@@ -1442,9 +1442,9 @@ O6d：parallel Worktree batch 与 deterministic conflict graph。
   verified、conflicted 与 cleanup inventory，不会把 replay 当成重新 apply/check 的授权。
 - lane candidate 与 final promotion target 已改为 tagged union，不能同时记录 snapshot workspace 与
   managed ref，也不能在一次 promotion 中同时记录 workspace apply 与 Git ref advance。
-- O1e explicit invocation grant、O6c dirty overlay、O6d deterministic conflict graph 与 O6e
-  physical/recovery lane contract 已完成。promotion authority、parent mutation/final verification
-  和 O6g 产品面仍未完成，因而本 RFC 顶部状态保持 O6f-O8 deferred。
+- O1e explicit invocation grant、O6c dirty overlay、O6d deterministic conflict graph、O6e
+  physical/recovery lane contract、O6f promotion barrier 和 O6g TUI review/accept 产品闭环均已
+  完成；下一实施边界从 O7 的 guidance、approval routing 与 restart reconciliation 开始。
 
 1. scheduler 只把相互独立的 `SubagentWrite + Worktree` ready step 组成 homogeneous batch；
    coordinator 在启动前冻结同一 O6c base identity，并对 profile、permission、workspace、
@@ -1577,6 +1577,18 @@ O6g：integration review 最小产品面。
   exact promotion digest。TUI 不暴露 private worktree path/ref，也不提供“强制覆盖”快捷动作。
 - stale preview、迟到响应、session switch 和 task supersede 都以 request id/task id/plan version
   隔离；旧 modal 回包不能作用于新 task。
+
+实施状态：O6f、O6g 完成（2026-07-24）。
+
+- Kernel 只投影当前 task/plan version 的未消费 exact preview；authority consumed、promotion
+  terminal、supersede 或 inconsistent projection 都会移除旧 action。
+- Runtime 从 durable artifact/provenance 重建 reviewed candidate，接受时再次校验 preview、
+  policy、frozen base、target 与 authority，随后完成单次 promotion 和 authoritative parent
+  verification；只有 `Passed` / `NotApplicable` 才开放 synthesis gate。
+- TUI 的 review 与 accept 都携带 request id、task id、plan id/version 和 preview digest；迟到
+  load/accept 回包不覆盖当前状态。detail 展示 aggregate diff、脱敏 lane provenance、冲突原因与
+  child/lane/parent verification 分层，不暴露 private ref/worktree path。接受并通过 parent
+  verification 后，TUI 按 exact task id 自动继续到 Synthesis。
 
 O6 依赖顺序：
 
