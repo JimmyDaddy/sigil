@@ -32,8 +32,8 @@
 
 <p align="center"><a href="https://sigil.corerobin.com/#demo">Watch the 45-second demo</a> · <a href="assets/demo/sigil-45-second-demo.mp4">MP4</a></p>
 
-> [!NOTE]
-> Sigil is an early preview. The website and user docs follow `main`; packaged releases can lag behind. Check [Installation](docs/en/installation.md) and the [Changelog](docs/en/changelog.md) before relying on a newly documented feature.
+> [!WARNING]
+> Sigil is under active development and continuous iteration, so features may be unstable and change without notice. The website and user docs follow `main`; packaged releases can lag behind. Check [Installation](docs/en/installation.md) and the [Changelog](docs/en/changelog.md) before relying on a newly documented feature.
 
 ## Why Sigil
 
