@@ -213,6 +213,7 @@ pub enum ControlEntry {
     TaskRun(TaskRunEntry),
     TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry),
     TaskPlan(TaskPlanEntry),
+    TaskGuidanceApplied(crate::TaskGuidanceAppliedEntry),
     TaskStep(TaskStepEntry),
     TaskParticipantAttempt(TaskParticipantAttemptEntry),
     TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),

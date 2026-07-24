@@ -194,6 +194,16 @@ pub fn task_participant_input_hash(input: &AgentRunInput) -> Result<String> {
                 "max_plan_steps": context.max_plan_steps,
             })
         }),
+        "task_guidance_assessment": input.task_guidance_assessment.as_ref().map(|context| {
+            serde_json::json!({
+                "queue_id": context.queue_id.as_str(),
+                "task_id": context.task_id.as_str(),
+                "plan_version": context.plan_version,
+                "dispatch_run_id": context.dispatch_run_id,
+                "accepted_plan": context.accepted_plan,
+                "eligible_pending_step_ids": context.eligible_pending_step_ids,
+            })
+        }),
     });
     let bytes = serde_json::to_vec(&value)?;
     let mut hasher = Sha256::new();

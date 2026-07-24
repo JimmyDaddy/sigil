@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
+pub const TASK_GUIDANCE_APPLY_TOOL_NAME: &str = "task_guidance_apply";
 /// Maximum number of characters copied from a participant transcript into parent task control.
 pub const TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS: usize = 4_000;
 /// Maximum artifact references copied from one participant into parent task control.
@@ -546,6 +547,198 @@ pub struct TaskPlanUpdateContext {
     pub task_id: TaskId,
     pub max_plan_steps: usize,
     pub max_plan_versions: usize,
+}
+
+/// Host-owned facts exposed to one model-driven task-guidance review.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskGuidanceAssessmentContext {
+    pub queue_id: crate::ConversationInputQueueId,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub dispatch_run_id: String,
+    pub accepted_plan: TaskPlanEntry,
+    pub eligible_pending_step_ids: Vec<TaskStepId>,
+}
+
+impl TaskGuidanceAssessmentContext {
+    /// Validates that the review context is bound to one current accepted plan.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.plan_version == 0 {
+            bail!("task guidance assessment plan version must be non-zero");
+        }
+        validate_stable_id(
+            "task guidance assessment dispatch run id",
+            &self.dispatch_run_id,
+        )?;
+        if self.accepted_plan.task_id != self.task_id
+            || self.accepted_plan.plan_version != self.plan_version
+            || self.accepted_plan.status != TaskPlanStatus::Accepted
+        {
+            bail!("task guidance assessment accepted plan does not match its task binding");
+        }
+        validate_task_plan_graph_steps(&self.accepted_plan.steps)?;
+        if self.eligible_pending_step_ids.is_empty() {
+            bail!("task guidance assessment requires at least one eligible pending step");
+        }
+        let plan_step_ids = self
+            .accepted_plan
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        for step_id in &self.eligible_pending_step_ids {
+            if !plan_step_ids.contains(step_id) {
+                bail!(
+                    "task guidance assessment eligible step {} is absent from the accepted plan",
+                    step_id.as_str()
+                );
+            }
+            if !seen.insert(step_id) {
+                bail!(
+                    "task guidance assessment repeats eligible step {}",
+                    step_id.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Bounded model-owned reason for applying guidance without changing the accepted plan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskGuidanceApplyReason {
+    ClarifiesExistingStep,
+    PrioritizesPendingStep,
+    AddsExecutionConstraint,
+}
+
+/// Durable model decision that guidance can be materialized only into not-yet-started steps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskGuidanceAppliedEntry {
+    pub queue_id: crate::ConversationInputQueueId,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub dispatch_run_id: String,
+    pub reason: TaskGuidanceApplyReason,
+    pub target_step_ids: Vec<TaskStepId>,
+}
+
+impl TaskGuidanceAppliedEntry {
+    pub fn validate_against(&self, context: &TaskGuidanceAssessmentContext) -> Result<()> {
+        context.validate_shape()?;
+        if self.queue_id != context.queue_id
+            || self.task_id != context.task_id
+            || self.plan_version != context.plan_version
+            || self.dispatch_run_id != context.dispatch_run_id
+        {
+            bail!("task guidance applied entry does not match its host assessment binding");
+        }
+        if self.target_step_ids.is_empty() {
+            bail!("task guidance apply decision requires at least one target step");
+        }
+        let eligible = context
+            .eligible_pending_step_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        for step_id in &self.target_step_ids {
+            if !eligible.contains(step_id) {
+                bail!(
+                    "task guidance apply target {} is not an eligible pending step",
+                    step_id.as_str()
+                );
+            }
+            if !seen.insert(step_id) {
+                bail!(
+                    "task guidance apply decision repeats target step {}",
+                    step_id.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Model-visible tool for guidance that does not require a plan or scope change.
+pub fn task_guidance_apply_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+        description: "Apply the user's guidance only when it clarifies, prioritizes, or constrains work already represented by not-yet-started steps in the accepted plan. If the guidance changes scope, accepted intent, dependencies, roles, isolation, or required steps, call task_plan_update with the next plan version instead."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": [
+                        "clarifies_existing_step",
+                        "prioritizes_pending_step",
+                        "adds_execution_constraint"
+                    ]
+                },
+                "target_step_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            },
+            "required": ["reason", "target_step_ids"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct RawTaskGuidanceApplyArgs {
+    reason: TaskGuidanceApplyReason,
+    target_step_ids: Vec<TaskStepId>,
+}
+
+/// Parses one model decision to supplement the current accepted plan.
+pub fn task_guidance_applied_entry(
+    context: &TaskGuidanceAssessmentContext,
+    call: &ToolCall,
+) -> Result<TaskGuidanceAppliedEntry> {
+    context.validate_shape()?;
+    if call.name != TASK_GUIDANCE_APPLY_TOOL_NAME {
+        bail!("unexpected internal task guidance tool {}", call.name);
+    }
+    let args: RawTaskGuidanceApplyArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid task guidance apply arguments: {error}"))?;
+    let entry = TaskGuidanceAppliedEntry {
+        queue_id: context.queue_id.clone(),
+        task_id: context.task_id.clone(),
+        plan_version: context.plan_version,
+        dispatch_run_id: context.dispatch_run_id.clone(),
+        reason: args.reason,
+        target_step_ids: args.target_step_ids,
+    };
+    entry.validate_against(context)?;
+    Ok(entry)
+}
+
+/// Bounded model-visible acknowledgement for an accepted supplement decision.
+pub fn task_guidance_apply_result_content(entry: &TaskGuidanceAppliedEntry) -> String {
+    json!({
+        "task_id": entry.task_id.as_str(),
+        "plan_version": entry.plan_version,
+        "decision": "supplement_pending_steps",
+        "target_steps": entry.target_step_ids.len(),
+        "next_action": "stop; the system orchestrator will materialize the guidance into pending step inputs"
+    })
+    .to_string()
 }
 
 /// Model-visible schema for the internal planner plan-update tool.

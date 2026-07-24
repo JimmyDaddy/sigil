@@ -17,29 +17,31 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
-    AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode, AssistantMessageKind,
-    AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus, CompactionConfig,
-    CompletionRequest, ControlEntry, ConversationPurposeContext, ConversationTurnRef,
-    DurableEventType, EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule,
-    ExternalEvidenceLevel, ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
-    PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry,
-    PreparedToolExecution, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptStartedEntry,
-    ProviderPhysicalAttemptTerminalEntry, ProviderRequestRejection,
-    REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session, SessionLogEntry,
-    SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
-    ToolExecutionId, ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult,
-    ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar,
-    UserUrlCapabilityRegistration, VerificationVerdict, VisibleCompletionState,
-    WebUrlProvenanceKind, WorkspaceMutationDetected, plan_text_hash,
+    AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
+    AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
+    CompactionConfig, CompletionRequest, ControlEntry, ConversationInputQueueId,
+    ConversationPurposeContext, ConversationTurnRef, DurableEventType, EventHandler,
+    ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel, ExternalSourceRecord,
+    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
+    ModelMessage, MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanId,
+    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
+    ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
+    ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session,
+    SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceApplyReason,
+    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
+    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    plan_text_hash,
 };
 
 use super::{
@@ -4514,6 +4516,176 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
     Ok(())
 }
 
+fn task_guidance_assessment_context() -> Result<TaskGuidanceAssessmentContext> {
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    Ok(TaskGuidanceAssessmentContext {
+        queue_id: ConversationInputQueueId::new("queue_1")?,
+        task_id: task_id.clone(),
+        plan_version: 2,
+        dispatch_run_id: "dispatch_1".to_owned(),
+        accepted_plan: TaskPlanEntry {
+            task_id,
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Inspect current implementation".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
+            }],
+            reason: Some("current accepted plan".to_owned()),
+        },
+        eligible_pending_step_ids: vec![step_id],
+    })
+}
+
+#[tokio::test]
+async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()> {
+    let observed_tools = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        GuidanceDecisionProvider {
+            decision: GuidanceDecision::Apply,
+            observed_tools: Arc::clone(&observed_tools),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-guidance", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let exact_guidance = "请把验证顺序放到实现之前，而不是扩大任务范围";
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(exact_guidance)])
+                .with_task_plan_update(TaskPlanUpdateContext {
+                    task_id: TaskId::new("task_1")?,
+                    max_plan_steps: 4,
+                    max_plan_versions: 3,
+                })
+                .with_task_guidance_assessment(task_guidance_assessment_context()?),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::TaskPlanAccepted);
+    let observed_tools = observed_tools
+        .lock()
+        .expect("observed tools lock should not be poisoned");
+    assert!(
+        observed_tools
+            .iter()
+            .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
+    );
+    assert!(
+        observed_tools
+            .iter()
+            .any(|name| name == TASK_PLAN_UPDATE_TOOL_NAME)
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                if applied.queue_id.as_str() == "queue_1"
+                    && applied.plan_version == 2
+                    && applied.reason == TaskGuidanceApplyReason::PrioritizesPendingStep
+                    && applied.target_step_ids
+                        == vec![TaskStepId::new("step_1").expect("valid step id")]
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                if plan.plan_version == 2 && plan.status == TaskPlanStatus::Accepted
+        )
+    }));
+    let applied = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied)) => Some(applied),
+            _ => None,
+        })
+        .expect("model apply decision should be durable");
+    assert!(!serde_json::to_string(applied)?.contains(exact_guidance));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
+    let observed_tools = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        GuidanceDecisionProvider {
+            decision: GuidanceDecision::Replan,
+            observed_tools,
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-guidance-replan", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                "新增一个独立安全审查步骤",
+            )])
+            .with_task_plan_update(TaskPlanUpdateContext {
+                task_id: TaskId::new("task_1")?,
+                max_plan_steps: 4,
+                max_plan_versions: 3,
+            })
+            .with_task_guidance_assessment(task_guidance_assessment_context()?),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::TaskPlanAccepted);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                if plan.plan_version == 3 && plan.status == TaskPlanStatus::Accepted
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(_))
+        )
+    }));
+    Ok(())
+}
+
 #[tokio::test]
 async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batch() -> Result<()> {
     let executions = Arc::new(AtomicUsize::new(0));
@@ -4747,6 +4919,15 @@ struct PlanUpdateProvider {
     valid: bool,
     stream_calls: Option<Arc<AtomicUsize>>,
 }
+#[derive(Clone, Copy)]
+enum GuidanceDecision {
+    Apply,
+    Replan,
+}
+struct GuidanceDecisionProvider {
+    decision: GuidanceDecision,
+    observed_tools: Arc<Mutex<Vec<String>>>,
+}
 struct TaskHandoffProvider;
 struct TaskHandoffSideEffectTool {
     executions: Arc<AtomicUsize>,
@@ -4970,6 +5151,53 @@ impl Provider for PlanUpdateProvider {
             Ok(ProviderChunk::ToolCallComplete(ToolCall {
                 id: "call-plan-1".to_owned(),
                 name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for GuidanceDecisionProvider {
+    fn name(&self) -> &str {
+        "mock-guidance-decision"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.observed_tools
+            .lock()
+            .expect("observed tools lock should not be poisoned")
+            .extend(request.tools.iter().map(|tool| tool.name.clone()));
+        let (name, args) = match self.decision {
+            GuidanceDecision::Apply => (
+                TASK_GUIDANCE_APPLY_TOOL_NAME,
+                r#"{"reason":"prioritizes_pending_step","target_step_ids":["step_1"]}"#,
+            ),
+            GuidanceDecision::Replan => (
+                TASK_PLAN_UPDATE_TOOL_NAME,
+                r#"{"plan_version":3,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"},{"step_id":"step_2","title":"security review","role":"subagent_read","depends_on":["step_1"]}],"reason":"guidance changes required steps"}"#,
+            ),
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-guidance-decision".to_owned(),
+                name: name.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-guidance-decision".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-guidance-decision".to_owned(),
+                name: name.to_owned(),
                 args_json: args.to_owned(),
             })),
             Ok(ProviderChunk::Done),

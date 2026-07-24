@@ -4,20 +4,22 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentFinalAnswerRef, AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef,
-    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskId,
-    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
-    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
-    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    AgentFinalAnswerRef, AgentRole, ControlEntry, ConversationInputQueueId, Session,
+    SessionLogEntry, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGuidanceApplyReason,
+    TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    normalize_task_agent_display_name, task_final_message_id, task_participant_attempt_id,
-    task_participant_session_ref, task_plan_update_entry, task_plan_update_result_content,
-    task_plan_update_tool_spec, validate_task_plan_graph_steps,
+    normalize_task_agent_display_name, task_final_message_id, task_guidance_applied_entry,
+    task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_session_ref,
+    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
+    validate_task_plan_graph_steps,
 };
 
 fn task_id(value: &str) -> Result<TaskId> {
@@ -302,6 +304,78 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
     };
     assert!(task_plan_update_entry(&context, &invalid_display_name).is_err());
     Ok(())
+}
+
+#[test]
+fn task_guidance_apply_binds_model_choice_to_host_eligible_steps() -> Result<()> {
+    let first_step = step_id("step_1")?;
+    let context = TaskGuidanceAssessmentContext {
+        queue_id: ConversationInputQueueId::new("queue_1")?,
+        task_id: task_id("task_1")?,
+        plan_version: 2,
+        dispatch_run_id: "dispatch_1".to_owned(),
+        accepted_plan: TaskPlanEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![
+                read_step("step_1", Vec::new())?,
+                write_step("step_2", vec![first_step.clone()])?,
+            ],
+            reason: Some("current accepted plan".to_owned()),
+        },
+        eligible_pending_step_ids: vec![first_step.clone()],
+    };
+    let call = ToolCall {
+        id: "call-guidance-1".to_owned(),
+        name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+        args_json: r#"{"reason":"clarifies_existing_step","target_step_ids":["step_1"]}"#
+            .to_owned(),
+    };
+
+    let entry = task_guidance_applied_entry(&context, &call)?;
+
+    assert_eq!(entry.queue_id, context.queue_id);
+    assert_eq!(entry.task_id, context.task_id);
+    assert_eq!(entry.plan_version, 2);
+    assert_eq!(entry.dispatch_run_id, "dispatch_1");
+    assert_eq!(entry.reason, TaskGuidanceApplyReason::ClarifiesExistingStep);
+    assert_eq!(entry.target_step_ids, vec![first_step]);
+
+    let ineligible = ToolCall {
+        args_json: r#"{"reason":"adds_execution_constraint","target_step_ids":["step_2"]}"#
+            .to_owned(),
+        ..call.clone()
+    };
+    assert!(task_guidance_applied_entry(&context, &ineligible).is_err());
+
+    let duplicate = ToolCall {
+        args_json: r#"{"reason":"prioritizes_pending_step","target_step_ids":["step_1","step_1"]}"#
+            .to_owned(),
+        ..call.clone()
+    };
+    assert!(task_guidance_applied_entry(&context, &duplicate).is_err());
+
+    let wrong_tool = ToolCall {
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        ..call
+    };
+    assert!(task_guidance_applied_entry(&context, &wrong_tool).is_err());
+    Ok(())
+}
+
+#[test]
+fn task_guidance_tool_delegates_semantic_routing_to_the_model() {
+    let spec = task_guidance_apply_tool_spec();
+    let schema = spec.input_schema.to_string();
+
+    assert!(spec.description.contains("clarifies"));
+    assert!(spec.description.contains("call task_plan_update"));
+    assert!(schema.contains("target_step_ids"));
+    assert!(schema.contains("clarifies_existing_step"));
+    assert!(schema.contains("adds_execution_constraint"));
+    assert!(!schema.contains("keyword"));
+    assert!(!schema.contains("regex"));
 }
 
 #[test]

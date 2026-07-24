@@ -223,6 +223,7 @@ durable_event_types! {
     TaskPromotionAuthorityConsumed => ("task_promotion_authority_consumed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskParentVerificationRecorded => ("task_parent_verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskGuidanceApplied => ("task_guidance_applied", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseHeartbeatRecorded => ("step_lease_heartbeat_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -718,6 +719,13 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 }
                 _ => bail!("task status event carried non-task control payload"),
             }
+        }
+        DurableEventType::TaskGuidanceApplied => {
+            let control = decode_control_entry(&event)?;
+            let ControlEntry::TaskGuidanceApplied(entry) = control else {
+                bail!("task guidance applied event carried a different control payload");
+            };
+            TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskGuidanceApplied(entry))
         }
         DurableEventType::TaskHandoffRequested => {
             let control = decode_control_entry(&event)?;
@@ -1440,6 +1448,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskRun(_) => "task_run",
         ControlEntry::TaskRunCancellationScopeBound(_) => "task_run_cancellation_scope_bound",
         ControlEntry::TaskPlan(_) => "task_plan",
+        ControlEntry::TaskGuidanceApplied(_) => "task_guidance_applied",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
         ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",

@@ -867,6 +867,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskRunCancellationScopeBound(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskGuidanceApplied(_) => DurableEventType::TaskGuidanceApplied,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantAttempt(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantRetryScheduled(_) => DurableEventType::TaskStatusChanged,

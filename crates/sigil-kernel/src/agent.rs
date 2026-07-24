@@ -25,8 +25,9 @@ use crate::{
         ToolExecutionStatus,
     },
     task::{
-        TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskParticipantAttemptId, TaskPlanUpdateContext,
-        TaskStepId, task_plan_update_tool_spec,
+        TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceAssessmentContext,
+        TaskId, TaskParticipantAttemptId, TaskPlanUpdateContext, TaskStepId,
+        task_guidance_apply_tool_spec, task_plan_update_tool_spec,
     },
     task_handoff::{
         ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId,
@@ -47,6 +48,7 @@ mod preview;
 mod provider_stream;
 mod readiness;
 mod run_lifecycle;
+mod task_guidance;
 mod task_handoff;
 mod task_plan;
 mod tool_audit;
@@ -71,6 +73,10 @@ pub use readiness::projected_agent_run_readiness;
 use run_lifecycle::{
     append_completed_run_lifecycle_events, append_failed_run_lifecycle_events,
     append_run_lifecycle_events,
+};
+use task_guidance::{
+    append_tool_ignored_after_task_guidance_acceptance, handle_task_guidance_apply_call,
+    task_guidance_apply_call_is_accepted,
 };
 use task_handoff::{
     append_tool_ignored_after_task_handoff, handle_task_planning_request_call,
@@ -227,6 +233,7 @@ pub struct AgentRunInput {
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
+    pub task_guidance_assessment: Option<TaskGuidanceAssessmentContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
     agent_invocation_grant: Option<crate::AgentInvocationGrant>,
@@ -261,6 +268,17 @@ impl fmt::Debug for AgentRunInput {
             .field("transient_context_count", &self.transient_context.len())
             .field("runtime_context", &self.runtime_context)
             .field("task_plan_update", &self.task_plan_update)
+            .field(
+                "task_guidance_assessment",
+                &self.task_guidance_assessment.as_ref().map(|context| {
+                    (
+                        context.queue_id.as_str(),
+                        context.task_id.as_str(),
+                        context.plan_version,
+                        context.eligible_pending_step_ids.len(),
+                    )
+                }),
+            )
             .field("agent_delegation", &self.agent_delegation)
             .field("purpose", &self.purpose)
             .field(
@@ -318,6 +336,7 @@ impl AgentRunInput {
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -346,6 +365,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -373,6 +393,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -439,6 +460,19 @@ impl AgentRunInput {
             }));
         }
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Enables model-owned review of whether guidance supplements the accepted plan or replans it.
+    #[must_use]
+    pub fn with_task_guidance_assessment(mut self, context: TaskGuidanceAssessmentContext) -> Self {
+        if self.purpose.is_none() {
+            self.purpose = Some(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                task_id: context.task_id.clone(),
+                attempt_id: None,
+            }));
+        }
+        self.task_guidance_assessment = Some(context);
         self
     }
 
@@ -1149,6 +1183,7 @@ where
             mut transient_context,
             runtime_context,
             task_plan_update,
+            task_guidance_assessment,
             agent_delegation,
             purpose,
             agent_invocation_grant,
@@ -1225,6 +1260,13 @@ where
         {
             return Err(anyhow!(
                 "tool registry collides with reserved internal tool {REQUEST_TASK_PLANNING_TOOL_NAME}"
+            ));
+        }
+        if task_guidance_assessment.is_some()
+            && tools.spec_for(TASK_GUIDANCE_APPLY_TOOL_NAME).is_some()
+        {
+            return Err(anyhow!(
+                "tool registry collides with reserved internal tool {TASK_GUIDANCE_APPLY_TOOL_NAME}"
             ));
         }
 
@@ -1418,6 +1460,9 @@ where
                 .collect::<Vec<_>>();
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
+            }
+            if task_guidance_assessment.is_some() {
+                tool_specs.push(task_guidance_apply_tool_spec());
             }
             if task_handoff_binding.is_some() {
                 tool_specs.push(request_task_planning_tool_spec());
@@ -1617,11 +1662,19 @@ where
                     && completed_calls
                         .iter()
                         .any(task_planning_request_call_is_accepted);
+                let accepted_task_guidance_in_batch = !accepted_task_plan_in_batch
+                    && task_guidance_assessment.is_some()
+                    && completed_calls.iter().any(|call| {
+                        task_guidance_assessment.as_ref().is_some_and(|context| {
+                            task_guidance_apply_call_is_accepted(context, call)
+                        })
+                    });
                 if let Some(delegate) = agent_delegate.as_deref_mut() {
                     delegate.set_join_batch_eligibility(&completed_calls);
                 }
                 let mut accepted_task_plan = false;
                 let mut accepted_task_handoff = None;
+                let mut accepted_task_guidance = false;
                 for call in completed_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
@@ -1639,6 +1692,17 @@ where
                     }
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
+                    if accepted_task_guidance_in_batch
+                        && (call.name != TASK_GUIDANCE_APPLY_TOOL_NAME || accepted_task_guidance)
+                    {
+                        append_tool_ignored_after_task_guidance_acceptance(
                             session,
                             handler,
                             &mut outcome,
@@ -1709,6 +1773,36 @@ where
                             context,
                         )?;
                         accepted_task_plan = accepted_task_plan || accepted;
+                        continue;
+                    }
+                    if call.name == TASK_GUIDANCE_APPLY_TOOL_NAME {
+                        let Some(context) = task_guidance_assessment.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "task_guidance_apply is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        };
+                        let accepted = handle_task_guidance_apply_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                        )?;
+                        accepted_task_guidance = accepted_task_guidance || accepted;
                         continue;
                     }
                     let tool_call_context = ToolCallProcessingContext {
@@ -1783,6 +1877,31 @@ where
                         result: AgentRunResult {
                             final_text: "task plan accepted; orchestration will continue"
                                 .to_owned(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::TaskPlanAccepted,
+                    });
+                }
+                if accepted_task_guidance {
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "completed",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text:
+                                "task guidance accepted for pending steps; orchestration will continue"
+                                    .to_owned(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
                         },
