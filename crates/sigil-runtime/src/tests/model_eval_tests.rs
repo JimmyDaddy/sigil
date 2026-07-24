@@ -6,9 +6,13 @@ use std::{
 };
 
 use sigil_kernel::{
-    ControlEntry, DisclosurePresentationError, DisclosurePresentationReceipt,
+    ControlEntry, ConversationTurnRef, DisclosurePresentationError, DisclosurePresentationReceipt,
     EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, ReceiptStatus, Session,
-    TaskRoutingPolicy, VerificationVerdict, write_file_with_mutation,
+    SessionRef, TaskAdmissionReason, TaskAdmissionTrigger, TaskFinalAnswerCommittedEntry,
+    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
+    ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
+    write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -21,7 +25,8 @@ use crate::{
     model_eval::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalRunExecutionStatus,
         load_model_eval_fixture, materialize_model_eval_fixture, model_eval_reservation_microusd,
-        run_model_eval_campaign, verify_model_eval_run, write_isolated_model_eval_config,
+        orchestration_eval_observation, run_model_eval_campaign, verify_model_eval_run,
+        write_isolated_model_eval_config,
     },
 };
 
@@ -41,6 +46,86 @@ fn fixture_root(id: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../dev/evals/model-fixtures")
         .join(id)
+}
+
+#[test]
+fn orchestration_observation_uses_typed_durable_facts() {
+    let mut session = Session::new("provider", "model");
+    let handoff_id = TaskHandoffId::new("handoff-1").expect("handoff id");
+    let task_id = TaskId::new("task-1").expect("task id");
+    let source_turn = ConversationTurnRef::new(session.session_scope_id(), "message-1", "run-1")
+        .expect("source turn");
+    let request = TaskHandoffRequestedEntry {
+        handoff_id: handoff_id.clone(),
+        source_turn,
+        trigger: TaskAdmissionTrigger::ModelRequested,
+        reason_codes: vec![TaskAdmissionReason::CrossLayer],
+        recovery_objective: None,
+        policy_snapshot_hash: "sha256:policy".to_owned(),
+        requested_at_ms: 1,
+    };
+    session
+        .append_control(ControlEntry::TaskHandoffRequested(request.clone()))
+        .expect("append handoff request");
+    session
+        .append_control(ControlEntry::TaskHandoffRequested(request))
+        .expect("append duplicate handoff request");
+    session
+        .append_control(ControlEntry::TaskHandoffResolved(
+            TaskHandoffResolvedEntry {
+                handoff_id,
+                decision: TaskHandoffDecision::Accepted,
+                task_id: Some(task_id.clone()),
+                decided_at_ms: 2,
+            },
+        ))
+        .expect("append handoff resolution");
+    session
+        .append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("parent ref"),
+            objective: "Implement the cross-layer change".to_owned(),
+            status: TaskRunStatus::Started,
+            reason: None,
+        }))
+        .expect("append task start");
+    let final_answer = TaskFinalAnswerCommittedEntry {
+        task_id,
+        plan_version: 1,
+        synthesis_attempt_id: TaskParticipantAttemptId::new("synthesis-1")
+            .expect("synthesis attempt"),
+        message_id: "final-1".to_owned(),
+        content_hash: "sha256:final".to_owned(),
+    };
+    session
+        .append_control(ControlEntry::TaskFinalAnswerCommitted(final_answer.clone()))
+        .expect("append final answer");
+    session
+        .append_control(ControlEntry::TaskFinalAnswerCommitted(final_answer))
+        .expect("append duplicate final answer");
+    session
+        .append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "wait-1".to_owned(),
+            tool_name: crate::agent_tools::WAIT_AGENT_TOOL_NAME.to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        })))
+        .expect("append polling tool call");
+
+    let observation = orchestration_eval_observation(&session);
+
+    assert!(observation.automatic_task_created);
+    assert_eq!(observation.duplicate_handoffs, 1);
+    assert_eq!(observation.duplicate_parent_child_finals, 1);
+    assert_eq!(observation.model_polling_turns, 1);
+    assert_eq!(observation.duplicate_spawns, 0);
+    assert_eq!(observation.duplicate_continuations, 0);
+    assert_eq!(observation.duplicate_merges, 0);
 }
 
 #[test]
