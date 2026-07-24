@@ -95,6 +95,10 @@ where
                     &mut agent_delegate,
                     Some(cancellation_handle.clone()),
                 );
+                sigil_kernel::AgentToolDelegate::set_root_logical_run_id(
+                    &mut agent_delegate,
+                    Some(&format!("foreground-run-{run_id}")),
+                );
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();

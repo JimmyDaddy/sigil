@@ -1443,6 +1443,7 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
                 authority: sigil_kernel::DelegationAuthorityRecord::ModelProactive,
                 objective_hash: "sha256:objective".to_owned(),
                 tool_contract_fingerprint: "sha256:contracts".to_owned(),
+                invocation_grant: None,
                 admitted_at_ms: None,
             }),
         )),

@@ -1468,6 +1468,7 @@ async fn prepare_application_run_internal(
             &mut runtime,
             Some(cancellation_handle.clone()),
         );
+        sigil_kernel::AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some(&run_id));
         ApplicationRunExecutionKind::AgentProfile {
             runtime: Box::new(runtime),
             profile_id,

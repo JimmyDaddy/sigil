@@ -45,6 +45,8 @@ impl AgentToolRuntime {
                 );
             }
         };
+        #[cfg(test)]
+        self.ensure_test_delegation_runtime_binding();
         let completion_mode = parsed.completion_mode;
         if completion_mode == AgentInvocationMode::JoinBeforeFinal
             && (!self.join_batch_eligible || self.run_cancellation.is_none())
@@ -108,7 +110,30 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let authority = self.model_delegation_authority();
+        let delegation_context = match self.model_delegation_run_context(session) {
+            Ok(context) => context,
+            Err(error) => {
+                return batch_spawn_error(
+                    call,
+                    ToolErrorKind::PermissionDenied,
+                    None,
+                    format!("{error:#}"),
+                );
+            }
+        };
+        let authority = delegation_context.authority.clone();
+        let Some(root_cancellation) = self.run_cancellation.clone() else {
+            return batch_spawn_error(
+                call,
+                ToolErrorKind::PermissionDenied,
+                None,
+                "spawn_agents is missing the root cancellation scope".to_owned(),
+            );
+        };
+        let root_logical_run_id = self
+            .root_logical_run_id
+            .clone()
+            .expect("batch id admission already required the root logical run");
         let mut prepared = Vec::with_capacity(parsed.members.len());
         for member in parsed.members {
             let request_key = member.request_key;
@@ -178,14 +203,49 @@ impl AgentToolRuntime {
                     );
                 }
             };
+            let grant = match mint_agent_invocation_grant(
+                delegation_context.clone(),
+                &root_logical_run_id,
+                &root_cancellation,
+                spawn.profile_id.clone(),
+                role,
+                TaskIsolationMode::SharedReadOnly,
+                &child_registry,
+                options,
+                unix_time_ms(),
+            )
+            .and_then(|grant| {
+                revalidate_agent_invocation_grant(
+                    &grant,
+                    &delegation_context,
+                    &root_logical_run_id,
+                    &root_cancellation,
+                    &spawn.profile_id,
+                    role,
+                    TaskIsolationMode::SharedReadOnly,
+                    &child_registry,
+                    &options.workspace_root,
+                    unix_time_ms(),
+                )?;
+                Ok(grant)
+            }) {
+                Ok(grant) => grant,
+                Err(error) => {
+                    return batch_spawn_error(
+                        call,
+                        ToolErrorKind::PermissionDenied,
+                        Some(&request_key),
+                        format!("{error:#}"),
+                    );
+                }
+            };
             let delegation_admission = match delegation_admission_entry(
-                authority.clone(),
+                &grant,
                 thread_id.clone(),
                 spawn.profile_id.clone(),
                 completion_mode,
                 AgentInvocationSource::Chat,
                 &spawn.objective,
-                &child_registry,
             ) {
                 Ok(admission) => admission,
                 Err(error) => {
@@ -251,9 +311,11 @@ impl AgentToolRuntime {
                 child_messages.push(ModelMessage::system(system_prompt));
             }
             child_messages.push(ModelMessage::user(spawn.prompt.clone()));
-            let child_input = self.inherit_web_task_tree_budget(
-                sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
-            );
+            let child_input = self
+                .inherit_web_task_tree_budget(
+                    sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
+                )
+                .with_agent_invocation_grant(grant.clone());
             let mut child_options = build_role_run_options(
                 &self.root_config,
                 options.workspace_root.clone(),
@@ -265,6 +327,7 @@ impl AgentToolRuntime {
                 options,
                 role,
                 resolved_profile.profile.permission_policy.clone(),
+                &grant,
             );
             if let Some(warning) = spawn_scope_overlap_warning(session, &spawn) {
                 let _ = handler.handle(RunEvent::Notice(warning));
@@ -286,6 +349,7 @@ impl AgentToolRuntime {
                 provider_capabilities: child_capabilities,
                 invocation_mode: completion_mode,
                 invocation_source: AgentInvocationSource::Chat,
+                invocation_grant: grant,
                 delegation_admission,
                 display_name_hint: spawn.display_name_hint,
             };

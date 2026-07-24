@@ -55,12 +55,14 @@ pub use agent::{
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId, AgentBatchProjection,
-    AgentBatchStatusSummary, AgentDelegationAdmissionEntry, AgentElicitationRouteEntry,
-    AgentFinalAnswerRef, AgentGraphSummary, AgentInvocationMode, AgentInvocationPolicy,
-    AgentInvocationRequest, AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus,
-    AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry,
-    AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
-    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentBatchStatusSummary, AgentDelegationAdmissionEntry, AgentDelegationRunContext,
+    AgentElicitationRouteEntry, AgentFinalAnswerRef, AgentGraphSummary, AgentInvocationGrant,
+    AgentInvocationGrantBinding, AgentInvocationGrantRecord, AgentInvocationGrantSource,
+    AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentPermissionPolicy,
+    AgentProfile, AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind,
+    AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
     AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationProjection,
     AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
     AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
@@ -70,8 +72,8 @@ pub use agent_thread::{
     AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
     AgentThreadStateProjection, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, DelegationAuthority,
-    DelegationAuthorityRecord, WorkspaceRootSnapshot, closed_agent_routes,
-    interrupted_agent_attempts, interrupted_agent_mailbox_messages,
+    DelegationAuthorityRecord, WorkspaceRootSnapshot, agent_invocation_workspace_snapshot_id,
+    closed_agent_routes, interrupted_agent_attempts, interrupted_agent_mailbox_messages,
     interrupted_agent_result_continuations, interrupted_agent_threads,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};

@@ -231,6 +231,16 @@ impl AgentSupervisor {
         {
             bail!("child-agent delegation admission is not bound to the requested invocation");
         }
+        let durable_grant = start.invocation_grant.durable_record()?;
+        if start.delegation_admission.invocation_grant.as_ref() != Some(&durable_grant)
+            || durable_grant.profile_id != start.profile_id
+            || durable_grant.role != start.role
+            || durable_grant.tool_contract_fingerprint
+                != start.delegation_admission.tool_contract_fingerprint
+            || durable_grant.authority != start.delegation_admission.authority
+        {
+            bail!("child-agent invocation grant is not bound to its durable admission evidence");
+        }
 
         append_control(
             session,

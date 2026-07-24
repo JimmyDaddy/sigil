@@ -229,6 +229,7 @@ pub struct AgentRunInput {
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
+    agent_invocation_grant: Option<crate::AgentInvocationGrant>,
     logical_run_id: Option<String>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
@@ -262,6 +263,13 @@ impl fmt::Debug for AgentRunInput {
             .field("task_plan_update", &self.task_plan_update)
             .field("agent_delegation", &self.agent_delegation)
             .field("purpose", &self.purpose)
+            .field(
+                "agent_invocation_grant",
+                &self
+                    .agent_invocation_grant
+                    .as_ref()
+                    .map(crate::AgentInvocationGrant::fingerprint),
+            )
             .field("logical_run_id", &self.logical_run_id)
             .field("cancellation", &self.cancellation)
             .field(
@@ -312,6 +320,7 @@ impl AgentRunInput {
             task_plan_update: None,
             agent_delegation: None,
             purpose: None,
+            agent_invocation_grant: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -339,6 +348,7 @@ impl AgentRunInput {
             task_plan_update: None,
             agent_delegation: None,
             purpose: None,
+            agent_invocation_grant: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -365,6 +375,7 @@ impl AgentRunInput {
             task_plan_update: None,
             agent_delegation: None,
             purpose: None,
+            agent_invocation_grant: None,
             logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
@@ -534,6 +545,13 @@ impl AgentRunInput {
         self
     }
 
+    /// Binds every child tool effect to the exact process-local invocation capability.
+    #[must_use]
+    pub fn with_agent_invocation_grant(mut self, grant: crate::AgentInvocationGrant) -> Self {
+        self.agent_invocation_grant = Some(grant);
+        self
+    }
+
     /// Binds this run to a caller-provided durable correlation id.
     ///
     /// Queued promotion uses this to bind its queue CAS to the first provider physical attempt.
@@ -698,6 +716,17 @@ pub trait AgentToolDelegate: Send {
     /// replay-safe child orchestration identities, but must not expose it to the model as a
     /// provider request handle.
     fn set_root_logical_run_id(&mut self, _logical_run_id: Option<&str>) {}
+
+    /// Binds the host-owned source and authority from which a concrete child grant may be minted.
+    ///
+    /// The context is derived from the root run purpose. It is not exposed through model tool
+    /// arguments and does not itself authorize a child until the runtime mints an exact invocation
+    /// grant.
+    fn set_agent_delegation_run_context(
+        &mut self,
+        _context: Option<&crate::AgentDelegationRunContext>,
+    ) {
+    }
 
     /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
     fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
@@ -1110,6 +1139,7 @@ where
             task_plan_update,
             agent_delegation,
             purpose,
+            agent_invocation_grant,
             logical_run_id,
             cancellation,
             cancellation_terminal_authority,
@@ -1150,6 +1180,33 @@ where
                 | AgentRunPurpose::TaskSynthesis(_),
             )
             | None => None,
+        };
+        let agent_delegation_run_context = match purpose.as_ref() {
+            Some(AgentRunPurpose::Conversation(context)) => {
+                Some(crate::AgentDelegationRunContext {
+                    source: crate::AgentInvocationGrantSource::Conversation {
+                        source_turn: context.source_turn.clone(),
+                    },
+                    authority: crate::DelegationAuthority::ModelProactive,
+                })
+            }
+            Some(AgentRunPurpose::TaskParticipant(context)) => {
+                Some(crate::AgentDelegationRunContext {
+                    source: crate::AgentInvocationGrantSource::AcceptedTaskPlan {
+                        task_id: context.task_id.clone(),
+                        plan_version: context.plan_version,
+                        step_id: context.step_id.clone(),
+                    },
+                    authority: crate::DelegationAuthority::AcceptedTaskPlan {
+                        task_id: context.task_id.clone(),
+                        plan_version: context.plan_version,
+                        step_id: context.step_id.clone(),
+                    },
+                })
+            }
+            Some(AgentRunPurpose::TaskPlanner(_) | AgentRunPurpose::TaskSynthesis(_)) | None => {
+                None
+            }
         };
         if task_handoff_binding.is_some()
             && tools.spec_for(REQUEST_TASK_PLANNING_TOOL_NAME).is_some()
@@ -1519,6 +1576,9 @@ where
                             options.permission_context.network_policy,
                             false,
                         );
+                if let Some(grant) = agent_invocation_grant.as_ref() {
+                    tool_ctx = tool_ctx.with_agent_invocation_grant(grant.clone());
+                }
                 if let Some(cancellation) = cancellation.as_ref() {
                     tool_ctx = tool_ctx.with_cancellation(cancellation.clone());
                 }
@@ -1648,6 +1708,7 @@ where
                         tool_ctx: tool_ctx.clone(),
                         cancellation: cancellation.clone(),
                         root_logical_run_id: &logical_run_id,
+                        agent_delegation_run_context: agent_delegation_run_context.as_ref(),
                         agent_delegate: &mut agent_delegate,
                         approval_handler,
                         outcome: &mut outcome,
@@ -1848,6 +1909,7 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     tool_ctx: ToolContext,
     cancellation: Option<RunCancellationHandle>,
     root_logical_run_id: &'run str,
+    agent_delegation_run_context: Option<&'run crate::AgentDelegationRunContext>,
     agent_delegate: &'run mut Option<&'delegate mut (dyn AgentToolDelegate + Send)>,
     approval_handler: &'run mut A,
     outcome: &'run mut AgentRunOutcome,
@@ -1874,6 +1936,7 @@ where
         tool_ctx,
         cancellation,
         root_logical_run_id,
+        agent_delegation_run_context,
         agent_delegate,
         approval_handler,
         outcome,
@@ -2436,6 +2499,7 @@ where
             tool_ctx,
             cancellation,
             root_logical_run_id,
+            agent_delegation_run_context,
             agent_delegate,
             approval_handler,
             outcome,
@@ -2466,6 +2530,7 @@ where
         tool_ctx,
         cancellation,
         root_logical_run_id,
+        agent_delegation_run_context,
         agent_delegate,
         approval_handler,
         outcome,
@@ -2583,6 +2648,7 @@ where
             Some(delegate) => {
                 delegate.set_run_cancellation(cancellation.clone());
                 delegate.set_root_logical_run_id(Some(root_logical_run_id));
+                delegate.set_agent_delegation_run_context(agent_delegation_run_context);
                 delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
                 match delegate
                     .handle_agent_tool_call(session, &call, options, handler, approval_handler)

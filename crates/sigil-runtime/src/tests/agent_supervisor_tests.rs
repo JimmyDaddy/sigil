@@ -16,13 +16,15 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentConfig, AgentDelegationAdmissionEntry, AgentFinalAnswerRef, AgentInvocationMode,
+    Agent, AgentConfig, AgentDelegationAdmissionEntry, AgentFinalAnswerRef, AgentInvocationGrant,
+    AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentInvocationMode,
     AgentInvocationSource, AgentRole, AgentRouteId, AgentRunInput, AgentRunOptions,
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
-    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthorityRecord, EventHandler,
-    InteractionMode, IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, MultiAgentMode, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthority,
+    DelegationAuthorityRecord, EventHandler, InteractionMode, IsolatedWorkspaceCleanupStatus,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MultiAgentMode, NetworkPolicy,
+    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
     ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
     RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
     TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionBatchCommitEnvelope,
@@ -1168,6 +1170,36 @@ fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentCh
     let call_id = format!("call_{profile_id}");
     let profile_id = sigil_kernel::AgentProfileId::new(profile_id)?;
     let thread_id = super::chat_agent_thread_id_for_call(&call_id, &profile_id)?;
+    let cancellation = RunCancellationOwner::new().handle();
+    let authority = DelegationAuthority::ModelProactive;
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: sigil_kernel::ConversationTurnRef::new(
+                    "test-session",
+                    "test-message",
+                    "test-run",
+                )?,
+            },
+            authority: authority.clone(),
+            root_logical_run_id: "test-run".to_owned(),
+            profile_id: profile_id.clone(),
+            role: AgentRole::SubagentRead,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            permission_upper_bound: PermissionConfig {
+                mode: sigil_kernel::PermissionMode::ReadOnly,
+                ..PermissionConfig::default()
+            },
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: "sha256:test-contracts".to_owned(),
+            workspace_snapshot_id: sigil_kernel::agent_invocation_workspace_snapshot_id(
+                &workspace_root,
+            )?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
     Ok(AgentChatChildStart {
         call_id,
         budget_scope_id: TaskId::new("chat_1")?,
@@ -1188,6 +1220,7 @@ fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentCh
         provider_capabilities: provider_capabilities(),
         invocation_mode: AgentInvocationMode::JoinBeforeFinal,
         invocation_source: AgentInvocationSource::Chat,
+        invocation_grant: grant.clone(),
         delegation_admission: AgentDelegationAdmissionEntry {
             thread_id,
             profile_id,
@@ -1196,6 +1229,7 @@ fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentCh
             authority: DelegationAuthorityRecord::ModelProactive,
             objective_hash: super::hash_text("inspect code"),
             tool_contract_fingerprint: "sha256:test-contracts".to_owned(),
+            invocation_grant: Some(grant.durable_record()?),
             admitted_at_ms: None,
         },
         display_name_hint: Some("inspect".to_owned()),
@@ -1210,6 +1244,52 @@ fn rebind_chat_delegation_admission(start: &mut AgentChatChildStart) -> Result<(
     start.delegation_admission.invocation_source = start.invocation_source;
     start.delegation_admission.objective_hash =
         super::hash_text(&sigil_kernel::safe_persistence_text(&start.objective));
+    let authority = match &start.delegation_admission.authority {
+        DelegationAuthorityRecord::UserExplicit => DelegationAuthority::UserExplicit,
+        DelegationAuthorityRecord::AcceptedTaskPlan {
+            task_id,
+            plan_version,
+            step_id,
+        } => DelegationAuthority::AcceptedTaskPlan {
+            task_id: task_id.clone(),
+            plan_version: *plan_version,
+            step_id: step_id.clone(),
+        },
+        DelegationAuthorityRecord::ModelProactive => DelegationAuthority::ModelProactive,
+        DelegationAuthorityRecord::SystemRecovery => DelegationAuthority::SystemRecovery,
+    };
+    let cancellation = RunCancellationOwner::new().handle();
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: sigil_kernel::ConversationTurnRef::new(
+                    "test-session",
+                    "test-message",
+                    "test-run",
+                )?,
+            },
+            authority,
+            root_logical_run_id: "test-run".to_owned(),
+            profile_id: start.profile_id.clone(),
+            role: start.role,
+            isolation: if start.role == AgentRole::SubagentWrite {
+                TaskIsolationMode::ChangesetOnly
+            } else {
+                TaskIsolationMode::SharedReadOnly
+            },
+            permission_upper_bound: PermissionConfig::default(),
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: start.delegation_admission.tool_contract_fingerprint.clone(),
+            workspace_snapshot_id: sigil_kernel::agent_invocation_workspace_snapshot_id(
+                &start.workspace_root,
+            )?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    start.delegation_admission.invocation_grant = Some(grant.durable_record()?);
+    start.invocation_grant = grant;
     Ok(())
 }
 
@@ -1404,6 +1484,7 @@ fn chat_child_start_rejects_write_capable_profile_without_lease_support() -> Res
     let mut handler = RecordingEventHandler::default();
     let mut start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
+    rebind_chat_delegation_admission(&mut start)?;
 
     let error = supervisor
         .begin_chat_child_thread(&mut session, &mut handler, start)

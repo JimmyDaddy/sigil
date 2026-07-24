@@ -1,5 +1,7 @@
 use super::*;
 
+const AGENT_INVOCATION_GRANT_TTL_MS: u64 = 30 * 60 * 1_000;
+
 pub(super) fn tool_scope_summary(scope: &sigil_kernel::ToolRegistryScope) -> String {
     if scope.allow_all {
         return "all tools".to_owned();
@@ -43,20 +45,22 @@ pub(super) fn admit_model_agent_spawn(
     child_registry: &ToolRegistry,
 ) -> Result<()> {
     match authority {
-        DelegationAuthority::AcceptedTaskPlan { .. } => bail!(
-            "accepted task-plan delegation requires an O2 scoped grant bound to a durable plan step"
-        ),
         DelegationAuthority::SystemRecovery => bail!(
-            "system recovery delegation requires a scoped recovery grant and is not available yet"
+            "system recovery may reconcile prior work but cannot create forward-effect child authority"
         ),
-        DelegationAuthority::UserExplicit | DelegationAuthority::ModelProactive => {}
+        DelegationAuthority::UserExplicit
+        | DelegationAuthority::AcceptedTaskPlan { .. }
+        | DelegationAuthority::ModelProactive => {}
     }
     match mode {
         MultiAgentMode::None => {
             bail!("model agent spawn is disabled by [task].multi_agent_mode=none")
         }
         MultiAgentMode::ExplicitRequestOnly => {
-            if matches!(authority, DelegationAuthority::UserExplicit) {
+            if matches!(
+                authority,
+                DelegationAuthority::UserExplicit | DelegationAuthority::AcceptedTaskPlan { .. }
+            ) {
                 return Ok(());
             }
             bail!(
@@ -82,39 +86,108 @@ pub(super) fn admit_model_agent_spawn(
 }
 
 pub(super) fn delegation_admission_entry(
-    authority: DelegationAuthority,
+    grant: &AgentInvocationGrant,
     thread_id: AgentThreadId,
     profile_id: AgentProfileId,
     invocation_mode: AgentInvocationMode,
     invocation_source: AgentInvocationSource,
     objective: &str,
-    child_registry: &ToolRegistry,
 ) -> Result<sigil_kernel::AgentDelegationAdmissionEntry> {
-    let durable_authority = sigil_kernel::DelegationAuthorityRecord::from(&authority);
-    let contracts = child_registry
-        .contracts()
-        .into_iter()
-        .map(|(spec, tracking)| {
-            json!({
-                "spec": spec,
-                "mutation_tracking": match tracking {
-                    sigil_kernel::ToolMutationTracking::None => "none",
-                    sigil_kernel::ToolMutationTracking::Controlled => "controlled",
-                    sigil_kernel::ToolMutationTracking::Unknown => "unknown",
-                },
-            })
-        })
-        .collect::<Vec<_>>();
+    let binding = grant.binding();
     Ok(sigil_kernel::AgentDelegationAdmissionEntry {
         thread_id,
         profile_id,
         invocation_mode,
         invocation_source,
-        authority: durable_authority,
+        authority: sigil_kernel::DelegationAuthorityRecord::from(&binding.authority),
         objective_hash: hash_text(&sigil_kernel::safe_persistence_text(objective)),
-        tool_contract_fingerprint: hash_text(&serde_json::to_string(&contracts)?),
+        tool_contract_fingerprint: binding.tool_contract_fingerprint.clone(),
+        invocation_grant: Some(grant.durable_record()?),
         admitted_at_ms: None,
     })
+}
+
+pub(super) fn resolved_tool_contract_fingerprint(registry: &ToolRegistry) -> Result<String> {
+    registry.contract_fingerprint()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn mint_agent_invocation_grant(
+    context: AgentDelegationRunContext,
+    root_logical_run_id: &str,
+    root_cancellation: &sigil_kernel::RunCancellationHandle,
+    profile_id: AgentProfileId,
+    role: AgentRole,
+    isolation: TaskIsolationMode,
+    child_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    now_ms: u64,
+) -> Result<AgentInvocationGrant> {
+    if root_cancellation.is_cancel_requested() {
+        bail!("root run cancelled before child invocation grant minting");
+    }
+    let mut permission_upper_bound = options.permission_config.clone();
+    if matches!(role, AgentRole::Planner | AgentRole::SubagentRead)
+        || matches!(context.authority, DelegationAuthority::ModelProactive)
+    {
+        permission_upper_bound.mode = PermissionMode::ReadOnly;
+        permission_upper_bound.external_directory.enabled = false;
+        permission_upper_bound.external_directory.default_mode = ApprovalMode::Deny;
+        permission_upper_bound.external_directory.rules.clear();
+    }
+    let network_upper_bound = if matches!(context.authority, DelegationAuthority::ModelProactive) {
+        NetworkPolicy::Deny
+    } else {
+        options.permission_context.network_policy
+    };
+    AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: context.source,
+            authority: context.authority,
+            root_logical_run_id: root_logical_run_id.to_owned(),
+            profile_id,
+            role,
+            isolation,
+            permission_upper_bound,
+            network_upper_bound,
+            tool_contract_fingerprint: resolved_tool_contract_fingerprint(child_registry)?,
+            workspace_snapshot_id: sigil_kernel::agent_invocation_workspace_snapshot_id(
+                &options.workspace_root,
+            )?,
+            root_cancellation_scope_id: root_cancellation.scope_id().to_owned(),
+            expires_at_ms: now_ms.saturating_add(AGENT_INVOCATION_GRANT_TTL_MS),
+        },
+        now_ms,
+    )
+}
+
+pub(super) fn revalidate_agent_invocation_grant(
+    grant: &AgentInvocationGrant,
+    context: &AgentDelegationRunContext,
+    root_logical_run_id: &str,
+    root_cancellation: &sigil_kernel::RunCancellationHandle,
+    profile_id: &AgentProfileId,
+    role: AgentRole,
+    isolation: TaskIsolationMode,
+    child_registry: &ToolRegistry,
+    workspace_root: &Path,
+    now_ms: u64,
+) -> Result<()> {
+    if root_cancellation.is_cancel_requested() {
+        bail!("root run cancelled before child provider admission");
+    }
+    grant.validate_invocation(
+        &context.source,
+        &context.authority,
+        root_logical_run_id,
+        profile_id,
+        role,
+        isolation,
+        &resolved_tool_contract_fingerprint(child_registry)?,
+        &sigil_kernel::agent_invocation_workspace_snapshot_id(workspace_root)?,
+        root_cancellation.scope_id(),
+        now_ms,
+    )
 }
 
 pub(super) fn apply_child_permission_constraints(
@@ -122,6 +195,7 @@ pub(super) fn apply_child_permission_constraints(
     parent: &AgentRunOptions,
     role: AgentRole,
     profile: PermissionConfig,
+    grant: &AgentInvocationGrant,
 ) {
     let mut role_policy = parent.permission_config.clone();
     if matches!(role, AgentRole::Planner | AgentRole::SubagentRead) {
@@ -132,5 +206,17 @@ pub(super) fn apply_child_permission_constraints(
     child
         .permission_context
         .delegated_policy_constraints
-        .extend([role_policy, profile]);
+        .extend([role_policy, profile, grant.permission_upper_bound().clone()]);
+    child.permission_context.network_policy = strictest_network_policy(
+        parent.permission_context.network_policy,
+        grant.network_upper_bound(),
+    );
+}
+
+fn strictest_network_policy(left: NetworkPolicy, right: NetworkPolicy) -> NetworkPolicy {
+    match (left, right) {
+        (NetworkPolicy::Deny, _) | (_, NetworkPolicy::Deny) => NetworkPolicy::Deny,
+        (NetworkPolicy::Ask, _) | (_, NetworkPolicy::Ask) => NetworkPolicy::Ask,
+        (NetworkPolicy::Allow, NetworkPolicy::Allow) => NetworkPolicy::Allow,
+    }
 }

@@ -15,6 +15,7 @@ pub struct AgentToolRuntime {
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) root_logical_run_id: Option<String>,
+    pub(super) delegation_run_context: Option<AgentDelegationRunContext>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
     #[cfg(test)]
     pub(super) delegation_authority_override: Option<DelegationAuthority>,
@@ -47,6 +48,7 @@ impl AgentToolRuntime {
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             root_logical_run_id: None,
+            delegation_run_context: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -73,6 +75,7 @@ impl AgentToolRuntime {
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
             root_logical_run_id: None,
+            delegation_run_context: None,
             web_task_tree_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
@@ -87,21 +90,85 @@ impl AgentToolRuntime {
 
     /// Test-only injection for exercising host-owned delegation admission.
     ///
-    /// Production model-tool runtimes always begin with proactive authority. O2 will expose a
-    /// scoped, consumable host grant rather than an ambient authority setter.
+    /// Production model-tool runtimes receive source-bound authority from the root agent loop.
+    /// Tests use this override only to exercise each grant authority branch.
     #[cfg(test)]
     #[must_use]
     pub(super) fn with_delegation_authority(mut self, authority: DelegationAuthority) -> Self {
         self.delegation_authority_override = Some(authority);
+        if self.root_logical_run_id.is_none() {
+            self.root_logical_run_id = Some("test-root-logical-run".to_owned());
+        }
+        if self.run_cancellation.is_none() {
+            self.run_cancellation = Some(RunCancellationOwner::new().handle());
+        }
         self
     }
 
-    pub(super) fn model_delegation_authority(&self) -> DelegationAuthority {
+    pub(super) fn model_delegation_run_context(
+        &self,
+        _session: &Session,
+    ) -> Result<AgentDelegationRunContext> {
         #[cfg(test)]
         if let Some(authority) = &self.delegation_authority_override {
-            return authority.clone();
+            let source = match authority {
+                DelegationAuthority::AcceptedTaskPlan {
+                    task_id,
+                    plan_version,
+                    step_id,
+                } => AgentInvocationGrantSource::AcceptedTaskPlan {
+                    task_id: task_id.clone(),
+                    plan_version: *plan_version,
+                    step_id: step_id.clone(),
+                },
+                DelegationAuthority::UserExplicit | DelegationAuthority::ModelProactive => {
+                    AgentInvocationGrantSource::Conversation {
+                        source_turn: sigil_kernel::ConversationTurnRef::new(
+                            _session.session_scope_id(),
+                            "test-host-authorized-turn",
+                            self.root_logical_run_id
+                                .as_deref()
+                                .unwrap_or("test-root-logical-run"),
+                        )?,
+                    }
+                }
+                DelegationAuthority::SystemRecovery => {
+                    bail!("system recovery cannot create a child invocation grant")
+                }
+            };
+            return Ok(AgentDelegationRunContext {
+                source,
+                authority: authority.clone(),
+            });
         }
-        DelegationAuthority::ModelProactive
+        #[cfg(test)]
+        if self.delegation_run_context.is_none() {
+            return Ok(AgentDelegationRunContext {
+                source: AgentInvocationGrantSource::Conversation {
+                    source_turn: sigil_kernel::ConversationTurnRef::new(
+                        _session.session_scope_id(),
+                        "test-model-proactive-turn",
+                        self.root_logical_run_id
+                            .as_deref()
+                            .unwrap_or("test-root-logical-run"),
+                    )?,
+                },
+                authority: DelegationAuthority::ModelProactive,
+            });
+        }
+        self.delegation_run_context
+            .clone()
+            .ok_or_else(|| anyhow!("agent spawn is missing host-bound delegation source authority"))
+    }
+
+    #[cfg(test)]
+    pub(super) fn ensure_test_delegation_runtime_binding(&mut self) {
+        if self.root_logical_run_id.is_none() {
+            self.root_logical_run_id = Some("test-root-logical-run".to_owned());
+        }
+        if self.run_cancellation.is_none() {
+            self.run_cancellation = Some(RunCancellationOwner::new().handle());
+        }
     }
 
     pub async fn collect_finished_background_runs(
@@ -337,6 +404,10 @@ impl AgentToolDelegate for AgentToolRuntime {
 
     fn set_root_logical_run_id(&mut self, logical_run_id: Option<&str>) {
         self.root_logical_run_id = logical_run_id.map(str::to_owned);
+    }
+
+    fn set_agent_delegation_run_context(&mut self, context: Option<&AgentDelegationRunContext>) {
+        self.delegation_run_context = context.cloned();
     }
 
     fn set_web_task_tree_budget(&mut self, budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>) {

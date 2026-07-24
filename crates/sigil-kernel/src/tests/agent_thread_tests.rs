@@ -2,19 +2,22 @@ use anyhow::Result;
 
 use crate::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId, AgentDelegationAdmissionEntry,
-    AgentElicitationRouteEntry, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationSource,
+    AgentElicitationRouteEntry, AgentInvocationGrant, AgentInvocationGrantBinding,
+    AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationSource,
     AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentProfile,
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
     AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
     AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
-    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
-    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
-    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
-    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
-    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
-    AgentUsageSummary, ControlEntry, DelegationAuthorityRecord, JsonlSessionStore, ModelMessage,
-    Session, SessionLogEntry, SessionRef, WorkspaceRootSnapshot,
+    AgentResultContinuationStatus, AgentResultPolicy, AgentRole, AgentRouteClosedEntry,
+    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
+    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultDeliveredEntry,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
+    ApprovalMode, ControlEntry, DelegationAuthority, DelegationAuthorityRecord, JsonlSessionStore,
+    ModelMessage, NetworkPolicy, PermissionConfig, PermissionMode, Session, SessionLogEntry,
+    SessionRef, TaskIsolationMode, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -1725,6 +1728,7 @@ fn delegation_admission_roundtrips_as_audit_evidence_without_execution_authority
             authority: DelegationAuthorityRecord::ModelProactive,
             objective_hash: "sha256:objective".to_owned(),
             tool_contract_fingerprint: "sha256:contracts".to_owned(),
+            invocation_grant: None,
             admitted_at_ms: None,
         },
     ));
@@ -1739,6 +1743,111 @@ fn delegation_admission_roundtrips_as_audit_evidence_without_execution_authority
     assert_eq!(
         admission.authority,
         DelegationAuthorityRecord::ModelProactive
+    );
+    Ok(())
+}
+
+fn sample_invocation_grant_binding(
+    authority: DelegationAuthority,
+) -> Result<AgentInvocationGrantBinding> {
+    Ok(AgentInvocationGrantBinding {
+        source: AgentInvocationGrantSource::Conversation {
+            source_turn: crate::ConversationTurnRef::new("session-1", "message-1", "root-run-1")?,
+        },
+        authority,
+        root_logical_run_id: "root-run-1".to_owned(),
+        profile_id: profile_id("explore")?,
+        role: AgentRole::SubagentRead,
+        isolation: TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound: PermissionConfig {
+            mode: PermissionMode::ReadOnly,
+            tools: std::collections::BTreeMap::from([(
+                "private-policy-tool".to_owned(),
+                ApprovalMode::Deny,
+            )]),
+            ..PermissionConfig::default()
+        },
+        network_upper_bound: NetworkPolicy::Deny,
+        tool_contract_fingerprint: "sha256:contracts".to_owned(),
+        workspace_snapshot_id: "sha256:workspace".to_owned(),
+        root_cancellation_scope_id: "private-cancellation-scope".to_owned(),
+        expires_at_ms: 100,
+    })
+}
+
+#[test]
+fn invocation_grant_record_is_non_replayable_and_redacts_runtime_authority() -> Result<()> {
+    let first = AgentInvocationGrant::mint(
+        sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?,
+        1,
+    )?;
+    let second = AgentInvocationGrant::mint(
+        sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?,
+        1,
+    )?;
+
+    assert_ne!(first.fingerprint(), second.fingerprint());
+    let record = first.durable_record()?;
+    let encoded = serde_json::to_string(&record)?;
+    assert!(!encoded.contains("private-cancellation-scope"));
+    assert!(!encoded.contains("private-policy-tool"));
+    assert!(encoded.contains(first.fingerprint()));
+    assert_eq!(record.authority, DelegationAuthorityRecord::ModelProactive);
+    Ok(())
+}
+
+#[test]
+fn invocation_grant_revalidation_fails_closed_on_drift_and_expiry() -> Result<()> {
+    let binding = sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?;
+    let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;
+
+    grant.validate_invocation(
+        &binding.source,
+        &binding.authority,
+        &binding.root_logical_run_id,
+        &binding.profile_id,
+        binding.role,
+        binding.isolation,
+        &binding.tool_contract_fingerprint,
+        &binding.workspace_snapshot_id,
+        &binding.root_cancellation_scope_id,
+        99,
+    )?;
+    assert!(
+        grant
+            .validate_tool_effect(
+                "sha256:changed-contracts",
+                &binding.workspace_snapshot_id,
+                &binding.root_cancellation_scope_id,
+                99,
+            )
+            .is_err()
+    );
+    assert!(
+        grant
+            .validate_tool_effect(
+                &binding.tool_contract_fingerprint,
+                &binding.workspace_snapshot_id,
+                &binding.root_cancellation_scope_id,
+                100,
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn system_recovery_cannot_mint_forward_effect_invocation_grant() -> Result<()> {
+    let error = AgentInvocationGrant::mint(
+        sample_invocation_grant_binding(DelegationAuthority::SystemRecovery)?,
+        1,
+    )
+    .expect_err("system recovery must not mint a child grant");
+
+    assert!(
+        error
+            .to_string()
+            .contains("system recovery cannot mint forward-effect")
     );
     Ok(())
 }

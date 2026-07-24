@@ -5,14 +5,16 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
-    ApprovalMode, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
-    JsonlSessionStore, MessageRole, MutationEventRecorder, SessionStreamRecord, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
-    ToolLifecycleOwner, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope,
-    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan,
-    provider::ToolCall,
+    AgentInvocationGrant, AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentProfileId,
+    AgentRole, ApprovalMode, DelegationAuthority, DurableEventType, ExecutionCoverageLabel,
+    ExecutionCoverageSummary, JsonlSessionStore, MessageRole, MutationEventRecorder, NetworkPolicy,
+    PermissionConfig, PermissionMode, RunCancellationOwner, SessionStreamRecord, TaskIsolationMode,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit,
+    ToolErrorKind, ToolLifecycleOwner, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
+    ToolSubjectScope, VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationScan, provider::ToolCall,
 };
 
 #[test]
@@ -322,6 +324,63 @@ impl Tool for ReadOnlyShellFixtureTool {
             ToolResultMeta::default(),
         ))
     }
+}
+
+#[tokio::test]
+async fn child_tool_execution_revalidates_workspace_and_tool_contract_grant() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("tracked.txt"), "before\n")?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadOnlyShellFixtureTool));
+    let cancellation = RunCancellationOwner::new().handle();
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: crate::ConversationTurnRef::new(
+                    "session-1",
+                    "message-1",
+                    "root-run-1",
+                )?,
+            },
+            authority: DelegationAuthority::ModelProactive,
+            root_logical_run_id: "root-run-1".to_owned(),
+            profile_id: AgentProfileId::new("explore")?,
+            role: AgentRole::SubagentRead,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            permission_upper_bound: PermissionConfig {
+                mode: PermissionMode::ReadOnly,
+                ..PermissionConfig::default()
+            },
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: registry.contract_fingerprint()?,
+            workspace_snapshot_id: crate::agent_invocation_workspace_snapshot_id(workspace.path())?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    let context = ToolContext::new(workspace.path(), 30)
+        .with_cancellation(cancellation)
+        .with_agent_invocation_grant(grant);
+    let call = ToolCall {
+        id: "grant-read-1".to_owned(),
+        name: "fixture_shell_read".to_owned(),
+        args_json: "{}".to_owned(),
+    };
+
+    let first = registry.execute(context.clone(), call.clone()).await?;
+    assert!(!first.is_error());
+    fs::write(workspace.path().join("tracked.txt"), "after\n")?;
+    let error = registry
+        .execute(context, call)
+        .await
+        .expect_err("workspace drift must invalidate child tool authority");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace snapshot changed after grant minting")
+    );
+    Ok(())
 }
 
 #[async_trait]

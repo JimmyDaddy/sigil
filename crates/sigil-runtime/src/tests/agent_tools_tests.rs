@@ -17,19 +17,20 @@ use futures::{Stream, stream};
 use serde_json::json;
 use sha2::Digest;
 use sigil_kernel::{
-    Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
+    Agent, AgentConfig, AgentInvocationGrant, AgentInvocationGrantBinding,
+    AgentInvocationGrantSource, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileTrustEntry, AgentRunAttemptId, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentThreadId, AgentThreadStatus, AgentToolDelegate, AgentTrustState, ApprovalMode,
     AutoApproveHandler, CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
     DelegationAuthority, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
-    MessageRole, MultiAgentMode, PermissionConfig, PermissionEvaluationContext, PermissionMode,
-    PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session,
-    SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskStepId, Tool, ToolAccess,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, UsageStats, WorkspaceConfig,
+    MessageRole, MultiAgentMode, NetworkPolicy, PermissionConfig, PermissionEvaluationContext,
+    PermissionMode, PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities,
+    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
+    RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskIsolationMode,
+    TaskStepId, Tool, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
+    ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -78,6 +79,36 @@ fn ensure_test_read_contract(registry: &mut ToolRegistry) {
             mutation_tracking: ToolMutationTracking::None,
         }));
     }
+}
+
+fn permission_test_invocation_grant(
+    role: sigil_kernel::AgentRole,
+    permission_upper_bound: PermissionConfig,
+) -> Result<AgentInvocationGrant> {
+    let cancellation = RunCancellationOwner::new().handle();
+    AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: sigil_kernel::ConversationTurnRef::new(
+                    "test-session",
+                    "test-message",
+                    "test-run",
+                )?,
+            },
+            authority: DelegationAuthority::UserExplicit,
+            root_logical_run_id: "test-run".to_owned(),
+            profile_id: AgentProfileId::new("explore")?,
+            role,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            permission_upper_bound,
+            network_upper_bound: NetworkPolicy::Allow,
+            tool_contract_fingerprint: "sha256:test-contracts".to_owned(),
+            workspace_snapshot_id: "sha256:test-workspace".to_owned(),
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )
 }
 
 #[derive(Clone)]
@@ -346,18 +377,23 @@ fn production_child_permission_materialization_preserves_ancestor_role_and_profi
         ..PermissionConfig::default()
     };
     let mut child = run_options(std::env::temp_dir());
+    let grant = permission_test_invocation_grant(
+        sigil_kernel::AgentRole::SubagentWrite,
+        parent.permission_config.clone(),
+    )?;
 
     super::apply_child_permission_constraints(
         &mut child,
         &parent,
         sigil_kernel::AgentRole::SubagentWrite,
         profile,
+        &grant,
     );
 
     assert_eq!(child.permission_config, parent.permission_config);
     assert_eq!(
         child.permission_context.delegated_policy_constraints.len(),
-        3
+        4
     );
     let decision = PermissionPolicyChain::new_with_context(
         &child.permission_config,
@@ -386,12 +422,20 @@ fn production_child_permission_materialization_applies_read_role_hard_cap() -> R
         ..PermissionConfig::default()
     };
     let mut child = run_options(std::env::temp_dir());
+    let grant = permission_test_invocation_grant(
+        sigil_kernel::AgentRole::SubagentRead,
+        PermissionConfig {
+            mode: PermissionMode::ReadOnly,
+            ..parent.permission_config.clone()
+        },
+    )?;
 
     super::apply_child_permission_constraints(
         &mut child,
         &parent,
         sigil_kernel::AgentRole::SubagentRead,
         profile,
+        &grant,
     );
 
     let decision = PermissionPolicyChain::new_with_context(
@@ -1351,6 +1395,8 @@ async fn invoke_explore_spawn(
     session: &mut Session,
     call_id: &str,
 ) -> Result<ToolResult> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
     let call = ToolCall {
         id: call_id.to_owned(),
         name: SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -1368,7 +1414,7 @@ async fn invoke_explore_spawn(
         .handle_agent_tool_call(
             session,
             &call,
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
             &mut handler,
             &mut approval,
         )
@@ -1917,11 +1963,18 @@ async fn explicit_only_accepts_host_bound_user_authority() -> Result<()> {
     );
     assert!(!admission.objective_hash.is_empty());
     assert!(!admission.tool_contract_fingerprint.is_empty());
+    let grant = admission
+        .invocation_grant
+        .as_ref()
+        .expect("host authorization must persist non-executable grant evidence");
+    assert_eq!(grant.profile_id.as_str(), "explore");
+    assert_eq!(grant.role, sigil_kernel::AgentRole::SubagentRead);
+    assert_eq!(grant.network_upper_bound, NetworkPolicy::Allow);
     Ok(())
 }
 
 #[tokio::test]
-async fn accepted_plan_authority_fails_closed_until_scoped_plan_binding_exists() -> Result<()> {
+async fn accepted_plan_authority_mints_exact_scoped_invocation_grant() -> Result<()> {
     let mut config = root_config();
     config.task.multi_agent_mode = MultiAgentMode::Proactive;
     let registry = registry_with_contract(
@@ -1934,7 +1987,7 @@ async fn accepted_plan_authority_fails_closed_until_scoped_plan_binding_exists()
         supervisor,
         config,
         registry,
-        Arc::new(RejectingProviderFactory),
+        Arc::new(StaticProviderFactory),
     )
     .with_delegation_authority(DelegationAuthority::AcceptedTaskPlan {
         task_id: TaskId::new("task_1")?,
@@ -1943,11 +1996,26 @@ async fn accepted_plan_authority_fails_closed_until_scoped_plan_binding_exists()
     });
     let mut session = Session::new("parent", "model");
 
-    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-unbound-plan").await?;
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-bound-plan").await?;
 
-    assert!(result.is_error());
-    assert!(result.content.contains("scoped grant"));
-    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(!result.is_error(), "{}", result.content);
+    let admission = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(entry)) => Some(entry),
+        _ => None,
+    });
+    let admission = admission.expect("accepted-plan grant admission recorded");
+    assert!(matches!(
+        admission.authority,
+        sigil_kernel::DelegationAuthorityRecord::AcceptedTaskPlan { .. }
+    ));
+    let grant = admission
+        .invocation_grant
+        .as_ref()
+        .expect("accepted-plan invocation grant recorded");
+    assert!(matches!(
+        grant.source,
+        AgentInvocationGrantSource::AcceptedTaskPlan { .. }
+    ));
     Ok(())
 }
 
@@ -2019,6 +2087,18 @@ async fn proactive_explore_accepts_verified_local_read_contract() -> Result<()> 
 
     assert!(!result.is_error(), "{}", result.content);
     assert!(!session.agent_thread_state_projection().threads.is_empty());
+    let grant = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(entry)) => {
+            entry.invocation_grant.as_ref()
+        }
+        _ => None,
+    });
+    assert_eq!(
+        grant
+            .expect("proactive grant evidence recorded")
+            .network_upper_bound,
+        NetworkPolicy::Deny
+    );
     Ok(())
 }
 
@@ -6881,6 +6961,15 @@ fn root_config() -> RootConfig {
 }
 
 fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
+    let workspace_root = if workspace_root == std::env::temp_dir() {
+        let isolated =
+            std::env::temp_dir().join(format!("sigil-agent-tools-tests-{}", std::process::id()));
+        let _ = fs::create_dir_all(&isolated);
+        let _ = fs::write(isolated.join("README.md"), "test workspace\n");
+        isolated
+    } else {
+        workspace_root
+    };
     AgentRunOptions {
         workspace_root,
         max_turns: Some(4),

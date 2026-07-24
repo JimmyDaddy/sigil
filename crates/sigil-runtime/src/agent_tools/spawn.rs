@@ -40,7 +40,15 @@ impl AgentToolRuntime {
             changeset_only_write,
             profile_tool_scope,
         );
-        let authority = self.model_delegation_authority();
+        #[cfg(test)]
+        self.ensure_test_delegation_runtime_binding();
+        let delegation_context = match self.model_delegation_run_context(session) {
+            Ok(context) => context,
+            Err(error) => {
+                return agent_spawn_denied_tool_result(call, format!("{error:#}"));
+            }
+        };
+        let authority = delegation_context.authority.clone();
         if let Err(error) = admit_model_agent_spawn(
             self.root_config.task.multi_agent_mode,
             &authority,
@@ -60,14 +68,67 @@ impl AgentToolRuntime {
                 );
             }
         };
+        let root_logical_run_id = match self.root_logical_run_id.clone() {
+            Some(root_logical_run_id) => root_logical_run_id,
+            None => {
+                return agent_spawn_denied_tool_result(
+                    call,
+                    "agent spawn is missing the root logical-run identity".to_owned(),
+                );
+            }
+        };
+        let root_cancellation = match self.run_cancellation.clone() {
+            Some(root_cancellation) => root_cancellation,
+            None => {
+                return agent_spawn_denied_tool_result(
+                    call,
+                    "agent spawn is missing the root cancellation scope".to_owned(),
+                );
+            }
+        };
+        let isolation = if changeset_only_write {
+            TaskIsolationMode::ChangesetOnly
+        } else {
+            TaskIsolationMode::SharedReadOnly
+        };
+        let grant = match mint_agent_invocation_grant(
+            delegation_context.clone(),
+            &root_logical_run_id,
+            &root_cancellation,
+            parsed.profile_id.clone(),
+            role,
+            isolation,
+            &child_registry,
+            options,
+            unix_time_ms(),
+        )
+        .and_then(|grant| {
+            revalidate_agent_invocation_grant(
+                &grant,
+                &delegation_context,
+                &root_logical_run_id,
+                &root_cancellation,
+                &parsed.profile_id,
+                role,
+                isolation,
+                &child_registry,
+                &options.workspace_root,
+                unix_time_ms(),
+            )?;
+            Ok(grant)
+        }) {
+            Ok(grant) => grant,
+            Err(error) => {
+                return agent_spawn_denied_tool_result(call, format!("{error:#}"));
+            }
+        };
         let delegation_admission = match delegation_admission_entry(
-            authority,
+            &grant,
             thread_id.clone(),
             parsed.profile_id.clone(),
             parsed.mode,
             AgentInvocationSource::Chat,
             &parsed.objective,
-            &child_registry,
         ) {
             Ok(admission) => admission,
             Err(error) => {
@@ -163,6 +224,7 @@ impl AgentToolRuntime {
                 provider_capabilities: child_capabilities,
                 invocation_mode: parsed.mode,
                 invocation_source: AgentInvocationSource::Chat,
+                invocation_grant: grant.clone(),
                 delegation_admission,
                 display_name_hint: parsed.display_name_hint.clone(),
             },
@@ -201,9 +263,11 @@ impl AgentToolRuntime {
             ));
         }
         child_messages.push(ModelMessage::user(parsed.prompt.clone()));
-        let child_input = self.inherit_web_task_tree_budget(
-            sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
-        );
+        let child_input = self
+            .inherit_web_task_tree_budget(
+                sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
+            )
+            .with_agent_invocation_grant(grant.clone());
         let mut child_options = build_role_run_options(
             &self.root_config,
             options.workspace_root.clone(),
@@ -215,6 +279,7 @@ impl AgentToolRuntime {
             options,
             role,
             resolved_profile.profile.permission_policy.clone(),
+            &grant,
         );
 
         if matches!(parsed.mode, AgentInvocationMode::Background) {
@@ -765,14 +830,67 @@ impl AgentToolRuntime {
             &child_registry,
         )?;
         let thread_id = chat_agent_thread_id_for_call(&call.id, &request.profile_id)?;
+        let root_logical_run_id = self
+            .root_logical_run_id
+            .clone()
+            .ok_or_else(|| anyhow!("manual agent invocation is missing the root logical-run id"))?;
+        let root_cancellation = self.run_cancellation.clone().ok_or_else(|| {
+            anyhow!("manual agent invocation is missing the root cancellation scope")
+        })?;
+        let source_message_id = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::User(message) => Some(message.id.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("manual agent invocation is missing its durable source turn"))?;
+        let delegation_context = AgentDelegationRunContext {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: sigil_kernel::ConversationTurnRef::new(
+                    session.session_scope_id(),
+                    source_message_id,
+                    root_logical_run_id.clone(),
+                )?,
+            },
+            authority: authority.clone(),
+        };
+        let isolation = if changeset_only_write {
+            TaskIsolationMode::ChangesetOnly
+        } else {
+            TaskIsolationMode::SharedReadOnly
+        };
+        let grant = mint_agent_invocation_grant(
+            delegation_context.clone(),
+            &root_logical_run_id,
+            &root_cancellation,
+            request.profile_id.clone(),
+            role,
+            isolation,
+            &child_registry,
+            options,
+            unix_time_ms(),
+        )?;
+        revalidate_agent_invocation_grant(
+            &grant,
+            &delegation_context,
+            &root_logical_run_id,
+            &root_cancellation,
+            &request.profile_id,
+            role,
+            isolation,
+            &child_registry,
+            &options.workspace_root,
+            unix_time_ms(),
+        )?;
         let delegation_admission = delegation_admission_entry(
-            authority,
+            &grant,
             thread_id.clone(),
             request.profile_id.clone(),
             request.mode,
             request.invocation_source,
             &request.objective,
-            &child_registry,
         )?;
         let child_provider = self
             .provider_factory
@@ -808,6 +926,7 @@ impl AgentToolRuntime {
                 provider_capabilities: child_capabilities,
                 invocation_mode: request.mode,
                 invocation_source: request.invocation_source,
+                invocation_grant: grant.clone(),
                 delegation_admission,
                 display_name_hint: request.display_name_hint.clone(),
             },
@@ -835,9 +954,11 @@ impl AgentToolRuntime {
             ));
         }
         child_messages.push(ModelMessage::user(request.prompt.clone()));
-        let child_input = self.inherit_web_task_tree_budget(
-            sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
-        );
+        let child_input = self
+            .inherit_web_task_tree_budget(
+                sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
+            )
+            .with_agent_invocation_grant(grant.clone());
         let mut child_options = build_role_run_options(
             &self.root_config,
             options.workspace_root.clone(),
@@ -849,6 +970,7 @@ impl AgentToolRuntime {
             options,
             role,
             request.resolved_profile.profile.permission_policy.clone(),
+            &grant,
         );
         let child_input = self
             .run_cancellation

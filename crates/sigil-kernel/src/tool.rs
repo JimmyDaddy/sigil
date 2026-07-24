@@ -4,12 +4,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, RwLock, Weak},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
     mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
@@ -396,6 +398,7 @@ pub struct ToolContext {
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
     cancellation: Option<crate::RunCancellationHandle>,
+    agent_invocation_grant: Option<crate::AgentInvocationGrant>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -419,6 +422,13 @@ impl std::fmt::Debug for ToolContext {
             .field("approved_subjects", &self.approved_subjects.len())
             .field("progress_sink", &self.progress_sink.is_some())
             .field("cancellation", &self.cancellation.is_some())
+            .field(
+                "agent_invocation_grant",
+                &self
+                    .agent_invocation_grant
+                    .as_ref()
+                    .map(crate::AgentInvocationGrant::fingerprint),
+            )
             .field(
                 "execution_mutation_profile_recorded_call_ids",
                 &self.execution_mutation_profile_recorded_call_ids.len(),
@@ -444,6 +454,7 @@ impl ToolContext {
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
             cancellation: None,
+            agent_invocation_grant: None,
         }
     }
 
@@ -539,6 +550,16 @@ impl ToolContext {
     #[must_use]
     pub fn with_cancellation(mut self, cancellation: crate::RunCancellationHandle) -> Self {
         self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Installs the exact child invocation capability for last-responsible-moment revalidation.
+    #[must_use]
+    pub(crate) fn with_agent_invocation_grant(
+        mut self,
+        grant: crate::AgentInvocationGrant,
+    ) -> Self {
+        self.agent_invocation_grant = Some(grant);
         self
     }
 
@@ -2290,6 +2311,32 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Computes the exact visible tool-contract fingerprint used by invocation grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tool specification cannot be serialized.
+    pub fn contract_fingerprint(&self) -> Result<String> {
+        let contracts = self
+            .contracts()
+            .into_iter()
+            .map(|(spec, tracking)| {
+                json!({
+                    "spec": spec,
+                    "mutation_tracking": match tracking {
+                        ToolMutationTracking::None => "none",
+                        ToolMutationTracking::Controlled => "controlled",
+                        ToolMutationTracking::Unknown => "unknown",
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_vec(&contracts)?;
+        let mut hasher = Sha256::new();
+        hasher.update(encoded);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
     /// Returns one registered spec by name.
     pub fn spec_for(&self, name: &str) -> Option<ToolSpec> {
         if !self.allows(name) {
@@ -2322,6 +2369,7 @@ impl ToolRegistry {
             let mutation_tracking = tool.mutation_tracking();
             (tool, spec, mutation_tracking)
         };
+        self.validate_agent_invocation_grant(&ctx)?;
         ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -2403,6 +2451,7 @@ impl ToolRegistry {
         };
         let spec = current_tool.spec();
         let mutation_tracking = current_tool.mutation_tracking();
+        self.validate_agent_invocation_grant(&ctx)?;
         ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -2442,6 +2491,30 @@ impl ToolRegistry {
         finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
             .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
         result
+    }
+
+    fn validate_agent_invocation_grant(&self, ctx: &ToolContext) -> Result<()> {
+        let Some(grant) = ctx.agent_invocation_grant.as_ref() else {
+            return Ok(());
+        };
+        let cancellation = ctx.cancellation.as_ref().ok_or_else(|| {
+            anyhow!("child tool execution is missing its root cancellation scope")
+        })?;
+        if cancellation.is_cancel_requested() {
+            bail!("root run cancelled before child tool execution");
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        grant.validate_tool_effect(
+            &self.contract_fingerprint()?,
+            &crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?,
+            cancellation.scope_id(),
+            now_ms,
+        )
     }
 
     /// Returns the mutation profile that must be persisted before executing this tool call.

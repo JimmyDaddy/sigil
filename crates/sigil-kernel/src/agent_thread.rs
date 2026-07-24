@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::{fmt, path::Path};
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     permission::PermissionConfig,
@@ -10,6 +13,8 @@ use crate::{
     task::SessionRef,
     tool::ToolRegistryScope,
 };
+
+const AGENT_INVOCATION_GRANT_SCOPE_HASH: &str = "agent_invocation_grant_v1";
 
 /// Stable identifier for an agent profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -674,6 +679,371 @@ pub enum DelegationAuthority {
     SystemRecovery,
 }
 
+/// Host-owned source bound to one executable child-agent invocation grant.
+///
+/// This source contains durable identities only. It never contains prompt text or provider
+/// continuation handles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AgentInvocationGrantSource {
+    Conversation {
+        source_turn: crate::ConversationTurnRef,
+    },
+    AcceptedTaskPlan {
+        task_id: crate::TaskId,
+        plan_version: u32,
+        step_id: crate::TaskStepId,
+    },
+}
+
+/// Root-run facts from which the host may mint a concrete child invocation grant.
+///
+/// This value is process-local and is installed by the agent loop, never parsed from a model tool
+/// argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDelegationRunContext {
+    pub source: AgentInvocationGrantSource,
+    pub authority: DelegationAuthority,
+}
+
+/// Complete host input for minting one process-local child invocation capability.
+///
+/// The type intentionally has no serde implementation. A model can propose a child invocation,
+/// but only host code that already owns these exact runtime facts can mint the corresponding
+/// [`AgentInvocationGrant`].
+#[derive(Clone)]
+pub struct AgentInvocationGrantBinding {
+    pub source: AgentInvocationGrantSource,
+    pub authority: DelegationAuthority,
+    pub root_logical_run_id: String,
+    pub profile_id: AgentProfileId,
+    pub role: crate::AgentRole,
+    pub isolation: crate::TaskIsolationMode,
+    pub permission_upper_bound: PermissionConfig,
+    pub network_upper_bound: crate::NetworkPolicy,
+    pub tool_contract_fingerprint: String,
+    pub workspace_snapshot_id: crate::WorkspaceSnapshotId,
+    pub root_cancellation_scope_id: String,
+    pub expires_at_ms: u64,
+}
+
+impl fmt::Debug for AgentInvocationGrantBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentInvocationGrantBinding")
+            .field("source", &self.source)
+            .field("authority", &self.authority)
+            .field("root_logical_run_id", &self.root_logical_run_id)
+            .field("profile_id", &self.profile_id)
+            .field("role", &self.role)
+            .field("isolation", &self.isolation)
+            .field("permission_upper_bound", &"[host-owned permission policy]")
+            .field("network_upper_bound", &self.network_upper_bound)
+            .field("tool_contract_fingerprint", &self.tool_contract_fingerprint)
+            .field("workspace_snapshot_id", &self.workspace_snapshot_id)
+            .field(
+                "root_cancellation_scope_id",
+                &"[host-owned cancellation scope]",
+            )
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
+}
+
+/// Process-local, non-replayable authority for one exact child-agent invocation.
+///
+/// The random minting secret is deliberately absent from the durable audit projection. Replaying
+/// an [`AgentInvocationGrantRecord`] therefore cannot recreate this capability.
+#[derive(Clone)]
+pub struct AgentInvocationGrant {
+    binding: AgentInvocationGrantBinding,
+    fingerprint: String,
+}
+
+impl fmt::Debug for AgentInvocationGrant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentInvocationGrant")
+            .field("fingerprint", &self.fingerprint)
+            .field("source", &self.binding.source)
+            .field("profile_id", &self.binding.profile_id)
+            .field("role", &self.binding.role)
+            .field("isolation", &self.binding.isolation)
+            .field("expires_at_ms", &self.binding.expires_at_ms)
+            .finish()
+    }
+}
+
+impl AgentInvocationGrant {
+    /// Mints one non-replayable invocation capability from exact host-owned facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for incomplete bindings, expired grants, or recovery authority. Recovery
+    /// may reconcile already-started work but cannot create new forward-effect authority.
+    pub fn mint(binding: AgentInvocationGrantBinding, now_ms: u64) -> Result<Self> {
+        validate_invocation_grant_binding(&binding, now_ms)?;
+        let permission_upper_bound_fingerprint =
+            fingerprint_serializable(&binding.permission_upper_bound)?;
+        let material = AgentInvocationGrantFingerprintMaterial {
+            source: &binding.source,
+            authority: DelegationAuthorityRecord::from(&binding.authority),
+            root_logical_run_id: &binding.root_logical_run_id,
+            profile_id: &binding.profile_id,
+            role: binding.role,
+            isolation: binding.isolation,
+            permission_upper_bound_fingerprint: &permission_upper_bound_fingerprint,
+            network_upper_bound: binding.network_upper_bound,
+            tool_contract_fingerprint: &binding.tool_contract_fingerprint,
+            workspace_snapshot_id: &binding.workspace_snapshot_id,
+            root_cancellation_scope_id: &binding.root_cancellation_scope_id,
+            expires_at_ms: binding.expires_at_ms,
+        };
+        let encoded = serde_json::to_vec(&material)?;
+        let minting_secret = uuid::Uuid::new_v4();
+        let mut hasher = Sha256::new();
+        hasher.update(b"sigil-agent-invocation-grant-v1\0");
+        hasher.update(minting_secret.as_bytes());
+        hasher.update(encoded);
+        Ok(Self {
+            binding,
+            fingerprint: format!("sha256:{:x}", hasher.finalize()),
+        })
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &AgentInvocationGrantBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn permission_upper_bound(&self) -> &PermissionConfig {
+        &self.binding.permission_upper_bound
+    }
+
+    #[must_use]
+    pub fn network_upper_bound(&self) -> crate::NetworkPolicy {
+        self.binding.network_upper_bound
+    }
+
+    /// Revalidates all invocation facts immediately before child/provider admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any exact binding changed or the capability expired.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_invocation(
+        &self,
+        source: &AgentInvocationGrantSource,
+        authority: &DelegationAuthority,
+        root_logical_run_id: &str,
+        profile_id: &AgentProfileId,
+        role: crate::AgentRole,
+        isolation: crate::TaskIsolationMode,
+        tool_contract_fingerprint: &str,
+        workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+        root_cancellation_scope_id: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if now_ms >= self.binding.expires_at_ms {
+            bail!("agent invocation grant expired");
+        }
+        if &self.binding.source != source
+            || &self.binding.authority != authority
+            || self.binding.root_logical_run_id != root_logical_run_id
+            || &self.binding.profile_id != profile_id
+            || self.binding.role != role
+            || self.binding.isolation != isolation
+            || self.binding.tool_contract_fingerprint != tool_contract_fingerprint
+            || &self.binding.workspace_snapshot_id != workspace_snapshot_id
+            || self.binding.root_cancellation_scope_id != root_cancellation_scope_id
+        {
+            bail!("agent invocation grant binding changed before child admission");
+        }
+        Ok(())
+    }
+
+    /// Revalidates the dynamic authority that must still hold at a child tool-effect boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after expiry, cancellation-scope drift, tool-contract drift, or workspace
+    /// snapshot drift. Callers must perform this check before mutation scanning or external I/O.
+    pub fn validate_tool_effect(
+        &self,
+        tool_contract_fingerprint: &str,
+        workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+        root_cancellation_scope_id: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if now_ms >= self.binding.expires_at_ms {
+            bail!("agent invocation grant expired before tool execution");
+        }
+        if self.binding.tool_contract_fingerprint != tool_contract_fingerprint {
+            bail!("agent invocation tool contracts changed after grant minting");
+        }
+        if &self.binding.workspace_snapshot_id != workspace_snapshot_id {
+            bail!("agent invocation workspace snapshot changed after grant minting");
+        }
+        if self.binding.root_cancellation_scope_id != root_cancellation_scope_id {
+            bail!("agent invocation cancellation scope changed after grant minting");
+        }
+        Ok(())
+    }
+
+    /// Produces the safe, non-executable durable audit projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the permission upper bound cannot be fingerprinted.
+    pub fn durable_record(&self) -> Result<AgentInvocationGrantRecord> {
+        Ok(AgentInvocationGrantRecord {
+            grant_fingerprint: self.fingerprint.clone(),
+            source: self.binding.source.clone(),
+            authority: DelegationAuthorityRecord::from(&self.binding.authority),
+            profile_id: self.binding.profile_id.clone(),
+            role: self.binding.role,
+            isolation: self.binding.isolation,
+            permission_upper_bound_fingerprint: fingerprint_serializable(
+                &self.binding.permission_upper_bound,
+            )?,
+            network_upper_bound: self.binding.network_upper_bound,
+            tool_contract_fingerprint: self.binding.tool_contract_fingerprint.clone(),
+            workspace_snapshot_id: self.binding.workspace_snapshot_id.clone(),
+            root_run_fingerprint: fingerprint_text(
+                b"sigil-agent-grant-root-run-v1\0",
+                &self.binding.root_logical_run_id,
+            ),
+            root_cancellation_scope_fingerprint: fingerprint_text(
+                b"sigil-agent-grant-cancellation-v1\0",
+                &self.binding.root_cancellation_scope_id,
+            ),
+            expires_at_ms: self.binding.expires_at_ms,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct AgentInvocationGrantFingerprintMaterial<'a> {
+    source: &'a AgentInvocationGrantSource,
+    authority: DelegationAuthorityRecord,
+    root_logical_run_id: &'a str,
+    profile_id: &'a AgentProfileId,
+    role: crate::AgentRole,
+    isolation: crate::TaskIsolationMode,
+    permission_upper_bound_fingerprint: &'a str,
+    network_upper_bound: crate::NetworkPolicy,
+    tool_contract_fingerprint: &'a str,
+    workspace_snapshot_id: &'a str,
+    root_cancellation_scope_id: &'a str,
+    expires_at_ms: u64,
+}
+
+/// Safe durable evidence for one invocation grant.
+///
+/// It contains no random minting secret, raw permission policy, prompt, cancellation handle, or
+/// provider capability. It is audit evidence only and can never be promoted back into an
+/// executable [`AgentInvocationGrant`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentInvocationGrantRecord {
+    pub grant_fingerprint: String,
+    pub source: AgentInvocationGrantSource,
+    pub authority: DelegationAuthorityRecord,
+    pub profile_id: AgentProfileId,
+    pub role: crate::AgentRole,
+    pub isolation: crate::TaskIsolationMode,
+    pub permission_upper_bound_fingerprint: String,
+    pub network_upper_bound: crate::NetworkPolicy,
+    pub tool_contract_fingerprint: String,
+    pub workspace_snapshot_id: crate::WorkspaceSnapshotId,
+    pub root_run_fingerprint: String,
+    pub root_cancellation_scope_fingerprint: String,
+    pub expires_at_ms: u64,
+}
+
+fn validate_invocation_grant_binding(
+    binding: &AgentInvocationGrantBinding,
+    now_ms: u64,
+) -> Result<()> {
+    if matches!(binding.authority, DelegationAuthority::SystemRecovery) {
+        bail!("system recovery cannot mint forward-effect agent invocation grants");
+    }
+    if binding.root_logical_run_id.trim().is_empty()
+        || binding.tool_contract_fingerprint.trim().is_empty()
+        || binding.workspace_snapshot_id.trim().is_empty()
+        || binding.root_cancellation_scope_id.trim().is_empty()
+    {
+        bail!("agent invocation grant binding is incomplete");
+    }
+    if now_ms >= binding.expires_at_ms {
+        bail!("agent invocation grant expiry must be in the future");
+    }
+    match (&binding.source, &binding.authority) {
+        (
+            AgentInvocationGrantSource::Conversation { .. },
+            DelegationAuthority::UserExplicit | DelegationAuthority::ModelProactive,
+        ) => {}
+        (
+            AgentInvocationGrantSource::AcceptedTaskPlan {
+                task_id,
+                plan_version,
+                step_id,
+            },
+            DelegationAuthority::AcceptedTaskPlan {
+                task_id: authority_task_id,
+                plan_version: authority_plan_version,
+                step_id: authority_step_id,
+            },
+        ) if task_id == authority_task_id
+            && plan_version == authority_plan_version
+            && step_id == authority_step_id => {}
+        _ => bail!("agent invocation grant source and authority do not match"),
+    }
+    Ok(())
+}
+
+fn fingerprint_serializable(value: &impl Serialize) -> Result<String> {
+    let encoded = serde_json::to_vec(value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"sigil-agent-invocation-grant-policy-v1\0");
+    hasher.update(encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn fingerprint_text(domain: &[u8], value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(value.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Captures the tracked workspace snapshot bound to child-agent invocation authority.
+///
+/// # Errors
+///
+/// Returns an error when the workspace cannot be identified or the snapshot is incomplete.
+pub fn agent_invocation_workspace_snapshot_id(
+    workspace_root: impl AsRef<Path>,
+) -> Result<crate::WorkspaceSnapshotId> {
+    let workspace_root = workspace_root.as_ref();
+    let workspace_id = crate::stable_workspace_id(workspace_root)?;
+    let snapshot = crate::build_workspace_snapshot(
+        workspace_root,
+        workspace_id,
+        &crate::VerificationScope::all_tracked(AGENT_INVOCATION_GRANT_SCOPE_HASH),
+        0,
+    )?;
+    snapshot.workspace_snapshot_id.ok_or_else(|| {
+        anyhow::anyhow!("agent invocation grant requires a complete tracked workspace snapshot")
+    })
+}
+
 /// Durable, non-executable projection of the authority used for one admitted child invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -722,6 +1092,8 @@ pub struct AgentDelegationAdmissionEntry {
     pub authority: DelegationAuthorityRecord,
     pub objective_hash: String,
     pub tool_contract_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_grant: Option<AgentInvocationGrantRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_at_ms: Option<u64>,
 }
