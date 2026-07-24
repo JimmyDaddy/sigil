@@ -6,6 +6,19 @@
 
 Sigil 可以连接本机 stdio 服务和用户级的 Streamable HTTP MCP 服务。建议先只配置一个服务，保持 `approval_default = "ask"`，运行 `/doctor`，并确认它能够读取、修改或传输哪些数据。
 
+## CLI 配置
+
+完成快速配置后，可以直接管理选中的用户配置，无需手工编辑 TOML：
+
+```bash
+sigil mcp add filesystem -- node /absolute/path/to/server.js
+sigil mcp add my-search --url https://mcp.example.com/mcp
+sigil mcp list
+sigil mcp remove filesystem
+```
+
+本机 stdio 服务需要环境变量时，逐个传入 `--inherit-env NAME`；远端静态 Bearer 令牌使用 `--bearer-token-env-var NAME`。新条目默认 `approval_default = "ask"`、不允许 secrets、立即启动，并且除非显式传入 `--required`，否则不会因为启动失败阻断 Sigil。`list` 不展示命令、参数和凭据来源；需要结构化安全输出时使用 `--json`。要修改指定配置，请把全局 `--config PATH` 放在 `mcp` 之前。
+
 ## 最小配置
 
 ```toml

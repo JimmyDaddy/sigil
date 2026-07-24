@@ -508,6 +508,7 @@ fn cli_help_hides_provider_debug_commands() {
     assert!(help.contains("run"));
     assert!(help.contains("resume"));
     assert!(help.contains("doctor"));
+    assert!(help.contains("mcp"));
     assert!(help.contains("serve"));
     assert!(!help.contains("prefix"));
     assert!(!help.contains("fim"));
@@ -649,6 +650,79 @@ fn cli_parses_doctor_json_output() -> Result<()> {
         Some(Commands::Doctor {
             output: DoctorOutput::Json,
         })
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_mcp_management_commands() -> Result<()> {
+    let add = Cli::try_parse_from([
+        "sigil",
+        "--config",
+        "custom.toml",
+        "mcp",
+        "add",
+        "filesystem",
+        "--inherit-env",
+        "MCP_TOKEN",
+        "--",
+        "node",
+        "server.js",
+    ])?;
+    assert!(matches!(
+        add.command,
+        Some(Commands::Mcp {
+            command: super::mcp_cli::McpCommand::Add {
+                ref name,
+                url: None,
+                ref inherit_env,
+                ref command,
+                ..
+            },
+        }) if name == "filesystem"
+            && inherit_env.iter().map(String::as_str).eq(["MCP_TOKEN"])
+            && command.iter().map(String::as_str).eq(["node", "server.js"])
+    ));
+
+    let remote = Cli::try_parse_from([
+        "sigil",
+        "mcp",
+        "add",
+        "search",
+        "--url",
+        "https://mcp.example.com/mcp",
+        "--bearer-token-env-var",
+        "SEARCH_TOKEN",
+    ])?;
+    assert!(matches!(
+        remote.command,
+        Some(Commands::Mcp {
+            command: super::mcp_cli::McpCommand::Add {
+                ref name,
+                ref url,
+                ref bearer_token_env_var,
+                ref command,
+                ..
+            },
+        }) if name == "search"
+            && url.as_deref() == Some("https://mcp.example.com/mcp")
+            && bearer_token_env_var.as_deref() == Some("SEARCH_TOKEN")
+            && command.is_empty()
+    ));
+
+    let list = Cli::try_parse_from(["sigil", "mcp", "list", "--json"])?;
+    assert!(matches!(
+        list.command,
+        Some(Commands::Mcp {
+            command: super::mcp_cli::McpCommand::List { json: true },
+        })
+    ));
+    let remove = Cli::try_parse_from(["sigil", "mcp", "remove", "search"])?;
+    assert!(matches!(
+        remove.command,
+        Some(Commands::Mcp {
+            command: super::mcp_cli::McpCommand::Remove { ref name },
+        }) if name == "search"
     ));
     Ok(())
 }

@@ -8,6 +8,7 @@ use std::{
 };
 
 pub mod egress_disclosure;
+mod mcp_cli;
 
 #[cfg(not(test))]
 use std::io;
@@ -105,6 +106,11 @@ enum Commands {
     Doctor {
         #[arg(long, value_enum, default_value = "text")]
         output: DoctorOutput,
+    },
+    /// Manage MCP servers in the selected Sigil user configuration.
+    Mcp {
+        #[command(subcommand)]
+        command: mcp_cli::McpCommand,
     },
     Tokenizer {
         #[command(subcommand)]
@@ -280,6 +286,9 @@ async fn run_main() -> Result<u8> {
             )?;
         }
         Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
+        Commands::Mcp { command } => {
+            print!("{}", mcp_cli::execute_mcp_command(&config_path, command)?);
+        }
         Commands::Tokenizer { command } => {
             tokenizer_command(&config_path, &cwd, command).await?;
         }
