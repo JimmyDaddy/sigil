@@ -2414,6 +2414,39 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
         event.label == "follow-up:dispatch" && event.detail.contains(queue_id.as_str())
     }));
 
+    let mut dispatching = sigil_kernel::ConversationQueueItemProjection {
+        queued: sigil_kernel::ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            prompt_hash: "sha256:queue".to_owned(),
+            prompt: "follow up after current run".to_owned(),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            created_at_ms: Some(1),
+        },
+        status: sigil_kernel::ConversationInputStatus::Dispatching,
+        reason: Some("promotion_bound".to_owned()),
+    };
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![dispatching.clone()],
+        paused: false,
+        entries: vec![
+            SessionLogEntry::Control(ControlEntry::ConversationInputQueued(
+                dispatching.queued.clone(),
+            )),
+            SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(
+                sigil_kernel::ConversationInputStatusEntry {
+                    queue_id: queue_id.clone(),
+                    status: sigil_kernel::ConversationInputStatus::Dispatching,
+                    reason: dispatching.reason.take(),
+                    updated_at_ms: Some(2),
+                },
+            )),
+        ],
+    })?;
+    assert!(app.composer_queue_rows().is_empty());
+    assert_eq!(app.last_notice(), Some("no follow-ups pending"));
+
     app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
         items: Vec::new(),
         paused: true,

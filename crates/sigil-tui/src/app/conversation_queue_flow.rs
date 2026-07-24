@@ -38,9 +38,9 @@ impl AppState {
             ));
         }
         let mut projection = ConversationQueueProjection::from_entries(&entries);
-        projection
-            .items
-            .retain(|item| item.queued.target == visible_target);
+        projection.items.retain(|item| {
+            item.queued.target == visible_target && item.status == ConversationInputStatus::Queued
+        });
         if !projection.items.iter().any(|item| {
             projection
                 .next_dispatchable

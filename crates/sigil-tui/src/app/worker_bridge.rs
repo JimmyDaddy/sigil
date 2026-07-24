@@ -176,9 +176,10 @@ impl AppState {
                 let visible_items = items
                     .iter()
                     .filter(|item| {
-                        visible_target
-                            .as_ref()
-                            .is_some_and(|target| item.queued.target == *target)
+                        item.status == sigil_kernel::ConversationInputStatus::Queued
+                            && visible_target
+                                .as_ref()
+                                .is_some_and(|target| item.queued.target == *target)
                     })
                     .collect::<Vec<_>>();
                 let summary = if let Some(next) = visible_items.first() {
