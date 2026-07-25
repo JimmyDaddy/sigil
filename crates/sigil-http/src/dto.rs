@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
-    TaskIntegrationReviewRequest, TaskVerificationRerunRequest, ToolApprovalUserDecision,
-    VerificationProductView,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskVerificationRerunRequest,
+    ToolApprovalUserDecision, VerificationProductView,
 };
 use sigil_runtime::application_compaction::{
     ApplicationCompactionAdmission, ApplicationCompactionReview,
@@ -31,7 +31,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 8;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 9;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +61,8 @@ pub struct HttpServerCapabilities {
     pub approval: bool,
     /// Active runs support cooperative cancellation and bounded drain.
     pub cancellation: bool,
+    /// Active durable Tasks support exact plan- and scope-bound pause.
+    pub task_pause: bool,
     /// Durable task verification can be inspected and one exact recommended check rerun.
     pub verification: bool,
     /// Durable Task integration can be reviewed and one exact preview accepted.
@@ -88,6 +90,7 @@ impl HttpServerCapabilities {
             live_events: true,
             approval: true,
             cancellation: true,
+            task_pause: true,
             verification: true,
             task_integration: true,
             run_context: true,
@@ -1167,6 +1170,9 @@ pub struct HttpTaskContinuationRequest {
     pub guidance: Option<String>,
 }
 
+/// Exact stale-safe Task pause request shared with TUI projection truth.
+pub type HttpTaskPauseRequest = TaskPauseRequest;
+
 /// Request body for cancelling one run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -1440,6 +1446,8 @@ pub enum HttpRunStatus {
     WaitingForApproval,
     /// Cancellation has been requested and routed to the driver.
     CancelRequested,
+    /// An exact durable Task pause has been requested and routed to the driver.
+    PauseRequested,
     /// The driver boundary unwound and execution state requires durable reconciliation.
     ExecutionUncertain,
     /// The run has finished.
@@ -1448,6 +1456,8 @@ pub enum HttpRunStatus {
     Failed,
     /// Cooperative cancellation reached a durable clean terminal.
     Cancelled,
+    /// The physical run quiesced and its exact durable Task is resumably paused.
+    Paused,
     /// Execution stopped without proving a clean cancellation terminal.
     Interrupted,
 }
@@ -1458,7 +1468,7 @@ impl HttpRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Finished | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Finished | Self::Failed | Self::Cancelled | Self::Paused | Self::Interrupted
         )
     }
 }
@@ -1473,6 +1483,8 @@ pub enum HttpRunTerminalOutcome {
     Failed,
     /// Cooperative cancellation reached durable quiescence.
     Cancelled,
+    /// Cooperative cancellation reached durable quiescence for an exact Task pause.
+    Paused,
     /// Execution stopped without a provable clean cancellation terminal.
     Interrupted,
 }
@@ -1485,6 +1497,7 @@ impl HttpRunTerminalOutcome {
             Self::Finished => HttpRunStatus::Finished,
             Self::Failed => HttpRunStatus::Failed,
             Self::Cancelled => HttpRunStatus::Cancelled,
+            Self::Paused => HttpRunStatus::Paused,
             Self::Interrupted => HttpRunStatus::Interrupted,
         }
     }
@@ -2297,6 +2310,39 @@ pub struct HttpRunCancelCommandReceipt {
 }
 
 impl HttpRunCancelCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Receipt for an envelope-routed exact Task pause command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpTaskPauseCommandReceipt {
+    /// Command id used for retry de-duplication.
+    pub command_id: String,
+    /// Client that submitted the command.
+    pub client_id: String,
+    /// Session id from the command envelope.
+    pub session_id: String,
+    /// Optional optimistic state guard supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    /// Optional durable correlation id supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Exact Task selected by the rendered pause action.
+    pub task_id: String,
+    /// Accepted plan incarnation selected by the rendered pause action.
+    pub plan_version: u32,
+    /// Run snapshot after the pause reached a durable terminal.
+    pub run: HttpRunSnapshot,
+    /// Whether this response was replayed from a prior command id.
+    pub replayed: bool,
+}
+
+impl HttpTaskPauseCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

@@ -299,6 +299,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/runs/{run_id}/task-pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pause one exact durable Task plan */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    run_id: components["parameters"]["RunId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TaskPauseCommand"];
+                };
+            };
+            responses: {
+                /** @description Task-pause command receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskPauseCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/server-info": {
         parameters: {
             query?: never;
@@ -2449,7 +2497,7 @@ export interface components {
             type: "run_started";
         };
         /** @enum {string} */
-        RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "interrupted";
+        RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "pause_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "paused" | "interrupted";
         ServerCapabilities: {
             agent_activity: boolean;
             approval: boolean;
@@ -2464,6 +2512,7 @@ export interface components {
             session_catalog: boolean;
             support_diagnostics: boolean;
             task_integration: boolean;
+            task_pause: boolean;
             verification: boolean;
         };
         ServerInfo: {
@@ -2474,7 +2523,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 8;
+            schema_version: 9;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -2787,6 +2836,28 @@ export interface components {
             schema_version: 1;
             target_kind: components["schemas"]["IntegrationPromotionTargetKind"];
             verification_invalidation_count: number;
+        };
+        TaskPauseCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["TaskPauseRequest"];
+        };
+        TaskPauseCommandReceipt: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            /** Format: uint64 */
+            expected_stream_sequence?: number | null;
+            /** Format: uint32 */
+            plan_version: number;
+            replayed: boolean;
+            run: components["schemas"]["RunSnapshot"];
+            session_id: string;
+            task_id: string;
+        };
+        TaskPauseRequest: {
+            /** Format: uint32 */
+            plan_version: number;
+            request_id: string;
+            task_id: string;
         };
         TaskPhaseChangedEvent: {
             phase: components["schemas"]["PublicTaskPhase"];

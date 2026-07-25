@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc as std_mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -71,11 +73,12 @@ use crate::{
     HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
     HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission,
     HttpQueuedRunDriverStart, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
+    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
+    HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -723,7 +726,9 @@ impl HttpProductionRunDriver {
                     .and_then(|registry| registry.get_run(&run_id).ok())
                     .map_or(HttpQueuedUnpromotedTerminal::Rejected, |run| {
                         match run.status {
-                            crate::HttpRunStatus::Cancelled | crate::HttpRunStatus::Interrupted => {
+                            crate::HttpRunStatus::Cancelled
+                            | crate::HttpRunStatus::Paused
+                            | crate::HttpRunStatus::Interrupted => {
                                 HttpQueuedUnpromotedTerminal::Cancelled
                             }
                             _ => HttpQueuedUnpromotedTerminal::Rejected,
@@ -873,16 +878,47 @@ impl HttpRunDriver for HttpProductionRunDriver {
         }
         let (acknowledgement, acknowledged) = std_mpsc::sync_channel(1);
         run.cancel_sender
-            .send(HttpProductionCancellationCommand {
-                reason: cancel
-                    .reason
-                    .unwrap_or_else(|| "HTTP client requested cancellation".to_owned()),
-                acknowledgement,
-            })
+            .send(HttpProductionRunControlCommand::Cancel(
+                HttpProductionCancellationCommand {
+                    reason: cancel
+                        .reason
+                        .unwrap_or_else(|| "HTTP client requested cancellation".to_owned()),
+                    acknowledgement,
+                },
+            ))
             .map_err(|_| HttpRunDriverError::new("production cancellation owner is closed"))?;
         acknowledged.recv().map_err(|_| {
             HttpRunDriverError::new(
                 "production cancellation owner stopped before durable acknowledgement",
+            )
+        })?
+    }
+
+    fn pause_task(&self, pause: HttpRunDriverTaskPause) -> Result<(), HttpRunDriverError> {
+        let runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+        let run = runs.get(&pause.run_id).ok_or_else(|| {
+            HttpRunDriverError::new(format!("production run is not active: {}", pause.run_id))
+        })?;
+        if run.session_id != pause.session_id {
+            return Err(HttpRunDriverError::new(
+                "production Task pause session mismatch",
+            ));
+        }
+        let (acknowledgement, acknowledged) = std_mpsc::sync_channel(1);
+        run.cancel_sender
+            .send(HttpProductionRunControlCommand::Pause(
+                HttpProductionTaskPauseCommand {
+                    request: pause.request,
+                    acknowledgement,
+                },
+            ))
+            .map_err(|_| HttpRunDriverError::new("production Task pause owner is closed"))?;
+        acknowledged.recv().map_err(|_| {
+            HttpRunDriverError::new(
+                "production Task pause owner stopped before durable acknowledgement",
             )
         })?
     }
@@ -2371,11 +2407,21 @@ fn http_queued_terminal_from_attempt_evidence(
 struct HttpProductionActiveRun {
     session_id: String,
     broker: Arc<HttpApprovalBroker>,
-    cancel_sender: mpsc::UnboundedSender<HttpProductionCancellationCommand>,
+    cancel_sender: mpsc::UnboundedSender<HttpProductionRunControlCommand>,
+}
+
+enum HttpProductionRunControlCommand {
+    Cancel(HttpProductionCancellationCommand),
+    Pause(HttpProductionTaskPauseCommand),
 }
 
 struct HttpProductionCancellationCommand {
     reason: String,
+    acknowledgement: std_mpsc::SyncSender<Result<(), HttpRunDriverError>>,
+}
+
+struct HttpProductionTaskPauseCommand {
+    request: sigil_kernel::TaskPauseRequest,
     acknowledgement: std_mpsc::SyncSender<Result<(), HttpRunDriverError>>,
 }
 
@@ -2389,7 +2435,7 @@ struct HttpRunSupervisor {
     start: HttpRunDriverStart,
     queued: Option<HttpQueuedRunPreparation>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
-    cancel_receiver: mpsc::UnboundedReceiver<HttpProductionCancellationCommand>,
+    cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
 }
 
 impl HttpRunSupervisor {
@@ -2503,7 +2549,13 @@ impl HttpRunSupervisor {
                 drop(preparation);
                 result
             }
-            Err(Some(cancellation)) => {
+            Err(Some(HttpProductionRunControlCommand::Pause(pause))) => {
+                let _ = pause.acknowledgement.send(Err(HttpRunDriverError::new(
+                    "production Task pause is unavailable during run preparation",
+                )));
+                preparation.await
+            }
+            Err(Some(HttpProductionRunControlCommand::Cancel(cancellation))) => {
                 let deadline = cancellation_deadline(self.options.cancellation_timeout);
                 let joined =
                     tokio::time::timeout(remaining_until(deadline), &mut preparation).await;
@@ -2600,9 +2652,10 @@ impl HttpRunSupervisor {
         };
         let mut execution =
             Box::pin(execution.execute_on_owned_blocking(event_handler.clone(), approval_handler));
-        tokio::select! {
-            biased;
-            result = &mut execution => {
+        'run: loop {
+            tokio::select! {
+                biased;
+                result = &mut execution => {
                 let terminal_was_delivered = control
                     .terminal_was_delivered()
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
@@ -2615,12 +2668,31 @@ impl HttpRunSupervisor {
                 registry
                     .record_run_terminal(&self.start.run.id, terminal)
                     .map_err(registry_driver_error)?;
-            }
-            cancellation = self.cancel_receiver.recv() => {
-                let Some(cancellation) = cancellation else {
+                    break 'run;
+                }
+                command = self.cancel_receiver.recv() => {
+                let Some(command) = command else {
                     return Err(HttpRunDriverError::new(
                         "production cancellation owner closed before run terminal",
                     ));
+                };
+                let cancellation = match command {
+                    HttpProductionRunControlCommand::Cancel(cancellation) => cancellation,
+                    HttpProductionRunControlCommand::Pause(pause) => {
+                        if self
+                            .pause_active_task(
+                                &registry,
+                                pause,
+                                Arc::clone(&control),
+                                &mut execution,
+                                event_handler.clone(),
+                            )
+                            .await?
+                        {
+                            break 'run;
+                        }
+                        continue 'run;
+                    }
                 };
                 let acknowledgement = cancellation.acknowledgement;
                 let deadline = cancellation_deadline(self.options.cancellation_timeout);
@@ -2923,10 +2995,215 @@ impl HttpRunSupervisor {
                 if !acknowledgement_sent {
                     let _ = acknowledgement.send(Ok(()));
                 }
+                    break 'run;
+                }
             }
         }
         self.broker.cancel_all();
         Ok(())
+    }
+
+    async fn pause_active_task<F>(
+        &self,
+        registry: &Arc<HttpSessionRunRegistry>,
+        pause: HttpProductionTaskPauseCommand,
+        control: Arc<ApplicationRunControl>,
+        execution: &mut Pin<Box<F>>,
+        event_handler: HttpProductionEventHandler,
+    ) -> Result<bool, HttpRunDriverError>
+    where
+        F: Future<Output = Result<ApplicationRunTerminalStatus>>,
+    {
+        let acknowledgement = pause.acknowledgement;
+        let deadline = cancellation_deadline(self.options.cancellation_timeout);
+        let request_control = Arc::clone(&control);
+        let request_broker = Arc::clone(&self.broker);
+        let request_timeout = remaining_until(deadline);
+        let mut request_worker = tokio::task::spawn_blocking(move || {
+            request_control.request_task_pause(pause.request, Some(request_timeout), || {
+                request_broker.cancel_all()
+            })
+        });
+        let request =
+            match tokio::time::timeout(remaining_until(deadline), &mut request_worker).await {
+                Ok(Ok(request)) => request,
+                Ok(Err(_)) => {
+                    let error = quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        HttpRunDriverError::new("production Task pause activation worker failed"),
+                    );
+                    let natural_result = (&mut *execution).await;
+                    if record_natural_terminal_if_delivered(
+                        &control,
+                        registry,
+                        &self.start.run.id,
+                        &natural_result,
+                    )? {
+                        return Ok(true);
+                    }
+                    return Err(error);
+                }
+                Err(_) => {
+                    let error = quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        HttpRunDriverError::new(
+                            "production Task pause activation missed its shared deadline",
+                        ),
+                    );
+                    let request = request_worker.await.map_err(|_| error.clone())?;
+                    match request {
+                        Ok(ticket) => Ok(ticket),
+                        Err(request_error) => match request_error.into_ticket() {
+                            Some(ticket) => Ok(ticket),
+                            None => {
+                                let natural_result = (&mut *execution).await;
+                                if record_natural_terminal_if_delivered(
+                                    &control,
+                                    registry,
+                                    &self.start.run.id,
+                                    &natural_result,
+                                )? {
+                                    return Ok(true);
+                                }
+                                return Err(error);
+                            }
+                        },
+                    }
+                }
+            };
+        let ticket = match request {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                let message = error.to_string();
+                match error.into_ticket() {
+                    Some(ticket) => ticket,
+                    None => {
+                        let _ = acknowledgement.send(Err(HttpRunDriverError::new(message)));
+                        return Ok(false);
+                    }
+                }
+            }
+        };
+        let execution_joined = tokio::time::timeout(ticket.remaining_timeout(), &mut *execution)
+            .await
+            .is_ok();
+        let mut acknowledgement_sent = false;
+        if !execution_joined {
+            let _ = quarantine_cancellation_failure(
+                registry,
+                &self.start.run.id,
+                &acknowledgement,
+                HttpRunDriverError::new(
+                    "production Task execution did not join before the pause deadline",
+                ),
+            );
+            acknowledgement_sent = true;
+        }
+        let finalize_control = Arc::clone(&control);
+        let runtime = tokio::runtime::Handle::current();
+        let mut pause_events = event_handler;
+        let mut finalize_worker = tokio::task::spawn_blocking(move || {
+            runtime.block_on(finalize_control.finalize_task_pause(
+                ticket,
+                execution_joined,
+                &mut pause_events,
+            ))
+        });
+        let finalized =
+            match tokio::time::timeout(remaining_until(deadline), &mut finalize_worker).await {
+                Ok(Ok(finalized)) => finalized,
+                Ok(Err(_)) => Err(anyhow!("production Task pause finalization worker failed")),
+                Err(_) => {
+                    if !acknowledgement_sent {
+                        let _ = quarantine_cancellation_failure(
+                            registry,
+                            &self.start.run.id,
+                            &acknowledgement,
+                            HttpRunDriverError::new(
+                                "production Task pause finalization missed its shared deadline",
+                            ),
+                        );
+                        acknowledgement_sent = true;
+                    }
+                    finalize_worker.await.map_err(|_| {
+                        HttpRunDriverError::new("production Task pause finalization worker failed")
+                    })?
+                }
+            };
+        let terminal = match finalized {
+            Ok(outcome) if outcome.task_status == sigil_kernel::TaskRunStatus::Paused => {
+                HttpRunTerminalOutcome::Paused
+            }
+            Ok(outcome) if outcome.task_status == sigil_kernel::TaskRunStatus::Interrupted => {
+                HttpRunTerminalOutcome::Interrupted
+            }
+            Ok(_) => {
+                return Err(HttpRunDriverError::new(
+                    "production Task pause reached an invalid durable status",
+                ));
+            }
+            Err(error) => {
+                let error = HttpRunDriverError::new(format!(
+                    "production Task pause terminal could not be durably proven: {error}"
+                ));
+                let error = if acknowledgement_sent {
+                    error
+                } else {
+                    quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        error,
+                    )
+                };
+                if !execution_joined {
+                    let _ = (&mut *execution).await;
+                }
+                return Err(error);
+            }
+        };
+        if !execution_joined {
+            let _ = (&mut *execution).await;
+        }
+        let terminal_was_delivered = control
+            .terminal_was_delivered()
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        if !terminal_was_delivered {
+            let error = HttpRunDriverError::new(
+                "production Task pause ended without a durable protocol terminal",
+            );
+            return Err(if acknowledgement_sent {
+                error
+            } else {
+                quarantine_cancellation_failure(
+                    registry,
+                    &self.start.run.id,
+                    &acknowledgement,
+                    error,
+                )
+            });
+        }
+        if let Err(error) = registry.record_run_terminal(&self.start.run.id, terminal) {
+            let error = registry_driver_error(error);
+            return Err(if acknowledgement_sent {
+                error
+            } else {
+                quarantine_cancellation_failure(
+                    registry,
+                    &self.start.run.id,
+                    &acknowledgement,
+                    error,
+                )
+            });
+        }
+        if !acknowledgement_sent {
+            let _ = acknowledgement.send(Ok(()));
+        }
+        Ok(true)
     }
 
     async fn cancel_prepared_before_execution(

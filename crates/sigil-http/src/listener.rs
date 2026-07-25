@@ -34,7 +34,7 @@ use crate::{
         HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
         HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
         HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpTaskIntegrationReviewRequest, HttpVerificationRerunRequest,
+        HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -1042,6 +1042,24 @@ fn route_http_request(
         && let Some(run_id) = request
             .path
             .strip_prefix("/runs/")
+            .and_then(|suffix| suffix.strip_suffix("/task-pause"))
+            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpTaskPauseRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid Task pause command body");
+        };
+        return match registry.pause_task_command(run_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(run_id) = request
+            .path
+            .strip_prefix("/runs/")
             .and_then(|suffix| suffix.strip_suffix("/cancel"))
             .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
     {
@@ -1643,6 +1661,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidTaskContinuation
+        | HttpRegistryError::InvalidTaskPauseRequest
         | HttpRegistryError::InvalidTaskIntegrationReview
         | HttpRegistryError::InvalidSessionOpenRequest
         | HttpRegistryError::ConversationDisplayCursorInvalid
@@ -1688,6 +1707,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationRecoveryStaleBinding => "recovery_binding_stale",
         HttpRegistryError::ConversationRecoveryConflict => "recovery_conflict",
         HttpRegistryError::ConversationRecoveryUnavailable => "conversation_recovery_unavailable",
+        HttpRegistryError::InvalidTaskPauseRequest => "invalid_task_pause_request",
         HttpRegistryError::InvalidTaskIntegrationReview => "invalid_task_integration_review",
         _ => "registry_error",
     };

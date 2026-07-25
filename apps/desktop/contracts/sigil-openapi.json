@@ -3667,10 +3667,12 @@
           "running",
           "waiting_for_approval",
           "cancel_requested",
+          "pause_requested",
           "execution_uncertain",
           "finished",
           "failed",
           "cancelled",
+          "paused",
           "interrupted"
         ],
         "type": "string"
@@ -3717,6 +3719,9 @@
           "task_integration": {
             "type": "boolean"
           },
+          "task_pause": {
+            "type": "boolean"
+          },
           "verification": {
             "type": "boolean"
           }
@@ -3731,6 +3736,7 @@
           "live_events",
           "approval",
           "cancellation",
+          "task_pause",
           "verification",
           "task_integration",
           "run_context",
@@ -3759,7 +3765,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 8,
+            "const": 9,
             "type": "integer"
           },
           "server_version": {
@@ -5044,6 +5050,95 @@
         ],
         "type": "object"
       },
+      "TaskPauseCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/TaskPauseRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TaskPauseCommandReceipt": {
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSnapshot"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "task_id",
+          "plan_version",
+          "run",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "TaskPauseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_version": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "task_id",
+          "plan_version"
+        ],
+        "type": "object"
+      },
       "TaskPhaseChangedEvent": {
         "additionalProperties": false,
         "properties": {
@@ -5935,6 +6030,56 @@
           }
         },
         "summary": "Replay durable run events then follow live events"
+      }
+    },
+    "/runs/{run_id}/task-pause": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskPauseCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskPauseCommandReceipt"
+                }
+              }
+            },
+            "description": "Task-pause command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Pause one exact durable Task plan"
       }
     },
     "/server-info": {

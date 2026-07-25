@@ -12,7 +12,7 @@ use crate::{
     HttpApprovalCommandReceipt, HttpConversationQueueCommandReceipt,
     HttpConversationRecoveryCommandReceipt, HttpRunCancelCommandReceipt,
     HttpRunStartCommandReceipt, HttpTaskIntegrationAcceptanceCommandReceipt,
-    HttpVerificationRerunCommandReceipt,
+    HttpTaskPauseCommandReceipt, HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
 };
 
@@ -280,6 +280,7 @@ pub(crate) enum HttpStoredCommandCompletion {
     Reserved,
     Start(HttpRunStartCommandReceipt),
     Cancel(HttpRunCancelCommandReceipt),
+    Pause(HttpTaskPauseCommandReceipt),
     Approval(HttpApprovalCommandReceipt),
     Verification(Box<HttpVerificationRerunCommandReceipt>),
     Integration(Box<HttpTaskIntegrationAcceptanceCommandReceipt>),
@@ -401,6 +402,15 @@ fn validate_completion(
         }
         HttpStoredCommandCompletion::Cancel(receipt) => {
             identity.kind == "cancel"
+                && receipt.command_id == identity.key.command_id
+                && receipt.client_id == identity.key.client_id
+                && receipt.session_id == identity.key.session_id
+                && receipt.run.session_id == identity.key.session_id
+                && receipt.run.prompt_preview == HTTP_DURABLE_COMMAND_PROMPT_OMISSION
+                && !receipt.replayed
+        }
+        HttpStoredCommandCompletion::Pause(receipt) => {
+            identity.kind == "pause"
                 && receipt.command_id == identity.key.command_id
                 && receipt.client_id == identity.key.client_id
                 && receipt.session_id == identity.key.session_id

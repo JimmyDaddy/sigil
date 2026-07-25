@@ -13,8 +13,8 @@ use crate::dto::{
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort,
     HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
     HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -49,6 +49,17 @@ pub struct HttpRunDriverCancel {
     pub run_id: String,
     /// Optional user-facing reason persisted by the runtime cancellation control plane.
     pub reason: Option<String>,
+}
+
+/// Exact Task pause context delivered to the HTTP run driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRunDriverTaskPause {
+    /// Owning session id.
+    pub session_id: String,
+    /// Run id owning the exact Task cancellation scope.
+    pub run_id: String,
+    /// Exact rendered Task, plan, and request binding.
+    pub request: HttpTaskPauseRequest,
 }
 
 /// Approval context delivered to the HTTP run driver.
@@ -179,6 +190,16 @@ pub trait HttpRunDriver: Send + Sync {
     ///
     /// Returns an error when the underlying runtime cannot route the cancellation.
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError>;
+
+    /// Requests an exact durable Task pause for a registered run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying runtime cannot prove the rendered task/plan/scope
+    /// binding or route the pause to its cancellation owner.
+    fn pause_task(&self, _pause: HttpRunDriverTaskPause) -> Result<(), HttpRunDriverError> {
+        Err(HttpRunDriverError::new("Task pause is unavailable"))
+    }
 
     /// Routes a user approval decision to a registered run.
     ///

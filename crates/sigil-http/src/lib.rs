@@ -31,7 +31,8 @@ pub use driver::{
     HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
     HttpConversationRecoveryDriverError, HttpConversationRecoveryDriverOutput,
     HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpSessionOpenBindingError,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpSessionOpenBindingError,
 };
 pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION,
@@ -79,8 +80,9 @@ pub use dto::{
     HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTaskContinuationRequest,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

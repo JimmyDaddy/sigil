@@ -13,10 +13,10 @@ use sigil_kernel::{
     AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
     EgressNetworkRoute, EvidenceScope, IntegrationPlanId, IntegrationPromotionStatus,
     JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent, PublicRunEventKind,
-    Session, TaskId, TaskIntegrationReviewRequest, TaskStepId, TaskVerificationRerunRequest,
-    ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent, VerificationProductAction,
-    VerificationProductEvidence, VerificationProductView, VerificationRecommendationKind,
-    VerificationVerdict,
+    Session, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskStepId,
+    TaskVerificationRerunRequest, ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent,
+    VerificationProductAction, VerificationProductEvidence, VerificationProductView,
+    VerificationRecommendationKind, VerificationVerdict,
 };
 use sigil_runtime::{
     LocalSessionLifecycleService, SessionCatalogProjectionService, support::SupportBuildInfo,
@@ -55,14 +55,15 @@ use super::{
     HttpProtocolVersionError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
     HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
     HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
-    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
-    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
-    HttpSseEvent, HttpSupportContext, HttpTaskContinuationRequest,
-    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
+    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView,
+    HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -1951,6 +1952,94 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
 }
 
 #[tokio::test]
+async fn local_task_pause_route_is_exact_idempotent_and_typed() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "Task pause"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let start = HttpCommandEnvelope::new(
+        "command-task-pause-start",
+        "desktop-client",
+        session_id,
+        run_start("run durable Task", HttpPermissionMode::Manual),
+    );
+    let (status, start_receipt) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/runs"),
+            Some("secret-token"),
+            &serde_json::to_string(&start).expect("run command should serialize"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let run_id = start_receipt["run"]["id"].as_str().expect("run id");
+    let run_sequence = start_receipt["run"]["stream_sequence"]
+        .as_u64()
+        .expect("run sequence");
+    let pause_request = TaskPauseRequest::new(
+        TaskId::new("task-http-listener-pause").expect("Task id should be valid"),
+        4,
+    );
+    let pause = HttpCommandEnvelope::new(
+        "command-task-pause-route",
+        "desktop-client",
+        session_id,
+        pause_request.clone(),
+    )
+    .with_expected_stream_sequence(run_sequence);
+    let request = http_post(
+        &format!("/runs/{run_id}/task-pause"),
+        Some("secret-token"),
+        &serde_json::to_string(&pause).expect("pause command should serialize"),
+    );
+
+    let (status, receipt) = http_raw_request(address, request.clone()).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(receipt["task_id"], pause_request.task_id.as_str());
+    assert_eq!(receipt["plan_version"], 4);
+    assert_eq!(receipt["run"]["status"], "pause_requested");
+    assert_eq!(receipt["replayed"], false);
+    assert_eq!(driver.pauses().len(), 1);
+
+    let (status, replayed) = http_raw_request(address, request).await;
+    assert_eq!(status, 200);
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(driver.pauses().len(), 1);
+
+    let mut forged = pause_request;
+    forged.request_id = "forged".to_owned();
+    let invalid = HttpCommandEnvelope::new(
+        "command-task-pause-invalid",
+        "desktop-client",
+        session_id,
+        forged,
+    );
+    let (status, body) = http_raw_request(
+        address,
+        http_post(
+            &format!("/runs/{run_id}/task-pause"),
+            Some("secret-token"),
+            &serde_json::to_string(&invalid).expect("invalid pause command should serialize"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_task_pause_request");
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_events() {
     let (address, shutdown, driver, registry, event_bus) =
         spawn_test_http_server_with_registry_and_events().await;
@@ -2403,6 +2492,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["task_integration"]["type"],
         "boolean"
     );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["task_pause"]["type"],
+        "boolean"
+    );
     assert!(
         document["paths"]["/sessions/{session_id}/task-integration/review"]["get"]["responses"]
             ["200"]
@@ -2440,6 +2533,7 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         "/sessions/{session_id}/verification/rerun",
         "/sessions/{session_id}/task-integration/accept",
         "/runs/{run_id}/cancel",
+        "/runs/{run_id}/task-pause",
         "/runs/{run_id}/approvals/{call_id}",
     ] {
         assert!(document["paths"][path]["post"]["responses"]["500"].is_object());
@@ -2447,6 +2541,12 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     }
     assert!(document["paths"]["/runs/{run_id}"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["409"].is_object());
+    assert!(document["paths"]["/runs/{run_id}/task-pause"]["post"]["responses"]["409"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["TaskPauseCommand"]["allOf"][1]["properties"]["payload"]
+            ["$ref"],
+        "#/components/schemas/TaskPauseRequest"
+    );
     assert!(document["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"].is_object());
     assert_eq!(
         document["paths"]["/runs/{run_id}/events"]["get"]["summary"],
@@ -4850,6 +4950,126 @@ fn cancel_routes_to_driver_and_is_idempotent() {
 }
 
 #[test]
+fn exact_task_pause_routes_once_and_rejection_restores_the_run() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("pause exact Task", HttpPermissionMode::Manual),
+        )
+        .expect("driver should accept run");
+    let request = TaskPauseRequest::new(
+        TaskId::new("task-http-registry-pause").expect("Task id should be valid"),
+        2,
+    );
+    let command = HttpCommandEnvelope::new(
+        "command-task-pause",
+        "client-a",
+        &session.id,
+        request.clone(),
+    )
+    .with_expected_stream_sequence(run.stream_sequence);
+
+    let receipt = registry
+        .pause_task_command(&run.id, command.clone())
+        .expect("exact Task pause should route");
+
+    assert_eq!(receipt.task_id, request.task_id.as_str());
+    assert_eq!(receipt.plan_version, 2);
+    assert_eq!(receipt.run.status, HttpRunStatus::PauseRequested);
+    assert!(!receipt.replayed);
+    assert_eq!(
+        driver.pauses(),
+        vec![HttpRunDriverTaskPause {
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+            request: request.clone(),
+        }]
+    );
+    assert!(
+        registry
+            .pause_task_command(&run.id, command)
+            .expect("same command should replay")
+            .replayed
+    );
+    assert_eq!(driver.pauses().len(), 1);
+
+    let (rejection_registry, rejection_driver) = registry_with_driver();
+    let rejection_session =
+        create_session(&rejection_registry, HttpSessionCreateRequest::default());
+    let rejection_run = rejection_registry
+        .start_run(
+            &rejection_session.id,
+            run_start("reject pause", HttpPermissionMode::Manual),
+        )
+        .expect("rejection run should start");
+    rejection_driver.reject_next_pause("stale task plan");
+    let rejected = rejection_registry.pause_task_command(
+        &rejection_run.id,
+        HttpCommandEnvelope::new(
+            "command-task-pause-rejected",
+            "client-a",
+            &rejection_session.id,
+            request,
+        )
+        .with_expected_stream_sequence(rejection_run.stream_sequence),
+    );
+    assert!(matches!(
+        rejected,
+        Err(HttpRegistryError::DriverRejected {
+            operation: "Task pause",
+            ..
+        })
+    ));
+    assert_eq!(
+        rejection_registry
+            .get_run(&rejection_run.id)
+            .expect("rejected pause run should remain visible")
+            .status,
+        HttpRunStatus::Running
+    );
+}
+
+#[test]
+fn malformed_task_pause_identity_fails_before_driver_routing() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("reject malformed pause", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    let mut request = TaskPauseRequest::new(
+        TaskId::new("task-http-malformed-pause").expect("Task id should be valid"),
+        1,
+    );
+    request.request_id = "forged".to_owned();
+
+    assert_eq!(
+        registry.pause_task_command(
+            &run.id,
+            HttpCommandEnvelope::new(
+                "command-malformed-task-pause",
+                "client-a",
+                &session.id,
+                request,
+            ),
+        ),
+        Err(HttpRegistryError::InvalidTaskPauseRequest)
+    );
+    assert!(driver.pauses().is_empty());
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should remain active")
+            .status,
+        HttpRunStatus::Running
+    );
+}
+
+#[test]
 fn concurrent_duplicate_cancel_waits_and_routes_once() {
     let driver = Arc::new(RecordingRunDriver::default());
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
@@ -6113,11 +6333,13 @@ struct RecordingRunDriver {
     purged_session_scopes: Mutex<Vec<String>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
+    pauses: Mutex<Vec<HttpRunDriverTaskPause>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
     next_start_error: Mutex<Option<String>>,
     next_binding_error: Mutex<Option<String>>,
     next_binding: Mutex<Option<HttpSessionBinding>>,
     next_cancel_error: Mutex<Option<String>>,
+    next_pause_error: Mutex<Option<String>>,
     next_approval_error: Mutex<Option<String>>,
     start_observer: Mutex<Option<StartObserver>>,
     cancel_observer: Mutex<Option<CancelObserver>>,
@@ -6156,6 +6378,10 @@ impl RecordingRunDriver {
         lock(&self.cancels).clone()
     }
 
+    fn pauses(&self) -> Vec<HttpRunDriverTaskPause> {
+        lock(&self.pauses).clone()
+    }
+
     fn approvals(&self) -> Vec<HttpRunDriverApproval> {
         lock(&self.approvals).clone()
     }
@@ -6174,6 +6400,10 @@ impl RecordingRunDriver {
 
     fn reject_next_cancel(&self, message: &str) {
         *lock(&self.next_cancel_error) = Some(message.to_owned());
+    }
+
+    fn reject_next_pause(&self, message: &str) {
+        *lock(&self.next_pause_error) = Some(message.to_owned());
     }
 
     fn reject_next_approval(&self, message: &str) {
@@ -6318,6 +6548,14 @@ impl HttpRunDriver for RecordingRunDriver {
             return Err(HttpRunDriverError::new(message));
         }
         lock(&self.cancels).push(cancel);
+        Ok(())
+    }
+
+    fn pause_task(&self, pause: HttpRunDriverTaskPause) -> Result<(), HttpRunDriverError> {
+        if let Some(message) = lock(&self.next_pause_error).take() {
+            return Err(HttpRunDriverError::new(message));
+        }
+        lock(&self.pauses).push(pause);
         Ok(())
     }
 

@@ -26,7 +26,7 @@ use crate::{
         HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
         HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
         HttpConversationRecoveryDriverError, HttpQueuedRunDriverStart, HttpRunDriver,
-        HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
+        HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart, HttpRunDriverTaskPause,
         HttpSessionOpenBindingError,
     },
     dto::{
@@ -44,7 +44,8 @@ use crate::{
         HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
         HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceCommandReceipt,
         HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+        HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -117,6 +118,9 @@ pub enum HttpRegistryError {
     /// The run cannot accept this operation in its current state.
     #[error("http run {run_id} is not active")]
     RunNotActive { run_id: String },
+    /// The exact Task pause request identity is malformed.
+    #[error("http Task pause request is invalid")]
+    InvalidTaskPauseRequest,
     /// The addressed run no longer owns the session's foreground event stream.
     #[error("http run {run_id} no longer owns foreground session {session_id}")]
     RunNoLongerForeground { session_id: String, run_id: String },
@@ -1886,6 +1890,11 @@ impl HttpSessionRunRegistry {
                     run_id: run_id.to_owned(),
                 });
             }
+            if run.pause_operation.is_some() {
+                return Err(HttpRegistryError::RunNotActive {
+                    run_id: run_id.to_owned(),
+                });
+            }
             if let Some(operation) = run.cancel_operation.as_ref() {
                 HttpCancelClaim::Wait(Arc::clone(operation))
             } else {
@@ -2012,6 +2021,161 @@ impl HttpSessionRunRegistry {
         })();
         completion.complete(HttpCommandCompletion::Cancel(result.clone()))?;
         result
+    }
+
+    /// Requests an exact Task pause from a command envelope with retry de-duplication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request identity is malformed, the command is stale, the run is
+    /// not active, or the driver cannot prove the exact task/plan/scope binding.
+    pub fn pause_task_command(
+        &self,
+        run_id: &str,
+        command: HttpCommandEnvelope<HttpTaskPauseRequest>,
+    ) -> Result<HttpTaskPauseCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if !command.payload.has_exact_identity() {
+            return Err(HttpRegistryError::InvalidTaskPauseRequest);
+        }
+        let request = HttpReservedCommand::pause(run_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_pause(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| {
+            {
+                let state = self.lock_state();
+                let run = state
+                    .runs
+                    .get(run_id)
+                    .ok_or_else(|| HttpRegistryError::RunNotFound {
+                        run_id: run_id.to_owned(),
+                    })?;
+                if run.session_id != command.session_id {
+                    return Err(HttpRegistryError::CommandSessionMismatch {
+                        command_session_id: command.session_id.clone(),
+                        run_id: run_id.to_owned(),
+                        run_session_id: run.session_id.clone(),
+                    });
+                }
+                if let Some(expected) = command.expected_stream_sequence
+                    && expected != run.stream_sequence
+                {
+                    return Err(HttpRegistryError::StaleCommandSequence {
+                        run_id: run_id.to_owned(),
+                        expected,
+                        actual: run.stream_sequence,
+                    });
+                }
+            }
+            let run = self.pause_task(run_id, command.payload.clone())?;
+            Ok(HttpTaskPauseCommandReceipt {
+                command_id: command.command_id,
+                client_id: command.client_id,
+                session_id: command.session_id,
+                expected_stream_sequence: command.expected_stream_sequence,
+                correlation_id: command.correlation_id,
+                task_id: command.payload.task_id.as_str().to_owned(),
+                plan_version: command.payload.plan_version,
+                run,
+                replayed: false,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::Pause(result.clone()))?;
+        result
+    }
+
+    fn pause_task(
+        &self,
+        run_id: &str,
+        request: HttpTaskPauseRequest,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let claim = {
+            let mut state = self.lock_state();
+            let run = state
+                .runs
+                .get_mut(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if !matches!(
+                run.status,
+                HttpRunStatus::Running | HttpRunStatus::WaitingForApproval
+            ) || run.cancel_operation.is_some()
+            {
+                return Err(HttpRegistryError::RunNotActive {
+                    run_id: run_id.to_owned(),
+                });
+            }
+            if let Some(operation) = run.pause_operation.as_ref() {
+                HttpPauseClaim::Wait(Arc::clone(operation))
+            } else {
+                let operation = Arc::new(HttpCancelOperation::new());
+                run.previous_status = Some(run.status);
+                run.status = HttpRunStatus::PauseRequested;
+                run.pause_operation = Some(Arc::clone(&operation));
+                run.advance_stream_sequence();
+                HttpPauseClaim::Execute {
+                    operation,
+                    pause: HttpRunDriverTaskPause {
+                        session_id: run.session_id.clone(),
+                        run_id: run.id.clone(),
+                        request,
+                    },
+                }
+            }
+        };
+        let (operation, pause) = match claim {
+            HttpPauseClaim::Execute { operation, pause } => (operation, pause),
+            HttpPauseClaim::Wait(operation) => {
+                operation.wait()?;
+                return self.get_run(run_id);
+            }
+        };
+
+        let driver_result = catch_unwind(AssertUnwindSafe(|| self.driver.pause_task(pause)));
+        match driver_result {
+            Ok(Ok(())) => {
+                operation.complete(Ok(()));
+                self.get_run(run_id)
+            }
+            Ok(Err(error)) => {
+                let registry_error = HttpRegistryError::DriverRejected {
+                    operation: "Task pause",
+                    run_id: run_id.to_owned(),
+                    message: error.message,
+                };
+                let mut state = self.lock_state();
+                if let Some(run) = state.runs.get_mut(run_id)
+                    && run
+                        .pause_operation
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &operation))
+                {
+                    run.pause_operation = None;
+                    run.restore_previous_status_if_pause_requested();
+                }
+                drop(state);
+                operation.complete(Err(registry_error.clone()));
+                Err(registry_error)
+            }
+            Err(_) => {
+                let registry_error = HttpRegistryError::DriverPanicked {
+                    operation: "Task pause",
+                    run_id: run_id.to_owned(),
+                };
+                self.lock_state().mark_run_driver_uncertain(run_id)?;
+                operation.complete(Err(registry_error.clone()));
+                Err(registry_error)
+            }
+        }
     }
 
     /// Registers one pending approval for an active run.
@@ -2442,6 +2606,7 @@ impl HttpCommandKey {
 enum HttpCommandKind {
     Start,
     Cancel,
+    Pause,
     Approval,
     Verification,
     Integration,
@@ -2454,6 +2619,7 @@ impl HttpCommandKind {
         match self {
             Self::Start => b"start",
             Self::Cancel => b"cancel",
+            Self::Pause => b"pause",
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Integration => b"integration",
@@ -2466,6 +2632,7 @@ impl HttpCommandKind {
         match self {
             Self::Start => "start",
             Self::Cancel => "cancel",
+            Self::Pause => "pause",
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Integration => "integration",
@@ -2494,6 +2661,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpRunCancelRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Cancel, &[run_id], command)
+    }
+
+    fn pause(
+        run_id: &str,
+        command: &HttpCommandEnvelope<HttpTaskPauseRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::Pause, &[run_id], command)
     }
 
     fn approval(
@@ -2580,6 +2754,7 @@ impl HttpReservedCommand {
 enum HttpCommandCompletion {
     Start(Result<HttpRunStartCommandReceipt, HttpRegistryError>),
     Cancel(Result<HttpRunCancelCommandReceipt, HttpRegistryError>),
+    Pause(Result<HttpTaskPauseCommandReceipt, HttpRegistryError>),
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
@@ -2606,6 +2781,14 @@ impl HttpCommandCompletion {
                     .correlation_id
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Cancel(receipt)
+            }
+            Self::Pause(Ok(receipt)) => {
+                let mut receipt = receipt.clone();
+                project_stored_run_snapshot(&mut receipt.run);
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Pause(receipt)
             }
             Self::Approval(Ok(receipt)) => {
                 let mut receipt = receipt.clone();
@@ -2673,6 +2856,7 @@ impl HttpCommandCompletion {
             }
             Self::Start(Err(_))
             | Self::Cancel(Err(_))
+            | Self::Pause(Err(_))
             | Self::Approval(Err(_))
             | Self::Verification(_)
             | Self::Integration(_)
@@ -2686,6 +2870,7 @@ impl HttpCommandCompletion {
         match completion {
             HttpStoredCommandCompletion::Start(receipt) => Self::Start(Ok(receipt)),
             HttpStoredCommandCompletion::Cancel(receipt) => Self::Cancel(Ok(receipt)),
+            HttpStoredCommandCompletion::Pause(receipt) => Self::Pause(Ok(receipt)),
             HttpStoredCommandCompletion::Approval(receipt) => Self::Approval(Ok(receipt)),
             HttpStoredCommandCompletion::Verification(receipt) => {
                 Self::Verification(Box::new(Ok(*receipt)))
@@ -2745,6 +2930,14 @@ enum HttpCancelClaim {
     Execute {
         operation: Arc<HttpCancelOperation>,
         cancel: HttpRunDriverCancel,
+    },
+    Wait(Arc<HttpCancelOperation>),
+}
+
+enum HttpPauseClaim {
+    Execute {
+        operation: Arc<HttpCancelOperation>,
+        pause: HttpRunDriverTaskPause,
     },
     Wait(Arc<HttpCancelOperation>),
 }
@@ -2883,6 +3076,7 @@ impl HttpCommandReservation {
                 result.map(HttpRunStartCommandReceipt::replayed)
             }
             HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -2898,6 +3092,23 @@ impl HttpCommandReservation {
                 result.map(HttpRunCancelCommandReceipt::replayed)
             }
             HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_pause(&self) -> Result<HttpTaskPauseCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::Pause(result) => {
+                result.map(HttpTaskPauseCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -2914,6 +3125,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
@@ -2931,6 +3143,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
@@ -2948,6 +3161,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Queue(_)
@@ -2963,6 +3177,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -2980,6 +3195,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3096,6 +3312,7 @@ impl HttpRegistryState {
             run.status = requested;
             run.previous_status = None;
             run.cancel_operation = None;
+            run.pause_operation = None;
             run.pending_approvals.clear();
             run.in_flight_approvals.clear();
             run.advance_stream_sequence();
@@ -3158,6 +3375,7 @@ impl HttpRegistryState {
             run.status = HttpRunStatus::ExecutionUncertain;
             run.previous_status = None;
             run.cancel_operation = None;
+            run.pause_operation = None;
             run.pending_approvals.clear();
             run.in_flight_approvals.clear();
             run.advance_stream_sequence();
@@ -3226,6 +3444,7 @@ struct HttpRunState {
     status: HttpRunStatus,
     previous_status: Option<HttpRunStatus>,
     cancel_operation: Option<Arc<HttpCancelOperation>>,
+    pause_operation: Option<Arc<HttpCancelOperation>>,
     permission_mode: HttpPermissionMode,
     reasoning_effort: Option<HttpReasoningEffort>,
     prompt_preview: String,
@@ -3249,6 +3468,7 @@ impl HttpRunState {
             status: HttpRunStatus::Starting,
             previous_status: None,
             cancel_operation: None,
+            pause_operation: None,
             permission_mode,
             reasoning_effort,
             prompt_preview,
@@ -3293,6 +3513,14 @@ impl HttpRunState {
 
     fn restore_previous_status_if_cancel_requested(&mut self) {
         if self.status == HttpRunStatus::CancelRequested
+            && let Some(previous) = self.previous_status.take()
+        {
+            self.status = previous;
+        }
+    }
+
+    fn restore_previous_status_if_pause_requested(&mut self) {
+        if self.status == HttpRunStatus::PauseRequested
             && let Some(previous) = self.previous_status.take()
         {
             self.status = previous;

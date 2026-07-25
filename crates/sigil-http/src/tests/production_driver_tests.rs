@@ -11,11 +11,11 @@ use sigil_kernel::{
     AgentRole, AssistantMessageKind, CandidateCheck, CheckCommand, CheckDiscoverySource,
     CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope,
     NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus,
-    SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolEffect, ToolPreviewCapability, ToolSpec, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationProductAction, VerificationVerdict,
-    VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
+    SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolSpec,
+    VerificationPolicy, VerificationPolicyChangedEntry, VerificationProductAction,
+    VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
 
 use super::*;
@@ -2526,6 +2526,9 @@ async fn production_cancel_returns_only_after_supervisor_acknowledges_activation
         .recv()
         .await
         .expect("supervisor should receive cancellation");
+    let HttpProductionRunControlCommand::Cancel(command) = command else {
+        panic!("cancel driver call must route a cancellation command");
+    };
 
     assert_eq!(command.reason, "user requested stop");
     assert!(finished_rx.try_recv().is_err());
@@ -2540,4 +2543,79 @@ async fn production_cancel_returns_only_after_supervisor_acknowledges_activation
         .join()
         .expect("cancel caller should join")
         .expect("acknowledged cancellation should succeed");
+}
+
+#[tokio::test]
+async fn production_task_pause_returns_only_after_supervisor_acknowledges_activation() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-pause.json"), 8)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures-pause.json"), 8)
+            .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(temp.path().join("sigil.toml"), temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should accept a durable event bus"),
+    );
+    let (cancel_sender, mut cancel_receiver) = mpsc::unbounded_channel();
+    driver
+        .active_runs
+        .lock()
+        .expect("active runs should lock")
+        .insert(
+            "run-task-pause".to_owned(),
+            Arc::new(HttpProductionActiveRun {
+                session_id: "session-task-pause".to_owned(),
+                broker: Arc::new(HttpApprovalBroker::default()),
+                cancel_sender,
+            }),
+        );
+    let request = TaskPauseRequest::new(
+        TaskId::new("task-http-pause").expect("Task id should be valid"),
+        3,
+    );
+    let expected = request.clone();
+    let (finished, finished_rx) = std_mpsc::channel();
+    let pause_driver = Arc::clone(&driver);
+    let caller = std::thread::spawn(move || {
+        let result = pause_driver.pause_task(crate::HttpRunDriverTaskPause {
+            session_id: "session-task-pause".to_owned(),
+            run_id: "run-task-pause".to_owned(),
+            request,
+        });
+        finished
+            .send(())
+            .expect("completion signal should be delivered");
+        result
+    });
+    let command = cancel_receiver
+        .recv()
+        .await
+        .expect("supervisor should receive Task pause");
+    let HttpProductionRunControlCommand::Pause(command) = command else {
+        panic!("Task pause driver call must route a pause command");
+    };
+
+    assert_eq!(command.request, expected);
+    assert!(finished_rx.try_recv().is_err());
+    command
+        .acknowledgement
+        .send(Ok(()))
+        .expect("durable pause acknowledgement should send");
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("driver call should finish after acknowledgement");
+    caller
+        .join()
+        .expect("Task pause caller should join")
+        .expect("acknowledged Task pause should succeed");
 }

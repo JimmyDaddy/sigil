@@ -731,6 +731,36 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/runs/{run_id}/task-pause": {
+                "post": {
+                    "summary": "Pause one exact durable Task plan",
+                    "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/TaskPauseCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Task-pause command receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/TaskPauseCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}/events": {
                 "get": {
                     "summary": "Replay durable run events then follow live events",
@@ -864,7 +894,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "task_integration", "run_context", "agent_activity", "support_diagnostics"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "run_context", "agent_activity", "support_diagnostics"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -875,6 +905,7 @@ pub fn http_openapi_document() -> Value {
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
+                        "task_pause": { "type": "boolean" },
                         "verification": { "type": "boolean" },
                         "task_integration": { "type": "boolean" },
                         "run_context": { "type": "boolean" },
@@ -2187,6 +2218,43 @@ pub fn http_openapi_document() -> Value {
                         "replayed": { "type": "boolean" }
                     }
                 },
+                "TaskPauseCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/TaskPauseRequest" }
+                            }
+                        }
+                    ]
+                },
+                "TaskPauseRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["request_id", "task_id", "plan_version"],
+                    "properties": {
+                        "request_id": { "type": "string" },
+                        "task_id": { "type": "string" },
+                        "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 }
+                    }
+                },
+                "TaskPauseCommandReceipt": {
+                    "type": "object",
+                    "required": ["command_id", "client_id", "session_id", "task_id", "plan_version", "run", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "task_id": { "type": "string" },
+                        "plan_version": { "type": "integer", "format": "uint32" },
+                        "run": { "$ref": "#/components/schemas/RunSnapshot" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
                 "RunSnapshot": {
                     "type": "object",
                     "required": ["id", "session_id", "status", "permission_mode", "prompt_preview", "pending_approval_call_ids", "stream_sequence"],
@@ -2203,7 +2271,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunStatus": {
                     "type": "string",
-                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "execution_uncertain", "finished", "failed", "cancelled", "interrupted"]
+                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "pause_requested", "execution_uncertain", "finished", "failed", "cancelled", "paused", "interrupted"]
                 },
                 "ApprovalDecisionCommand": {
                     "allOf": [

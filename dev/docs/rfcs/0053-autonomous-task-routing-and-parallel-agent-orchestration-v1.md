@@ -1720,8 +1720,17 @@ O8b：typed public protocol 与 application parity。
 `TaskPauseRequest` 校验、root cancellation scope 与单一有序 Task stop writer batch。Pause 在请求前和
 quiescence 后分别校验 task/plan/scope；只有 execution join、child/effect permit 与 cleanup
 全部确认后才追加 `Paused`，否则追加 `Interrupted`。Application cancel 也只关闭当前 scope
-真实绑定的 Task，普通 chat cancel 不再猜测 latest Task。HTTP/Desktop 尚未把这一 pause
-authority 接入 typed route/supervisor，也仍缺 task-targeted guidance、integration
+真实绑定的 Task，普通 chat cancel 不再猜测 latest Task。
+
+HTTP schema v9 已新增 authenticated `POST /runs/{run_id}/task-pause`、typed request/receipt、
+`pause_requested` / `paused` 状态和 `task_pause` capability。Command store 以 command identity
+幂等重放；registry 在交给 production driver 前核对 session、stream sequence 和 exact
+task/plan identity，driver 只有在 shared application control 完成 durable pause finalization
+后才确认成功。Activation、join、cleanup 或 durable terminal 不能证明时必须 fail closed 为
+`Interrupted`；driver 拒绝且尚未激活 stop 时才恢复之前的 active status。OpenAPI snapshot 与
+generated TypeScript contract 已同步形成 drift gate。
+
+Desktop renderer 尚未消费这一 capability 和 route，也仍缺 task-targeted guidance、integration
 review/accept 与 restart control。显式 `auto` 在需要这些动作时仍会停在 blocked/paused
 terminal，因此这是必须收口的 interim gap；兼容默认值继续为 manual，本 slice 也不授权 O8d
 默认切换。
