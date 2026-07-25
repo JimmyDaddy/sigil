@@ -4,7 +4,7 @@ use sigil_kernel::{
     TaskRunStatus,
 };
 
-use super::{finalize_task_root, resolve_task_continuation};
+use super::{finalize_task_root, prepare_task_run_cancellation, resolve_task_continuation};
 
 #[test]
 fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Result<()> {
@@ -37,6 +37,36 @@ fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Resu
             .to_string()
             .contains("already completed")
     );
+    Ok(())
+}
+
+#[test]
+fn shared_task_cancellation_scope_is_bound_before_dispatch() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(directory.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store);
+    let task_id = TaskId::new("task-1")?;
+
+    let prepared = prepare_task_run_cancellation(&mut session, &task_id)?;
+
+    let binding = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding)) => {
+                Some(binding)
+            }
+            _ => None,
+        })
+        .expect("cancellation binding should be durable before dispatch");
+    assert_eq!(binding.task_id, task_id);
+    assert_eq!(binding.run_scope_id, prepared.handle.scope_id());
+    assert_eq!(
+        prepared.owner.handle().scope_id(),
+        prepared.handle.scope_id()
+    );
+    let _durable_recorder = prepared.recorder;
+    drop(prepared.task_guard);
     Ok(())
 }
 

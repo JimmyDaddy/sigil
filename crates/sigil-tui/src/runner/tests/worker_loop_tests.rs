@@ -5,9 +5,10 @@ use sigil_kernel::{
     DurableEventType, JsonlSessionStore, McpServerConfig, MemoryConfig,
     MutationArtifactCleanupRequested, MutationArtifactLifecycleRecorded,
     MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, RootConfig, RunEvent,
-    Session, SessionConfig, SessionStreamRecord, StorageConfig, TaskConfig, TaskId, ToolEffect,
-    VerificationCheckConfig, VerificationConfig, WorkspaceConfig, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig, stable_workspace_id,
+    Session, SessionConfig, SessionLogEntry, SessionStreamRecord, StorageConfig, TaskConfig,
+    TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig, WorkspaceConfig,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig,
+    stable_workspace_id,
 };
 
 use crate::runner::{
@@ -18,7 +19,8 @@ use crate::runner::{
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
         configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
         configured_provider_route_concurrency_limit, delete_mutation_artifact,
-        materialize_task_verification_config, promote_workspace_verification_check,
+        materialize_task_verification_config, prepare_task_run_cancellation,
+        promote_workspace_verification_check,
     },
 };
 
@@ -40,6 +42,24 @@ fn task_parallel_concurrency_uses_config_and_clamps_zero() {
     assert_eq!(configured_max_parallel_read_steps(&config), 1);
     assert_eq!(configured_max_parallel_changeset_steps(&config), 1);
     assert_eq!(configured_provider_route_concurrency_limit(&config), 1);
+}
+
+#[test]
+fn tui_task_cancellation_adapter_uses_durable_shared_binding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl")).expect("session store");
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let task_id = TaskId::new("task-1").expect("task id");
+
+    let (_owner, _recorder, handle, task_guard) =
+        prepare_task_run_cancellation(&mut session, &task_id).expect("task cancellation");
+
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+            if binding.task_id == task_id && binding.run_scope_id == handle.scope_id()
+    )));
+    drop(task_guard);
 }
 
 #[tokio::test]

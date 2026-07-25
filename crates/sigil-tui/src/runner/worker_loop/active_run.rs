@@ -54,9 +54,16 @@ pub(in crate::runner) fn prepare_task_run_cancellation(
     ),
     String,
 > {
-    let cancellation = prepare_run_cancellation(session)?;
-    bind_task_run_cancellation_scope(session, task_id, &cancellation.2)?;
-    Ok(cancellation)
+    let prepared = sigil_runtime::agent_supervisor::task_execution::prepare_task_run_cancellation(
+        session, task_id,
+    )
+    .map_err(|error| format!("failed to prepare task cancellation: {error:#}"))?;
+    Ok((
+        prepared.owner,
+        prepared.recorder,
+        prepared.handle,
+        prepared.task_guard,
+    ))
 }
 
 pub(in crate::runner) fn bind_task_run_cancellation_scope(
@@ -64,14 +71,10 @@ pub(in crate::runner) fn bind_task_run_cancellation_scope(
     task_id: &TaskId,
     handle: &RunCancellationHandle,
 ) -> std::result::Result<(), String> {
-    session
-        .append_control(ControlEntry::TaskRunCancellationScopeBound(
-            TaskRunCancellationScopeBoundEntry {
-                task_id: task_id.clone(),
-                run_scope_id: handle.scope_id().to_owned(),
-            },
-        ))
-        .map_err(|error| format!("failed to bind task cancellation scope: {error:#}"))
+    sigil_runtime::agent_supervisor::task_execution::bind_task_run_cancellation_scope(
+        session, task_id, handle,
+    )
+    .map_err(|error| format!("failed to bind task cancellation scope: {error:#}"))
 }
 
 #[allow(clippy::too_many_arguments)]

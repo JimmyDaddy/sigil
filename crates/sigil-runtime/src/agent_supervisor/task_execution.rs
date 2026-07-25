@@ -4,11 +4,13 @@ use anyhow::{Result, anyhow};
 use sigil_kernel::{
     AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, RootConfig, RunCancellationHandle, RunEvent,
+    DiscoveredCheck, EventHandler, EvidenceScope, RootConfig, RunCancellationHandle,
+    RunCancellationOwner, RunCancellationRecorder, RunEvent, RunTaskGuard,
     SandboxProfileRequirement, SequentialTaskRequest, Session, SessionRef,
-    TaskGuidancePromotedEntry, TaskId, TaskRunEntry, TaskRunStatus, ToolRegistry,
-    VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
-    discover_candidate_checks_with_user_config, safe_persistence_text, stable_workspace_id,
+    TaskGuidancePromotedEntry, TaskId, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
+    TaskRunStatus, ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry,
+    WorkspaceTrustRequirement, discover_candidate_checks_with_user_config, safe_persistence_text,
+    stable_workspace_id,
 };
 
 use super::{
@@ -51,6 +53,58 @@ pub struct ContinuedTaskExecution<'a, H> {
     pub role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
+}
+
+/// Root cancellation authority and durable recorder for one Task execution.
+pub struct PreparedTaskRunCancellation {
+    pub owner: RunCancellationOwner,
+    pub recorder: RunCancellationRecorder,
+    pub handle: RunCancellationHandle,
+    pub task_guard: RunTaskGuard,
+}
+
+/// Creates a root cancellation scope and durably binds it to one exact Task.
+///
+/// The binding is appended before this function returns, so adapters cannot dispatch Task work
+/// with an untracked cancellation scope.
+///
+/// # Errors
+///
+/// Returns an error when the durable cancellation recorder, root task guard, or Task binding
+/// cannot be created.
+pub fn prepare_task_run_cancellation(
+    session: &mut Session,
+    task_id: &TaskId,
+) -> Result<PreparedTaskRunCancellation> {
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let task_guard = handle.register_task()?;
+    bind_task_run_cancellation_scope(session, task_id, &handle)?;
+    Ok(PreparedTaskRunCancellation {
+        owner,
+        recorder,
+        handle,
+        task_guard,
+    })
+}
+
+/// Durably binds an existing root cancellation scope to one exact Task.
+///
+/// # Errors
+///
+/// Returns an error when the append-only control entry cannot be persisted.
+pub fn bind_task_run_cancellation_scope(
+    session: &mut Session,
+    task_id: &TaskId,
+    handle: &RunCancellationHandle,
+) -> Result<()> {
+    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
+        TaskRunCancellationScopeBoundEntry {
+            task_id: task_id.clone(),
+            run_scope_id: handle.scope_id().to_owned(),
+        },
+    ))
 }
 
 /// Resolves one exact durable Task continuation without creating execution authority.
