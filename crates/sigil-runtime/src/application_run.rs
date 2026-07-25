@@ -37,8 +37,15 @@ use crate::{
     unsupported_mcp_runtime_event_handler,
 };
 
+mod integration_control;
 mod task_control;
 
+pub use integration_control::{
+    APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
+    ApplicationIntegrationPromotionTargetKind, ApplicationTaskIntegrationAcceptanceView,
+    ApplicationTaskIntegrationLaneView, ApplicationTaskIntegrationReviewView,
+    accept_application_task_integration_review, application_task_integration_review_view,
+};
 pub use task_control::{
     ApplicationTaskContinuationExecution, ApplicationTaskContinuationOutput,
     ApplicationTaskContinuationRequest, PreparedApplicationTaskContinuation,

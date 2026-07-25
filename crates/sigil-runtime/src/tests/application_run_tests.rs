@@ -15,16 +15,16 @@ use sigil_kernel::{
     AgentRunResult, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind,
     AutoApproveHandler, CompletionRequest, ControlEntry, ConversationRunLifecycleRecordV1,
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
-    DisclosurePresentationReceipt, EgressDisclosurePresenter, InteractionMode, JsonlSessionStore,
-    ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider, ProviderCapabilities,
-    ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort, ReasoningStreamSupport,
-    RootConfig, RunCancellationOwner, RunCancellationTarget, RunCancellationTerminalOutcome,
-    RunEvent, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskRoutingPolicy, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval,
-    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
-    ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    conversation_run_lifecycle_record_from_stream,
+    DisclosurePresentationReceipt, EgressDisclosurePresenter, IntegrationPlanId, InteractionMode,
+    JsonlSessionStore, ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider,
+    ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, SessionRef,
+    StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
+    TaskIntegrationReviewRequest, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -36,10 +36,11 @@ use super::{
     ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
     ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime, ApplicationTranscriptRole,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    admit_application_agent_binding, admit_application_model_selection,
-    admit_application_reasoning_effort, admit_application_skill_binding,
-    application_run_context_view, application_run_input, application_session_frontier_view,
-    application_session_transcript_page, application_terminal_projection,
+    accept_application_task_integration_review, admit_application_agent_binding,
+    admit_application_model_selection, admit_application_reasoning_effort,
+    admit_application_skill_binding, application_run_context_view, application_run_input,
+    application_session_frontier_view, application_session_transcript_page,
+    application_task_integration_review_view, application_terminal_projection,
     application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, continue_application_task_handoff,
@@ -367,6 +368,91 @@ model = "deepseek-v4-flash"
 
     assert!(error.to_string().contains("active foreground run"));
     drop(foreground);
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_review_projection_is_scope_checked_and_acceptance_shares_the_foreground_lease()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/integration.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let before = std::fs::read(&binding.session_log_path)?;
+
+    assert!(
+        application_task_integration_review_view(
+            &binding.session_log_path,
+            &binding.session_scope_id,
+        )?
+        .is_none()
+    );
+    assert!(
+        application_task_integration_review_view(
+            &binding.session_log_path,
+            "another-session-scope",
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(&binding.session_log_path)?,
+        before,
+        "integration review projection must not mutate durable truth"
+    );
+
+    let lease_manager = Arc::new(ApplicationSessionLeaseManager::new());
+    let foreground = lease_manager.acquire(&binding.session_log_path)?;
+    let services = ApplicationRunServices::with_session_leases(
+        Arc::new(RejectingDisclosurePresenter),
+        Arc::clone(&lease_manager),
+    );
+    let request = TaskIntegrationReviewRequest {
+        request_id: "review-request".to_owned(),
+        task_id: TaskId::new("task-integration")?,
+        plan_id: IntegrationPlanId::new("plan-integration")?,
+        plan_version: 1,
+        preview_digest: "sha256:preview".to_owned(),
+    };
+
+    let error = accept_application_task_integration_review(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        &services,
+        &request,
+    )
+    .await
+    .expect_err("integration acceptance must not overlap a foreground operation");
+    assert!(error.to_string().contains("active foreground run"));
+
+    drop(foreground);
+    let error = accept_application_task_integration_review(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        &services,
+        &request,
+    )
+    .await
+    .expect_err("a session without a current review must reject acceptance");
+    assert!(error.to_string().contains("no longer current"));
+    assert_eq!(
+        std::fs::read(&binding.session_log_path)?,
+        before,
+        "rejected integration acceptance must not append durable facts"
+    );
     Ok(())
 }
 
