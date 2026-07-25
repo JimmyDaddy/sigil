@@ -6,7 +6,9 @@
 
 Sigil 可以连接本机 stdio 服务和用户级的 Streamable HTTP MCP 服务。建议先只配置一个服务，保持 `approval_default = "ask"`，运行 `/doctor`，并确认它能够读取、修改或传输哪些数据。
 
-## CLI 配置
+## 最小配置
+
+### CLI 配置
 
 完成快速配置后，可以直接管理选中的用户配置，无需手工编辑 TOML：
 
@@ -20,7 +22,7 @@ sigil mcp remove filesystem
 
 本机 stdio 服务需要环境变量时，逐个传入 `--inherit-env NAME`；远端静态 Bearer 令牌使用 `--bearer-token-env-var NAME`。新条目默认 `approval_default = "ask"`、不允许 secrets、立即启动，并且除非显式传入 `--required`，否则不会因为启动失败阻断 Sigil。`list` 不展示命令、参数和凭据来源；`get` 展示选中服务的命令或经过脱敏的远端目的地及凭据来源名称，但不会展示命令参数和凭据值。两个读取命令都支持 `--json`。要修改指定配置，请把全局 `--config PATH` 放在 `mcp` 之前。CLI 与 TUI 保存共用同一把配置独占锁和同目录原子替换；遇到并发写入时会关闭失败，而不会静默覆盖任一方的改动。
 
-## 最小配置
+### TOML 配置
 
 ```toml
 [[mcp_servers]]

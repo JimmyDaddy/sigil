@@ -26,6 +26,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Cancel current run / close overlay | `Ctrl-C` with no selection / `Esc` |
 | Focus and move through activity | `Ctrl-G`, `Alt-J` / `Alt-K` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
+| Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
 | Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
@@ -65,6 +66,9 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | --- | --- |
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor [--output text|json]` | Run local diagnostics |
+| `sigil mcp add <name> -- <command> [args...]` | Add a local stdio MCP server |
+| `sigil mcp add <name> --url <https-url>` | Add a remote Streamable HTTP MCP server |
+| `sigil mcp list` / `get <name>` / `remove <name>` | Inspect or remove configured MCP servers |
 | `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task |
 | `sigil resume [session-id]` | Open the TUI and restore a session |
 | `sigil serve` | Start the authenticated loopback-only local service |

@@ -26,6 +26,7 @@
 | 取消当前运行 / 关闭浮层 | 无选区时按 `Ctrl-C` / `Esc` |
 | 聚焦并切换活动 | `Ctrl-G`、`Alt-J` / `Alt-K` |
 | 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |
+| 在安全边界暂停当前精确任务 | `Alt-P`；之后用 `/task continue` 恢复 |
 | 打开最近一次检查点恢复 | `Ctrl-R`；`Enter` 恢复，`F` 分叉会话，`Esc` 关闭 |
 | 打开已保存会话的操作菜单 | 选择 `/resume` 行，再按 `Ctrl-O` 或右键 |
 | 切换可见的子智能体会话 | 子智能体面板、`Alt-A`、`Shift-Alt-A` |
@@ -65,6 +66,9 @@
 | --- | --- |
 | `sigil` | 在当前工作区打开 TUI |
 | `sigil doctor [--output text|json]` | 运行本机诊断 |
+| `sigil mcp add <名称> -- <命令> [参数...]` | 添加本机 stdio MCP 服务 |
+| `sigil mcp add <名称> --url <https-url>` | 添加远端 Streamable HTTP MCP 服务 |
+| `sigil mcp list` / `get <名称>` / `remove <名称>` | 检查或移除已配置的 MCP 服务 |
 | `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复会话 |
 | `sigil serve` | 启动带认证且只监听回环地址的本机服务 |
