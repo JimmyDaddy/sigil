@@ -2,11 +2,12 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use crate::{
-    ControlEntry, ConversationTurnRef, EventHandler, REQUEST_TASK_PLANNING_TOOL_NAME, RunEvent,
-    Session, SessionLogEntry, StartDurableTaskAction, TaskAdmissionTrigger, TaskHandoffDecision,
-    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskPlanningHandoffBinding,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, ToolCall, ToolErrorKind,
-    ToolExecutionStatus, ToolResult, ToolResultMeta, task_planning_reason_codes,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationTurnRef, EventHandler,
+    REQUEST_TASK_PLANNING_TOOL_NAME, RunEvent, Session, SessionLogEntry, StartDurableTaskAction,
+    TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
+    task_planning_reason_codes, validate_continue_without_task_planning_call,
 };
 
 use super::{
@@ -17,6 +18,62 @@ use super::{
 
 pub(super) fn task_planning_request_call_is_accepted(call: &ToolCall) -> bool {
     call.name == REQUEST_TASK_PLANNING_TOOL_NAME && task_planning_reason_codes(call).is_ok()
+}
+
+pub(super) fn continue_without_task_planning_call_is_accepted(call: &ToolCall) -> bool {
+    call.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+        && validate_continue_without_task_planning_call(call).is_ok()
+}
+
+pub(super) fn handle_continue_without_task_planning_call<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
+    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    if let Err(error) = validate_continue_without_task_planning_call(call) {
+        let mut result = ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::InvalidInput,
+            error.to_string(),
+        );
+        attach_tool_call_context(&mut result, call, &[]);
+        append_tool_execution_audit(
+            session,
+            call,
+            &[],
+            ToolExecutionStatus::Failed,
+            None,
+            Some(&result),
+        )?;
+        record_and_emit_tool_result(session, handler, outcome, result)?;
+        return Ok(false);
+    }
+
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        "ordinary conversation routing accepted; continue with the user's request",
+        ToolResultMeta {
+            details: json!({"status": "accepted"}),
+            ..ToolResultMeta::default()
+        },
+    );
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Completed,
+        None,
+        Some(&result),
+    )?;
+    record_and_emit_tool_result(session, handler, outcome, result)?;
+    Ok(true)
 }
 
 pub(super) fn handle_task_planning_request_call<H>(
@@ -188,6 +245,60 @@ where
         call,
         &[],
         ToolExecutionStatus::Cancelled,
+        None,
+        Some(&result),
+    )?;
+    record_and_emit_tool_result(session, handler, outcome, result)
+}
+
+pub(super) fn append_tool_ignored_after_routing_decision<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Unsupported,
+        "a typed task-routing decision was accepted; additional tool calls in this routing microturn were ignored",
+    );
+    attach_tool_call_context(&mut result, call, &[]);
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Cancelled,
+        None,
+        Some(&result),
+    )?;
+    record_and_emit_tool_result(session, handler, outcome, result)
+}
+
+pub(super) fn append_tool_rejected_during_task_routing<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Unsupported,
+        "ordinary tools are not available during the typed task-routing microturn",
+    );
+    attach_tool_call_context(&mut result, call, &[]);
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Failed,
         None,
         Some(&result),
     )?;

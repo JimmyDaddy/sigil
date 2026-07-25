@@ -1546,6 +1546,7 @@ where
                 && root_config.task.routing_policy == sigil_kernel::TaskRoutingPolicy::Auto
             {
                 tools.push(sigil_kernel::request_task_planning_tool_spec());
+                tools.push(sigil_kernel::continue_without_task_planning_tool_spec());
             }
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();

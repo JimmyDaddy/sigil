@@ -3,16 +3,16 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunInput, AgentRunPurpose, ControlEntry, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
-    ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
-    PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
-    Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
-    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPauseRequest,
-    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    project_conversation_prompt_for_persistence,
+    Agent, AgentRole, AgentRunInput, AgentRunPurpose, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+    ControlEntry, ConversationInputKind, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputStatus, ConversationInputTarget, JsonlSessionStore, ModelMessage,
+    MultiAgentMode, PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk,
+    ReasoningEffort, Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId,
+    TaskIsolationMode, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
+    TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, Tool,
+    ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, project_conversation_prompt_for_persistence,
 };
 use tempfile::tempdir;
 
@@ -580,10 +580,29 @@ fn ordinary_simple_chat_in_auto_mode_remains_a_chat_without_task_admission() -> 
         .join(".sigil/sessions/session-auto-simple-chat-e2e.jsonl");
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta("A concise direct answer.".to_owned()),
-        ProviderChunk::Done,
-    ])]);
+    let direct_args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "direct-routing-call".to_owned(),
+                name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "direct-routing-call".to_owned(),
+                delta: direct_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "direct-routing-call".to_owned(),
+                name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                args_json: direct_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("A concise direct answer.".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
@@ -609,6 +628,13 @@ fn ordinary_simple_chat_in_auto_mode_remains_a_chat_without_task_admission() -> 
                 | ControlEntry::TaskRun(_)
         )
     )));
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Assistant(message)
+                if message.content.as_deref() == Some("A concise direct answer.")
+        )
+    }));
     worker.shutdown()?;
     Ok(())
 }

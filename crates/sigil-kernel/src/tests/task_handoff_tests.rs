@@ -1,9 +1,11 @@
 use anyhow::Result;
 
 use crate::{
-    ControlEntry, ConversationTurnRef, SessionLogEntry, TaskAdmissionReason, TaskAdmissionTrigger,
-    TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskId, task_routing_system_prompt_contract_material,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationTurnRef, SessionLogEntry,
+    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
+    TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, ToolCall,
+    continue_without_task_planning_tool_spec, task_routing_system_prompt_contract_material,
+    validate_continue_without_task_planning_call,
 };
 
 fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
@@ -49,10 +51,28 @@ fn handoff_identifiers_and_source_turns_validate_shape() {
 #[test]
 fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
     let prompt = task_routing_system_prompt_contract_material();
-    assert!(prompt.contains("classify the requested outcome by its meaning, not by keywords"));
-    assert!(prompt.contains("MUST call request_task_planning as the only tool call"));
+    assert!(prompt.contains("Classify the requested outcome by its meaning, not by keywords"));
+    assert!(prompt.contains("Call exactly one of the two routing tools"));
+    assert!(prompt.contains("Call request_task_planning"));
+    assert!(prompt.contains("Call continue_without_task_planning"));
     assert!(prompt.contains("Do not inspect files, run commands, edit code"));
     assert!(prompt.contains("small single-file edit"));
+}
+
+#[test]
+fn direct_conversation_routing_tool_is_typed_and_bounded() {
+    let spec = continue_without_task_planning_tool_spec();
+    assert_eq!(spec.name, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME);
+    let valid = ToolCall {
+        id: "call-direct".to_owned(),
+        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+        args_json: r#"{"reason":"does_not_meet_task_planning_criteria"}"#.to_owned(),
+    };
+    assert!(validate_continue_without_task_planning_call(&valid).is_ok());
+
+    let mut invalid = valid.clone();
+    invalid.args_json = r#"{"reason":"cross_layer"}"#.to_owned();
+    assert!(validate_continue_without_task_planning_call(&invalid).is_err());
 }
 
 #[test]

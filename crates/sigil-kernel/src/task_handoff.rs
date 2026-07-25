@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
+pub const CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME: &str = "continue_without_task_planning";
 pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 
 /// Stable model-visible policy for semantic conversation-to-task routing.
@@ -18,20 +19,20 @@ pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 /// make the semantic routing decision itself.
 #[must_use]
 pub fn task_routing_system_prompt_contract_material() -> &'static str {
-    r#"You are the semantic task router for the current user turn.
+    r#"You are the semantic task router for the current user turn. This is a routing-only microturn: do not answer the user or use ordinary tools.
 
-Before answering or using any normal tool, classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents.
+Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents. Call exactly one of the two routing tools and then stop.
 
-You MUST call request_task_planning as the only tool call in this turn, and produce no answer in this turn, when fulfilling the goal clearly requires one or more of:
+Call request_task_planning when fulfilling the goal clearly requires one or more of:
 - coordinated changes across multiple files, components, or architectural layers;
 - independent work streams that benefit from parallel investigation or implementation;
 - a multi-stage implementation whose stages have dependencies;
 - long-running or multi-part verification;
 - high-risk execution that benefits from a durable reviewed plan.
 
-Do not inspect files, run commands, edit code, or start solving the task in the same turn when you request task planning. The host will start the durable planner and executor.
+Call continue_without_task_planning for an explanation, one symbol lookup, one read-only query, or a small single-file edit that does not meet any task-planning criterion.
 
-Do NOT call request_task_planning for an explanation, one symbol lookup, one read-only query, or a small single-file edit. Handle those requests directly. When none of the routing criteria clearly applies, continue normally."#
+Do not inspect files, run commands, edit code, start solving the task, or produce free text in this routing microturn. The host will either start the durable planner or begin an ordinary conversation turn after your typed decision."#
 }
 
 /// Stable identity for one conversation-to-task handoff.
@@ -210,6 +211,31 @@ pub fn request_task_planning_tool_spec() -> ToolSpec {
     }
 }
 
+/// Model-visible negative decision for the routing-only microturn.
+#[must_use]
+pub fn continue_without_task_planning_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+        description: "Continue with an ordinary conversation turn only when the current goal is an explanation, one symbol lookup, one read-only query, or a small single-file edit and does not require coordinated multi-stage work, cross-layer changes, parallel work streams, long verification, or high-risk execution."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["does_not_meet_task_planning_criteria"]
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
 /// Parses the bounded model-owned portion of a task handoff request.
 ///
 /// # Errors
@@ -234,10 +260,40 @@ pub fn task_planning_reason_codes(call: &ToolCall) -> Result<Vec<TaskAdmissionRe
     Ok(args.reason_codes)
 }
 
+/// Validates the model-owned negative decision for a routing-only microturn.
+///
+/// # Errors
+///
+/// Returns an error when the call uses another tool, has unknown fields, or does not carry the
+/// single bounded negative-decision reason.
+pub fn validate_continue_without_task_planning_call(call: &ToolCall) -> Result<()> {
+    if call.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME {
+        bail!("unexpected internal task routing tool {}", call.name);
+    }
+    let args: RawContinueWithoutTaskPlanningArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid direct conversation routing arguments: {error}"))?;
+    if args.reason != DirectConversationReason::DoesNotMeetTaskPlanningCriteria {
+        bail!("direct conversation routing reason is unsupported");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct RawTaskPlanningArgs {
     reason_codes: Vec<TaskAdmissionReason>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct RawContinueWithoutTaskPlanningArgs {
+    reason: DirectConversationReason,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DirectConversationReason {
+    DoesNotMeetTaskPlanningCriteria,
 }
 
 /// Latest durable state for one handoff identity.

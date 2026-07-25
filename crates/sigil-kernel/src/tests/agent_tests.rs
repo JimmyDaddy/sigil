@@ -19,14 +19,14 @@ use serde_json::{Value, json};
 use crate::{
     AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
     AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
-    CompactionConfig, CompletionRequest, ControlEntry, ConversationInputQueueId,
-    ConversationPurposeContext, ConversationTurnRef, DurableEventType, EventHandler,
-    ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel, ExternalSourceRecord,
-    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanId,
-    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig, CompletionRequest, ControlEntry,
+    ConversationInputQueueId, ConversationPurposeContext, ConversationTurnRef, DurableEventType,
+    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel,
+    ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
+    MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
+    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, PreparedToolExecution, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
     ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session,
@@ -275,6 +275,18 @@ struct CapturingTextProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
+struct CapturingRoutingProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+struct LateTaskHandoffProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+struct InvalidRoutingProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
 #[async_trait]
 impl Provider for CapturingTextProvider {
     fn name(&self) -> &str {
@@ -313,6 +325,174 @@ impl Provider for CapturingTextProvider {
             .push(request);
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("captured".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for CapturingRoutingProvider {
+    fn name(&self) -> &str {
+        "mock-capturing-routing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        CapturingTextProvider {
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+        .capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let routing_microturn = request
+            .tools
+            .iter()
+            .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME);
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if routing_microturn {
+            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-routing-side-effect".to_owned(),
+                    name: "handoff_side_effect".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-routing-side-effect".to_owned(),
+                    delta: "{}".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-routing-side-effect".to_owned(),
+                    name: "handoff_side_effect".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-continue-routing".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-continue-routing".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-continue-routing".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("captured".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for LateTaskHandoffProvider {
+    fn name(&self) -> &str {
+        "mock-late-task-handoff"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        CapturingTextProvider {
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+        .capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+        if turn == 0 {
+            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-continue-routing".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-continue-routing".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-continue-routing".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        if turn == 1 {
+            let args = r#"{"reason_codes":["cross_layer"]}"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-late-handoff".to_owned(),
+                    name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-late-handoff".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-late-handoff".to_owned(),
+                    name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("ordinary answer".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for InvalidRoutingProvider {
+    fn name(&self) -> &str {
+        "mock-invalid-routing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        CapturingTextProvider {
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+        .capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("captured".to_owned())),
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-invalid-routing-tool".to_owned(),
+                name: "handoff_side_effect".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-invalid-routing-tool".to_owned(),
+                delta: "{}".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-invalid-routing-tool".to_owned(),
+                name: "handoff_side_effect".to_owned(),
+                args_json: "{}".to_owned(),
+            })),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -4689,11 +4869,16 @@ async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
 #[tokio::test]
 async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(TaskHandoffSideEffectTool {
+        executions: Arc::clone(&executions),
+    }));
     let agent = Agent::new(
-        CapturingTextProvider {
+        CapturingRoutingProvider {
             captured: Arc::clone(&captured),
         },
-        ToolRegistry::new(),
+        tools,
     );
     let mut session = Session::new("mock-capturing", "mock-model");
     let prompt = "coordinate parser and formatter changes, then run the complete verification";
@@ -4752,7 +4937,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
     let requests = captured
         .lock()
         .expect("captured requests lock should not be poisoned");
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     let request = &requests[0];
     let routing_index = request
         .messages
@@ -4767,12 +4952,213 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
         .position(|message| message.content.as_deref() == Some(prompt))
         .expect("request should include the user turn");
     assert!(routing_index < user_index);
+    assert_eq!(request.tools.len(), 2);
     assert!(
         request
             .tools
             .iter()
             .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME)
     );
+    assert!(
+        request
+            .tools
+            .iter()
+            .any(|tool| tool.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME)
+    );
+    assert!(requests[1].tools.iter().all(|tool| {
+        tool.name != REQUEST_TASK_PLANNING_TOOL_NAME
+            && tool.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+    }));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(TaskHandoffSideEffectTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(
+        InvalidRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        tools,
+    );
+    let mut session = Session::new("mock-untyped-routing", "mock-model");
+    let prompt = "coordinate parser and formatter changes";
+    let logical_run_id = "untyped-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn: source_turn.clone(),
+                    routing_policy: TaskRoutingPolicy::Auto,
+                    task_handoff: Some(TaskPlanningHandoffBinding {
+                        handoff_id: TaskHandoffId::new("handoff-untyped-routing")?,
+                        task_id: TaskId::new("task-untyped-routing")?,
+                        source_turn,
+                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                        objective: prompt.to_owned(),
+                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        requested_at_ms: 42,
+                        decided_at_ms: 43,
+                    }),
+                },
+            )));
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::TaskRoutingUnsatisfied
+    );
+    assert_eq!(
+        captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .len(),
+        2
+    );
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant && message.content.as_deref() == Some("captured")
+    }));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(handler.events.iter().all(|event| {
+        !matches!(
+            event,
+            RunEvent::TextDelta(_)
+                | RunEvent::ReasoningDelta(_)
+                | RunEvent::ToolCallStarted(_)
+                | RunEvent::ToolCallArgsDelta { .. }
+                | RunEvent::ToolCallCompleted(_)
+                | RunEvent::ToolProgress(_)
+                | RunEvent::ToolResult(_)
+                | RunEvent::AssistantMessage(_)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        LateTaskHandoffProvider {
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-late-task-handoff", "mock-model");
+    let prompt = "what does this symbol mean?";
+    let logical_run_id = "late-handoff-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn: source_turn.clone(),
+                    routing_policy: TaskRoutingPolicy::Auto,
+                    task_handoff: Some(TaskPlanningHandoffBinding {
+                        handoff_id: TaskHandoffId::new("handoff-late-routing")?,
+                        task_id: TaskId::new("task-late-routing")?,
+                        source_turn,
+                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                        objective: prompt.to_owned(),
+                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        requested_at_ms: 42,
+                        decided_at_ms: 43,
+                    }),
+                },
+            )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(output.result.final_text, "ordinary answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(
+                ControlEntry::TaskHandoffRequested(_)
+                    | ControlEntry::TaskHandoffResolved(_)
+                    | ControlEntry::TaskRun(_)
+            )
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::ToolResult(result)
+                if result.tool_call_id.as_deref() == Some("call-late-handoff")
+                    && result.content.as_deref().is_some_and(|content| {
+                        content.contains("not available after the routing microturn")
+                    })
+        )
+    }));
     Ok(())
 }
 

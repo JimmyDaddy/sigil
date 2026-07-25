@@ -30,8 +30,9 @@ use crate::{
         task_guidance_apply_tool_spec, task_plan_update_tool_spec,
     },
     task_handoff::{
-        ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId,
-        TaskPlanningHandoffBinding, request_task_planning_tool_spec,
+        CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef,
+        REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId, TaskPlanningHandoffBinding,
+        continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
         task_routing_system_prompt_contract_material,
     },
     tool::{
@@ -80,7 +81,9 @@ use task_guidance::{
     task_guidance_apply_call_is_accepted,
 };
 use task_handoff::{
-    append_tool_ignored_after_task_handoff, handle_task_planning_request_call,
+    append_tool_ignored_after_routing_decision, append_tool_ignored_after_task_handoff,
+    append_tool_rejected_during_task_routing, continue_without_task_planning_call_is_accepted,
+    handle_continue_without_task_planning_call, handle_task_planning_request_call,
     task_planning_request_call_is_accepted,
 };
 use task_plan::{
@@ -103,6 +106,44 @@ use tool_results::{
     agent_tool_result_satisfies_delegation, append_invalid_tool_input_result, emit_tool_result,
     record_and_emit_tool_result, record_tool_run_outcome,
 };
+
+struct RoutingMicroturnEventFilter<'a, H> {
+    inner: &'a mut H,
+    suppress_model_surface: bool,
+}
+
+impl<'a, H> RoutingMicroturnEventFilter<'a, H> {
+    fn new(inner: &'a mut H, suppress_model_surface: bool) -> Self {
+        Self {
+            inner,
+            suppress_model_surface,
+        }
+    }
+}
+
+impl<H> EventHandler for RoutingMicroturnEventFilter<'_, H>
+where
+    H: EventHandler,
+{
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if self.suppress_model_surface
+            && matches!(
+                event,
+                RunEvent::TextDelta(_)
+                    | RunEvent::ReasoningDelta(_)
+                    | RunEvent::ToolCallStarted(_)
+                    | RunEvent::ToolCallArgsDelta { .. }
+                    | RunEvent::ToolCallCompleted(_)
+                    | RunEvent::ToolProgress(_)
+                    | RunEvent::ToolResult(_)
+                    | RunEvent::AssistantMessage(_)
+            )
+        {
+            return Ok(());
+        }
+        self.inner.handle(event)
+    }
+}
 
 /// Runtime knobs for one agent run.
 #[derive(Debug, Clone)]
@@ -721,6 +762,7 @@ pub enum AgentRunTerminalReason {
     FinalAnswer,
     MaxTurns,
     DelegationUnsatisfied,
+    TaskRoutingUnsatisfied,
     TaskHandoff,
 }
 
@@ -730,6 +772,7 @@ impl AgentRunTerminalReason {
             Self::FinalAnswer => "final_answer",
             Self::MaxTurns => "max_turns",
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
+            Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
             Self::TaskHandoff => "task_handoff",
         }
     }
@@ -1404,6 +1447,8 @@ where
         let agent_delegation_enforced = agent_delegation;
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
+        let mut task_routing_decision_pending = task_handoff_binding.is_some();
+        let mut task_routing_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
 
@@ -1465,19 +1510,25 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            let mut tool_specs = tools
-                .specs()
-                .into_iter()
-                .filter(|spec| !suppressed_tool_names.contains(&spec.name))
-                .collect::<Vec<_>>();
-            if task_plan_update.is_some() {
-                tool_specs.push(task_plan_update_tool_spec());
-            }
-            if task_guidance_assessment.is_some() {
-                tool_specs.push(task_guidance_apply_tool_spec());
-            }
-            if task_handoff_binding.is_some() {
-                tool_specs.push(request_task_planning_tool_spec());
+            let mut tool_specs = if task_routing_decision_pending {
+                vec![
+                    request_task_planning_tool_spec(),
+                    continue_without_task_planning_tool_spec(),
+                ]
+            } else {
+                tools
+                    .specs()
+                    .into_iter()
+                    .filter(|spec| !suppressed_tool_names.contains(&spec.name))
+                    .collect::<Vec<_>>()
+            };
+            if !task_routing_decision_pending {
+                if task_plan_update.is_some() {
+                    tool_specs.push(task_plan_update_tool_spec());
+                }
+                if task_guidance_assessment.is_some() {
+                    tool_specs.push(task_guidance_apply_tool_spec());
+                }
             }
             let initial_frozen_request = initial_frozen_provider_request.take();
             let provider_logical_run_id = if initial_frozen_request.is_some() {
@@ -1552,34 +1603,38 @@ where
                         return Err(error);
                     }
                 };
-            let provider_turn_result = match initial_frozen_request {
-                Some(frozen_request) => {
-                    provider_stream::collect_frozen_provider_turn(
-                        &self.provider,
-                        session,
-                        frozen_request,
-                        &provider_logical_run_id,
-                        &mut previous_response_handle,
-                        total_tool_calls,
-                        handler,
-                        cancellation.as_ref(),
-                        current_hosted_processor.as_ref(),
-                    )
-                    .await
-                }
-                None => {
-                    collect_provider_turn(
-                        &self.provider,
-                        session,
-                        request,
-                        &provider_logical_run_id,
-                        &mut previous_response_handle,
-                        total_tool_calls,
-                        handler,
-                        cancellation.as_ref(),
-                        current_hosted_processor.as_ref(),
-                    )
-                    .await
+            let provider_turn_result = {
+                let mut provider_event_handler =
+                    RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
+                match initial_frozen_request {
+                    Some(frozen_request) => {
+                        provider_stream::collect_frozen_provider_turn(
+                            &self.provider,
+                            session,
+                            frozen_request,
+                            &provider_logical_run_id,
+                            &mut previous_response_handle,
+                            total_tool_calls,
+                            &mut provider_event_handler,
+                            cancellation.as_ref(),
+                            current_hosted_processor.as_ref(),
+                        )
+                        .await
+                    }
+                    None => {
+                        collect_provider_turn(
+                            &self.provider,
+                            session,
+                            request,
+                            &provider_logical_run_id,
+                            &mut previous_response_handle,
+                            total_tool_calls,
+                            &mut provider_event_handler,
+                            cancellation.as_ref(),
+                            current_hosted_processor.as_ref(),
+                        )
+                        .await
+                    }
                 }
             };
             drop(provider_effect);
@@ -1616,7 +1671,11 @@ where
                     delegate.confirm_join_context_delivery(session, handler, &context_key)?;
                 }
             }
-            let assistant_text = provider_turn.assistant_text;
+            let assistant_text = if task_routing_decision_pending {
+                String::new()
+            } else {
+                provider_turn.assistant_text
+            };
             let completed_calls = provider_turn
                 .completed_calls
                 .into_iter()
@@ -1625,13 +1684,15 @@ where
             let pending_states = provider_turn.pending_states;
             let hosted_finalized = provider_turn.hosted_finalized;
 
-            append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
+            if !task_routing_decision_pending {
+                append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
+            }
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
-                    handler,
+                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
                     tools,
                     &assistant_text,
                     &completed_calls,
@@ -1670,10 +1731,16 @@ where
                         .as_ref()
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
-                let accepted_task_handoff_in_batch = task_handoff_binding.is_some()
+                let accepted_task_handoff_in_batch = task_routing_decision_pending
+                    && task_handoff_binding.is_some()
                     && completed_calls
                         .iter()
                         .any(task_planning_request_call_is_accepted);
+                let accepted_direct_conversation_in_batch = task_routing_decision_pending
+                    && !accepted_task_handoff_in_batch
+                    && completed_calls
+                        .iter()
+                        .any(continue_without_task_planning_call_is_accepted);
                 let accepted_task_guidance_in_batch = !accepted_task_plan_in_batch
                     && task_guidance_assessment.is_some()
                     && completed_calls.iter().any(|call| {
@@ -1686,6 +1753,7 @@ where
                 }
                 let mut accepted_task_plan = false;
                 let mut accepted_task_handoff = None;
+                let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
                 for call in completed_calls {
                     let safe_call =
@@ -1696,7 +1764,19 @@ where
                     {
                         append_tool_ignored_after_task_handoff(
                             session,
-                            handler,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
+                    if accepted_direct_conversation_in_batch
+                        && (call.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+                            || accepted_direct_conversation)
+                    {
+                        append_tool_ignored_after_routing_decision(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
                         )?;
@@ -1722,7 +1802,55 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "continue_without_task_planning is not available after the routing microturn",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        }
+                        let accepted = handle_continue_without_task_planning_call(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut outcome,
+                            &call,
+                        )?;
+                        accepted_direct_conversation = accepted_direct_conversation || accepted;
+                        continue;
+                    }
                     if call.name == REQUEST_TASK_PLANNING_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "request_task_planning is not available after the routing microturn",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        }
                         let Some(binding) = task_handoff_binding.as_ref() else {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
@@ -1744,7 +1872,7 @@ where
                         };
                         accepted_task_handoff = handle_task_planning_request_call(
                             session,
-                            handler,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
                             binding,
@@ -1754,6 +1882,15 @@ where
                                     anyhow!("task handoff requires a root cancellation scope")
                                 })?
                                 .scope_id(),
+                        )?;
+                        continue;
+                    }
+                    if task_routing_decision_pending {
+                        append_tool_rejected_during_task_routing(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut outcome,
+                            &call,
                         )?;
                         continue;
                     }
@@ -1872,6 +2009,47 @@ where
                         disposition: AgentRunDisposition::StartDurableTask(action),
                     });
                 }
+                if accepted_direct_conversation {
+                    task_routing_decision_pending = false;
+                } else if task_routing_decision_pending {
+                    if !task_routing_retry_used {
+                        task_routing_retry_used = true;
+                        handler.handle(RunEvent::Notice(
+                            "task routing decision was invalid; retrying the typed routing microturn"
+                                .to_owned(),
+                        ))?;
+                        transient_context.push(ModelMessage::system(
+                            task_routing_system_prompt_contract_material(),
+                        ));
+                    } else {
+                        handler.handle(RunEvent::Notice(
+                            "task routing decision remained invalid; no user-visible answer was recorded"
+                                .to_owned(),
+                        ))?;
+                        outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
+                        outcome.tool_calls = total_tool_calls;
+                        claim_natural_run_terminal(
+                            cancellation.as_ref(),
+                            cancellation_terminal_authority,
+                        )?;
+                        append_run_lifecycle_events(
+                            session,
+                            "blocked",
+                            outcome.terminal_reason,
+                            None,
+                            total_tool_calls,
+                        )?;
+                        return Ok(AgentRunOutput {
+                            result: AgentRunResult {
+                                final_text: String::new(),
+                                tool_calls: total_tool_calls,
+                                final_message_id: None,
+                            },
+                            outcome,
+                            disposition: AgentRunDisposition::Blocked,
+                        });
+                    }
+                }
                 if accepted_task_plan {
                     outcome.tool_calls = total_tool_calls;
                     claim_natural_run_terminal(
@@ -1922,6 +2100,43 @@ where
                     });
                 }
                 continue;
+            }
+
+            if task_routing_decision_pending {
+                if !task_routing_retry_used {
+                    task_routing_retry_used = true;
+                    handler.handle(RunEvent::Notice(
+                        "task routing microturn returned free text; retrying with a typed decision"
+                            .to_owned(),
+                    ))?;
+                    transient_context.push(ModelMessage::system(
+                        task_routing_system_prompt_contract_material(),
+                    ));
+                    continue;
+                }
+                handler.handle(RunEvent::Notice(
+                    "task routing microturn did not return a typed decision; no user-visible answer was recorded"
+                        .to_owned(),
+                ))?;
+                outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
+                outcome.tool_calls = total_tool_calls;
+                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
+                append_run_lifecycle_events(
+                    session,
+                    "blocked",
+                    outcome.terminal_reason,
+                    None,
+                    total_tool_calls,
+                )?;
+                return Ok(AgentRunOutput {
+                    result: AgentRunResult {
+                        final_text: String::new(),
+                        tool_calls: total_tool_calls,
+                        final_message_id: None,
+                    },
+                    outcome,
+                    disposition: AgentRunDisposition::Blocked,
+                });
             }
 
             if let Some(requirement) = agent_delegation_enforced.as_ref()

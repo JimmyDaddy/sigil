@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness slice implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness 与 typed routing microturn implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
 
 创建日期：2026-07-22
 
@@ -218,28 +218,40 @@ pub enum AgentRunPurpose {
 
 ### 6.1 Internal tool
 
-普通 Conversation run 在 `routing_policy = Auto` 时获得一个 internal tool：
+普通 Conversation run 在 `routing_policy = Auto` 时，必须先执行一个独立 routing-only
+microturn；该 microturn 只能看到两个 internal tool：
 
 ```text
 request_task_planning {
   reason_codes: [string]
 }
+
+continue_without_task_planning {
+  reason: "does_not_meet_task_planning_criteria"
+}
 ```
 
 工具约束：
 
+- 模型必须按语义调用且只调用其中一个 typed decision；host 不根据 prompt 关键词替模型判断。
+- routing microturn 不暴露普通 read/write/agent tool，也不允许产生用户可见回答。负向 decision
+  被接受后，下一 model turn 才恢复普通工具面并处理用户请求。
 - 模型不能传 objective、task id、permission、role、profile 或 plan。
 - objective 永远引用本轮已经持久化的 user turn，防止模型改写用户目标。
 - `reason_codes` 使用有界枚举，例如 `cross_layer`、`parallel_research`、`multi_stage_change`、
   `long_verification`、`high_risk`；不保存自由文本推理。
 - 同一 persisted user turn 只允许一次 accepted handoff。
-- handoff 被接受后，同一 model response 中其他 tool calls 不执行，并记录 ignored reason。
+- 任一 typed routing decision 被接受后，同一 model response 中其他 tool calls 不执行，并记录
+  ignored reason。
+- free text、未知 tool 或无效参数只允许一次 typed retry；第二次仍无效时以
+  `task_routing_unsatisfied` blocked terminal 收口，不能把 routing 文本当成用户回答。
 - agent loop 返回 typed `NextAction::StartDurableTask`，不写伪 final answer。
 
 模型 routing instruction 是位于当前 user turn 之前的 transient system message，要求模型按语义
-先分类，并在满足 admission 条件时把 `request_task_planning` 作为该回合唯一 tool call；它还应
-明确 negative examples：简单问答、单文件小改、一次只读查询不应建 task。host 不扫描 prompt
-关键词，可靠性通过 route contract 绑定该 instruction 与 tool schema，并由 model eval 约束。
+先分类并给出正向或负向 typed decision；它还应明确 negative examples：简单问答、单文件小改、
+一次只读查询不应建 task。host 不扫描 prompt 关键词，可靠性通过 route contract 绑定该
+instruction 与两个 tool schema，并由 model eval 约束。独立 microturn 避免普通工具面和直接
+作答与 task admission 在同一模型回合竞争。
 
 ### 6.2 Durable handoff records
 
@@ -1785,9 +1797,19 @@ O8c：deterministic、real-model 与 chaos acceptance。
   approval、crash/continue、cancel、integration review/promotion 与唯一 final；Pause 的 exact
   scope 与 resumable lifecycle 由 O8a worker E2E 覆盖。
 
-O8c 尚未完成：仍缺同一候选 release、目标 provider route 的 30 case × 3 provider-admitted
-真实模型报告及 `qualified` route gate。该运行会产生外部请求与费用，必须由 release owner
-显式选择 route、冻结 route contract、确认本地成本准入后执行；在此之前 O8d 继续被阻止。
+同日对候选 `6432fc5728a6` 的 DeepSeek V4 Flash exact route 执行了 30 case × 3
+provider-admitted 真实模型 campaign。90 次请求中 55 次完成、48 次通过基础 acceptance；exact
+route 的 negative false-positive 为 `0`，但 positive task miss 为 `77.8%`，另有 33 次请求因
+TLS handshake EOF 在任何可确认的 provider 输出前失败，route gate 因此为
+`insufficient_evidence`，没有授权默认切换。该失败证据暴露出原设计把 routing instruction、
+`request_task_planning` 与普通工具放在同一 turn，模型常直接解决任务而不 handoff；实现已改为
+上述独立 typed routing microturn，并把两个 routing schema 纳入 exact route digest。由于 prompt
+和 tool contract 已改变，`6432fc5728a6` 的报告只能作为失败诊断，不能用于新候选 qualification。
+
+O8c 尚未完成：仍需在连接失败的“已确认未派发”安全重试收口后，重建同一候选 release 与 route
+contract，重新通过 deterministic、PTY 和目标 provider route 的 30 case × 3 真实模型报告，
+最终得到 `qualified` route gate。运行仍须由 release owner 显式确认 route 与成本准入；在此之前
+O8d 继续被阻止。
 
 O8d：默认切换、迁移与回滚。
 

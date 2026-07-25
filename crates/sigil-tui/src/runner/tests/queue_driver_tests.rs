@@ -299,7 +299,10 @@ fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
         &exact_prompts,
         temp.path(),
         &MemoryConfig { enabled: false },
-        vec![sigil_kernel::request_task_planning_tool_spec()],
+        vec![
+            sigil_kernel::request_task_planning_tool_spec(),
+            sigil_kernel::continue_without_task_planning_tool_spec(),
+        ],
         None,
         None,
     )

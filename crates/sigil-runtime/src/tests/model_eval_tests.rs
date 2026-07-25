@@ -14,8 +14,8 @@ use sigil_kernel::{
     TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
     TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
-    request_task_planning_tool_spec, task_routing_system_prompt_contract_material,
-    write_file_with_mutation,
+    continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+    task_routing_system_prompt_contract_material, write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -231,7 +231,10 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     expected_routing_material.extend(
         serde_json::to_vec(&serde_json::json!({
             "system_prompt": task_routing_system_prompt_contract_material(),
-            "tool": request_task_planning_tool_spec(),
+            "tools": [
+                request_task_planning_tool_spec(),
+                continue_without_task_planning_tool_spec(),
+            ],
         }))
         .expect("serialize routing contract material"),
     );
@@ -633,7 +636,7 @@ fn orchestration_campaign_attaches_the_production_task_executor() {
         .expect("test runtime");
     runtime.block_on(async {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let base_url = spawn_deepseek_eval_server(Arc::clone(&requests))
+        let base_url = spawn_direct_routing_eval_server(Arc::clone(&requests))
             .await
             .expect("spawn server");
         let _api_key = EnvironmentGuard::set("SIGIL_API_KEY", "model-eval-test-key");
@@ -725,8 +728,10 @@ corpus_version = "rfc-0053-v1"
             "deepseek-v4-flash"
         );
         let requests = requests.lock().expect("requests lock");
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         assert!(requests[0].contains(r#""name":"request_task_planning""#));
+        assert!(requests[0].contains(r#""name":"continue_without_task_planning""#));
+        assert!(!requests[1].contains(r#""name":"request_task_planning""#));
     });
 }
 
@@ -999,6 +1004,84 @@ async fn spawn_deepseek_eval_server(requests: Arc<Mutex<Vec<String>>>) -> anyhow
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{address}"))
+}
+
+async fn spawn_direct_routing_eval_server(
+    requests: Arc<Mutex<Vec<String>>>,
+) -> anyhow::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        for index in 0..2 {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap_or_default();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+                if http_request_is_complete(&bytes) || bytes.len() >= 128 * 1024 {
+                    break;
+                }
+            }
+            requests
+                .lock()
+                .expect("requests lock")
+                .push(String::from_utf8_lossy(&bytes).into_owned());
+            let envelope = if index == 0 {
+                serde_json::json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-direct-routing",
+                                "function": {
+                                    "name": "continue_without_task_planning",
+                                    "arguments": serde_json::json!({
+                                        "reason": "does_not_meet_task_planning_criteria"
+                                    }).to_string()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "prompt_cache_hit_tokens": 0,
+                        "prompt_cache_miss_tokens": 10
+                    },
+                    "system_fingerprint": "fp-test"
+                })
+            } else {
+                serde_json::json!({
+                    "choices": [{
+                        "delta": {"content": "done"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 2,
+                        "prompt_cache_hit_tokens": 0,
+                        "prompt_cache_miss_tokens": 20
+                    },
+                    "system_fingerprint": "fp-test"
+                })
+            };
+            let body = format!("data: {envelope}\n\ndata: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
     });
     Ok(format!("http://{address}"))
 }

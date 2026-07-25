@@ -509,11 +509,13 @@ pub use task::{
     task_planner_logical_run_id, validate_task_plan_graph_steps,
 };
 pub use task_handoff::{
-    ConversationTurnRef, MAX_TASK_ADMISSION_REASON_CODES, REQUEST_TASK_PLANNING_TOOL_NAME,
-    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
-    TaskHandoffProjection, TaskHandoffProjectionEntry, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, request_task_planning_tool_spec,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef, MAX_TASK_ADMISSION_REASON_CODES,
+    REQUEST_TASK_PLANNING_TOOL_NAME, TaskAdmissionReason, TaskAdmissionTrigger,
+    TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffProjectionEntry,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskPlanningHandoffBinding,
+    continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
     task_planning_reason_codes, task_routing_system_prompt_contract_material,
+    validate_continue_without_task_planning_call,
 };
 pub use task_memory::{
     AttemptRef, BranchId, CommandReceiptId, FileChangeRef, ModelAssistedMemoryDecision,
