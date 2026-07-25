@@ -64,6 +64,8 @@ pub(crate) struct ThemePalette {
     pub(crate) markdown_code_fg: Color,
     pub(crate) markdown_code_bg: Color,
     pub(crate) markdown_link: Color,
+    pub(crate) markdown_math: Color,
+    pub(crate) markdown_diagram: Color,
     pub(crate) modal_bg: Color,
     pub(crate) modal_border: Color,
     pub(crate) modal_shadow: Color,

@@ -242,6 +242,7 @@ impl AppState {
         self.timeline_state.streaming_reasoning_index = None;
         self.timeline_state.expanded_thinking_entry_indices.clear();
         self.timeline_state.collapsed_thinking_entry_indices.clear();
+        self.timeline_state.expanded_diagram_entry_indices.clear();
         self.timeline_state.deferred_render_indexes.clear();
         self.rebuild_tool_activity_cache();
         self.rebuild_timeline_render_store();
@@ -298,6 +299,37 @@ impl AppState {
         let state = if expanded { "collapsed" } else { "expanded" };
         self.last_notice = Some(format!("thinking {state}"));
         self.push_event("thinking:entry", format!("{entry_index} {state}"));
+        true
+    }
+
+    pub(crate) fn toggle_latest_diagram_entry(&mut self) -> bool {
+        let Some(entry_index) =
+            self.timeline
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| {
+                    (entry.role == TimelineRole::Assistant
+                        && crate::ui::markdown_contains_mermaid_diagram(&entry.text))
+                    .then_some(index)
+                })
+        else {
+            self.last_notice = Some("no diagram source yet".to_owned());
+            return false;
+        };
+        let expanded = !self
+            .timeline_state
+            .expanded_diagram_entry_indices
+            .remove(&entry_index);
+        if expanded {
+            self.timeline_state
+                .expanded_diagram_entry_indices
+                .insert(entry_index);
+        }
+        self.rerender_timeline_entry(entry_index);
+        let state = if expanded { "expanded" } else { "collapsed" };
+        self.last_notice = Some(format!("diagram source {state} · Ctrl-L copies response"));
+        self.push_event("diagram:view", state);
         true
     }
 
@@ -1030,6 +1062,10 @@ impl AppState {
             collapsed_thinking_entry_indices: self
                 .timeline_state
                 .collapsed_thinking_entry_indices
+                .clone(),
+            expanded_diagram_entry_indices: self
+                .timeline_state
+                .expanded_diagram_entry_indices
                 .clone(),
             hovered_thinking_entry_index: self.hovered_thinking_entry_index(),
             theme: crate::ui::theme::resolve_for_app(self),

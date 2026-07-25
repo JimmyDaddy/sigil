@@ -1,7 +1,10 @@
+use std::borrow::Cow;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
 };
+use serde_json::Value;
 
 use crate::ui::theme::{accent_gold, accent_lime, accent_teal, ink, muted};
 
@@ -20,6 +23,350 @@ fn line_plain_text(line: &Line<'static>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect()
+}
+
+fn shared_markdown_fixture_source(case: &Value) -> Cow<'static, str> {
+    if let Some(source) = case["source"].as_str() {
+        return Cow::Owned(source.to_owned());
+    }
+    let path = case["sourceFile"].as_str().expect("sourceFile");
+    Cow::Borrowed(match path {
+        "sources/attached-closing-fence.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/attached-closing-fence.md"
+        ),
+        "sources/streaming-mermaid.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/streaming-mermaid.md"
+        ),
+        "sources/complete-mermaid.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/complete-mermaid.md"
+        ),
+        "sources/math.md" => {
+            include_str!("../../../../../dev/fixtures/markdown-rendering-v1/sources/math.md")
+        }
+        "sources/live-paragraph.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/live-paragraph.md"
+        ),
+        "sources/tilde-fence.md" => {
+            include_str!("../../../../../dev/fixtures/markdown-rendering-v1/sources/tilde-fence.md")
+        }
+        "sources/long-marker.md" => {
+            include_str!("../../../../../dev/fixtures/markdown-rendering-v1/sources/long-marker.md")
+        }
+        "sources/incomplete-fence.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/incomplete-fence.md"
+        ),
+        "sources/table-paragraph.md" => include_str!(
+            "../../../../../dev/fixtures/markdown-rendering-v1/sources/table-paragraph.md"
+        ),
+        "sources/nested-cjk.md" => {
+            include_str!("../../../../../dev/fixtures/markdown-rendering-v1/sources/nested-cjk.md")
+        }
+        other => panic!("unregistered shared Markdown fixture {other}"),
+    })
+}
+
+#[test]
+fn shared_markdown_projection_corpus_matches_expected_ranges_and_diagnostics() {
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../../../dev/fixtures/markdown-rendering-v1/cases.json"
+    ))
+    .expect("shared Markdown fixture manifest should parse");
+    for case in manifest["cases"]
+        .as_array()
+        .expect("shared Markdown cases should be an array")
+    {
+        let id = case["id"].as_str().expect("case id");
+        let source = shared_markdown_fixture_source(case);
+        let phase = match case["phase"].as_str().expect("phase") {
+            "streaming" => projection::MarkdownPhase::Streaming,
+            "complete" => projection::MarkdownPhase::Complete,
+            other => panic!("unexpected phase {other}"),
+        };
+        let projected = projection::project_markdown(&source, phase, id);
+        assert_eq!(
+            projected.source_length,
+            case["sourceLength"].as_u64().expect("sourceLength") as usize,
+            "{id} source length"
+        );
+        let expected_blocks = case["blocks"].as_array().expect("blocks");
+        assert_eq!(projected.blocks.len(), expected_blocks.len(), "{id} blocks");
+        for (actual, expected) in projected.blocks.iter().zip(expected_blocks) {
+            assert_eq!(
+                actual.kind.label(),
+                expected["kind"].as_str().expect("kind"),
+                "{id} kind"
+            );
+            assert_eq!(
+                actual.source_start,
+                expected["sourceStart"].as_u64().expect("sourceStart") as usize,
+                "{id} start"
+            );
+            assert_eq!(
+                actual.source_end,
+                expected["sourceEnd"].as_u64().expect("sourceEnd") as usize,
+                "{id} end"
+            );
+            let stability = match actual.stability {
+                projection::ProjectedMarkdownStability::Stable => "stable",
+                projection::ProjectedMarkdownStability::Live => "live",
+            };
+            assert_eq!(
+                stability,
+                expected["stability"].as_str().expect("stability"),
+                "{id} stability"
+            );
+            assert_eq!(
+                actual.synthetic_closing_fence,
+                expected["syntheticClosingFence"]
+                    .as_bool()
+                    .expect("syntheticClosingFence"),
+                "{id} synthetic fence"
+            );
+            assert_eq!(
+                actual.key,
+                format!("{id}:{}:{}", actual.source_start, actual.kind.label())
+            );
+        }
+        let expected_diagnostics = case["diagnostics"].as_array().expect("diagnostics");
+        assert_eq!(
+            projected.diagnostics.len(),
+            expected_diagnostics.len(),
+            "{id} diagnostics"
+        );
+        for (actual, expected) in projected.diagnostics.iter().zip(expected_diagnostics) {
+            let kind = match actual.kind {
+                normalize::MarkdownRepairDiagnosticKind::AttachedClosingFence => {
+                    "attached_closing_fence"
+                }
+            };
+            assert_eq!(kind, expected["kind"].as_str().expect("diagnostic kind"));
+            assert_eq!(
+                actual.source_start,
+                expected["sourceStart"].as_u64().expect("diagnostic start") as usize
+            );
+            assert_eq!(
+                actual.source_end,
+                expected["sourceEnd"].as_u64().expect("diagnostic end") as usize
+            );
+        }
+    }
+}
+
+#[test]
+fn tui_formula_and_mermaid_sections_preserve_source_at_narrow_width() {
+    let source =
+        "Inline $E = mc^2$.\n\n$$\n\\frac{a}{b}\n$$\n\n```mermaid\nflowchart TD\nA --> B\n```";
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        source,
+        MarkdownRenderOptions::timeline(20).with_diagram_source(true),
+    );
+    let rendered = plain_text(&lines);
+    assert!(rendered.contains("$E = mc^2$"));
+    assert!(rendered.contains("formula"));
+    assert!(rendered.contains("\\frac{a}{b}"));
+    assert!(rendered.contains("diagram"));
+    assert!(rendered.contains("flowchart"));
+    assert!(rendered.contains('A'), "{rendered}");
+    assert!(rendered.contains('B'), "{rendered}");
+    let raw_lines = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+    assert!(
+        raw_lines.iter().any(|line| line.ends_with("flowchart TD"))
+            && raw_lines.iter().any(|line| line.ends_with("A --> B")),
+        "diagram source disclosure must preserve original line boundaries: {raw_lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| line.width() <= 22),
+        "bounded TUI blocks should not create an unbounded horizontal viewport: {:?}",
+        lines.iter().map(Line::width).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn incomplete_math_and_mermaid_remain_source_only_while_streaming() {
+    let source = "live $formula\n\n```mermaid\nflowchart TD\nA -->";
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        source,
+        MarkdownRenderOptions::timeline(40).with_phase(MarkdownPhase::Streaming),
+    );
+    let rendered = plain_text(&lines);
+    assert!(rendered.contains("$formula"));
+    assert!(rendered.contains("generating"));
+    assert!(!rendered.contains("formulaLaTeX"));
+}
+
+#[test]
+fn streaming_projection_preserves_stable_prefix_identity_across_append() {
+    let first = projection::project_markdown_with_cursor(
+        "Stable paragraph.\n\nLive",
+        MarkdownPhase::Streaming,
+        "assistant-1",
+        None,
+    );
+    let appended = projection::project_markdown_with_cursor(
+        "Stable paragraph.\n\nLive tail",
+        MarkdownPhase::Streaming,
+        "assistant-1",
+        Some(&first.cursor),
+    );
+
+    assert_eq!(
+        first.projection.blocks[0].stability,
+        projection::ProjectedMarkdownStability::Stable
+    );
+    assert_eq!(appended.reused_stable_blocks, 1);
+    assert_eq!(
+        first.projection.blocks[0].key,
+        appended.projection.blocks[0].key
+    );
+    assert_eq!(
+        first.projection.blocks[0].source,
+        appended.projection.blocks[0].source
+    );
+    assert_eq!(
+        appended.projection.blocks[1].stability,
+        projection::ProjectedMarkdownStability::Live
+    );
+}
+
+#[test]
+fn projection_invalidates_identity_when_reconnect_replaces_content_id() {
+    let before = projection::project_markdown_with_cursor(
+        "Stable paragraph.\n\nLive",
+        MarkdownPhase::Streaming,
+        "provisional-message",
+        None,
+    );
+    let reconciled = projection::project_markdown_with_cursor(
+        "Stable paragraph.\n\nDurable replacement",
+        MarkdownPhase::Complete,
+        "durable-message",
+        Some(&before.cursor),
+    );
+
+    assert_eq!(reconciled.reused_stable_blocks, 0);
+    assert_ne!(
+        before.projection.blocks[0].key,
+        reconciled.projection.blocks[0].key
+    );
+    assert!(
+        reconciled
+            .projection
+            .blocks
+            .iter()
+            .all(|block| block.stability == projection::ProjectedMarkdownStability::Stable)
+    );
+}
+
+#[test]
+fn streaming_projection_rebuilds_when_source_is_replaced() {
+    let before = projection::project_markdown_with_cursor(
+        "Stable paragraph.\n\nLive",
+        MarkdownPhase::Streaming,
+        "assistant-1",
+        None,
+    );
+    let replaced = projection::project_markdown_with_cursor(
+        "Replacement paragraph.\n\nLive",
+        MarkdownPhase::Streaming,
+        "assistant-1",
+        Some(&before.cursor),
+    );
+
+    assert_eq!(replaced.reused_stable_blocks, 0);
+    assert_eq!(
+        replaced.projection.blocks[0].source,
+        "Replacement paragraph.\n\n"
+    );
+}
+
+#[test]
+fn mermaid_admission_is_bounded_and_rejects_active_directives() {
+    assert!(matches!(
+        mermaid::admit_mermaid("flowchart TD\nA --> B", true),
+        mermaid::MermaidAdmission::Ready { ref diagram_type }
+            if diagram_type == "flowchart"
+    ));
+    assert_eq!(
+        mermaid::admit_mermaid("%%{init: {}}%%\nflowchart TD", true),
+        mermaid::MermaidAdmission::Rejected
+    );
+    assert_eq!(
+        mermaid::admit_mermaid("flowchart TD\nclick A https://example.com", true),
+        mermaid::MermaidAdmission::Rejected
+    );
+    assert_eq!(
+        mermaid::admit_mermaid("flowchart TD\nA[<b>unsafe</b>]", true),
+        mermaid::MermaidAdmission::Rejected
+    );
+    assert_eq!(
+        mermaid::admit_mermaid("flowchart TD\nA[https://example.com]", true),
+        mermaid::MermaidAdmission::Rejected
+    );
+    assert_eq!(
+        mermaid::admit_mermaid("flowchart TD\nA -->", false),
+        mermaid::MermaidAdmission::Generating
+    );
+    let oversized = format!("flowchart TD\n{}", "A --> B\n".repeat(5_000));
+    assert_eq!(
+        mermaid::admit_mermaid(&oversized, true),
+        mermaid::MermaidAdmission::Oversize
+    );
+    assert!(matches!(
+        mermaid::admit_mermaid("unknownDiagram\nA B", true),
+        mermaid::MermaidAdmission::Ready { ref diagram_type }
+            if diagram_type == "mermaid"
+    ));
+}
+
+#[test]
+fn tui_limits_diagram_sections_per_message_and_preserves_overflow_source() {
+    let source = (0..17)
+        .map(|index| format!("```mermaid\nflowchart TD\nA{index} --> B{index}\n```"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let rendered = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        &source,
+        MarkdownRenderOptions::timeline(80),
+    )
+    .into_iter()
+    .map(|line| {
+        line.spans
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert_eq!(rendered.matches("message limit").count(), 1);
+    assert!(rendered.contains("A16 --> B16"));
+}
+
+#[test]
+fn tui_renders_a_64_kib_message_with_bounded_line_width() {
+    let source = (0..1_024)
+        .map(|index| format!("Paragraph {index}: {}", "bounded ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(source.len() >= 64 * 1_024);
+    let rendered = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        &source,
+        MarkdownRenderOptions::timeline(80),
+    );
+
+    assert!(!rendered.is_empty());
+    assert!(
+        rendered.iter().all(|line| line.width() <= 82),
+        "large Markdown rows must remain inside the bounded timeline width"
+    );
 }
 
 #[test]

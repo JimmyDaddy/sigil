@@ -89,6 +89,26 @@ fn timeline_render_store_model_matches_full_rebuild_after_append_and_rerender() 
 }
 
 #[test]
+fn timeline_render_store_reuses_stable_markdown_blocks_for_streaming_append() {
+    let options = crate::ui::TimelineRenderOptions {
+        max_content_width: 80,
+        streaming_assistant_index: Some(0),
+        ..crate::ui::TimelineRenderOptions::default()
+    };
+    let mut timeline = vec![entry(TimelineRole::Assistant, "Stable paragraph.\n\nLive")];
+    let mut store = TimelineRenderStore::default();
+    store.rebuild(&timeline, &options);
+
+    timeline[0].text = "Stable paragraph.\n\nLive tail".to_owned();
+    assert_eq!(
+        store.rerender_entry(&timeline, 0, &options),
+        RerenderOutcome::Rerendered
+    );
+    assert_eq!(store.last_reused_markdown_blocks(), 1);
+    assert_matches_full_rebuild(&store, &timeline, &options);
+}
+
+#[test]
 fn timeline_render_store_sequence_matches_full_rebuild_after_mixed_operations() {
     let narrow = crate::ui::TimelineRenderOptions {
         max_content_width: 28,
@@ -383,6 +403,28 @@ fn timeline_render_store_fast_paths_match_rebuild_across_hidden_tail_transitions
     assert_eq!(
         store.rerender_entry(&timeline, tail_index, &options),
         RerenderOutcome::Rerendered
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+}
+
+#[test]
+fn timeline_render_store_reuses_unchanged_streaming_prefix_lines() {
+    let options = render_options();
+    let mut timeline = vec![entry(
+        TimelineRole::Assistant,
+        "stable paragraph\n\nstreaming tail",
+    )];
+    let mut store = TimelineRenderStore::default();
+    store.rebuild(&timeline, &options);
+
+    timeline[0].text = "stable paragraph\n\nstreaming tail with more content".to_owned();
+    assert_eq!(
+        store.rerender_entry(&timeline, 0, &options),
+        RerenderOutcome::Rerendered
+    );
+    assert!(
+        store.last_reused_prefix_lines() > 0,
+        "unchanged rendered prefix lines should be moved from the prior tail block"
     );
     assert_matches_full_rebuild(&store, &timeline, &options);
 }

@@ -1,0 +1,4 @@
+intro
+
+```rust
+fn main()

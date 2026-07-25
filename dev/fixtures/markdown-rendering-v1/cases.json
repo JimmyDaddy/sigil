@@ -1,0 +1,312 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "attached-closing-fence",
+      "phase": "complete",
+      "sourceFile": "sources/attached-closing-fence.md",
+      "sourceLength": 18,
+      "blocks": [
+        {
+          "kind": "code",
+          "sourceStart": 0,
+          "sourceEnd": 12,
+          "stability": "stable",
+          "syntheticClosingFence": true
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 13,
+          "sourceEnd": 19,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": [
+        {
+          "kind": "attached_closing_fence",
+          "sourceStart": 7,
+          "sourceEnd": 10
+        }
+      ]
+    },
+    {
+      "id": "streaming-mermaid",
+      "phase": "streaming",
+      "sourceFile": "sources/streaming-mermaid.md",
+      "sourceLength": 38,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 7,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "mermaid",
+          "sourceStart": 7,
+          "sourceEnd": 38,
+          "stability": "live",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "complete-mermaid",
+      "phase": "complete",
+      "sourceFile": "sources/complete-mermaid.md",
+      "sourceLength": 36,
+      "blocks": [
+        {
+          "kind": "mermaid",
+          "sourceStart": 0,
+          "sourceEnd": 36,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "math",
+      "phase": "complete",
+      "sourceFile": "sources/math.md",
+      "sourceLength": 42,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 24,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 24,
+          "sourceEnd": 42,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "live-paragraph",
+      "phase": "streaming",
+      "sourceFile": "sources/live-paragraph.md",
+      "sourceLength": 16,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 16,
+          "stability": "live",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "tilde-fence-cjk-tail",
+      "phase": "complete",
+      "sourceFile": "sources/tilde-fence.md",
+      "sourceLength": 36,
+      "blocks": [
+        {
+          "kind": "code",
+          "sourceStart": 0,
+          "sourceEnd": 25,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 26,
+          "sourceEnd": 36,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "long-marker-containing-short-marker",
+      "phase": "complete",
+      "sourceFile": "sources/long-marker.md",
+      "sourceLength": 33,
+      "blocks": [
+        {
+          "kind": "code",
+          "sourceStart": 0,
+          "sourceEnd": 33,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "streaming-incomplete-fence",
+      "phase": "streaming",
+      "sourceFile": "sources/incomplete-fence.md",
+      "sourceLength": 25,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 7,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "code",
+          "sourceStart": 7,
+          "sourceEnd": 25,
+          "stability": "live",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "table-followed-by-paragraph",
+      "phase": "complete",
+      "sourceFile": "sources/table-paragraph.md",
+      "sourceLength": 44,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 31,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 31,
+          "sourceEnd": 44,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "nested-quote-list-cjk-emoji",
+      "phase": "complete",
+      "sourceFile": "sources/nested-cjk.md",
+      "sourceLength": 44,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 34,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 34,
+          "sourceEnd": 44,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "crlf-cjk-emoji",
+      "phase": "complete",
+      "source": "alpha\r\n\r\n中文 😀\r\n",
+      "sourceLength": 22,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 9,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 9,
+          "sourceEnd": 22,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "five-marker-containing-short-marker",
+      "phase": "complete",
+      "source": "`````\n```\n`````\n",
+      "sourceLength": 16,
+      "blocks": [
+        {
+          "kind": "code",
+          "sourceStart": 0,
+          "sourceEnd": 16,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "completed-appended-fence",
+      "phase": "complete",
+      "source": "Before\n```rust\nfn main() {}\n```\n",
+      "sourceLength": 32,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 7,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "code",
+          "sourceStart": 7,
+          "sourceEnd": 32,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "reference-link-and-footnote-source",
+      "phase": "complete",
+      "source": "[docs][d]\n\n[^1]: note\n\n[d]: https://example.com\n",
+      "sourceLength": 48,
+      "blocks": [
+        {
+          "kind": "markdown",
+          "sourceStart": 0,
+          "sourceEnd": 11,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 11,
+          "sourceEnd": 23,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        },
+        {
+          "kind": "markdown",
+          "sourceStart": 23,
+          "sourceEnd": 48,
+          "stability": "stable",
+          "syntheticClosingFence": false
+        }
+      ],
+      "diagnostics": []
+    }
+  ]
+}

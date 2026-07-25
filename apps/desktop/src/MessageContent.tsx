@@ -3,19 +3,29 @@ import { useState } from "react";
 import { writeClipboard } from "./clipboard";
 import { useLocale } from "./i18n";
 import { SafeMarkdown } from "./SafeMarkdown";
+import type { MarkdownPhase } from "./markdown/types";
 import { Icon } from "./ui/icons";
 import { IconButton, Tooltip } from "./ui/primitives";
 
 interface MessageContentProps {
   readonly text: string;
+  readonly phase?: MarkdownPhase;
+  readonly contentId?: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
 }
 
-export function MessageContent({ text, onOpenExternalUrl }: MessageContentProps) {
+export function MessageContent({
+  text,
+  phase = "complete",
+  contentId,
+  onOpenExternalUrl,
+}: MessageContentProps) {
   const { t } = useLocale();
   const [copied, setCopied] = useState(false);
   if (text.trim() === "") {
-    return <p className="message-content-empty">{t("messageUnavailable")}</p>;
+    return phase === "streaming"
+      ? null
+      : <p className="message-content-empty">{t("messageUnavailable")}</p>;
   }
   return (
     <div className="message-content sg-bounded-content">
@@ -28,7 +38,12 @@ export function MessageContent({ text, onOpenExternalUrl }: MessageContentProps)
           icon={<Icon name={copied ? "check" : "copy"} />}
         />
       </Tooltip>
-      <SafeMarkdown text={text} onOpenExternalUrl={onOpenExternalUrl} />
+      <SafeMarkdown
+        text={text}
+        phase={phase}
+        contentId={contentId}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />
     </div>
   );
 }

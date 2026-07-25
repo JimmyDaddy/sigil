@@ -24,6 +24,7 @@ use super::*;
 
 fn test_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -34,6 +35,7 @@ fn test_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -50,6 +52,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -120,7 +123,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         .as_ref()
         .expect("setup hit areas should render")
         .fields;
-    assert_eq!(setup_fields.len(), 4);
+    assert_eq!(setup_fields.len(), 5);
     let provider_area = setup_fields
         .iter()
         .find(|area| area.index == 0)
@@ -283,6 +286,7 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
                 profile_snapshot_id: snapshot_id,
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
+                model_ref: None,
                 reasoning_effort: None,
                 workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
                 effective_tool_scope_hash: "sha256:tools".to_owned(),

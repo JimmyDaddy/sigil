@@ -12,6 +12,7 @@ use super::*;
 
 fn test_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -22,6 +23,7 @@ fn test_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -38,6 +40,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -59,14 +62,17 @@ fn modal_visual_uses_config_palette_when_config_panel_is_open() -> anyhow::Resul
 
 #[test]
 fn modal_visual_uses_setup_title_palettes_for_model_and_api_key() -> anyhow::Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _deepseek_environment = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut model_app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
         Path::new(".").to_path_buf(),
         None,
     );
     let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
-    assert_eq!(model_app.modal_title(), Some("Model ID"));
+    let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(model_app.modal_title(), Some("Model"));
     let theme = Theme::default();
 
     let model_visual = modal_visual(&model_app);
@@ -78,7 +84,6 @@ fn modal_visual_uses_setup_title_palettes_for_model_and_api_key() -> anyhow::Res
         Path::new(".").to_path_buf(),
         None,
     );
-    let _ = api_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = api_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = api_app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))?;
     assert_eq!(api_app.modal_title(), Some("API Key"));

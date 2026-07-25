@@ -11,6 +11,7 @@ use super::*;
 
 fn test_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -21,6 +22,7 @@ fn test_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -37,6 +39,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
