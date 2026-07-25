@@ -19,6 +19,7 @@ mod ids;
 mod projection;
 mod record;
 mod task_discovery;
+pub(crate) use task_discovery::{planner_tools_with_discovery, task_discovery_system_prompt};
 pub mod task_execution;
 pub mod task_role_runtime;
 mod task_runner;

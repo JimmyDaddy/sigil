@@ -33,9 +33,11 @@ use crate::{
     context_engine::{
         ContextBodyRef, ContextInclusionReason, ContextItem, ContextItemId, ContextPackOptions,
         ContextSensitivity, ContextSource, ContextTrustLevel,
-        DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext, RuntimeContextCandidates,
-        SessionArchive, SessionArchiveEntry, context_provenance_row_v1,
-        estimate_context_token_cost, pack_context_items, validate_context_render_snippet,
+        DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext, RUNTIME_CONTEXT_V1_HEADING,
+        RUNTIME_CONTEXT_V1_NOTE, RUNTIME_CONTEXT_V1_PLACEMENT, RUNTIME_CONTEXT_V1_SCHEMA,
+        RUNTIME_CONTEXT_V1_SELECTION_POLICY, RuntimeContextCandidates, SessionArchive,
+        SessionArchiveEntry, context_provenance_row_v1, estimate_context_token_cost,
+        pack_context_items, validate_context_render_snippet,
     },
     conversation_queue::{
         ConversationInputEditedEntry, ConversationInputPromotedEntry,

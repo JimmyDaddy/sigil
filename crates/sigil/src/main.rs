@@ -146,6 +146,14 @@ enum Commands {
         #[arg(long = "orchestration-route-contract")]
         orchestration_route_contract: Option<PathBuf>,
     },
+    /// Hidden release-owner adapter for a frozen orchestration candidate.
+    #[command(name = "model-eval-route-contract", hide = true)]
+    ModelEvalRouteContract {
+        #[arg(long = "case", default_value = "orchestration-v1")]
+        cases: Vec<String>,
+        #[arg(long)]
+        output: PathBuf,
+    },
     // Hidden provider-specific developer diagnostics. Keep ordinary users on the
     // TUI, `run`, `doctor`, or explicit provider configuration surfaces.
     #[command(hide = true)]
@@ -342,6 +350,15 @@ async fn run_main() -> Result<u8> {
             )
             .await?;
         }
+        Commands::ModelEvalRouteContract { cases, output } => {
+            model_eval_route_contract_command(
+                &config_path,
+                &cwd,
+                &BuildInfo::current(),
+                cases,
+                output,
+            )?;
+        }
         Commands::Prefix {
             prompt,
             assistant_prefix,
@@ -357,6 +374,36 @@ async fn run_main() -> Result<u8> {
         } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await?,
     }
     Ok(0)
+}
+
+#[cfg(not(test))]
+fn model_eval_route_contract_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    build_info: &BuildInfo,
+    cases: Vec<String>,
+    output: PathBuf,
+) -> Result<()> {
+    let fixture_roots = resolve_model_eval_fixture_roots(launch_cwd, &cases)?;
+    let output = if output.is_absolute() {
+        output
+    } else {
+        launch_cwd.join(output)
+    };
+    let contract = sigil_runtime::model_eval::build_model_eval_orchestration_route_contract(
+        &sigil_runtime::model_eval::ModelEvalRouteContractBuildRequest {
+            config_path: config_path.to_path_buf(),
+            fixture_roots,
+        },
+    )?;
+    if contract.sigil_commit != build_info.git_hash {
+        anyhow::bail!(
+            "candidate CLI and runtime build metadata disagree; rebuild the frozen binary"
+        );
+    }
+    sigil_runtime::model_eval::write_model_eval_orchestration_route_contract(&contract, &output)?;
+    println!("wrote {}", output.display());
+    Ok(())
 }
 
 #[cfg(not(test))]

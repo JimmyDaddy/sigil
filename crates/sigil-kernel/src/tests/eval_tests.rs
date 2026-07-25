@@ -190,6 +190,36 @@ fn orchestration_eval_qualifies_only_a_complete_exact_route_campaign() -> Result
 }
 
 #[test]
+fn orchestration_eval_marks_unresolved_provider_version_stale() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("orchestration-report");
+    let mut records = orchestration_campaign_records();
+    for record in &mut records {
+        record.identity.route.canonical_model_version =
+            "unresolved:provider-system-fingerprint-mismatch".to_owned();
+    }
+    write_orchestration_eval_report_v1(
+        &output,
+        &OrchestrationEvalReportCampaignV1 {
+            campaign_id: "orchestration-stale-provider-version".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: records.len(),
+            records,
+        },
+    )?;
+
+    let manifest: crate::OrchestrationEvalReportManifestV1 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    let gate = &manifest.route_gates[0];
+    assert_eq!(gate.status, OrchestrationEvalRouteStatus::Stale);
+    assert!(gate.reasons.iter().any(|reason| {
+        reason.contains("did not resolve to the frozen canonical model version")
+    }));
+    Ok(())
+}
+
+#[test]
 fn orchestration_eval_blocks_a_majority_misrouted_negative_case_below_global_threshold()
 -> Result<()> {
     let temp = tempfile::tempdir()?;

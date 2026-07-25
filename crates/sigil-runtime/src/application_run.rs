@@ -2790,7 +2790,7 @@ fn admit_application_model_selection(
         .map_err(ApplicationRunPrepareError::execution)
 }
 
-fn constrain_application_tool_registry(
+pub(crate) fn constrain_application_tool_registry(
     registry: sigil_kernel::ToolRegistry,
     scope: &ToolRegistryScope,
 ) -> Result<sigil_kernel::ToolRegistry> {

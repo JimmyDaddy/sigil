@@ -25,9 +25,11 @@ use crate::{
     application_run::ApplicationRunServices,
     model_eval::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalOrchestrationRouteContractV1,
-        ModelEvalRunExecutionStatus, load_model_eval_fixture, materialize_model_eval_fixture,
-        model_eval_reservation_microusd, orchestration_eval_observation, run_model_eval_campaign,
-        verify_model_eval_run, write_isolated_model_eval_config,
+        ModelEvalRouteContractBuildRequest, ModelEvalRunExecutionStatus,
+        build_model_eval_orchestration_route_contract, load_model_eval_fixture,
+        materialize_model_eval_fixture, model_eval_reservation_microusd,
+        orchestration_eval_observation, run_model_eval_campaign, verify_model_eval_run,
+        write_isolated_model_eval_config,
     },
 };
 
@@ -49,13 +51,28 @@ fn fixture_root(id: &str) -> std::path::PathBuf {
         .join(id)
 }
 
+fn orchestration_fixture_roots() -> Vec<std::path::PathBuf> {
+    let root = fixture_root("orchestration-v1");
+    let mut fixtures = Vec::new();
+    for class in ["negative", "positive"] {
+        for entry in fs::read_dir(root.join(class)).expect("read orchestration corpus") {
+            let path = entry.expect("fixture entry").path();
+            if path.join("fixture.toml").is_file() {
+                fixtures.push(path);
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
 fn orchestration_route_contract() -> ModelEvalOrchestrationRouteContractV1 {
     let digest = format!("sha256:{}", "1".repeat(64));
     ModelEvalOrchestrationRouteContractV1 {
         schema_version: 1,
         provider_kind: "deepseek".to_owned(),
         endpoint_family: "openai-compatible-chat".to_owned(),
-        canonical_model_version: "test-v1".to_owned(),
+        canonical_model_version: "test-v1@fp-test".to_owned(),
         routing_prompt_digest: digest.clone(),
         planner_prompt_digest: digest.clone(),
         system_prompt_digest: digest.clone(),
@@ -143,6 +160,72 @@ fn orchestration_observation_uses_typed_durable_facts() {
     assert_eq!(observation.duplicate_spawns, 0);
     assert_eq!(observation.duplicate_continuations, 0);
     assert_eq!(observation.duplicate_merges, 0);
+}
+
+#[test]
+fn route_contract_is_derived_from_the_frozen_production_surface() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::route_contract_is_derived_from_the_frozen_production_surface",
+        "SIGIL_TEST_ROUTE_CONTRACT_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", "https://api.deepseek.com");
+    let _beta_url = EnvironmentGuard::set("SIGIL_BETA_BASE_URL", "https://api.deepseek.com/beta");
+    let temp = tempdir().expect("temp dir");
+    let config_path = temp.path().join("source.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[permission]
+mode = "auto-edit"
+
+[task]
+enabled = true
+multi_agent_mode = "proactive"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+beta_base_url = "https://api.deepseek.com/beta"
+anthropic_base_url = "https://api.deepseek.com/anthropic"
+"#,
+    )
+    .expect("write config");
+    let request = ModelEvalRouteContractBuildRequest {
+        config_path,
+        fixture_roots: orchestration_fixture_roots(),
+    };
+
+    let first =
+        build_model_eval_orchestration_route_contract(&request).expect("derive route contract");
+    let second =
+        build_model_eval_orchestration_route_contract(&request).expect("derive route contract");
+
+    assert_eq!(first, second);
+    assert_eq!(first.provider_kind, "deepseek");
+    assert_eq!(first.endpoint_family, "openai_chat_completions");
+    assert!(
+        first
+            .canonical_model_version
+            .starts_with("DeepSeek-V4-Flash@fp_")
+    );
+    for digest in [
+        &first.routing_prompt_digest,
+        &first.planner_prompt_digest,
+        &first.system_prompt_digest,
+        &first.tool_profile_contract_digest,
+    ] {
+        assert_eq!(digest.len(), 71);
+        assert!(digest.starts_with("sha256:"));
+    }
+    assert!(first.sigil_build.ends_with(&first.sigil_commit));
 }
 
 #[test]
@@ -892,7 +975,8 @@ async fn spawn_deepseek_eval_server(requests: Arc<Mutex<Vec<String>>>) -> anyhow
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],",
             "\"usage\":{\"prompt_tokens\":10000000,\"completion_tokens\":2,",
-            "\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":10000000}}\n\n",
+            "\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":10000000},",
+            "\"system_fingerprint\":\"fp-test\"}\n\n",
             "data: [DONE]\n\n"
         );
         let response = format!(

@@ -140,7 +140,8 @@ pub use context_engine::{
     PackedContext, RuntimeContextCandidates, SessionArchive, SessionArchiveEntry,
     SessionArchiveEntryId, SessionArchiveSearchHit, UNKNOWN_CONTEXT_REPO_REVISION,
     build_context_quality_evidence_pack, context_provenance_row_v1, estimate_context_token_cost,
-    pack_context_items, validate_context_render_snippet, write_context_quality_evidence_artifacts,
+    pack_context_items, runtime_context_v1_system_prompt_contract_material,
+    validate_context_render_snippet, write_context_quality_evidence_artifacts,
 };
 pub use conversation_fork::{
     ConversationForkOutput, ConversationForkPoint, ConversationForkProjection,
@@ -532,7 +533,8 @@ pub use task_orchestrator::{
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
     changeset_only_child_tool_scope, decode_changeset_only_child_output,
     reconcile_task_final_answer_prefix, rerun_task_verification_check, task_participant_input_hash,
-    task_step_owner_agent_id, validate_isolated_parent_snapshot_unchanged_for_task,
+    task_planner_prompt_contract_material, task_step_owner_agent_id,
+    validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,

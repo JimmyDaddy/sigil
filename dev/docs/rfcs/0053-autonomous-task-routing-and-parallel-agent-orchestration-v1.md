@@ -1750,6 +1750,10 @@ O8c：deterministic、real-model 与 chaos acceptance。
   三件套产物；deterministic mode 同时执行 corpus drift check 与 permission、whole-batch、
   reverse completion、429、cancel/restart、approval、lane CAS、partial recovery 和 cleanup
   inventory gate。CI 对 corpus、wrapper 和 orchestration scripts 的变化会重新运行这些门禁。
+- 冻结候选 binary 可通过 hidden release-owner command 从完整 corpus、production prompt、
+  tool/profile surface 与嵌入式 build identity 生成 create-new route contract；DeepSeek hosted
+  route 还会把实际 usage `system_fingerprint` 与冻结 canonical version 核对，缺失或漂移的
+  observation 直接把该 route gate 标记为 `stale`。
 - 本地 fixture-provider PTY campaign 已通过 auto handoff、parallel progress、participant
   approval、crash/continue、cancel、integration review/promotion 与唯一 final；Pause 的 exact
   scope 与 resumable lifecycle 由 O8a worker E2E 覆盖。

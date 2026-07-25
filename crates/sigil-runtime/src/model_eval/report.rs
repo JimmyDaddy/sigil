@@ -110,7 +110,7 @@ fn build_orchestration_eval_report_record(
                 provider_kind: contract.provider_kind.clone(),
                 endpoint_family: contract.endpoint_family.clone(),
                 canonical_model_id: execution.model.clone(),
-                canonical_model_version: contract.canonical_model_version.clone(),
+                canonical_model_version: observed_canonical_model_version(execution, contract),
                 route_fingerprint,
                 routing_prompt_digest: contract.routing_prompt_digest.clone(),
                 planner_prompt_digest: contract.planner_prompt_digest.clone(),
@@ -128,6 +128,30 @@ fn build_orchestration_eval_report_record(
         observation: orchestration_eval_observation(&session),
         model_eval,
     })
+}
+
+fn observed_canonical_model_version(
+    execution: &ModelEvalRunExecution,
+    contract: &super::ModelEvalOrchestrationRouteContractV1,
+) -> String {
+    if contract.provider_kind != "deepseek" {
+        return contract.canonical_model_version.clone();
+    }
+    let Some((_, expected_fingerprint)) = contract.canonical_model_version.rsplit_once('@') else {
+        return "unresolved:canonical-version-has-no-provider-fingerprint".to_owned();
+    };
+    if execution.usage.provider_system_fingerprints.len() == 1
+        && execution
+            .usage
+            .provider_system_fingerprints
+            .contains(expected_fingerprint)
+    {
+        contract.canonical_model_version.clone()
+    } else if execution.usage.provider_system_fingerprints.is_empty() {
+        "unresolved:provider-system-fingerprint-missing".to_owned()
+    } else {
+        "unresolved:provider-system-fingerprint-mismatch".to_owned()
+    }
 }
 
 fn build_model_eval_report_record(

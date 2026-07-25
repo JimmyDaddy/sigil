@@ -38,7 +38,7 @@ const MAX_DISCOVERY_TITLE_CHARS: usize = 160;
 const MAX_DISCOVERY_OBJECTIVE_CHARS: usize = 2_000;
 const MAX_DISCOVERY_PATH_CHARS: usize = 512;
 
-pub(super) fn planner_tools_with_discovery(base: &ToolRegistry, max_probes: usize) -> ToolRegistry {
+pub(crate) fn planner_tools_with_discovery(base: &ToolRegistry, max_probes: usize) -> ToolRegistry {
     let mut registry = base.snapshot();
     registry.register(Arc::new(TaskDiscoveryTool {
         max_probes: max_probes.min(MAX_TASK_DISCOVERY_PROBES),
@@ -180,9 +180,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             let child_session_ref =
                 child_session_ref(&self.task.task_id, &step_id, &child_task_id)?;
             let mut child_input = AgentRunInput::without_persisted_user_message(vec![
-                ModelMessage::system(
-                    "You are a read-only planner discovery probe. Investigate only the assigned objective and path hints. Do not modify files, spawn agents, create plans, or poll background work. Return concise factual findings, uncertainties, and relevant paths.",
-                ),
+                ModelMessage::system(task_discovery_system_prompt()),
                 ModelMessage::user(discovery_probe_prompt(&self.task.objective, &probe)),
             ])
             .with_child_cancellation(cancellation.clone())
@@ -420,6 +418,10 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             },
         ))
     }
+}
+
+pub(crate) fn task_discovery_system_prompt() -> &'static str {
+    "You are a read-only planner discovery probe. Investigate only the assigned objective and path hints. Do not modify files, spawn agents, create plans, or poll background work. Return concise factual findings, uncertainties, and relevant paths."
 }
 
 #[async_trait]

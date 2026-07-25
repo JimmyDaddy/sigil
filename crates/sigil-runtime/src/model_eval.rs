@@ -14,6 +14,8 @@ mod campaign;
 pub use campaign::*;
 mod report;
 pub use report::*;
+mod route_contract;
+pub use route_contract::*;
 mod verification;
 pub use verification::*;
 

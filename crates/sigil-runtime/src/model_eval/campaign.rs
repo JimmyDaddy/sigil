@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -82,6 +83,7 @@ pub struct ModelEvalUsageTotals {
     pub input_cost_usd: f64,
     pub output_cost_usd: f64,
     pub usage_events: u32,
+    pub provider_system_fingerprints: BTreeSet<String>,
 }
 
 impl ModelEvalUsageTotals {
@@ -97,6 +99,15 @@ impl ModelEvalUsageTotals {
         self.input_cost_usd += usage.input_cost;
         self.output_cost_usd += usage.output_cost;
         self.usage_events = self.usage_events.saturating_add(1);
+        if let Some(fingerprint) = usage
+            .system_fingerprint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            self.provider_system_fingerprints
+                .insert(fingerprint.to_owned());
+        }
     }
 
     #[must_use]

@@ -6,6 +6,15 @@ pub(super) fn planner_prompt(objective: &str) -> String {
     )
 }
 
+/// Stable data-free rendering of the exact planner prompt template.
+///
+/// The sentinel occupies the same interpolation boundary as a real objective without binding one
+/// evaluation case's user data into release metadata.
+#[must_use]
+pub fn task_planner_prompt_contract_material() -> String {
+    planner_prompt("<objective>")
+}
+
 pub(super) fn normalize_task_guidance(guidance: Option<String>) -> Option<String> {
     guidance
         .map(|value| value.trim().to_owned())

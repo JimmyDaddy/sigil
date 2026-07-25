@@ -26,8 +26,24 @@ least three homogeneous repetitions per case. Verify that the committed corpus h
 node dev/evals/generate-orchestration-corpus.mjs --check
 ```
 
-The candidate release owner must also prepare a route contract for the frozen binary. This is not
-ordinary user configuration and it must not be inferred from a model alias or evaluation result.
+The candidate release owner must also generate a route contract with the exact frozen binary. This
+is not ordinary user configuration and it must not be inferred from a model alias or evaluation
+result:
+
+```bash
+mkdir -p .repo-local-dev/evals
+target/release/sigil \
+  --config ~/.sigil/sigil.toml \
+  model-eval-route-contract \
+  --case orchestration-v1 \
+  --output .repo-local-dev/evals/route.toml
+```
+
+The hidden release-owner command requires the complete frozen corpus, creates a new output file
+without replacing an existing candidate artifact, and currently admits only the pinned official
+DeepSeek V4 Flash route. It derives prompt and tool/profile digests from production material in the
+candidate binary. The embedded CLI/runtime commit identities must agree.
+
 The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
 tool/profile contract digest, Sigil commit, and build must all come from the same candidate build
 metadata. Placeholder values, an older build's digests, or a drifting alias do not qualify rollout
@@ -65,7 +81,9 @@ ordinary and orchestration fixtures. In addition to the common V3 artifacts, it 
 `orchestration/results.jsonl`, `orchestration/manifest.json`, and `orchestration/summary.md`.
 Each exact route is classified independently as `qualified`, `insufficient_evidence`, `blocked`, or
 `stale`. Only a `qualified` report from the same candidate release can enter O8d; every other route
-remains `manual + explicit_request_only`.
+remains `manual + explicit_request_only`. For the pinned DeepSeek route, every provider usage event
+must resolve to the frozen hosted `system_fingerprint`; a missing or different fingerprint makes
+the route identity `stale` instead of silently accepting the alias.
 
 ## Committed cases
 

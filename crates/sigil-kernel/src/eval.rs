@@ -653,6 +653,12 @@ pub struct OrchestrationEvalRouteIdentityV1 {
 
 impl OrchestrationEvalRouteIdentityV1 {
     fn stale_reason(&self) -> Option<String> {
+        if self.canonical_model_version.starts_with("unresolved:") {
+            return Some(
+                "provider observation did not resolve to the frozen canonical model version"
+                    .to_owned(),
+            );
+        }
         [
             ("provider_adapter", self.provider_adapter.as_str()),
             ("provider_kind", self.provider_kind.as_str()),
