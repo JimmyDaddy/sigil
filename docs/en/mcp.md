@@ -1,4 +1,4 @@
-<!-- public-doc-role: mcp; authority: mcp-setup-and-use-authority; sections: minimal-config,streamable-http,process-environment-and-credentials,startup-and-refresh,compatibility-and-limits,trust-and-identity,roots-resources-prompts-and-input,troubleshooting; cta: open-troubleshooting -->
+<!-- public-doc-role: mcp; authority: mcp-setup-and-use-authority; sections: cli-setup,minimal-config,streamable-http,process-environment-and-credentials,startup-and-refresh,compatibility-and-limits,trust-and-identity,roots-resources-prompts-and-input,troubleshooting; cta: open-troubleshooting -->
 
 # MCP Guide
 

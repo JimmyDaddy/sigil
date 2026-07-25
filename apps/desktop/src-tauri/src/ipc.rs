@@ -257,7 +257,21 @@ struct DesktopCatalogEntry {
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopSessionCreateInput {
     pub(crate) label: Option<String>,
-    pub(crate) model_name: Option<String>,
+    pub(crate) model_ref: Option<DesktopProviderModelRefInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopProviderModelRefInput {
+    pub(crate) connection_id: String,
+    pub(crate) model_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderModelRefSummary {
+    pub(crate) connection_id: String,
+    pub(crate) model_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,6 +749,7 @@ pub(crate) enum DesktopConversationRecoveryActionInput {
     },
     ForkConversation {
         source_turn_digest: String,
+        model_ref: DesktopProviderModelRefInput,
     },
 }
 
@@ -751,9 +766,16 @@ impl DesktopConversationRecoveryActionInput {
                 checkpoint_id,
                 checkpoint_digest,
             },
-            Self::ForkConversation { source_turn_digest } => {
-                NativeConversationRecoveryCommandAction::ForkConversation { source_turn_digest }
-            }
+            Self::ForkConversation {
+                source_turn_digest,
+                model_ref,
+            } => NativeConversationRecoveryCommandAction::ForkConversation {
+                source_turn_digest,
+                model_ref: sigil_desktop::DesktopProviderModelRef {
+                    connection_id: model_ref.connection_id,
+                    model_id: model_ref.model_id,
+                },
+            },
         }
     }
 }
@@ -909,6 +931,8 @@ pub(crate) enum DesktopConversationDisplayContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        skill: Option<DesktopConversationDisplaySkillReference>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<&'static str>,
         image_attachment_count: u64,
         truncated: bool,
@@ -954,6 +978,13 @@ pub(crate) enum DesktopConversationDisplayContent {
         safe_summary: Option<String>,
         summary_truncated: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplaySkillReference {
+    pub(crate) id: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1023,9 +1054,9 @@ pub(crate) struct DesktopRunSummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunContext {
+    pub(crate) model_ref: DesktopProviderModelRefSummary,
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
-    pub(crate) available_models: Vec<String>,
     pub(crate) model_options: Vec<DesktopModelOption>,
     pub(crate) model_selection: &'static str,
     pub(crate) model_selection_binding: String,
@@ -1086,6 +1117,11 @@ pub(crate) struct DesktopAgentUsageSummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopModelOption {
+    pub(crate) model_ref: DesktopProviderModelRefSummary,
+    pub(crate) display_name: String,
+    pub(crate) availability: String,
+    pub(crate) recommendation: String,
+    pub(crate) provenance: String,
     pub(crate) model_name: String,
     pub(crate) available_reasoning_efforts: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1149,6 +1185,7 @@ pub(crate) struct DesktopSkillCatalogEntry {
 pub(crate) struct DesktopAgentCatalogEntry {
     pub(crate) id: String,
     pub(crate) invocation_token: String,
+    pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) source: String,
     pub(crate) kind: String,
@@ -1882,6 +1919,7 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
             NativeConversationDisplayContent::Message {
                 role,
                 text,
+                skill,
                 assistant_phase,
                 image_attachment_count,
                 truncated,
@@ -1892,6 +1930,10 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                     NativeConversationDisplayMessageRole::Assistant => "assistant",
                 },
                 text,
+                skill: skill.map(|skill| DesktopConversationDisplaySkillReference {
+                    id: skill.id,
+                    name: skill.name,
+                }),
                 assistant_phase: assistant_phase.map(|phase| match phase {
                     NativeConversationDisplayAssistantPhase::ToolPreamble => "tool_preamble",
                     NativeConversationDisplayAssistantPhase::Progress => "progress",
@@ -2074,33 +2116,48 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 .extension_catalog
                 .agents
                 .into_iter()
-                .map(|entry| DesktopAgentCatalogEntry {
-                    id: entry.id,
-                    invocation_token: entry.invocation_token,
-                    description: entry.description,
-                    source: entry.source,
-                    kind: entry.kind,
-                    trust: entry.trust,
-                    enabled: entry.enabled,
-                    user_invocable: entry.user_invocable,
-                    available: entry.available,
-                    unavailable_reason: entry.unavailable_reason,
-                    snapshot_id: entry.snapshot_id,
-                    binding: entry.binding.map(|binding| DesktopAgentBindingSummary {
-                        profile_id: binding.profile_id,
-                        snapshot_id: binding.snapshot_id,
-                    }),
+                .map(|entry| {
+                    let name = agent_display_name(&entry.invocation_token, &entry.id);
+                    DesktopAgentCatalogEntry {
+                        id: entry.id,
+                        invocation_token: entry.invocation_token,
+                        name,
+                        description: entry.description,
+                        source: entry.source,
+                        kind: entry.kind,
+                        trust: entry.trust,
+                        enabled: entry.enabled,
+                        user_invocable: entry.user_invocable,
+                        available: entry.available,
+                        unavailable_reason: entry.unavailable_reason,
+                        snapshot_id: entry.snapshot_id,
+                        binding: entry.binding.map(|binding| DesktopAgentBindingSummary {
+                            profile_id: binding.profile_id,
+                            snapshot_id: binding.snapshot_id,
+                        }),
+                    }
                 })
                 .collect(),
         };
         Self {
+            model_ref: DesktopProviderModelRefSummary {
+                connection_id: value.model_ref.connection_id,
+                model_id: value.model_ref.model_id,
+            },
             provider_name: value.provider_name,
             model_name: value.model_name,
-            available_models: value.available_models,
             model_options: value
                 .model_options
                 .into_iter()
                 .map(|option| DesktopModelOption {
+                    model_ref: DesktopProviderModelRefSummary {
+                        connection_id: option.model_ref.connection_id,
+                        model_id: option.model_ref.model_id,
+                    },
+                    display_name: option.display_name,
+                    availability: option.availability,
+                    recommendation: option.recommendation,
+                    provenance: option.provenance,
                     model_name: option.model_name,
                     available_reasoning_efforts: option
                         .available_reasoning_efforts
@@ -2114,7 +2171,7 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 })
                 .collect(),
             model_selection: match value.model_selection {
-                DesktopModelSelectionPolicy::PerRun => "per_run",
+                DesktopModelSelectionPolicy::FreshSession => "fresh_session",
             },
             model_selection_binding: value.model_selection_binding,
             default_permission_mode: permission_mode_label(value.default_permission_mode),
@@ -2140,6 +2197,14 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             extension_catalog,
         }
     }
+}
+
+fn agent_display_name(invocation_token: &str, fallback_id: &str) -> String {
+    invocation_token
+        .strip_prefix('@')
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(fallback_id)
+        .to_owned()
 }
 
 impl From<DesktopAgentActivityView> for DesktopAgentActivitySummary {
@@ -2358,3 +2423,7 @@ fn verification_check_status_label(value: DesktopVerificationCheckStatus) -> &'s
         DesktopVerificationCheckStatus::Errored => "errored",
     }
 }
+
+#[cfg(test)]
+#[path = "tests/ipc_tests.rs"]
+mod tests;

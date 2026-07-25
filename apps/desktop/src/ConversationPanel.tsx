@@ -17,7 +17,7 @@ import { ConversationRecoveryPanel } from "./ConversationRecoveryPanel";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { useLocale, type Translate } from "./i18n";
-import { Message } from "./Message";
+import { Message, type MessageView } from "./Message";
 import { ToolCard } from "./ToolCard";
 import type {
   AgentActivitySummary,
@@ -32,6 +32,7 @@ import type {
   CheckpointView,
   ConversationRecoveryView,
   PermissionMode,
+  ProviderModelRef,
   ReasoningEffort,
   RunContext,
   RunStreamState,
@@ -53,6 +54,7 @@ import {
   type ConversationDisplayPage,
   type ConversationTerminalObservation,
 } from "./features/conversation/continuityReducer";
+import { resolveComposerActivityState } from "./features/conversation/composerActivity";
 import { projectConversationRows } from "./features/conversation/conversationRows";
 import {
   createLiveEventState,
@@ -62,6 +64,7 @@ import {
   semanticLiveItemFromTimelineEvent,
   terminalSignalFromTimelineEvent,
 } from "./features/conversation/liveEventReducer";
+import { modelOptionIsSelectable } from "./types";
 import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { LoadingState, useNotifications } from "./ui/feedback";
@@ -74,6 +77,7 @@ interface ConversationPanelProps {
   onInitialLoadComplete?: (sessionId: string) => void;
   onRunContextChange?: (context: RunContext) => void;
   onNewSession: () => Promise<boolean>;
+  onCreateSessionForModel: (modelRef: ProviderModelRef) => Promise<SessionSummary | undefined>;
   onOpenWorkspacePicker: () => void;
   onOpenSessionPicker: (query: string) => void;
   onOpenSettings: () => void;
@@ -84,6 +88,7 @@ interface ConversationPanelProps {
 interface PendingPrompt {
   readonly identity: string;
   readonly text: string;
+  readonly skill?: MessageView["skill"];
   readonly runId?: string;
 }
 
@@ -107,6 +112,7 @@ export function ConversationPanel({
   onInitialLoadComplete,
   onRunContextChange,
   onNewSession,
+  onCreateSessionForModel,
   onOpenWorkspacePicker,
   onOpenSessionPicker,
   onOpenSettings,
@@ -141,6 +147,7 @@ export function ConversationPanel({
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
+  const pendingPromptRef = useRef<PendingPrompt | undefined>(undefined);
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
@@ -328,6 +335,7 @@ export function ConversationPanel({
     dispatchContinuity({ type: "session_selected", sessionId: session.id });
     dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
     setPendingPrompt(undefined);
+    pendingPromptRef.current = undefined;
     setStreamStatus(undefined);
     setVerification(undefined);
     setDisplayError(false);
@@ -578,9 +586,17 @@ export function ConversationPanel({
       dispatchLiveEvent({ type: "event_received", sessionId: session.id, event });
       const liveItem = semanticLiveItemFromTimelineEvent(event);
       if (liveItem !== undefined) {
+        if (
+          event.kind === "run_started"
+          && liveItem.content.type === "message"
+          && pendingPromptRef.current?.skill !== undefined
+        ) {
+          liveItem.content.skill = pendingPromptRef.current.skill;
+        }
         dispatchContinuity({ type: "live_item_received", sessionId: session.id, item: liveItem });
       }
       if (event.kind === "run_started") {
+        pendingPromptRef.current = undefined;
         setPendingPrompt((current) => (
           current !== undefined && (current.runId === undefined || current.runId === event.runId)
             ? undefined
@@ -593,6 +609,7 @@ export function ConversationPanel({
 
       const terminal = terminalSignalFromTimelineEvent(event);
       if (terminal !== undefined) {
+        pendingPromptRef.current = undefined;
         setPendingPrompt(undefined);
         setConversationQueueReload((value) => value + 1);
         dispatchContinuity({
@@ -851,6 +868,7 @@ export function ConversationPanel({
       kind: "user" as const,
       label: t("you"),
       text: pendingPrompt.text,
+      skill: pendingPrompt.skill,
       status: "sending",
     }];
   }, [continuityState, liveEventState, pendingPrompt, t]);
@@ -861,6 +879,15 @@ export function ConversationPanel({
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
   const submissionBlocked = continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
+  const composerActivityState = resolveComposerActivityState({
+    active,
+    submitting,
+    controlBusy,
+    approvalPending: pendingApproval?.approval !== undefined,
+    runStatus: run?.status,
+    streamState: streamStatus?.state,
+    continuityLifecycle: continuityState.lifecycle,
+  });
 
   useEffect(() => {
     if (pendingApproval?.approval !== undefined) setInspectorOpen(false);
@@ -1067,15 +1094,19 @@ export function ConversationPanel({
     }
     timelinePinnedToEnd.current = true;
     pendingPromptCounter.current += 1;
-    setPendingPrompt({
-      identity: `optimistic:${session.id}:${pendingPromptCounter.current}`,
-      text: nextPrompt,
-    });
+    const selectedSkill = skillBinding === undefined
+      ? undefined
+      : runContext?.extensionCatalog.skills.find(
+        (skill) => skill.binding?.skillId === skillBinding.skillId,
+      );
     setSubmitting(true);
     startRunPendingRef.current = true;
+    let targetSession = session;
     try {
       const modelChanged =
-        runContext !== undefined && selectedModelName !== runContext.modelName;
+        runContext !== undefined
+        && selectedModelName !== undefined
+        && selectedModelName !== runContext.modelName;
       const selectedModelOption = runContext?.modelOptions.find(
         (option) => option.modelName === selectedModelName,
       );
@@ -1083,13 +1114,34 @@ export function ConversationPanel({
         selectedModelOption?.availableReasoningEfforts.includes(reasoningEffort)
         ? reasoningEffort
         : undefined;
+      if (modelChanged && runContext !== undefined && selectedModelName !== undefined) {
+        if (selectedModelOption === undefined || !modelOptionIsSelectable(selectedModelOption)) {
+          onNotice(t("unsupportedModel", { value: selectedModelName }), true);
+          return false;
+        }
+        const created = await onCreateSessionForModel(selectedModelOption.modelRef);
+        if (created === undefined) {
+          onNotice(t("conversationCreateFailed"), true);
+          return false;
+        }
+        targetSession = created;
+      }
+      const optimisticPrompt: PendingPrompt = {
+        identity: `optimistic:${targetSession.id}:${pendingPromptCounter.current}`,
+        text: nextPrompt,
+        skill: selectedSkill === undefined
+          ? undefined
+          : { id: selectedSkill.id, name: selectedSkill.name },
+      };
+      pendingPromptRef.current = optimisticPrompt;
+      setPendingPrompt(optimisticPrompt);
       const started = await bridge.startRun(
         workspaceId,
-        session.id,
+        targetSession.id,
         nextPrompt,
         permissionMode,
-        modelChanged ? selectedModelName : undefined,
-        modelChanged ? runContext?.modelSelectionBinding : undefined,
+        undefined,
+        undefined,
         selectedReasoningEffort,
         selectedReasoningEffort === undefined
           ? undefined
@@ -1100,7 +1152,7 @@ export function ConversationPanel({
       activeRunIdRef.current = started.id;
       setPendingPrompt((current) => current === undefined ? current : { ...current, runId: started.id });
       setRun(started);
-      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
+      dispatchContinuity({ type: "owner_probe_started", sessionId: targetSession.id });
       setContinuityMessage(undefined);
       setPermissionMode(started.permissionMode);
       setReasoningEffort(started.reasoningEffort ?? selectedReasoningEffort);
@@ -1108,8 +1160,9 @@ export function ConversationPanel({
       setContinuityReload((current) => current + 1);
       return true;
     } catch {
+      pendingPromptRef.current = undefined;
       setPendingPrompt(undefined);
-      dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
+      dispatchContinuity({ type: "recovery_retry_started", sessionId: targetSession.id });
       setContinuityReload((current) => current + 1);
       onNotice(t("runStartFailed"), true);
       return false;
@@ -1277,11 +1330,19 @@ export function ConversationPanel({
 
   const forkConversation = async (sourceTurnDigest: string) => {
     if (conversationRecoveryBusy) return undefined;
+    if (runContext === undefined) {
+      setConversationRecoveryError(true);
+      return undefined;
+    }
     setConversationRecoveryBusy(true);
     try {
       const receipt = await bridge.commandConversationRecovery(workspaceId, {
         sessionId: session.id,
-        action: { kind: "fork_conversation", sourceTurnDigest },
+        action: {
+          kind: "fork_conversation",
+          sourceTurnDigest,
+          modelRef: runContext.modelRef,
+        },
       });
       setConversationRecovery(receipt.recovery);
       if (receipt.fork !== undefined) {
@@ -1574,6 +1635,7 @@ export function ConversationPanel({
         queueCount={conversationQueue?.totalItems ?? 0}
         queuePaused={conversationQueue?.paused ?? false}
         queueBusy={conversationQueueBusy || conversationQueueLoading}
+        activityState={composerActivityState}
         queuePanel={(
           <ConversationQueuePanel
             queue={conversationQueue}

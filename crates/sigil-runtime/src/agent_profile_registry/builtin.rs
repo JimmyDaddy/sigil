@@ -3,10 +3,13 @@ use serde_json::json;
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfile, AgentProfileId, AgentProfileKind, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentResultPolicy, AgentRole, AgentTrustState,
-    RootConfig, ToolAllowlistConfig, ToolRegistryScope,
+    ConnectionId, RootConfig, ToolAllowlistConfig, ToolRegistryScope,
 };
 
-use crate::{LOAD_SKILL_TOOL_NAME, provider_config_key};
+use crate::{
+    LOAD_SKILL_TOOL_NAME,
+    provider_connections::{ProviderFamily, ProviderProtocol, load_provider_connections},
+};
 
 use super::{ResolvedAgentProfile, hash_json};
 
@@ -28,10 +31,15 @@ pub(super) fn builtin_profile(
     spec: BuiltinProfileSpec<'_>,
 ) -> Result<ResolvedAgentProfile> {
     let role_config = root_config.task.role_config(spec.role);
-    let provider = role_config
-        .provider
+    let connection = role_config
+        .connection
         .clone()
-        .unwrap_or_else(|| root_config.agent.provider.clone());
+        .or_else(|| root_config.agent.connection.clone());
+    let provider = resolved_profile_provider(
+        root_config,
+        role_config.provider.as_deref(),
+        connection.as_ref(),
+    );
     let model = role_config
         .model
         .clone()
@@ -46,6 +54,7 @@ pub(super) fn builtin_profile(
         instructions: spec.instructions.to_owned(),
         model: Some(model),
         provider: Some(provider),
+        connection,
         reasoning_effort: role_config.reasoning_effort.clone(),
         tool_scope,
         permission_policy: root_config.permission.clone(),
@@ -69,7 +78,7 @@ pub(super) fn builtin_profile(
             "profile": spec.id,
             "role": spec.role.as_str(),
             "provider": profile.provider.as_deref(),
-            "provider_key": provider_config_key(profile.provider.as_deref().unwrap_or_default()),
+            "connection": profile.connection.as_ref().map(ConnectionId::as_str),
             "model": profile.model.as_deref(),
             "reasoning_effort": profile.reasoning_effort.as_ref(),
             "tools": &role_config.tools,
@@ -84,6 +93,34 @@ pub(super) fn builtin_profile(
         source: AgentProfileSource::System,
         trust_state: AgentTrustState::Trusted,
     })
+}
+
+fn resolved_profile_provider(
+    root_config: &RootConfig,
+    legacy_provider: Option<&str>,
+    connection: Option<&ConnectionId>,
+) -> String {
+    if let Some(provider) = legacy_provider {
+        return provider.to_owned();
+    }
+    let loaded = load_provider_connections(root_config);
+    connection
+        .and_then(|id| loaded.connections.get(id))
+        .map(|loaded| {
+            match (loaded.config.provider, loaded.config.protocol) {
+                (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => "deepseek",
+                (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses)
+                | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => "openai_responses",
+                (ProviderFamily::Custom, ProviderProtocol::OpenAiChatCompletions) => {
+                    "openai_compat"
+                }
+                (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => "anthropic",
+                (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => "gemini",
+                _ => "unknown",
+            }
+            .to_owned()
+        })
+        .unwrap_or_else(|| root_config.agent.provider.clone())
 }
 
 pub(super) fn capture_profile_snapshot(

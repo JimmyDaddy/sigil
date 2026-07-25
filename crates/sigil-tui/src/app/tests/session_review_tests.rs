@@ -87,6 +87,7 @@ fn session_review_snapshot_reuses_one_checkpoint_readiness_reduction() -> Result
 fn live_control_updates_preserve_review_without_rereading_the_session_file() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -118,6 +119,7 @@ fn live_control_updates_preserve_review_without_rereading_the_session_file() -> 
 fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -229,6 +231,7 @@ fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
 fn session_review_warns_for_unknown_mutation_without_precise_rewind() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -278,6 +281,7 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
     let note = workspace.join("note.txt");
     std::fs::write(&note, "before\n")?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace.display().to_string(),
         },

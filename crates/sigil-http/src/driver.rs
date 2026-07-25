@@ -138,7 +138,7 @@ pub trait HttpRunDriver: Send + Sync {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&crate::HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError>;
 
     /// Resolves an existing durable session after the registry validates its wire identity.

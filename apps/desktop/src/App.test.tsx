@@ -57,24 +57,37 @@ const defaultAppearance: AppearanceSnapshot = {
 };
 
 const defaultRunContext: RunContext = {
+  modelRef: {
+    connectionId: "deepseek-default",
+    modelId: "deepseek-v4-flash",
+  },
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
-  availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
   modelOptions: [
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      displayName: "DeepSeek V4 Flash",
+      availability: "available",
+      recommendation: "recommended",
+      provenance: "bundled",
       modelName: "deepseek-v4-flash",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
     },
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+      displayName: "DeepSeek V4 Pro",
+      availability: "available",
+      recommendation: "standard",
+      provenance: "bundled",
       modelName: "deepseek-v4-pro",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
     },
   ],
-  modelSelection: "per_run",
+  modelSelection: "fresh_session",
   modelSelectionBinding: "model-binding-deepseek-v4-flash",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -364,7 +377,7 @@ describe("desktop coding-agent components", () => {
 
     expect(document.querySelector("script")).toBeNull();
     expect(document.querySelector("img")).toBeNull();
-    expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
+    expect(screen.queryByText("<script>alert(1)</script>")).toBeNull();
     expect(screen.getByRole("list")).toBeTruthy();
     expect(screen.getByText("item").tagName).toBe("CODE");
     expect(screen.getByRole("heading", { name: "Result" }).tagName).toBe("H1");
@@ -429,6 +442,23 @@ describe("desktop coding-agent components", () => {
     expect(disclosure.open).toBe(true);
     expect(screen.getByText("Hide details")).toBeTruthy();
     unmount();
+  });
+
+  it("shows a user-selected skill as durable message context", () => {
+    render(
+      <Message
+        message={{
+          key: "user-skill",
+          kind: "user",
+          label: "You",
+          text: "Research Chang'an",
+          skill: { id: "compat-skill-123", name: "唐代城市研究" },
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("Used skill: 唐代城市研究")).toBeTruthy();
+    expect(screen.getByText("唐代城市研究")).toBeTruthy();
   });
 
   it("renders read-only bounded tool and diff surfaces", async () => {
@@ -720,6 +750,26 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByRole("button", { name: "System theme" }).getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("tolerates stale native appearance cleanup after a WebView reload", async () => {
+    let resolveSubscription: (unsubscribe: () => void) => void = () => undefined;
+    const subscribeAppearance = vi.fn(
+      () =>
+        new Promise<() => void>((resolve) => {
+          resolveSubscription = resolve;
+        }),
+    );
+    const view = render(<App bridge={bridgeWith({ subscribeAppearance })} />);
+
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    view.unmount();
+    resolveSubscription(() => {
+      throw new Error("listener registry was already reset");
+    });
+    await act(async () => Promise.resolve());
+
+    expect(subscribeAppearance).toHaveBeenCalledOnce();
+  });
+
   it("uses the topbar theme control as a bounded shortcut for named palettes", async () => {
     const user = userEvent.setup();
     const setAppearance = vi.fn(async () => ({
@@ -802,14 +852,21 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Default model for new conversations" }),
-      "deepseek-v4-pro",
+      "deepseek-default/deepseek-v4-pro",
     );
-    expect(window.localStorage.getItem("sigil.desktop.default-models.v1")).toContain("deepseek-v4-pro");
+    expect(window.localStorage.getItem("sigil.desktop.default-models.v2")).toContain("deepseek-v4-pro");
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
-    expect(createSession.mock.calls[1]).toEqual([workspace.id, "New conversation", "deepseek-v4-pro"]);
+    expect(createSession.mock.calls[1]).toEqual([
+      workspace.id,
+      "New conversation",
+      {
+        connectionId: "deepseek-default",
+        modelId: "deepseek-v4-pro",
+      },
+    ]);
   });
 
   it("restores the most recent workspace after native bootstrap", async () => {
@@ -1386,7 +1443,7 @@ describe("desktop workspace and history shell", () => {
     });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
     expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
-    expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
     expect(within(workspaceRegion).getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
   });
@@ -2972,7 +3029,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
     const composer = await readyComposer();
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
@@ -2987,9 +3044,9 @@ describe("desktop workspace and history shell", () => {
     expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
-  it("selects a model for the next run without creating another conversation", async () => {
+  it("creates a fresh exact-model conversation before starting a switched-model run", async () => {
     const user = userEvent.setup();
-    const selectedModels: Array<string | undefined> = [];
+    const selectedModels: Array<RunContext["modelRef"] | undefined> = [];
     const runSelections: Array<{
       sessionId: string;
       modelName?: string;
@@ -3003,8 +3060,8 @@ describe("desktop workspace and history shell", () => {
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
-      createSession: async (_workspaceId, _label, modelName) => {
-        selectedModels.push(modelName);
+      createSession: async (_workspaceId, _label, modelRef) => {
+        selectedModels.push(modelRef);
         return {
           id: `http-session-${selectedModels.length}`,
           label: "New conversation",
@@ -3045,18 +3102,24 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Model" }),
-      "deepseek-v4-pro",
+      "deepseek-default/deepseek-v4-pro",
     );
     expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     expect(screen.queryByRole("option", { name: "Effort unavailable" })).toBeNull();
     await user.type(composer, "Continue with pro");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(selectedModels).toEqual([undefined]);
+    expect(selectedModels).toEqual([
+      undefined,
+      {
+        connectionId: "deepseek-default",
+        modelId: "deepseek-v4-pro",
+      },
+    ]);
     expect(runSelections).toEqual([{
-      sessionId: "http-session-1",
-      modelName: "deepseek-v4-pro",
-      binding: "model-binding-deepseek-v4-flash",
+      sessionId: "http-session-2",
+      modelName: undefined,
+      binding: undefined,
       effort: "max",
       effortBinding: "effort-binding-deepseek-v4-pro",
     }]);

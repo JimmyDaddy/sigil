@@ -145,21 +145,21 @@ impl AgentToolRuntime {
         }
         let safe_detachable_registry =
             tool_registry_is_safe_readonly_for_auto_spawn(&child_registry);
-        let child_provider =
-            match self
-                .provider_factory
-                .build_provider(&self.root_config, role, &parsed.profile_id)
-            {
-                Ok(provider) => provider,
-                Err(error) => {
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        format!("failed to build child agent provider: {error:#}"),
-                    );
-                }
-            };
+        let child_provider = match self
+            .provider_factory
+            .build_provider(&self.root_config, role, &parsed.profile_id)
+            .await
+        {
+            Ok(provider) => provider,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    format!("failed to build child agent provider: {error:#}"),
+                );
+            }
+        };
         let child_capabilities = child_provider.capabilities();
         let parent_session_ref = match parent_session_ref(session) {
             Ok(reference) => reference,
@@ -895,6 +895,7 @@ impl AgentToolRuntime {
         let child_provider = self
             .provider_factory
             .build_provider(&self.root_config, role, &request.profile_id)
+            .await
             .with_context(|| {
                 format!(
                     "failed to build child agent provider for {}",

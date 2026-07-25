@@ -341,7 +341,7 @@ impl HttpSessionRunRegistry {
         };
         let binding = self
             .driver
-            .bind_session(&id, request.model_name.as_deref())
+            .bind_session(&id, request.model_ref.as_ref())
             .map_err(|error| HttpRegistryError::SessionBindingRejected {
                 session_id: id.clone(),
                 message: error.message,
@@ -3382,8 +3382,13 @@ fn validate_conversation_recovery_command(
         } => {
             is_bounded_recovery_token(checkpoint_id) && is_bounded_recovery_token(checkpoint_digest)
         }
-        HttpConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
+        HttpConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest,
+            model_ref,
+        } => {
             is_bounded_recovery_token(source_turn_digest)
+                && is_bounded_recovery_token(&model_ref.connection_id)
+                && is_bounded_recovery_token(&model_ref.model_id)
         }
     };
     valid

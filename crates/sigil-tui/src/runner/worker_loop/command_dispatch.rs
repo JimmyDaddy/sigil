@@ -1,7 +1,7 @@
 use crate::runner::WorkerCommandEnvelope;
 use sigil_kernel::{
-    ImageAttachment, MutationArtifactCleanupTarget, TaskIntegrationReviewRequest,
-    TaskVerificationRerunRequest,
+    ImageAttachment, MutationArtifactCleanupTarget, ResolvedModelRoute,
+    TaskIntegrationReviewRequest, TaskVerificationRerunRequest,
 };
 use sigil_runtime::{
     ProviderStatusConfig, SessionDeletePreview, SessionRetentionPolicy, SessionRetentionPreview,
@@ -123,6 +123,7 @@ pub(in crate::runner) enum SessionCommand {
     ForkLocalSession {
         request_id: u64,
         source_path: PathBuf,
+        current_model_route: ResolvedModelRoute,
     },
     ExportLocalSession {
         request_id: u64,
@@ -285,6 +286,12 @@ pub(in crate::runner) enum ProviderMcpCommand {
         request_id: u64,
         provider_config: ProviderStatusConfig,
     },
+    RefreshConnectionModels {
+        cache_root: PathBuf,
+        root_config: Box<RootConfig>,
+        request: sigil_runtime::provider_connections::ModelCatalogRequest,
+        prepared_credential: Option<sigil_runtime::provider_connections::PreparedCredential>,
+    },
     CancelProviderModelsRefresh {
         request_id: u64,
     },
@@ -390,9 +397,11 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::ForkLocalSession {
             request_id,
             source_path,
+            current_model_route,
         } => ClassifiedWorkerCommand::Session(SessionCommand::ForkLocalSession {
             request_id,
             source_path,
+            current_model_route,
         }),
         WorkerCommand::ExportLocalSession {
             request_id,
@@ -637,6 +646,17 @@ pub(in crate::runner) fn classify_worker_command(
         } => ClassifiedWorkerCommand::ProviderMcp(ProviderMcpCommand::RefreshProviderModels {
             request_id,
             provider_config,
+        }),
+        WorkerCommand::RefreshConnectionModels {
+            cache_root,
+            root_config,
+            request,
+            prepared_credential,
+        } => ClassifiedWorkerCommand::ProviderMcp(ProviderMcpCommand::RefreshConnectionModels {
+            cache_root,
+            root_config,
+            request,
+            prepared_credential,
         }),
         WorkerCommand::CancelProviderModelsRefresh { request_id } => {
             ClassifiedWorkerCommand::ProviderMcp(ProviderMcpCommand::CancelProviderModelsRefresh {

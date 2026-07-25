@@ -1,4 +1,5 @@
 mod capabilities;
+mod catalog;
 mod client;
 mod config;
 mod errors;
@@ -10,8 +11,15 @@ mod request;
 mod stream;
 
 pub use capabilities::gemini_capabilities;
+pub use catalog::{
+    BUNDLED_GEMINI_MODELS, GeminiCatalogModel, GeminiCatalogPage, parse_gemini_model_list,
+};
 pub use config::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV, SIGIL_GEMINI_BASE_URL_ENV};
 pub use provider::GeminiProvider;
+
+#[cfg(test)]
+#[path = "tests/catalog_tests.rs"]
+mod catalog_tests;
 
 #[cfg(test)]
 pub(crate) mod test_env {

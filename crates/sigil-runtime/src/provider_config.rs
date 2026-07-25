@@ -31,11 +31,22 @@ pub const PROVIDER_KEYS: [&str; 5] = [
     GEMINI_PROVIDER_KEY,
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderConfigFields {
     pub model: String,
     pub api_key: String,
     pub base_url: String,
+}
+
+impl std::fmt::Debug for ProviderConfigFields {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderConfigFields")
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,11 +103,22 @@ impl From<ProviderStrictToolsMode> for StrictToolsMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderStatusConfig {
     pub api_key: Option<String>,
     pub base_url: String,
     pub request_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for ProviderStatusConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderStatusConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("base_url", &self.base_url)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .finish()
+    }
 }
 
 #[must_use]
@@ -157,6 +179,26 @@ pub fn default_provider_model(provider: &str) -> Option<String> {
         GEMINI_PROVIDER_KEY => Some(GeminiProviderConfig::default().model),
         _ => None,
     }
+}
+
+/// Returns the provider-owned bundled models available without remote discovery.
+///
+/// The list is scoped to one canonical provider. It must never be merged with another provider's
+/// models.
+#[must_use]
+pub fn bundled_provider_models(provider: &str) -> Vec<String> {
+    let provider = normalize_provider_name(provider);
+    let Some(default_model) = default_provider_model(provider) else {
+        return Vec::new();
+    };
+    let mut models = vec![default_model];
+    if provider == DEEPSEEK_PROVIDER_KEY {
+        let fim_model = DeepSeekProviderConfig::default().fim_model;
+        if !models.iter().any(|model| model == &fim_model) {
+            models.push(fim_model);
+        }
+    }
+    models
 }
 
 #[must_use]
@@ -438,23 +480,24 @@ pub fn provider_model_status_config(
     root_config: &RootConfig,
 ) -> Result<Option<ProviderStatusConfig>> {
     match normalize_provider_name(&root_config.agent.provider) {
-        DEEPSEEK_PROVIDER_KEY => deepseek_provider_status_config(root_config).map(Some),
-        OPENAI_COMPAT_PROVIDER_KEY => {
-            let fields = provider_config_fields(
-                root_config,
-                OPENAI_COMPAT_PROVIDER_KEY,
-                &root_config.agent.model,
-            );
-            provider_status_config_from_fields(&fields, &root_config.model_request).map(Some)
-        }
-        OPENAI_RESPONSES_PROVIDER_KEY => {
-            let fields = provider_config_fields(
-                root_config,
-                OPENAI_RESPONSES_PROVIDER_KEY,
-                &root_config.agent.model,
-            );
-            provider_status_config_from_fields(&fields, &root_config.model_request).map(Some)
-        }
+        DEEPSEEK_PROVIDER_KEY => crate::resolve_deepseek_config(root_config)
+            .map(provider_config_fields_from_deepseek)
+            .and_then(|fields| {
+                provider_status_config_from_fields(&fields, &root_config.model_request)
+            })
+            .map(Some),
+        OPENAI_COMPAT_PROVIDER_KEY => crate::resolve_openai_compat_config(root_config)
+            .map(provider_config_fields_from_openai_compat)
+            .and_then(|fields| {
+                provider_status_config_from_fields(&fields, &root_config.model_request)
+            })
+            .map(Some),
+        OPENAI_RESPONSES_PROVIDER_KEY => crate::resolve_openai_responses_config(root_config)
+            .map(provider_config_fields_from_openai_responses)
+            .and_then(|fields| {
+                provider_status_config_from_fields(&fields, &root_config.model_request)
+            })
+            .map(Some),
         _ => Ok(None),
     }
 }
@@ -466,9 +509,44 @@ pub fn provider_model_status_config_from_fields(
 ) -> Result<Option<ProviderStatusConfig>> {
     match normalize_provider_name(provider_name) {
         DEEPSEEK_PROVIDER_KEY | OPENAI_COMPAT_PROVIDER_KEY | OPENAI_RESPONSES_PROVIDER_KEY => {
-            provider_status_config_from_fields(fields, model_request).map(Some)
+            let resolved = resolved_model_status_fields(provider_name, fields)?;
+            provider_status_config_from_fields(&resolved, model_request).map(Some)
         }
         _ => Ok(None),
+    }
+}
+
+fn resolved_model_status_fields(
+    provider_name: &str,
+    fields: &ProviderConfigFields,
+) -> Result<ProviderConfigFields> {
+    let model = fields.model.trim();
+    let api_key = optional_trimmed_string(&fields.api_key);
+    let base_url = fields.base_url.trim().to_owned();
+    match normalize_provider_name(provider_name) {
+        DEEPSEEK_PROVIDER_KEY => {
+            let mut config = DeepSeekProviderConfig::default_for_model(model);
+            config.api_key = api_key;
+            config.base_url = base_url;
+            config.resolved().map(provider_config_fields_from_deepseek)
+        }
+        OPENAI_COMPAT_PROVIDER_KEY => {
+            let mut config = OpenAiCompatibleProviderConfig::default_for_model(model);
+            config.api_key = api_key;
+            config.base_url = base_url;
+            config
+                .resolved()
+                .map(provider_config_fields_from_openai_compat)
+        }
+        OPENAI_RESPONSES_PROVIDER_KEY => {
+            let mut config = OpenAiResponsesProviderConfig::default_for_model(model);
+            config.api_key = api_key;
+            config.base_url = base_url;
+            config
+                .resolved()
+                .map(provider_config_fields_from_openai_responses)
+        }
+        _ => Ok(fields.clone()),
     }
 }
 

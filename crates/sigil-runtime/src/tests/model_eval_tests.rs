@@ -53,7 +53,7 @@ fn orchestration_route_contract() -> ModelEvalOrchestrationRouteContractV1 {
     let digest = format!("sha256:{}", "1".repeat(64));
     ModelEvalOrchestrationRouteContractV1 {
         schema_version: 1,
-        provider_kind: "deepseek".to_owned(),
+        provider_kind: "openai_compat".to_owned(),
         endpoint_family: "openai-compatible-chat".to_owned(),
         canonical_model_version: "test-v1".to_owned(),
         routing_prompt_digest: digest.clone(),
@@ -499,7 +499,11 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         );
         assert_eq!(
             campaign.runs[1].status,
-            ModelEvalRunExecutionStatus::BudgetSkipped
+            ModelEvalRunExecutionStatus::Completed
+        );
+        assert_eq!(
+            campaign.charged_microusd,
+            campaign.reservation_microusd_per_run * 2
         );
         assert!(campaign.runs[0].session_path.is_file());
         assert!(campaign.output_dir.join("results.jsonl").is_file());
@@ -517,7 +521,7 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         assert!(!request.contains(r#""name":"request_task_planning""#));
         assert!(!request.contains(r#""name":"bash""#));
         assert!(!request.contains("websearch"));
-        assert_eq!(requests.lock().expect("requests lock").len(), 1);
+        assert_eq!(requests.lock().expect("requests lock").len(), 2);
     });
 }
 
@@ -619,7 +623,7 @@ corpus_version = "rfc-0053-v1"
             orchestration_manifest.route_gates[0]
                 .identity
                 .provider_adapter,
-            "deepseek"
+            "openai_compat"
         );
         assert_eq!(
             orchestration_manifest.route_gates[0]
@@ -844,22 +848,25 @@ fn write_source_config(path: &Path, base_url: &str, permission_mode: &str) {
     fs::write(
         path,
         format!(
-            r#"[workspace]
+            r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "openai-compatible-eval"
 model = "deepseek-v4-flash"
 max_turns = 12
 
 [permission]
 mode = "{permission_mode}"
 
-[providers.deepseek]
+[connections.openai-compatible-eval]
+label = "OpenAI-compatible eval"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{base_url}"
-beta_base_url = "{base_url}"
-anthropic_base_url = "{base_url}"
-api_key = "inline-secret-must-not-copy"
+credential = {{ source = "none" }}
 "#
         ),
     )
@@ -870,37 +877,39 @@ async fn spawn_deepseek_eval_server(requests: Arc<Mutex<Vec<String>>>) -> anyhow
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move {
-        let Ok((mut socket, _)) = listener.accept().await else {
-            return;
-        };
-        let mut bytes = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        loop {
-            let count = socket.read(&mut chunk).await.unwrap_or_default();
-            if count == 0 {
-                break;
+        for _ in 0..2 {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap_or_default();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+                if http_request_is_complete(&bytes) || bytes.len() >= 64 * 1024 {
+                    break;
+                }
             }
-            bytes.extend_from_slice(&chunk[..count]);
-            if http_request_is_complete(&bytes) || bytes.len() >= 64 * 1024 {
-                break;
-            }
+            requests
+                .lock()
+                .expect("requests lock")
+                .push(String::from_utf8_lossy(&bytes).into_owned());
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":10000000,\"completion_tokens\":2,",
+                "\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":10000000}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
         }
-        requests
-            .lock()
-            .expect("requests lock")
-            .push(String::from_utf8_lossy(&bytes).into_owned());
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],",
-            "\"usage\":{\"prompt_tokens\":10000000,\"completion_tokens\":2,",
-            "\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":10000000}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
     });
     Ok(format!("http://{address}"))
 }

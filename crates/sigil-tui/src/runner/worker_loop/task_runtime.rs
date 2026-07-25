@@ -479,7 +479,8 @@ pub(in crate::runner) async fn continue_task_orchestration(
         &base_registry,
         agent_supervisor,
         role_provider_builder,
-    )?;
+    )
+    .await?;
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     let task_request = SequentialTaskRequest {
@@ -569,7 +570,8 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         child_role,
         agent_supervisor,
         role_provider_builder,
-    )?;
+    )
+    .await?;
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
@@ -866,7 +868,7 @@ pub(in crate::runner) fn format_mutation_artifact_delete_report(
     )
 }
 
-pub(in crate::runner) fn build_task_role_runtime(
+pub(in crate::runner) async fn build_task_role_runtime(
     root_config: &RootConfig,
     options: &AgentRunOptions,
     base_registry: &ToolRegistry,
@@ -880,10 +882,11 @@ pub(in crate::runner) fn build_task_role_runtime(
         agent_supervisor,
         role_provider_builder,
     )
+    .await
     .map_err(|error| format!("{error:#}"))
 }
 
-pub(in crate::runner) fn build_skill_child_role_runtime(
+pub(in crate::runner) async fn build_skill_child_role_runtime(
     root_config: &RootConfig,
     options: &AgentRunOptions,
     base_registry: &ToolRegistry,
@@ -894,18 +897,23 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
 ) -> std::result::Result<TaskRoleRuntime, String> {
     let planner_provider = role_provider_builder
         .build(root_config, AgentRole::Planner)
+        .await
         .map_err(|error| format!("{error:#}"))?;
     let executor_provider = role_provider_builder
         .build(root_config, AgentRole::Executor)
+        .await
         .map_err(|error| format!("{error:#}"))?;
     let synthesis_provider = role_provider_builder
         .build(root_config, AgentRole::Planner)
+        .await
         .map_err(|error| format!("{error:#}"))?;
     let subagent_read_provider = role_provider_builder
         .build(root_config, AgentRole::SubagentRead)
+        .await
         .map_err(|error| format!("{error:#}"))?;
     let subagent_write_provider = role_provider_builder
         .build(root_config, AgentRole::SubagentWrite)
+        .await
         .map_err(|error| format!("{error:#}"))?;
     let planner_registry =
         sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)

@@ -1463,6 +1463,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/provider-connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read secret-free provider connection settings
+         * @description Returns connection identity, readiness, credential source classification, and the compound saved default. Credential values, stored-credential identifiers, raw private endpoints, config paths, and provider-private JSON are excluded.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Native-owner provider connection inventory */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderConnectionInventory"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/support/bundle": {
         parameters: {
             query?: never;
@@ -1621,10 +1662,18 @@ export interface components {
             skills: components["schemas"]["ApplicationSkillCatalogEntry"][];
         };
         ApplicationModelOption: {
+            /** @enum {string} */
+            availability: "available" | "unverified" | "configured_unavailable";
             available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
             default_reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+            display_name: string;
             model_name: string;
+            model_ref: components["schemas"]["ProviderModelRef"];
+            /** @enum {string} */
+            provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
             reasoning_effort_binding?: string | null;
+            /** @enum {string} */
+            recommendation: "recommended" | "standard";
         };
         ApplicationSkillBinding: {
             index_fingerprint: string;
@@ -1807,6 +1856,7 @@ export interface components {
             original_content_bytes: number;
             /** @enum {string} */
             role: "user" | "assistant";
+            skill?: components["schemas"]["ConversationDisplaySkillReference"] | null;
             text?: string | null;
             truncated: boolean;
             /** @constant */
@@ -1895,6 +1945,10 @@ export interface components {
             terminal_frontier?: components["schemas"]["ConversationTerminalFrontier"] | null;
             through_session_stream_sequence: components["schemas"]["DecimalSequence"];
             total_items: components["schemas"]["DecimalSequence"];
+        };
+        ConversationDisplaySkillReference: {
+            id: string;
+            name: string;
         };
         /** @enum {string} */
         ConversationDisplaySource: "durable_transcript" | "durable_run_event" | "live_transient";
@@ -2047,6 +2101,7 @@ export interface components {
         ConversationRecoveryForkAction: {
             /** @constant */
             kind: "fork_conversation";
+            model_ref: components["schemas"]["ProviderModelRef"];
             source_turn_digest: string;
         };
         ConversationRecoveryRestoreAction: {
@@ -2096,6 +2151,37 @@ export interface components {
         /** @enum {string} */
         PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
         /** @enum {string} */
+        ProviderConfigMode: "legacy_v1" | "v2" | "mixed" | "unsupported_future";
+        ProviderConnectionEntry: {
+            credential_source: components["schemas"]["ProviderCredentialSource"];
+            default_model?: components["schemas"]["ProviderModelRef"] | null;
+            endpoint_display: string;
+            id: string;
+            issue?: components["schemas"]["ProviderConnectionIssue"] | null;
+            label: string;
+            protocol_label: string;
+            provider_label: string;
+            readiness: components["schemas"]["ProviderConnectionReadiness"];
+        };
+        ProviderConnectionInventory: {
+            config_mode: components["schemas"]["ProviderConfigMode"];
+            connections: components["schemas"]["ProviderConnectionEntry"][];
+            default_model?: components["schemas"]["ProviderModelRef"] | null;
+            issues: components["schemas"]["ProviderConnectionIssue"][];
+        };
+        ProviderConnectionIssue: {
+            code: string;
+            message: string;
+        };
+        /** @enum {string} */
+        ProviderConnectionReadiness: "ready" | "needs_credential" | "credential_unavailable" | "needs_model" | "unverified" | "invalid";
+        /** @enum {string} */
+        ProviderCredentialSource: "environment" | "system_keyring" | "stored" | "none" | "legacy_plaintext";
+        ProviderModelRef: {
+            connection_id: string;
+            model_id: string;
+        };
+        /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
@@ -2114,7 +2200,6 @@ export interface components {
             reason?: string | null;
         };
         RunContextView: {
-            available_models: string[];
             available_permission_modes: components["schemas"]["PermissionMode"][];
             available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
             /** @enum {string} */
@@ -2128,8 +2213,9 @@ export interface components {
             last_prompt_tokens?: number | null;
             model_name: string;
             model_options: components["schemas"]["ApplicationModelOption"][];
+            model_ref: components["schemas"]["ProviderModelRef"];
             /** @enum {string} */
-            model_selection: "per_run";
+            model_selection: "fresh_session";
             model_selection_binding: string;
             provider_name: string;
             reasoning_effort_binding?: string | null;
@@ -2181,6 +2267,7 @@ export interface components {
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
             live_events: boolean;
+            provider_connections: boolean;
             run_context: boolean;
             session_catalog: boolean;
             support_diagnostics: boolean;
@@ -2194,7 +2281,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 7;
+            schema_version: 8;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

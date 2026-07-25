@@ -6,11 +6,12 @@ use std::{
 };
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use sigil_kernel::{SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillRunMode, SkillSource};
 
 use crate::{
     DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF,
-    DEFAULT_WORKSPACE_SKILLS_LEAF,
+    DEFAULT_WORKSPACE_SKILLS_LEAF, definition_file_io::prepare_definition_roots,
 };
 
 use super::{
@@ -50,27 +51,74 @@ pub fn discover_skill_index_with_user_dir(
     let mut discovery = SkillDiscovery::new(workspace_root);
     let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
     let workspace_skills = project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF);
-    discovery.discover_skill_dir(&workspace_skills, SkillCandidateKind::WorkspaceSkill);
-
     let workspace_commands = project_assets_root.join(DEFAULT_WORKSPACE_COMMANDS_LEAF);
+    let workspace_agents = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
+    let mut definition_roots = vec![
+        workspace_skills.clone(),
+        workspace_commands.clone(),
+        workspace_agents.clone(),
+    ];
+    if compatibility_source_enabled(config, "agents")
+        || compatibility_source_enabled(config, "codex")
+    {
+        definition_roots.push(workspace_root.join(".agents").join("skills"));
+    }
+    if compatibility_source_enabled(config, "opencode") {
+        let root = workspace_root.join(".opencode");
+        definition_roots.extend([
+            root.join("skills"),
+            root.join("commands"),
+            root.join("agents"),
+        ]);
+    }
+    if compatibility_source_enabled(config, "claude") {
+        let root = workspace_root.join(".claude");
+        definition_roots.extend([
+            root.join("skills"),
+            root.join("commands"),
+            root.join("agents"),
+        ]);
+    }
+    if compatibility_source_enabled(config, "reasonix") {
+        definition_roots.push(workspace_root.join(".reasonix").join("agents"));
+    }
+    prepare_definition_roots(&definition_roots);
+
+    discovery.discover_skill_dir(&workspace_skills, SkillCandidateKind::WorkspaceSkill);
     discovery.discover_markdown_file_dir(
         &workspace_commands,
         SkillCandidateKind::WorkspaceCommand,
         "command",
     );
-
-    let workspace_agents = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
     discovery.discover_agent_dir(&workspace_agents, SkillCandidateKind::WorkspaceAgent);
 
-    if compatibility_source_enabled(config, "claude") {
+    if compatibility_source_enabled(config, "agents")
+        || compatibility_source_enabled(config, "codex")
+    {
         discovery.discover_skill_dir(
-            &workspace_root.join(".claude").join("skills"),
-            SkillCandidateKind::ClaudeSkill,
+            &workspace_root.join(".agents").join("skills"),
+            SkillCandidateKind::AgentStandardSkill,
         );
-        discovery.discover_agent_dir(
-            &workspace_root.join(".claude").join("agents"),
-            SkillCandidateKind::ClaudeAgent,
+    }
+    if compatibility_source_enabled(config, "opencode") {
+        let root = workspace_root.join(".opencode");
+        discovery.discover_skill_dir(&root.join("skills"), SkillCandidateKind::OpenCodeSkill);
+        discovery.discover_markdown_file_dir(
+            &root.join("commands"),
+            SkillCandidateKind::OpenCodeCommand,
+            "command",
         );
+        discovery.discover_agent_dir(&root.join("agents"), SkillCandidateKind::OpenCodeAgent);
+    }
+    if compatibility_source_enabled(config, "claude") {
+        let root = workspace_root.join(".claude");
+        discovery.discover_skill_dir(&root.join("skills"), SkillCandidateKind::ClaudeSkill);
+        discovery.discover_markdown_file_dir(
+            &root.join("commands"),
+            SkillCandidateKind::ClaudeCommand,
+            "command",
+        );
+        discovery.discover_agent_dir(&root.join("agents"), SkillCandidateKind::ClaudeAgent);
     }
     if compatibility_source_enabled(config, "reasonix") {
         discovery.discover_agent_dir(
@@ -133,7 +181,7 @@ impl SkillDiscovery {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if !valid_skill_id(&fallback_id) {
+            if !valid_skill_id(&fallback_id) && !kind.supports_derived_id() {
                 self.warn(
                     SkillDiscoveryWarningKind::InvalidName,
                     &path,
@@ -172,7 +220,7 @@ impl SkillDiscovery {
                 .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if !valid_skill_id(&fallback_id) {
+            if !valid_skill_id(&fallback_id) && !kind.supports_derived_id() {
                 self.warn(
                     SkillDiscoveryWarningKind::InvalidName,
                     &path,
@@ -310,7 +358,12 @@ pub(super) enum SkillCandidateKind {
     WorkspaceSkill,
     WorkspaceCommand,
     WorkspaceAgent,
+    AgentStandardSkill,
+    OpenCodeSkill,
+    OpenCodeCommand,
+    OpenCodeAgent,
     ClaudeSkill,
+    ClaudeCommand,
     ClaudeAgent,
     ReasonixAgent,
     UserSkill,
@@ -322,8 +375,45 @@ impl SkillCandidateKind {
     fn is_agent(&self) -> bool {
         matches!(
             self,
-            Self::WorkspaceAgent | Self::ClaudeAgent | Self::ReasonixAgent | Self::UserAgent
+            Self::WorkspaceAgent
+                | Self::OpenCodeAgent
+                | Self::ClaudeAgent
+                | Self::ReasonixAgent
+                | Self::UserAgent
         )
+    }
+
+    pub(super) fn supports_derived_id(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenCodeCommand
+                | Self::OpenCodeAgent
+                | Self::ClaudeCommand
+                | Self::ClaudeAgent
+                | Self::ReasonixAgent
+        )
+    }
+
+    pub(super) fn is_foreign_compatibility(&self) -> bool {
+        matches!(
+            self,
+            Self::AgentStandardSkill
+                | Self::OpenCodeSkill
+                | Self::OpenCodeCommand
+                | Self::OpenCodeAgent
+                | Self::ClaudeSkill
+                | Self::ClaudeCommand
+                | Self::ClaudeAgent
+                | Self::ReasonixAgent
+        )
+    }
+
+    pub(super) fn derived_id_prefix(&self) -> &'static str {
+        if self.is_agent() {
+            "compat-agent"
+        } else {
+            "compat-command"
+        }
     }
 
     fn is_workspace_scoped(&self) -> bool {
@@ -335,7 +425,12 @@ impl SkillCandidateKind {
             Self::WorkspaceSkill
             | Self::WorkspaceCommand
             | Self::WorkspaceAgent
+            | Self::AgentStandardSkill
+            | Self::OpenCodeSkill
+            | Self::OpenCodeCommand
+            | Self::OpenCodeAgent
             | Self::ClaudeSkill
+            | Self::ClaudeCommand
             | Self::ClaudeAgent
             | Self::ReasonixAgent => SkillSource::Workspace,
             Self::UserSkill | Self::UserAgent => SkillSource::User,
@@ -365,11 +460,27 @@ fn warning_kind_for_descriptor_error(error: &anyhow::Error) -> SkillDiscoveryWar
     }
 }
 
-fn compatibility_source_enabled(config: &SkillConfig, source: &str) -> bool {
+pub(crate) fn compatibility_source_enabled(config: &SkillConfig, source: &str) -> bool {
+    const DEFAULT_SOURCES: [&str; 4] = ["agents", "claude", "codex", "opencode"];
+    if config.compatibility_auto_discover
+        && DEFAULT_SOURCES
+            .iter()
+            .any(|default| default.eq_ignore_ascii_case(source))
+    {
+        return true;
+    }
     config
         .compatibility_sources
         .iter()
         .any(|configured| configured.trim().eq_ignore_ascii_case(source))
+}
+
+pub(crate) fn compatibility_stable_id(prefix: &str, logical_name: &str) -> String {
+    if valid_skill_id(logical_name) {
+        return logical_name.to_owned();
+    }
+    let digest = format!("{:x}", Sha256::digest(logical_name.trim().as_bytes()));
+    format!("{prefix}-{}", &digest[..16])
 }
 
 pub(super) fn valid_skill_id(value: &str) -> bool {

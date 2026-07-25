@@ -31,6 +31,7 @@ use super::{
 pub(crate) struct TimelineState {
     pub(in crate::app) expanded_thinking_entry_indices: BTreeSet<usize>,
     pub(in crate::app) collapsed_thinking_entry_indices: BTreeSet<usize>,
+    pub(in crate::app) expanded_diagram_entry_indices: BTreeSet<usize>,
     pub(in crate::app) selected_tool_activity_key: Option<String>,
     pub(in crate::app) expanded_tool_activity_keys: BTreeSet<String>,
     pub(in crate::app) collapsed_tool_activity_keys: BTreeSet<String>,
@@ -89,6 +90,7 @@ pub(crate) struct EgressDisclosureState {
 pub(crate) struct RuntimeStatusState {
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
+    pub(crate) model_route: Option<sigil_kernel::ResolvedModelRoute>,
     pub(crate) permission_mode: String,
     pub(crate) memory_enabled: bool,
     pub(crate) memory_document_count: usize,
@@ -112,11 +114,54 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) balance_snapshot: BalanceSnapshot,
     pub(crate) next_background_request_id: u64,
     pub(crate) pending_worker_commands: Vec<WorkerCommand>,
+    pub(crate) worker_rebind_required: bool,
     pub(crate) active_balance_refresh_id: Option<u64>,
     pub(in crate::app) active_model_picker_refresh: Option<PendingModelPickerRefresh>,
+    pub(in crate::app) setup_model_catalog_rx: Option<
+        std::sync::mpsc::Receiver<
+            Result<sigil_runtime::provider_connections::ModelCatalogResult, String>,
+        >,
+    >,
+    pub(in crate::app) connection_inventory:
+        Option<sigil_runtime::provider_connections::ConnectionInventory>,
+    pub(in crate::app) connection_inventory_revision: u64,
+    pub(in crate::app) connection_inventory_rx: Option<
+        std::sync::mpsc::Receiver<(
+            u64,
+            sigil_runtime::provider_connections::ConnectionInventory,
+        )>,
+    >,
+    #[cfg(not(test))]
+    pub(in crate::app) connection_inventory_worker: Option<ConnectionInventoryWorker>,
+    #[cfg(not(test))]
+    pub(in crate::app) pending_connection_inventory_config: Option<sigil_kernel::RootConfig>,
     pub(crate) active_task: Option<ActiveTaskRuntimeStatus>,
     pub(crate) task_provider_route_diagnostics: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
     pub(crate) task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot,
+}
+
+#[cfg(not(test))]
+#[derive(Debug)]
+pub(in crate::app) struct ConnectionInventoryWorker {
+    pub(in crate::app) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::app) handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(test))]
+impl ConnectionInventoryWorker {
+    pub(in crate::app) fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for ConnectionInventoryWorker {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone)]

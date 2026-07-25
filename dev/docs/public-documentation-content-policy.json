@@ -278,6 +278,7 @@
         "headless-and-local-api-workflows",
         "main-screen",
         "common-controls",
+        "rich-conversation-content",
         "image-attachments",
         "slash-commands",
         "config-panel",
@@ -295,6 +296,7 @@
           "Headless And Local API Workflows",
           "Main Screen",
           "Common Controls",
+          "Rich Conversation Content",
           "Image Attachments",
           "Slash Commands",
           "Config Panel",
@@ -310,6 +312,7 @@
           "非交互与本地 API 工作流",
           "主界面",
           "高频操作",
+          "富对话内容",
           "图片附件",
           "斜杠命令",
           "配置面板",
@@ -920,6 +923,7 @@
       "file": "mcp.md",
       "role": "mcp-setup-and-use-authority",
       "heading_keys": [
+        "cli-setup",
         "minimal-config",
         "streamable-http",
         "process-environment-and-credentials",
@@ -932,6 +936,7 @@
       "cta_key": "open-troubleshooting",
       "heading_labels": {
         "en": [
+          "CLI Setup",
           "Minimal Config",
           "Streamable HTTP",
           "Process Environment And Credentials",
@@ -942,6 +947,7 @@
           "Troubleshooting"
         ],
         "zh-CN": [
+          "CLI 配置",
           "最小配置",
           "Streamable HTTP",
           "进程环境与凭据",

@@ -555,6 +555,7 @@ fn root_config_with_checks(
     checks: Vec<VerificationCheckConfig>,
 ) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -562,6 +563,7 @@ fn root_config_with_checks(
         session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -582,6 +584,7 @@ fn root_config_with_checks(
         appearance: Default::default(),
         task: TaskConfig::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }

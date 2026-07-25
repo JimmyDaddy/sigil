@@ -21,8 +21,8 @@ use builtin::{
     BuiltinProfileSpec, builtin_profile, capture_profile_snapshot, read_only_role_tool_scope,
 };
 use discovery::{
-    discover_child_session_skill_profiles, discover_plugin_agent_profiles,
-    discover_workspace_agent_profiles,
+    discover_child_session_skill_profiles, discover_codex_agent_profiles,
+    discover_plugin_agent_profiles, discover_workspace_agent_profiles,
 };
 use index::build_model_visible_index;
 pub use index::{AgentProfileIndexContext, ModelVisibleAgentIndex, ModelVisibleAgentIndexEntry};
@@ -36,9 +36,9 @@ use paths::{
 #[cfg(test)]
 use profiles::{NativeAgentProfileFormat, namespaced_plugin_agent_profile_id};
 use profiles::{
-    child_session_skill_profile, fallback_plugin_agent_id, native_agent_entrypoint,
-    plugin_agent_profile_format, plugin_agent_profile_from_raw, tool_scope_is_empty,
-    workspace_agent_profile_from_raw,
+    child_session_skill_profile, codex_agent_profile_from_raw, fallback_plugin_agent_id,
+    native_agent_entrypoint, plugin_agent_profile_format, plugin_agent_profile_from_raw,
+    tool_scope_is_empty, workspace_agent_profile_from_raw,
 };
 use wire::resolve_agent_permission_config;
 #[cfg(test)]
@@ -235,6 +235,12 @@ impl AgentProfileRegistry {
                 &mut profiles,
                 &mut warnings,
             )?;
+            discover_codex_agent_profiles(
+                root_config,
+                workspace_root,
+                &mut profiles,
+                &mut warnings,
+            );
             discover_child_session_skill_profiles(
                 root_config,
                 workspace_root,
@@ -290,7 +296,10 @@ impl AgentProfileRegistry {
         projection: &AgentProfileTrustProjection,
     ) -> Result<()> {
         for profile in &mut self.profiles {
-            if profile.source == AgentProfileSource::System {
+            if matches!(
+                profile.source,
+                AgentProfileSource::System | AgentProfileSource::Compatibility { .. }
+            ) {
                 continue;
             }
             let snapshot = capture_profile_snapshot(profile)?;

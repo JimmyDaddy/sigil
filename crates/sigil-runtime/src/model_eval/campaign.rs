@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -170,11 +171,44 @@ pub fn write_isolated_model_eval_config(
         bail!("model eval requires a config that permits controlled workspace edits");
     }
 
-    let active_provider = config.agent.provider.clone();
-    config.providers.retain(|name, _| name == &active_provider);
     for value in config.providers.values_mut() {
         scrub_provider_secret_fields(value)?;
     }
+    let loaded = crate::provider_connections::load_provider_connections(&config);
+    if !loaded.issues.is_empty() {
+        let issue_codes = loaded
+            .issues
+            .iter()
+            .map(|issue| issue.code)
+            .collect::<Vec<_>>()
+            .join(",");
+        bail!("model eval provider connection configuration is invalid: {issue_codes}");
+    }
+    let default_model = loaded
+        .default_model
+        .clone()
+        .context("model eval requires an exact default model route")?;
+    let selected_connection = loaded
+        .connections
+        .get(&default_model.connection_id)
+        .context("model eval default connection is missing")?;
+    let active_provider =
+        crate::provider_connections::runtime_provider_name(&selected_connection.config).to_owned();
+    let mut isolated_connection = selected_connection.config.clone();
+    if matches!(
+        isolated_connection.credential,
+        crate::provider_connections::CredentialRefConfig::SystemKeyring { .. }
+            | crate::provider_connections::CredentialRefConfig::Stored { .. }
+    ) {
+        let environment_name = crate::provider_api_key_env_name(&active_provider)
+            .context("model eval connection has no process-environment credential binding")?;
+        isolated_connection.credential =
+            crate::provider_connections::CredentialRefConfig::Environment {
+                name: environment_name.to_owned(),
+            };
+    }
+    let isolated_connections =
+        BTreeMap::from([(default_model.connection_id.clone(), isolated_connection)]);
     config.agent.max_turns = Some(
         usize::try_from(fixture.max_turns).context("model eval max_turns does not fit usize")?,
     );
@@ -192,6 +226,11 @@ pub fn write_isolated_model_eval_config(
     config.web.network_mode = NetworkPolicy::Deny;
     config.web.search_mcp = None;
     config.mcp_servers.clear();
+    config = crate::provider_connections::materialize_v2_root_config(
+        &config,
+        &isolated_connections,
+        &default_model,
+    )?;
 
     config.workspace.root = "<model-eval-workspace>".to_owned();
     config.storage.state_root = StorageRoot::Path("<model-eval-state>".to_owned());
@@ -213,14 +252,13 @@ pub fn write_isolated_model_eval_config(
     config.save(&config_path)?;
     let config_bytes = fs::read(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let rendered = std::str::from_utf8(&config_bytes).context("isolated config is not UTF-8")?;
-    if rendered.to_ascii_lowercase().contains("api_key") {
-        bail!("isolated model eval config still contains an API-key field");
-    }
+    std::str::from_utf8(&config_bytes).context("isolated config is not UTF-8")?;
     let reloaded = RootConfig::load(&config_path)?;
+    let reloaded_connections = crate::provider_connections::load_provider_connections(&reloaded);
     if reloaded.workspace.root != config.workspace.root
-        || reloaded.agent.provider != config.agent.provider
-        || reloaded.agent.model != config.agent.model
+        || reloaded_connections.default_model.as_ref() != Some(&default_model)
+        || reloaded_connections.connections.len() != 1
+        || !reloaded_connections.issues.is_empty()
         || !reloaded.mcp_servers.is_empty()
         || reloaded.web.enabled
         || reloaded.task.enabled != fixture.orchestration.is_some()
@@ -238,8 +276,8 @@ pub fn write_isolated_model_eval_config(
         config_path,
         config_digest,
         isolated_config_digest: sha256_digest(&config_bytes),
-        provider: config.agent.provider,
-        model: config.agent.model,
+        provider: active_provider,
+        model: default_model.model_id,
         session_path: session_dir.join("run.jsonl"),
     })
 }

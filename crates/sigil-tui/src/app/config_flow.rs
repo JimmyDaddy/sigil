@@ -22,15 +22,21 @@ use sigil_kernel::{
     CodeIntelStartup, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
     JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PermissionMode,
     PluginCapability, PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision,
-    PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope,
+    PluginTrustEntry, RootConfig, SecretString, SessionLogEntry, SkillDescriptor, SkillRunMode,
+    SkillSource, SkillTrustState, SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope,
     VerificationStateProjection, WebSearchRoute, WorkspaceTrust, default_user_config_dir,
     discover_candidate_checks_with_user_config, stable_workspace_id,
 };
+#[cfg(not(test))]
+use sigil_runtime::provider_connections::ConfiguredProviderCredentialStore;
 use sigil_runtime::{
     AgentProfileRegistry, ContextWindowSource, ResolvedAgentProfile,
     doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
     provider_api_key_env_name, provider_capabilities_for_name, provider_capability_view,
+    provider_connections::{
+        ConfigPublishOutcome, ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher,
+        load_provider_connections, save_connection_config_with_base,
+    },
     resolve_context_window_tokens,
 };
 
@@ -184,6 +190,10 @@ impl AppState {
     pub fn config_editing_field_label(&self) -> Option<&'static str> {
         match self.modal_state.as_ref() {
             Some(ModalState::TextInput(TextInputState {
+                target: TextInputTarget::ConfigManualModel,
+                ..
+            })) => Some(ConfigField::ProviderModel.label()),
+            Some(ModalState::TextInput(TextInputState {
                 target: TextInputTarget::ConfigField(field),
                 ..
             })) => Some(field.label()),
@@ -304,6 +314,11 @@ impl AppState {
         if !keep_close_guard && let Some(config_state) = self.config_state.as_mut() {
             config_state.close_guard_armed = false;
         }
+        let is_connection_delete =
+            key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !is_connection_delete && let Some(config_state) = self.config_state.as_mut() {
+            config_state.pending_connection_delete = None;
+        }
 
         match key.code {
             KeyCode::Esc => {
@@ -327,7 +342,18 @@ impl AppState {
             }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    if config_state.selected_section == ConfigSection::Mcp {
+                    if config_state.selected_section == ConfigSection::Provider {
+                        match config_state.draft.add_connection() {
+                            Ok(()) => {
+                                config_state.mark_dirty();
+                                self.last_notice = Some(format!(
+                                    "added connection {}",
+                                    config_state.draft.selected_connection_id
+                                ));
+                            }
+                            Err(error) => self.last_notice = Some(error.to_string()),
+                        }
+                    } else if config_state.selected_section == ConfigSection::Mcp {
                         self.last_notice = Some("edit MCP servers in sigil.toml".to_owned());
                     } else {
                         self.last_notice = Some("MCP server editing uses sigil.toml".to_owned());
@@ -336,10 +362,72 @@ impl AppState {
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    if config_state.selected_section == ConfigSection::Mcp {
+                    if config_state.selected_section == ConfigSection::Provider {
+                        let current_session = config_state.current_session_route.clone();
+                        let selected = config_state.draft.selected_connection_id.clone();
+                        if config_state.pending_connection_delete.as_ref() == Some(&selected) {
+                            match config_state
+                                .draft
+                                .delete_selected_connection(current_session.as_ref())
+                            {
+                                Ok(()) => {
+                                    config_state.pending_connection_delete = None;
+                                    config_state.mark_dirty();
+                                    self.last_notice =
+                                        Some("removed connection from draft".to_owned());
+                                }
+                                Err(error) => self.last_notice = Some(error.to_string()),
+                            }
+                        } else {
+                            match config_state
+                                .draft
+                                .validate_selected_connection_deletion(current_session.as_ref())
+                            {
+                                Ok(()) => {
+                                    config_state.pending_connection_delete = Some(selected.clone());
+                                    self.last_notice = Some(format!(
+                                        "press Ctrl-D again to remove connection {selected}"
+                                    ));
+                                }
+                                Err(error) => self.last_notice = Some(error.to_string()),
+                            }
+                        }
+                    } else if config_state.selected_section == ConfigSection::Mcp {
                         self.last_notice = Some("edit MCP servers in sigil.toml".to_owned());
                     } else {
                         self.last_notice = Some("MCP server editing uses sigil.toml".to_owned());
+                    }
+                }
+            }
+            KeyCode::Char('d' | 'D')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(config_state) = self.config_state.as_mut()
+                    && config_state.selected_section == ConfigSection::Provider
+                {
+                    match config_state.draft.set_selected_as_default() {
+                        Ok(()) => {
+                            config_state.mark_dirty();
+                            self.last_notice =
+                                Some("updated saved default; current session unchanged".to_owned());
+                        }
+                        Err(error) => self.last_notice = Some(error.to_string()),
+                    }
+                }
+            }
+            KeyCode::Char('e' | 'E')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(config_state) = self.config_state.as_mut()
+                    && config_state.selected_section == ConfigSection::Provider
+                {
+                    match config_state.draft.confirm_selected_legacy_environment() {
+                        Ok(()) => {
+                            config_state.mark_dirty();
+                            self.last_notice =
+                                Some("confirmed environment credential migration".to_owned());
+                        }
+                        Err(error) => self.last_notice = Some(error.to_string()),
                     }
                 }
             }
@@ -426,7 +514,22 @@ impl AppState {
                 }
             }
             KeyCode::PageUp => {
-                if self
+                if self.config_state.as_ref().is_some_and(|config_state| {
+                    config_state.selected_section == ConfigSection::Provider
+                }) {
+                    if let Some(config_state) = self.config_state.as_mut() {
+                        match config_state.draft.cycle_connection(false) {
+                            Ok(()) => {
+                                config_state.bump_draft_revision();
+                                self.last_notice = Some(format!(
+                                    "connection {}",
+                                    config_state.draft.selected_connection_id
+                                ));
+                            }
+                            Err(error) => self.last_notice = Some(error.to_string()),
+                        }
+                    }
+                } else if self
                     .config_state
                     .as_ref()
                     .is_some_and(|config_state| config_state.selected_section == ConfigSection::Mcp)
@@ -468,7 +571,22 @@ impl AppState {
                 }
             }
             KeyCode::PageDown => {
-                if self
+                if self.config_state.as_ref().is_some_and(|config_state| {
+                    config_state.selected_section == ConfigSection::Provider
+                }) {
+                    if let Some(config_state) = self.config_state.as_mut() {
+                        match config_state.draft.cycle_connection(true) {
+                            Ok(()) => {
+                                config_state.bump_draft_revision();
+                                self.last_notice = Some(format!(
+                                    "connection {}",
+                                    config_state.draft.selected_connection_id
+                                ));
+                            }
+                            Err(error) => self.last_notice = Some(error.to_string()),
+                        }
+                    }
+                } else if self
                     .config_state
                     .as_ref()
                     .is_some_and(|config_state| config_state.selected_section == ConfigSection::Mcp)
@@ -653,10 +771,16 @@ impl AppState {
                             ));
                         }
                         ConfigField::ProviderName => {
-                            config_state.draft.cycle_provider();
-                            config_state.dirty = true;
-                            self.last_notice =
-                                Some(format!("provider -> {}", config_state.draft.provider_name));
+                            match config_state.draft.cycle_connection(true) {
+                                Ok(()) => {
+                                    config_state.bump_draft_revision();
+                                    self.last_notice = Some(format!(
+                                        "connection {}",
+                                        config_state.draft.selected_connection_id
+                                    ));
+                                }
+                                Err(error) => self.last_notice = Some(error.to_string()),
+                            }
                             return Ok(None);
                         }
                         ConfigField::ProviderFimModel => {
@@ -885,7 +1009,20 @@ impl AppState {
                         );
                         return Ok(None);
                     }
-                    ConfigField::ProviderModel | ConfigField::ProviderFimModel => {
+                    ConfigField::ProviderModel => {
+                        let current = self
+                            .config_state
+                            .as_ref()
+                            .map(|state| state.draft.provider_model.clone())
+                            .unwrap_or_default();
+                        self.open_model_picker(ModelPickerTarget::Provider, &current);
+                        self.last_notice = Some(
+                            "choose a catalog model or use M when manual entry is admitted"
+                                .to_owned(),
+                        );
+                        return Ok(None);
+                    }
+                    ConfigField::ProviderFimModel => {
                         self.open_text_input_with_char(
                             TextInputTarget::ConfigField(selected_field),
                             character,
@@ -961,6 +1098,19 @@ impl AppState {
     }
 
     pub(super) fn handle_config_paste_text(&mut self, text: &str) {
+        let provider_model = self.config_state.as_ref().and_then(|config_state| {
+            (!config_state.footer_selected
+                && config_state.selected_field == Some(ConfigField::ProviderModel))
+            .then(|| config_state.draft.provider_model.clone())
+        });
+        if let Some(current) = provider_model {
+            self.open_model_picker(ModelPickerTarget::Provider, &current);
+            self.last_notice = Some(
+                "pasted model ids require catalog admission; choose a model or press M".to_owned(),
+            );
+            return;
+        }
+
         let Some(config_state) = self.config_state.as_mut() else {
             return;
         };
@@ -987,7 +1137,11 @@ impl AppState {
         if value.is_empty() {
             return;
         }
-        let changed = if field == ConfigField::AppearanceColorOverride {
+        let changed = if field == ConfigField::ProviderApiKey {
+            let changed = config_state.draft.provider_api_key.expose_secret() != value;
+            config_state.draft.provider_api_key = SecretString::new(value);
+            changed
+        } else if field == ConfigField::AppearanceColorOverride {
             match config_state
                 .draft
                 .set_selected_appearance_color_override(value)
@@ -1019,6 +1173,11 @@ impl AppState {
         };
 
         let mut config_state = ConfigState::from_root_config(root_config);
+        config_state.current_session_route = self
+            .runtime
+            .model_route
+            .as_ref()
+            .map(|route| route.model_ref.clone());
         let (agents, agent_warnings) = self.discover_config_agents(root_config);
         config_state.set_agent_discovery(agents, agent_warnings);
         let (skills, warnings) = self.discover_config_skills(root_config);
@@ -1596,6 +1755,7 @@ impl AppState {
         self.append_control_to_current_session(ControlEntry::SessionIdentity {
             provider_name: self.runtime.provider_name.clone(),
             model_name: self.runtime.model_name.clone(),
+            resolved_model_route: self.runtime.model_route.clone(),
         })
     }
 
@@ -1659,27 +1819,80 @@ impl AppState {
             return Ok(None);
         };
 
-        let root_config = match config_state.draft.to_root_config() {
-            Ok(root_config) => root_config,
+        let next_base_root_config = match config_state.draft.to_base_root_config() {
+            Ok(root_config) => persisted_root_config(&root_config),
             Err(error) => {
                 self.last_notice = Some(error.to_string());
                 self.push_event("config:error", error.to_string());
                 return Ok(None);
             }
         };
-        persisted_root_config(&root_config).save(&self.config_path)?;
+        let connection_save = match config_state.draft.connection_save_draft() {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.last_notice = Some(error.to_string());
+                self.push_event("config:error", error.to_string());
+                return Ok(None);
+            }
+        };
+        let Some(expected_root_config) = self.config_snapshot.as_ref().cloned() else {
+            self.last_notice = Some("runtime config unavailable".to_owned());
+            return Ok(None);
+        };
+        let save_outcome = persist_connection_config(
+            persisted_root_config(&expected_root_config),
+            next_base_root_config,
+            self.config_path.clone(),
+            connection_save,
+        )?;
+        let ConnectionSaveOutcome {
+            root_config,
+            publish_outcome,
+            old_credential_cleanup_warning,
+        } = save_outcome;
         config_state.dirty = false;
         config_state.close_guard_armed = false;
         config_state.draft = ConfigDraft::from_root_config(&root_config);
+        config_state.draft_revision = config_state.draft_revision.saturating_add(1);
         config_state.sync_mcp_selection();
         self.apply_runtime_config_snapshot(&root_config);
-        self.last_notice = Some("saved config".to_owned());
+        self.last_notice = Some(match publish_outcome {
+            ConfigPublishOutcome::Published if old_credential_cleanup_warning => {
+                "saved config; an unreferenced stored credential needs cleanup".to_owned()
+            }
+            ConfigPublishOutcome::Published => "saved config".to_owned(),
+            ConfigPublishOutcome::PublishedDurabilityUncertain => {
+                "saved config; filesystem durability is uncertain, so old credentials were retained"
+                    .to_owned()
+            }
+            ConfigPublishOutcome::PublishedVisibilityUncertain { recovery_path } => recovery_path
+                .as_ref()
+                .map_or_else(
+                    || {
+                        "config replacement visibility is uncertain; inspect the config path before continuing"
+                            .to_owned()
+                    },
+                    |path| {
+                        format!(
+                            "config replacement visibility is uncertain; reconcile the previous config at {} before continuing",
+                            path.display()
+                        )
+                    },
+                ),
+        });
         self.push_event("config", format!("saved {}", self.config_path.display()));
+        let loaded = load_provider_connections(&root_config);
+        let default_model = loaded.default_model.as_ref();
         self.push_event(
             "config:model",
             format!(
                 "default {}/{}; current session unchanged",
-                root_config.agent.provider, root_config.agent.model
+                default_model
+                    .map(|model| model.connection_id.as_str())
+                    .unwrap_or("not_configured"),
+                default_model
+                    .map(|model| model.model_id.as_str())
+                    .unwrap_or("not_configured")
             ),
         );
         Ok(Some(AppAction::ConfigSaved {
@@ -1775,7 +1988,7 @@ impl AppState {
         Ok(Some(AppAction::RefreshMcpServer { server_name }))
     }
 
-    pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
+    pub(crate) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
         let info_rail_default_changed = self.config_snapshot.as_ref().is_none_or(|snapshot| {
             snapshot.appearance.info_rail != root_config.appearance.info_rail
         });
@@ -1791,6 +2004,7 @@ impl AppState {
         self.sigil_paths = sigil_paths;
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
+        self.schedule_connection_inventory_refresh(root_config);
         if info_rail_default_changed {
             self.info_rail_visible = root_config.appearance.info_rail;
         }
@@ -1805,10 +2019,6 @@ impl AppState {
         self.runtime.code_intelligence_diagnostics_line = None;
         self.runtime.code_intelligence_diagnostics_by_path.clear();
         self.runtime.mcp_server_statuses = initial_mcp_server_statuses(root_config);
-        if self.session_browser.current_entries.is_empty() {
-            self.runtime.provider_name = root_config.agent.provider.clone();
-            self.runtime.model_name = root_config.agent.model.clone();
-        }
         self.refresh_memory_summary();
         self.load_input_history();
         self.recompute_compaction_status(false);
@@ -1906,6 +2116,101 @@ impl AppState {
             lines.push(format!("... {} more checks", checks.len() - 4));
         }
         lines
+    }
+}
+
+fn persist_connection_config(
+    expected: RootConfig,
+    next_base: RootConfig,
+    config_path: PathBuf,
+    draft: ConnectionSaveDraft,
+) -> Result<ConnectionSaveOutcome> {
+    std::thread::Builder::new()
+        .name("sigil-config-save".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::new)?;
+            #[cfg(not(test))]
+            let credential_store = ConfiguredProviderCredentialStore::from_root_config(&next_base);
+            #[cfg(test)]
+            let credential_store = TestConfigCredentialStore::default();
+            #[cfg(test)]
+            let (config_path, _test_config_dir) = if config_path.is_absolute() {
+                (config_path, None)
+            } else {
+                let test_config_dir = tempfile::tempdir().map_err(anyhow::Error::new)?;
+                let test_config_path = test_config_dir.path().join("sigil.toml");
+                (test_config_path, Some(test_config_dir))
+            };
+            runtime
+                .block_on(save_connection_config_with_base(
+                    &expected,
+                    &next_base,
+                    &config_path,
+                    draft,
+                    &credential_store,
+                    &RootConfigPublisher,
+                ))
+                .map_err(anyhow::Error::new)
+        })
+        .map_err(anyhow::Error::new)?
+        .join()
+        .map_err(|_| anyhow::anyhow!("config save thread panicked"))?
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestConfigCredentialStore {
+    records: std::sync::Mutex<
+        std::collections::BTreeMap<
+            sigil_runtime::provider_connections::CredentialId,
+            sigil_runtime::provider_connections::ProviderCredentialRecord,
+        >,
+    >,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl sigil_runtime::provider_connections::ProviderCredentialStore for TestConfigCredentialStore {
+    async fn load(
+        &self,
+        credential_id: &sigil_runtime::provider_connections::CredentialId,
+    ) -> std::result::Result<
+        Option<sigil_runtime::provider_connections::ProviderCredentialRecord>,
+        sigil_runtime::provider_connections::ProviderCredentialError,
+    > {
+        Ok(self
+            .records
+            .lock()
+            .expect("test credential store lock")
+            .get(credential_id)
+            .cloned())
+    }
+
+    async fn store(
+        &self,
+        record: &sigil_runtime::provider_connections::ProviderCredentialRecord,
+    ) -> std::result::Result<(), sigil_runtime::provider_connections::ProviderCredentialError> {
+        self.records
+            .lock()
+            .expect("test credential store lock")
+            .insert(record.credential_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn delete(
+        &self,
+        credential_id: &sigil_runtime::provider_connections::CredentialId,
+    ) -> std::result::Result<bool, sigil_runtime::provider_connections::ProviderCredentialError>
+    {
+        Ok(self
+            .records
+            .lock()
+            .expect("test credential store lock")
+            .remove(credential_id)
+            .is_some())
     }
 }
 

@@ -72,6 +72,77 @@ pub struct DesktopSupportBundleExport {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderConfigMode {
+    LegacyV1,
+    V2,
+    Mixed,
+    UnsupportedFuture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderModelRef {
+    pub connection_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderCredentialSource {
+    Environment,
+    SystemKeyring,
+    Stored,
+    None,
+    LegacyPlaintext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderConnectionReadiness {
+    Ready,
+    NeedsCredential,
+    CredentialUnavailable,
+    NeedsModel,
+    Unverified,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderConnectionIssue {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderConnectionEntry {
+    pub id: String,
+    pub label: String,
+    pub provider_label: String,
+    pub protocol_label: String,
+    pub endpoint_display: String,
+    pub credential_source: DesktopProviderCredentialSource,
+    pub readiness: DesktopProviderConnectionReadiness,
+    #[serde(default)]
+    pub default_model: Option<DesktopProviderModelRef>,
+    #[serde(default)]
+    pub issue: Option<DesktopProviderConnectionIssue>,
+}
+
+/// Secret-free provider settings projection owned by native Rust code.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderConnectionInventory {
+    pub config_mode: DesktopProviderConfigMode,
+    #[serde(default)]
+    pub default_model: Option<DesktopProviderModelRef>,
+    pub connections: Vec<DesktopProviderConnectionEntry>,
+    pub issues: Vec<DesktopProviderConnectionIssue>,
+}
+
 /// Request body for creating one process-local session handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
@@ -79,9 +150,9 @@ pub struct DesktopSessionCreateRequest {
     /// Optional user-visible label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Optional model for the new durable session.
+    /// Optional exact connection/model identity for the new durable session.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
+    pub model_ref: Option<DesktopProviderModelRef>,
 }
 
 /// Request body for reopening one durable catalog entry.
@@ -477,6 +548,14 @@ pub enum DesktopConversationDisplayAssistantPhase {
     FinalAnswer,
 }
 
+/// User-selected skill bound to one durable prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationDisplaySkillReference {
+    pub id: String,
+    pub name: String,
+}
+
 /// User decision recorded for one approval item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -514,6 +593,8 @@ pub enum DesktopConversationDisplayContent {
         role: DesktopConversationDisplayMessageRole,
         #[serde(default)]
         text: Option<String>,
+        #[serde(default)]
+        skill: Option<DesktopConversationDisplaySkillReference>,
         #[serde(default)]
         assistant_phase: Option<DesktopConversationDisplayAssistantPhase>,
         image_attachment_count: u64,
@@ -774,7 +855,7 @@ pub enum DesktopPermissionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopModelSelectionPolicy {
-    PerRun,
+    FreshSession,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -890,6 +971,11 @@ pub enum DesktopReasoningEffort {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopApplicationModelOption {
+    pub model_ref: DesktopProviderModelRef,
+    pub display_name: String,
+    pub availability: String,
+    pub recommendation: String,
+    pub provenance: String,
     pub model_name: String,
     pub available_reasoning_efforts: Vec<DesktopReasoningEffort>,
     #[serde(default)]
@@ -902,9 +988,9 @@ pub struct DesktopApplicationModelOption {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopRunContextView {
+    pub model_ref: DesktopProviderModelRef,
     pub provider_name: String,
     pub model_name: String,
-    pub available_models: Vec<String>,
     pub model_options: Vec<DesktopApplicationModelOption>,
     pub model_selection: DesktopModelSelectionPolicy,
     pub model_selection_binding: String,
@@ -1393,6 +1479,7 @@ pub enum DesktopConversationRecoveryCommandAction {
     },
     ForkConversation {
         source_turn_digest: String,
+        model_ref: DesktopProviderModelRef,
     },
 }
 

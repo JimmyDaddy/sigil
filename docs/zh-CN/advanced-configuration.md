@@ -47,7 +47,7 @@ effect = "read_only"
 
 <!-- public-doc-topic: skills-agents -->
 
-可复用的工作区技能、命令、子智能体和插件分别位于 `.sigil/skills`、`.sigil/commands`、`.sigil/agents` 和 `.sigil/plugins`。用户资源和兼容格式导入由 `[skills]` 控制。允许导入的指令参与工作前，请先检查其内容。
+Sigil 原生的可复用工作区技能、命令、子智能体和插件分别位于 `.sigil/skills`、`.sigil/commands`、`.sigil/agents` 和 `.sigil/plugins`。默认还会发现标准 `.agents/skills`、Codex `.codex/agents`、OpenCode `.opencode/{skills,commands,agents}` 和 Claude Code `.claude/{skills,commands,agents}` 资源；同名时 Sigil 原生资源优先。兼容资源继承工作区信任，不再要求逐项审查或启用；兼容 command 通过 `/名称` 调用，agent 通过 `@名称` 手动调用并保持只读。设置 `[skills].compatibility_auto_discover = false` 可关闭默认集合，也可以通过 `compatibility_sources` 添加或精确选择来源。
 
 ## 上下文精简与代码智能
 

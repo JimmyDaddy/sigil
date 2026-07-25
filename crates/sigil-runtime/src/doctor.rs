@@ -8,7 +8,7 @@ use sigil_kernel::{
     AppearanceConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
     PluginCapability, PluginHookKind, PluginTrustDecision, PluginTrustEntry, RootConfig,
     SessionStreamCompatibilityError, SessionStreamRecord, ToolEffect, config::TerminalConfig,
-    resolve_workspace_root,
+    default_user_config_path, private_path_permissions_are_restricted, resolve_workspace_root,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -190,6 +190,88 @@ pub fn build_doctor_report_with_options(
             return report;
         }
     };
+
+    if matches!(
+        private_path_permissions_are_restricted(config_path),
+        Ok(false)
+    ) {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "config:permissions",
+            "config permissions allow access beyond the current user",
+            Some("save Provider settings again to atomically tighten config permissions"),
+        );
+    }
+    if default_user_config_path()
+        .ok()
+        .as_deref()
+        .is_some_and(|default_path| default_path == config_path)
+        && config_path.parent().is_some_and(|parent| {
+            matches!(private_path_permissions_are_restricted(parent), Ok(false))
+        })
+    {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "config:parent_permissions",
+            "the Sigil config directory allows access beyond the current user",
+            Some("save Provider settings again to tighten the Sigil config directory"),
+        );
+    }
+    if let Ok(credential_path) =
+        crate::provider_connections::FileProviderCredentialStore::default_path()
+    {
+        match fs::symlink_metadata(&credential_path) {
+            Ok(_) => {
+                match private_path_permissions_are_restricted(&credential_path) {
+                    Ok(true) => {}
+                    Ok(false) => report.push_with_remediation(
+                        DoctorStatus::Warn,
+                        "credential_store:permissions",
+                        "the Sigil credential file allows access beyond the current user",
+                        Some(
+                            "open Provider settings and save a credential again to tighten permissions",
+                        ),
+                    ),
+                    Err(_) => report.push_with_remediation(
+                        DoctorStatus::Error,
+                        "credential_store:path_invalid",
+                        "the Sigil credential path is unsafe or could not be inspected",
+                        Some(
+                            "replace the credential path with a regular owner-only file, then save Provider settings again",
+                        ),
+                    ),
+                }
+                if let Some(parent) = credential_path.parent() {
+                    match private_path_permissions_are_restricted(parent) {
+                        Ok(true) => {}
+                        Ok(false) => report.push_with_remediation(
+                            DoctorStatus::Warn,
+                            "credential_store:parent_permissions",
+                            "the Sigil credential directory allows access beyond the current user",
+                            Some(
+                                "open Provider settings and save a credential again to tighten the directory",
+                            ),
+                        ),
+                        Err(_) => report.push_with_remediation(
+                            DoctorStatus::Error,
+                            "credential_store:parent_invalid",
+                            "the Sigil credential directory could not be inspected safely",
+                            Some(
+                                "repair the credential directory and rerun `sigil doctor`",
+                            ),
+                        ),
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => report.push_with_remediation(
+                DoctorStatus::Error,
+                "credential_store:inspection_failed",
+                "the Sigil credential path could not be inspected",
+                Some("repair the credential path and rerun `sigil doctor`"),
+            ),
+        }
+    }
 
     if let Some(appearance_checks) = options.appearance_checks {
         report

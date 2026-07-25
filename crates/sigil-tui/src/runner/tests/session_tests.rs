@@ -16,7 +16,8 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, spawn_test_worker, test_root_config, wait_for_session_entry,
+        PlannedProvider, StreamPlan, routed_session_identity, routed_test_root_config,
+        spawn_test_worker, test_root_config, wait_for_session_entry,
     },
 };
 
@@ -80,6 +81,7 @@ fn prepare_resumable_image_session(
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "image-capturing".to_owned(),
         model_name: "vision-model".to_owned(),
+        resolved_model_route: None,
     }))?;
     let mut user = ModelMessage::user("inspect this image");
     user.image_attachments.push(attachment);
@@ -153,6 +155,7 @@ fn worker_previews_and_executes_exact_checkpoint_restore() -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "default-provider".to_owned(),
         model_name: "default-model".to_owned(),
+        resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
     let recorder = MutationEventRecorder::new(store.clone());
@@ -223,11 +226,12 @@ fn worker_forks_complete_conversation_and_switches_to_destination() -> Result<()
     let note = workspace_root.join("note.txt");
     fs::write(&note, "before\n")?;
     let session_log_path = temp.path().join(".sigil/sessions/session-source.jsonl");
+    let root_config = routed_test_root_config(&workspace_root, "default-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "default-provider".to_owned(),
-        model_name: "default-model".to_owned(),
-    }))?;
+    store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "default-model",
+    )?))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
     let recorder = MutationEventRecorder::new(store.clone());
     write_file_with_mutation(
@@ -264,7 +268,6 @@ fn worker_forks_complete_conversation_and_switches_to_destination() -> Result<()
         checkpoint_id: checkpoint.checkpoint_id,
         checkpoint_digest: checkpoint.checkpoint_digest,
     };
-    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
     let agent = Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
     let parent_before = fs::read(&session_log_path)?;
@@ -378,15 +381,15 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
     let workspace_root = temp.path().to_path_buf();
     let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
     let restore_log_path = temp.path().join(".sigil/sessions/session-restored.jsonl");
-    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let root_config = routed_test_root_config(&workspace_root, "restored-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
 
     let restore_store = JsonlSessionStore::new(&restore_log_path)?;
-    restore_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "restored-provider".to_owned(),
-        model_name: "restored-model".to_owned(),
-    }))?;
+    restore_store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "restored-model",
+    )?))?;
     restore_store.append(&SessionLogEntry::User(ModelMessage::user(
         "restored prompt",
     )))?;
@@ -406,7 +409,7 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
             ref entries,
         }
             if session_log_path == &restore_log_path
-                && provider_name == "restored-provider"
+                && provider_name == "deepseek"
                 && model_name == "restored-model"
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("restored prompt")))
     ));
@@ -421,7 +424,7 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
     let workspace_root = temp.path().to_path_buf();
     let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
     let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
-    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let root_config = routed_test_root_config(&workspace_root, "default-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
 
@@ -441,7 +444,7 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
             ref entries,
         }
             if session_log_path == &new_log_path
-                && provider_name == "default-provider"
+                && provider_name == "deepseek"
                 && model_name == "default-model"
                 && entries.len() == 1
                 && matches!(entries[0], SessionLogEntry::Control(ControlEntry::SessionIdentity { .. }))
@@ -460,14 +463,14 @@ fn start_new_session_carries_workspace_trust_decision() -> Result<()> {
     let workspace_id = stable_workspace_id(&workspace_root)?;
     let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
     let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
-    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let root_config = routed_test_root_config(&workspace_root, "default-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let current_store = JsonlSessionStore::new(&current_log_path)?;
-    current_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "default-provider".to_owned(),
-        model_name: "default-model".to_owned(),
-    }))?;
+    current_store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "default-model",
+    )?))?;
     current_store.append(&SessionLogEntry::Control(
         ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
             workspace_id: workspace_id.clone(),
@@ -697,7 +700,7 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
     let invalid_log_path = temp.path().join(".sigil/sessions");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let root_config = routed_test_root_config(&workspace_root, "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
@@ -729,7 +732,7 @@ fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
             .expect("invalid log path should have parent"),
     )?;
     fs::write(&invalid_log_path, "{not-json}\n")?;
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let root_config = routed_test_root_config(&workspace_root, "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
@@ -748,7 +751,7 @@ fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
             ref model_name,
             ref entries,
         } if session_log_path == &invalid_log_path
-            && provider_name == "planned"
+            && provider_name == "deepseek"
             && model_name == "planned-model"
             && entries.iter().any(|entry| matches!(
                 entry,

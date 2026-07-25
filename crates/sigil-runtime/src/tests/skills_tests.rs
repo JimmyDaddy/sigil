@@ -27,6 +27,7 @@ use super::{
     LOAD_SKILL_TOOL_NAME, SkillDiscoveryWarningKind, discover_skill_index,
     discover_skill_index_with_user_dir, namespaced_plugin_skill_id, register_skill_tools,
 };
+use crate::skills::compatibility_stable_id;
 
 struct LoadSkillProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -305,6 +306,7 @@ description: Compatibility skill.
 "#,
     );
     let disabled_config = SkillConfig {
+        compatibility_auto_discover: false,
         compatibility_sources: Vec::new(),
         ..SkillConfig::default()
     };
@@ -314,6 +316,7 @@ description: Compatibility skill.
     assert!(disabled.snapshot.descriptors.is_empty());
 
     let enabled_config = SkillConfig {
+        compatibility_auto_discover: false,
         compatibility_sources: vec!["claude".to_owned()],
         ..SkillConfig::default()
     };
@@ -323,6 +326,142 @@ description: Compatibility skill.
         descriptor(&enabled, "reviewer").description,
         "Compatibility skill."
     );
+}
+
+#[test]
+fn default_discovery_imports_standard_opencode_and_claude_assets_with_stable_unicode_ids() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".agents/skills/story/SKILL.md"),
+        r#"---
+name: story
+description: Shared agent skill.
+---
+
+# Story
+"#,
+    );
+    write_skill(
+        workspace.path().join(".opencode/skills/research/SKILL.md"),
+        r#"---
+name: research
+description: OpenCode skill.
+---
+
+# Research
+"#,
+    );
+    write_skill(
+        workspace.path().join(".opencode/commands/规划章节.md"),
+        r#"---
+description: Plan one chapter.
+agent: 规划师
+---
+Create a chapter plan.
+"#,
+    );
+    write_skill(
+        workspace.path().join(".claude/commands/规划章节.md"),
+        r#"---
+description: Shadowed Claude command.
+---
+Create a Claude chapter plan.
+"#,
+    );
+    write_skill(
+        workspace.path().join(".opencode/agents/规划师.md"),
+        r#"---
+description: OpenCode planning agent.
+mode: subagent
+---
+Plan without drafting prose.
+"#,
+    );
+    write_skill(
+        workspace.path().join(".claude/agents/规划师.md"),
+        r#"---
+name: 规划师
+description: Shadowed Claude planning agent.
+tools: Read, Edit, Grep, Glob
+---
+Plan with Claude conventions.
+"#,
+    );
+
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("default compatibility discovery should succeed");
+    let command_id = compatibility_stable_id("compat-command", "规划章节");
+    let agent_id = compatibility_stable_id("compat-agent", "规划师");
+
+    assert_eq!(
+        descriptor(&report, "story").description,
+        "Shared agent skill."
+    );
+    assert_eq!(
+        descriptor(&report, "research").description,
+        "OpenCode skill."
+    );
+    let command = descriptor(&report, &command_id);
+    assert_eq!(command.name, "规划章节");
+    assert_eq!(command.trust, SkillTrustState::Trusted);
+    assert_eq!(command.agent.as_deref(), Some("规划师"));
+    assert!(
+        command
+            .entrypoint
+            .starts_with(Path::new(".opencode/commands"))
+    );
+    let agent = descriptor(&report, &agent_id);
+    assert_eq!(agent.name, "规划师");
+    assert_eq!(agent.trust, SkillTrustState::Trusted);
+    assert_eq!(agent.run_as, SkillRunMode::ChildSession);
+    assert!(agent.entrypoint.starts_with(Path::new(".opencode/agents")));
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == SkillDiscoveryWarningKind::Shadowed)
+            .count(),
+        2
+    );
+
+    let disabled = discover_skill_index(
+        workspace.path(),
+        &SkillConfig {
+            compatibility_auto_discover: false,
+            compatibility_sources: Vec::new(),
+            ..SkillConfig::default()
+        },
+    )
+    .expect("explicit empty compatibility sources should disable foreign discovery");
+    assert!(disabled.snapshot.descriptors.is_empty());
+}
+
+#[test]
+fn claude_tool_names_are_mapped_to_sigil_tool_scope() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".claude/agents/reviewer.md"),
+        r#"---
+name: reviewer
+description: Claude reviewer.
+tools: Read, Edit, Grep, Glob, WebSearch, UnknownForeignTool
+---
+Review the workspace.
+"#,
+    );
+
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("Claude compatibility discovery should succeed");
+    let reviewer = descriptor(&report, "reviewer");
+
+    for tool in ["read_file", "write_file", "grep", "glob", "websearch"] {
+        assert!(
+            reviewer.allowed_tools.names.contains(tool),
+            "{tool} should be mapped"
+        );
+    }
+    assert!(!reviewer.allowed_tools.names.contains("Read"));
+    assert!(!reviewer.allowed_tools.names.contains("unknownforeigntool"));
 }
 
 #[test]
@@ -1542,12 +1681,24 @@ fn descriptor<'a>(
     report: &'a super::SkillDiscoveryReport,
     id: &str,
 ) -> &'a sigil_kernel::SkillDescriptor {
-    report
+    if let Some(descriptor) = report
         .snapshot
         .descriptors
         .iter()
         .find(|descriptor| descriptor.id == id)
-        .expect("descriptor should exist")
+    {
+        return descriptor;
+    }
+    panic!(
+        "descriptor {id:?} should exist; discovered={:?}; warnings={:?}",
+        report
+            .snapshot
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect::<Vec<_>>(),
+        report.warnings
+    )
 }
 
 fn tool_call(id: &str, args_json: &str) -> ToolCall {

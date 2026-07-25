@@ -82,6 +82,7 @@ impl AgentToolRuntime {
         } else {
             let batch_args = parsed.batch_spawn_args();
             self.spawn_agents(session, call, &batch_args, options, handler)
+                .await
         };
         self.delegation_run_context = previous_context;
         result

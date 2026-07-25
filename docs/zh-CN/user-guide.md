@@ -1,4 +1,4 @@
-<!-- public-doc-role: user-guide; authority: tui-daily-use-authority; sections: start,headless-and-local-api-workflows,main-screen,common-controls,image-attachments,slash-commands,config-panel,web-search-and-fetch,planned-tasks,approvals-and-file-changes,sessions-and-recovery,long-context-and-compaction,code-intelligence; cta: open-reference -->
+<!-- public-doc-role: user-guide; authority: tui-daily-use-authority; sections: start,headless-and-local-api-workflows,main-screen,common-controls,rich-conversation-content,image-attachments,slash-commands,config-panel,web-search-and-fetch,planned-tasks,approvals-and-file-changes,sessions-and-recovery,long-context-and-compaction,code-intelligence; cta: open-reference -->
 
 # Sigil TUI 用户指南
 
@@ -33,6 +33,14 @@ TUI 是日常使用的主界面。`sigil run` 为脚本提供文本、JSON 或 J
 拖选会话文本后按 `Ctrl-C`，可以在剪贴板集成可用时复制选区。`Ctrl-L` 会优先复制现有选区；没有选区时才复制最新的助手回复。这两种复制方式都只读取会话内容，不会把信息栏一起复制。没有选区时，`Ctrl-C` 仍用于取消运行或退出。
 
 鼠标还支持滚动、输入框定位、审批控件、菜单、会话列表、活动和工具卡片展开。终端复制、键盘、鼠标、tmux 与 SSH 检查见[终端兼容性](terminal-compatibility.md)。
+
+## 富对话内容
+
+Sigil 始终把原始 Markdown 作为持久化消息；标题、列表、表格、任务列表、链接、代码、行内公式、块公式和已经闭合的 Mermaid fence 都只是展示投影。异常或仍在流式生成的 fence 只影响实时尾部，不会改写已保存的回复，也不会吞掉后续会话。
+
+桌面端使用 KaTeX 在本机渲染公式，并在有大小限制的本地图表查看器中显示已闭合的 Mermaid。它不会加载远程图表资源，也不会开启 Mermaid 链接、回调、raw HTML 或脚本。公式或图表失败时只对当前块降级，并始终保留可复制源码。
+
+TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显示为带标签的 LaTeX 源码，Mermaid 显示为包含类型、状态、摘要和可选源码的图表区块。没有更高优先级的 `Ctrl-O` 操作时，按 `Ctrl-O` 可切换最近一张图表的源码；`Ctrl-L` 仍复制最新助手回复的原始内容。宽表格和代码只在局部内容区域处理，不会撑宽整个会话记录。
 
 ## 图片附件
 

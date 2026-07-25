@@ -443,6 +443,18 @@ impl AppState {
                                 Some("delete preview is unavailable; review it again".to_owned());
                             return None;
                         }
+                        let current_model_route = if action == SessionModalAction::Fork {
+                            let Some(route) = self.runtime.model_route.clone() else {
+                                self.last_notice = Some(
+                                    "cannot fork because the current model route is unavailable"
+                                        .to_owned(),
+                                );
+                                return None;
+                            };
+                            Some(route)
+                        } else {
+                            None
+                        };
                         let request_id = self.next_background_request_id();
                         if let Some(ModalState::SessionActions(state)) = self.modal_state.as_mut() {
                             state.request_id = request_id;
@@ -471,6 +483,8 @@ impl AppState {
                             SessionModalAction::Fork => Some(AppAction::ForkLocalSession {
                                 request_id,
                                 source_path: target_path,
+                                current_model_route: current_model_route
+                                    .expect("fork route checked before dispatch"),
                             }),
                             SessionModalAction::Export => Some(AppAction::ExportLocalSession {
                                 request_id,

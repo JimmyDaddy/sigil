@@ -22,16 +22,16 @@ use sigil_kernel::{
     AgentRunOutcome, AgentRunTerminalReason, AgentThreadId, AgentThreadTerminalStatus,
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, ChangeSet, ChangeSetFile,
     ChangeSetFileAction, ChangeSetId, ChangeSetRisk, CompactionConfig, CompletionRequest,
-    ControlEntry, ConversationInputQueueId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    ConnectionId, ControlEntry, ConversationInputQueueId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DelegationAuthority, DelegationAuthorityRecord, EventHandler, IntegrationBaseRepresentation,
     IntegrationContentClass, IntegrationEffect, IntegrationObservedEffect, IntegrationPlanId,
     IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
     IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
-    MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
-    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact,
-    TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    ModelRef, MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport,
+    ResolvedModelRoute, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
+    SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
     TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose,
@@ -952,6 +952,7 @@ impl Provider for ResultReplayProvider {
 
 fn root_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -962,6 +963,7 @@ fn root_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(12),
             tool_timeout_secs: 45,
@@ -983,6 +985,7 @@ fn root_config() -> RootConfig {
                 "base_url": "https://example.com",
             }),
         )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -4242,7 +4245,15 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
         ),
         Agent::new(Box::new(ResultReplayProvider), ToolRegistry::new()),
     );
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let model_ref = ModelRef::new(ConnectionId::new("deepseek-primary")?, "deepseek-v4-flash")?;
+    let route = ResolvedModelRoute::new(
+        model_ref.clone(),
+        "deepseek",
+        "deepseek",
+        "sha256:agent-run-context",
+    )?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new_with_route("deepseek", route).with_store(store.clone());
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -4285,6 +4296,28 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
             .as_ref()
             .map(|context| context.provider_capability_hash.as_str()),
         Some(expected_hash.as_str())
+    );
+    assert_eq!(
+        thread
+            .run_context
+            .as_ref()
+            .and_then(|context| context.model_ref.as_ref()),
+        Some(&model_ref)
+    );
+    drop(session);
+    let restored = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let restored_thread = restored
+        .agent_thread_state_projection()
+        .threads
+        .into_values()
+        .next()
+        .expect("persisted agent thread projected");
+    assert_eq!(
+        restored_thread
+            .run_context
+            .as_ref()
+            .and_then(|context| context.model_ref.as_ref()),
+        Some(&model_ref)
     );
     Ok(())
 }

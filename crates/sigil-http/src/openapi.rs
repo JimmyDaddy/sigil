@@ -77,6 +77,17 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/settings/provider-connections": {
+                "get": {
+                    "summary": "Read secret-free provider connection settings",
+                    "description": "Returns connection identity, readiness, credential source classification, and the compound saved default. Credential values, stored-credential identifiers, raw private endpoints, config paths, and provider-private JSON are excluded.",
+                    "responses": {
+                        "200": { "description": "Native-owner provider connection inventory", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderConnectionInventory" } } } },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "Read this authenticated local API description",
@@ -823,7 +834,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics", "provider_connections"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -837,7 +848,86 @@ pub fn http_openapi_document() -> Value {
                         "verification": { "type": "boolean" },
                         "run_context": { "type": "boolean" },
                         "agent_activity": { "type": "boolean" },
-                        "support_diagnostics": { "type": "boolean" }
+                        "support_diagnostics": { "type": "boolean" },
+                        "provider_connections": { "type": "boolean" }
+                    }
+                },
+                "ProviderConfigMode": {
+                    "type": "string",
+                    "enum": ["legacy_v1", "v2", "mixed", "unsupported_future"]
+                },
+                "ProviderModelRef": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["connection_id", "model_id"],
+                    "properties": {
+                        "connection_id": { "type": "string" },
+                        "model_id": { "type": "string" }
+                    }
+                },
+                "ProviderCredentialSource": {
+                    "type": "string",
+                    "enum": ["environment", "system_keyring", "stored", "none", "legacy_plaintext"]
+                },
+                "ProviderConnectionReadiness": {
+                    "type": "string",
+                    "enum": ["ready", "needs_credential", "credential_unavailable", "needs_model", "unverified", "invalid"]
+                },
+                "ProviderConnectionIssue": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["code", "message"],
+                    "properties": {
+                        "code": { "type": "string" },
+                        "message": { "type": "string" }
+                    }
+                },
+                "ProviderConnectionEntry": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "label", "provider_label", "protocol_label", "endpoint_display", "credential_source", "readiness"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "label": { "type": "string" },
+                        "provider_label": { "type": "string" },
+                        "protocol_label": { "type": "string" },
+                        "endpoint_display": { "type": "string" },
+                        "credential_source": { "$ref": "#/components/schemas/ProviderCredentialSource" },
+                        "readiness": { "$ref": "#/components/schemas/ProviderConnectionReadiness" },
+                        "default_model": {
+                            "anyOf": [
+                                { "$ref": "#/components/schemas/ProviderModelRef" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "issue": {
+                            "anyOf": [
+                                { "$ref": "#/components/schemas/ProviderConnectionIssue" },
+                                { "type": "null" }
+                            ]
+                        }
+                    }
+                },
+                "ProviderConnectionInventory": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["config_mode", "connections", "issues"],
+                    "properties": {
+                        "config_mode": { "$ref": "#/components/schemas/ProviderConfigMode" },
+                        "default_model": {
+                            "anyOf": [
+                                { "$ref": "#/components/schemas/ProviderModelRef" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "connections": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ProviderConnectionEntry" }
+                        },
+                        "issues": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ProviderConnectionIssue" }
+                        }
                     }
                 },
                 "SupportStatus": {
@@ -1119,6 +1209,15 @@ pub fn http_openapi_document() -> Value {
                     "type": "string",
                     "enum": ["recorded", "requested", "waiting_for_approval", "approved", "denied", "completed", "succeeded", "failed", "cancelled", "interrupted", "blocked"]
                 },
+                "ConversationDisplaySkillReference": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "name"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
                 "ConversationDisplayContent": {
                     "oneOf": [
                         {
@@ -1129,6 +1228,12 @@ pub fn http_openapi_document() -> Value {
                                 "type": { "const": "message" },
                                 "role": { "type": "string", "enum": ["user", "assistant"] },
                                 "text": { "type": ["string", "null"], "maxLength": 65536 },
+                                "skill": {
+                                    "anyOf": [
+                                        { "$ref": "#/components/schemas/ConversationDisplaySkillReference" },
+                                        { "type": "null" }
+                                    ]
+                                },
                                 "assistant_phase": { "type": ["string", "null"], "enum": ["tool_preamble", "progress", "final_answer", null] },
                                 "image_attachment_count": { "type": "integer", "format": "uint64" },
                                 "truncated": { "type": "boolean" },
@@ -1634,10 +1739,11 @@ pub fn http_openapi_document() -> Value {
                 "ConversationRecoveryForkAction": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["kind", "source_turn_digest"],
+                    "required": ["kind", "source_turn_digest", "model_ref"],
                     "properties": {
                         "kind": { "type": "string", "const": "fork_conversation" },
-                        "source_turn_digest": { "type": "string", "minLength": 1, "maxLength": 512 }
+                        "source_turn_digest": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" }
                     }
                 },
                 "ConversationRecoveryCommandAction": {
@@ -1948,8 +2054,13 @@ pub fn http_openapi_document() -> Value {
                 "ApplicationModelOption": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["model_name", "available_reasoning_efforts"],
+                    "required": ["model_ref", "display_name", "availability", "recommendation", "provenance", "model_name", "available_reasoning_efforts"],
                     "properties": {
+                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
+                        "display_name": { "type": "string" },
+                        "availability": { "type": "string", "enum": ["available", "unverified", "configured_unavailable"] },
+                        "recommendation": { "type": "string", "enum": ["recommended", "standard"] },
+                        "provenance": { "type": "string", "enum": ["remote", "cache", "bundled", "configured", "manual"] },
                         "model_name": { "type": "string" },
                         "available_reasoning_efforts": {
                             "type": "array",
@@ -1963,22 +2074,17 @@ pub fn http_openapi_document() -> Value {
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["provider_name", "model_name", "available_models", "model_options", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
+                    "required": ["model_ref", "provider_name", "model_name", "model_options", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
                     "properties": {
+                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
                         "provider_name": { "type": "string" },
                         "model_name": { "type": "string" },
-                        "available_models": {
-                            "type": "array",
-                            "minItems": 1,
-                            "uniqueItems": true,
-                            "items": { "type": "string" }
-                        },
                         "model_options": {
                             "type": "array",
                             "minItems": 1,
                             "items": { "$ref": "#/components/schemas/ApplicationModelOption" }
                         },
-                        "model_selection": { "type": "string", "enum": ["per_run"] },
+                        "model_selection": { "type": "string", "enum": ["fresh_session"] },
                         "model_selection_binding": { "type": "string" },
                         "default_permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "available_permission_modes": {

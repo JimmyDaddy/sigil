@@ -124,7 +124,13 @@ impl AppState {
             UiCommand::FocusLatestToolCard => self.focus_latest_tool_card(),
             UiCommand::SelectNextToolCard => self.select_adjacent_tool_card(true),
             UiCommand::SelectPreviousToolCard => self.select_adjacent_tool_card(false),
-            UiCommand::ToggleSelectedToolCard => self.toggle_selected_tool_card(),
+            UiCommand::ToggleSelectedToolCard => {
+                if self.has_tool_cards() {
+                    self.toggle_selected_tool_card()
+                } else {
+                    self.toggle_latest_diagram_entry()
+                }
+            }
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::CancelFocusedTerminalTask => false,
             UiCommand::SubmitPrompt

@@ -7,6 +7,36 @@ fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     config
 }
 
+fn multi_connection_v2_config() -> Result<RootConfig> {
+    use sigil_runtime::provider_connections::{
+        ProviderFamily, ProviderProtocol, materialize_v2_root_config, provider_connection_template,
+    };
+
+    let openai = provider_connection_template(
+        ProviderFamily::OpenAi,
+        ProviderProtocol::OpenAiResponses,
+        sigil_kernel::ConnectionId::new("openai-personal")?,
+        "OpenAI personal",
+    )?
+    .0;
+    let deepseek = provider_connection_template(
+        ProviderFamily::DeepSeek,
+        ProviderProtocol::DeepSeek,
+        sigil_kernel::ConnectionId::new("deepseek-team")?,
+        "DeepSeek team",
+    )?
+    .0;
+    let default_model = sigil_kernel::ModelRef::new(openai.id.clone(), "gpt-5")?;
+    materialize_v2_root_config(
+        &test_config(),
+        &std::collections::BTreeMap::from([
+            (openai.id.clone(), openai),
+            (deepseek.id.clone(), deepseek),
+        ]),
+        &default_model,
+    )
+}
+
 fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
     let path = workspace_root
         .join(".sigil")
@@ -723,14 +753,14 @@ fn model_command_switches_runtime_model_and_starts_fresh_session() -> Result<()>
 
     assert!(matches!(
         action,
-        Some(AppAction::RuntimeConfigUpdated { .. })
+        Some(AppAction::StartNewModelSession { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_ne!(app.session_id, previous_session_id);
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("model -> deepseek-v4-pro"))
+            .any(|entry| entry.text.contains("route ->") && entry.text.contains("deepseek-v4-pro"))
     );
     Ok(())
 }
@@ -1175,27 +1205,126 @@ fn slash_selector_offers_model_candidates_and_completes_argument() -> Result<()>
 
     let rows = app.slash_selector_rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, "pro");
+    assert_eq!(rows[0].0, "deepseek-v4-pro");
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert_eq!(app.composer.input, "/model deepseek-v4-pro");
+    assert_eq!(
+        app.composer.input,
+        "/model deepseek-default/deepseek-v4-pro"
+    );
     Ok(())
 }
 
 #[test]
-fn slash_selector_includes_custom_current_model_when_query_matches() {
+fn slash_model_groups_exact_connection_models_without_cross_provider_fallbacks() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _openai_key =
+        crate::test_env::EnvScope::set("SIGIL_OPENAI_RESPONSES_API_KEY", "openai-test-key");
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
+    let config = multi_connection_v2_config()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.composer.input = "/model".to_owned();
+
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(_, detail)| {
+        detail.contains("OpenAI personal") && detail.contains("openai-personal/gpt-")
+    }));
+    assert!(rows.iter().any(|(_, detail)| {
+        detail.contains("DeepSeek team") && detail.contains("deepseek-team/deepseek-")
+    }));
+    assert!(rows.iter().all(|(model, detail)| {
+        !detail.contains("OpenAI personal") || !model.starts_with("deepseek-")
+    }));
+    assert!(rows.iter().all(|(model, detail)| {
+        !detail.contains("DeepSeek team") || model.starts_with("deepseek-")
+    }));
+    Ok(())
+}
+
+#[test]
+fn slash_model_default_key_changes_saved_route_without_mutating_current_session() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _openai_key =
+        crate::test_env::EnvScope::set("SIGIL_OPENAI_RESPONSES_API_KEY", "openai-test-key");
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
+    let config = multi_connection_v2_config()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let current_route = app.runtime.model_route.clone();
+    let current_session_id = app.session_id.clone();
+    app.composer.input = "/model deepseek-team/deepseek-v4-pro".to_owned();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE))?;
+    let Some(AppAction::SetDefaultModel { root_config, .. }) = action else {
+        panic!("D should create an independent saved-default mutation");
+    };
+    assert_eq!(
+        root_config.agent.connection.as_ref().map(|id| id.as_str()),
+        Some("deepseek-team")
+    );
+    assert_eq!(root_config.agent.model, "deepseek-v4-pro");
+    assert_eq!(app.runtime.model_route, current_route);
+    assert_eq!(app.session_id, current_session_id);
+    Ok(())
+}
+
+#[test]
+fn slash_selector_includes_custom_current_model_when_query_matches() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let root_config = app
+        .root_config_snapshot()
+        .expect("root config snapshot")
+        .clone();
+    let custom_ref = sigil_kernel::ModelRef::new(
+        sigil_kernel::ConnectionId::new("deepseek-default")?,
+        "custom-current-model",
+    )?;
+    app.runtime.model_route = Some(
+        sigil_runtime::provider_connections::resolve_model_route(&root_config, &custom_ref)
+            .map_err(anyhow::Error::new)?
+            .1,
+    );
     app.runtime.model_name = "custom-current-model".to_owned();
     app.composer.input = "/model custom".to_owned();
 
     let rows = app.slash_selector_rows();
 
-    assert_eq!(rows.first().map(|row| row.0.as_str()), Some("current"));
+    assert_eq!(
+        rows.first().map(|row| row.0.as_str()),
+        Some("custom-current-model")
+    );
     assert!(
         rows.first()
-            .map(|row| row.1.contains("custom-current-model"))
+            .map(|row| row.1.contains("current session"))
             .unwrap_or(false)
     );
+    Ok(())
+}
+
+#[test]
+fn slash_model_omits_and_rejects_routes_from_a_cached_unready_connection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let inventory = app
+        .runtime
+        .connection_inventory
+        .as_mut()
+        .expect("offline inventory should be initialized");
+    let current = inventory
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id.as_str() == "deepseek-default")
+        .expect("current connection inventory row");
+    current.readiness = sigil_runtime::provider_connections::ConnectionReadiness::NeedsCredential;
+    let previous_session_id = app.session_id.clone();
+
+    app.composer.input = "/model custom".to_owned();
+    assert!(app.slash_selector_rows().is_empty());
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.session_id, previous_session_id);
+    assert_eq!(
+        app.last_notice(),
+        Some("connection deepseek-default is not ready; open /config to repair authentication")
+    );
+    Ok(())
 }
 
 #[test]
@@ -1226,7 +1355,7 @@ fn slash_selector_executes_selected_model_candidate() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::RuntimeConfigUpdated { .. })
+        Some(AppAction::StartNewModelSession { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_ne!(app.session_id, previous_session_id);
@@ -1243,8 +1372,8 @@ fn enter_on_root_slash_model_completes_into_second_stage_selector() -> Result<()
 
     assert_eq!(app.composer.input, "/model ");
     let rows = app.slash_selector_rows();
-    assert!(rows.iter().any(|(label, _)| label == "flash"));
-    assert!(rows.iter().any(|(label, _)| label == "pro"));
+    assert!(rows.iter().any(|(label, _)| label == "deepseek-v4-flash"));
+    assert!(rows.iter().any(|(label, _)| label == "deepseek-v4-pro"));
     Ok(())
 }
 
@@ -1276,7 +1405,7 @@ fn model_command_is_noop_when_selected_model_is_already_active() -> Result<()> {
     assert_eq!(app.session_id, previous_session_id);
     assert_eq!(
         app.last_notice(),
-        Some("model already active = deepseek-v4-flash")
+        Some("model already active = deepseek-default/deepseek-v4-flash")
     );
     Ok(())
 }
@@ -1337,15 +1466,21 @@ fn slash_selector_executes_selected_effort_candidate() -> Result<()> {
 }
 
 #[test]
-fn slash_selector_preserves_custom_model_ids() -> Result<()> {
+fn slash_selector_and_execution_reject_unadmitted_custom_model_ids() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let previous_session_id = app.session_id.clone();
     app.composer.input = "/model ds-custom".to_owned();
 
     let rows = app.slash_selector_rows();
-    assert_eq!(rows.first().map(|row| row.0.as_str()), Some("custom"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert_eq!(app.composer.input, "/model ds-custom");
+    assert!(rows.is_empty());
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.session_id, previous_session_id);
+    assert_eq!(
+        app.last_notice(),
+        Some(
+            "model deepseek-default/ds-custom is not admitted; open /config, refresh this connection, and use M only when offered"
+        )
+    );
     Ok(())
 }
 

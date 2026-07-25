@@ -1,6 +1,52 @@
 use super::*;
+use crate::app::modal_flow::ModelCatalogState;
 use crate::runner::{V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview};
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
+
+fn connection_catalog_result(
+    app: &AppState,
+    state: sigil_runtime::provider_connections::ModelCatalogState,
+    models: &[&str],
+) -> sigil_runtime::provider_connections::ModelCatalogResult {
+    let pending = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .expect("connection refresh should be pending");
+    let connection_id = pending
+        .connection_id
+        .clone()
+        .expect("connection refresh should carry an id");
+    sigil_runtime::provider_connections::ModelCatalogResult {
+        request_id: pending.request_id,
+        connection_id: connection_id.clone(),
+        draft_revision: pending.draft_revision,
+        connection_fingerprint: pending
+            .connection_fingerprint
+            .clone()
+            .expect("connection refresh should carry a fingerprint"),
+        state,
+        entries: models
+            .iter()
+            .map(
+                |model| sigil_runtime::provider_connections::ModelCatalogEntry {
+                    model_ref: sigil_kernel::ModelRef::new(
+                        connection_id.clone(),
+                        (*model).to_owned(),
+                    )
+                    .expect("test model ref"),
+                    display_name: (*model).to_owned(),
+                    availability: sigil_runtime::provider_connections::ModelAvailability::Available,
+                    recommendation:
+                        sigil_runtime::provider_connections::ModelRecommendation::Standard,
+                    provenance: sigil_runtime::provider_connections::ModelCatalogProvenance::Remote,
+                },
+            )
+            .collect(),
+        retry_after_secs: None,
+        manual_entry_allowed: false,
+    }
+}
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
@@ -681,6 +727,7 @@ fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_histor
 fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -777,12 +824,20 @@ fn esc_interrupts_active_run() -> Result<()> {
 fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
-    let model_request_id = app
+    let model_request = app
         .runtime
         .active_model_picker_refresh
         .as_ref()
-        .expect("model picker refresh should be active")
-        .request_id;
+        .expect("model picker refresh should be active");
+    let model_connection_id = model_request
+        .connection_id
+        .clone()
+        .expect("exact connection id");
+    let catalog = connection_catalog_result(
+        &app,
+        sigil_runtime::provider_connections::ModelCatalogState::Remote,
+        &["remote-model"],
+    );
 
     let balance_request_id = app.next_background_request_id();
     app.runtime.active_balance_refresh_id = Some(balance_request_id);
@@ -795,19 +850,13 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
             status: "USD 2.00".to_owned(),
         },
     })?;
-    app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
-        request_id: model_request_id,
-        base_url: "https://example.com".to_owned(),
-        result: Ok(vec!["remote-model".to_owned()]),
-    })?;
+    app.handle_worker_message(WorkerMessage::ConnectionModelsRefreshed { result: catalog })?;
 
     assert_eq!(app.runtime.balance_snapshot.status, "USD 2.00");
     assert!(app.runtime.active_balance_refresh_id.is_none());
     assert!(app.runtime.active_model_picker_refresh.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("loaded provider model list (https://example.com)")
-    );
+    let expected_notice = format!("model catalog remote for {model_connection_id}");
+    assert_eq!(app.last_notice(), Some(expected_notice.as_str()));
     assert!(app.modal_lines().join("\n").contains("remote-model"));
     assert!(
         app.events
@@ -818,32 +867,97 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
 }
 
 #[test]
-fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()> {
+fn model_picker_worker_empty_refresh_enters_empty_state_without_candidates() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let model_request = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .expect("model picker refresh should be active");
+    let _request_id = model_request.request_id;
+    let catalog = connection_catalog_result(
+        &app,
+        sigil_runtime::provider_connections::ModelCatalogState::Empty,
+        &[],
+    );
+
+    app.handle_worker_message(WorkerMessage::ConnectionModelsRefreshed { result: catalog })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("provider returned no models"));
+    assert!(lines.contains("configured: custom-model"));
+    if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_ref() {
+        assert!(state.options.is_empty());
+        assert_eq!(state.catalog_state, ModelCatalogState::Empty);
+    } else {
+        panic!("expected model picker modal");
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_model_worker_command_debug_redacts_credentials() {
+    let command = WorkerCommand::RefreshProviderModels {
+        request_id: 7,
+        provider_config: sigil_runtime::ProviderStatusConfig {
+            api_key: Some("worker-model-list-secret".to_owned()),
+            base_url: "https://models.example/v1".to_owned(),
+            request_timeout_secs: 5,
+        },
+    };
+
+    let debug = format!("{command:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("worker-model-list-secret"));
+}
+
+#[test]
+fn model_picker_pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.drain_pending_worker_commands();
     assert!(!app.poll_background_tasks());
     assert!(!app.has_pending_worker_commands());
 
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
-    let model_request_id = app
+    let model_request = app
         .runtime
         .active_model_picker_refresh
         .as_ref()
-        .expect("model picker refresh should be active")
-        .request_id;
+        .expect("model picker refresh should be active");
+    let model_request_id = model_request.request_id;
+    let model_base_url = model_request.base_url.clone();
     assert!(app.has_pending_worker_commands());
 
     let commands = app.drain_pending_worker_commands();
     assert!(matches!(
         commands.as_slice(),
-        [WorkerCommand::RefreshProviderModels { request_id, .. }] if *request_id == model_request_id
+        [WorkerCommand::RefreshConnectionModels { request, .. }]
+            if request.request_id == model_request_id
     ));
     assert!(!app.has_pending_worker_commands());
     assert!(app.drain_pending_worker_commands().is_empty());
 
+    let before_modal = app.modal_lines();
+    let before_notice = app.last_notice().map(str::to_owned);
+    app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
+        request_id: model_request_id,
+        base_url: "https://wrong-origin.example/v1".to_owned(),
+        result: Ok(vec!["wrong-origin-model".to_owned()]),
+    })?;
+    assert_eq!(app.modal_lines(), before_modal);
+    assert_eq!(app.last_notice(), before_notice.as_deref());
+    assert_eq!(
+        app.runtime
+            .active_model_picker_refresh
+            .as_ref()
+            .map(|pending| pending.request_id),
+        Some(model_request_id)
+    );
+
     app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
         request_id: model_request_id + 1,
-        base_url: "https://stale.example".to_owned(),
+        base_url: model_base_url,
         result: Ok(vec!["stale".to_owned()]),
     })?;
     assert!(app.runtime.active_model_picker_refresh.is_some());
@@ -1121,6 +1235,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: "restored-provider".to_owned(),
                 model_name: "restored-model".to_owned(),
+                resolved_model_route: None,
             }),
             SessionLogEntry::User(ModelMessage::user("prompt")),
             SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
@@ -1275,6 +1390,7 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
 fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1879,6 +1995,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
         event: Box::new(RunEvent::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-pro".to_owned(),
+            resolved_model_route: None,
         })),
     })?;
 
@@ -2025,6 +2142,7 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
                 profile_snapshot_id: snapshot_id,
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
+                model_ref: None,
                 reasoning_effort: None,
                 workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                 effective_tool_scope_hash: "tools".to_owned(),
@@ -2176,6 +2294,7 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
                 profile_snapshot_id: sigil_kernel::AgentProfileSnapshotId::new("snapshot_task_1")?,
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
+                model_ref: None,
                 reasoning_effort: None,
                 workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                 effective_tool_scope_hash: "tools".to_owned(),
@@ -2956,6 +3075,7 @@ fn new_session_started_restores_empty_session_view() -> Result<()> {
         entries: vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-pro".to_owned(),
+            resolved_model_route: None,
         })],
     })?;
 

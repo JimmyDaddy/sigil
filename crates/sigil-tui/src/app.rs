@@ -316,6 +316,7 @@ pub struct AppState {
     info_rail_detail: bool,
     review: ReviewState,
     config_snapshot: Option<RootConfig>,
+    recent_model_refs: Vec<sigil_kernel::ModelRef>,
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
@@ -501,6 +502,7 @@ pub enum AppAction {
     ForkLocalSession {
         request_id: u64,
         source_path: PathBuf,
+        current_model_route: sigil_kernel::ResolvedModelRoute,
     },
     ExportLocalSession {
         request_id: u64,
@@ -542,6 +544,13 @@ pub enum AppAction {
     RuntimeConfigUpdated {
         root_config: Box<RootConfig>,
     },
+    StartNewModelSession {
+        runtime_config: Box<RootConfig>,
+    },
+    SetDefaultModel {
+        root_config: Box<RootConfig>,
+        expected_root_config: Box<RootConfig>,
+    },
     SetupCompleted {
         config_path: PathBuf,
         root_config: Box<RootConfig>,
@@ -551,6 +560,22 @@ pub enum AppAction {
     },
 }
 
+fn configured_runtime_route(
+    root_config: &RootConfig,
+) -> (String, String, Option<sigil_kernel::ResolvedModelRoute>) {
+    sigil_runtime::provider_connections::resolve_default_model_route(root_config)
+        .map(|(provider_name, route)| {
+            (provider_name, route.model_ref.model_id.clone(), Some(route))
+        })
+        .unwrap_or_else(|_| {
+            (
+                root_config.agent.provider.clone(),
+                root_config.agent.model.clone(),
+                None,
+            )
+        })
+}
+
 impl AppState {
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -558,12 +583,18 @@ impl AppState {
             resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
         let sigil_paths =
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        let recent_model_refs = sigil_runtime::provider_connections::load_recent_model_refs(
+            &sigil_paths.state_root,
+            root_config,
+        );
         let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
         let permission_mode = root_config.permission.mode.as_str().to_owned();
+        let (configured_provider_name, configured_model_name, configured_model_route) =
+            configured_runtime_route(root_config);
         let initial_compaction_status = effective_compaction_config(
-            &root_config.agent.provider,
-            &root_config.agent.model,
+            &configured_provider_name,
+            &configured_model_name,
             &root_config.compaction,
         )
         .threshold_status(0)
@@ -588,8 +619,9 @@ impl AppState {
             session_id,
             support_build_info: SupportBuildInfo::unknown(),
             runtime: RuntimeStatusState {
-                provider_name: root_config.agent.provider.clone(),
-                model_name: root_config.agent.model.clone(),
+                provider_name: configured_provider_name,
+                model_name: configured_model_name,
+                model_route: configured_model_route,
                 permission_mode,
                 memory_enabled: root_config.memory.enabled,
                 memory_document_count: 0,
@@ -615,8 +647,17 @@ impl AppState {
                 },
                 next_background_request_id: 1,
                 pending_worker_commands: Vec::new(),
+                worker_rebind_required: false,
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,
+                setup_model_catalog_rx: None,
+                connection_inventory: None,
+                connection_inventory_revision: 0,
+                connection_inventory_rx: None,
+                #[cfg(not(test))]
+                connection_inventory_worker: None,
+                #[cfg(not(test))]
+                pending_connection_inventory_config: None,
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
@@ -635,6 +676,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
+            recent_model_refs,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
@@ -664,6 +706,7 @@ impl AppState {
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
         app.load_input_history();
+        app.schedule_connection_inventory_refresh(root_config);
         app.refresh_memory_summary();
         app.recompute_compaction_status(false);
         app.refresh_session_history();
@@ -696,6 +739,7 @@ impl AppState {
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
+                model_route: None,
                 permission_mode: PermissionMode::Manual.as_str().to_owned(),
                 memory_enabled: true,
                 memory_document_count: 0,
@@ -721,8 +765,17 @@ impl AppState {
                 },
                 next_background_request_id: 1,
                 pending_worker_commands: Vec::new(),
+                worker_rebind_required: false,
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,
+                setup_model_catalog_rx: None,
+                connection_inventory: None,
+                connection_inventory_revision: 0,
+                connection_inventory_rx: None,
+                #[cfg(not(test))]
+                connection_inventory_worker: None,
+                #[cfg(not(test))]
+                pending_connection_inventory_config: None,
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
@@ -741,6 +794,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: None,
+            recent_model_refs: Vec::new(),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
             setup_state: Some(SetupState::new(config_path, startup_error.clone())),
@@ -903,9 +957,16 @@ impl AppState {
         }
     }
 
-    fn reset_for_new_session(&mut self, provider_name: String, model_name: String, notice: String) {
+    fn reset_for_new_session(
+        &mut self,
+        provider_name: String,
+        model_name: String,
+        model_route: Option<sigil_kernel::ResolvedModelRoute>,
+        notice: String,
+    ) {
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_name;
+        self.runtime.model_route = model_route;
         self.session_id = Uuid::new_v4().to_string();
         self.session_log_path = self
             .session_log_dir

@@ -485,6 +485,24 @@ fn route_http_request(
         };
     }
 
+    if request.method == "GET" && request.path == "/settings/provider-connections" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_connections_unavailable",
+                "provider connection inventory is unavailable",
+            );
+        };
+        return match support_context.provider_connections() {
+            Ok(inventory) => json_response(200, json!(inventory)),
+            Err(_) => http_error_response(
+                503,
+                "provider_connections_unavailable",
+                "provider connection inventory could not be projected",
+            ),
+        };
+    }
+
     if request.method == "POST" && request.path == "/support/bundle" {
         let Some(support_context) = support_context else {
             return http_error_response(

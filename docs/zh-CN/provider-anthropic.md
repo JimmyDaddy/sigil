@@ -12,12 +12,20 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "anthropic"
+connection = "anthropic-default"
 model = "claude-sonnet-4-5"
 
-[providers.anthropic]
+[connections.anthropic-default]
+label = "Anthropic"
+provider = "anthropic"
+protocol = "anthropic_messages"
 base_url = "https://api.anthropic.com"
+credential = { source = "environment", name = "SIGIL_ANTHROPIC_API_KEY" }
+
+[connections.anthropic-default.options]
 anthropic_version = "2023-06-01"
 max_tokens = 4096
 ```
@@ -26,23 +34,23 @@ max_tokens = 4096
 
 ## 认证
 
-`SIGIL_ANTHROPIC_API_KEY` 优先于 `[providers.anthropic].api_key`。请优先使用环境变量；保存到配置中的密钥是明文。
+示例把当前连接绑定到 `SIGIL_ANTHROPIC_API_KEY`。首次设置和 `/config` 也可以把密钥保存到安全凭据存储；`sigil.toml` 中只保留不透明的 `stored` ID。默认 `auto` 优先系统存储，仅在不可用时使用 owner-only credential file。
 
 ## 选项与可见限制
 
-`SIGIL_ANTHROPIC_BASE_URL`、`SIGIL_ANTHROPIC_VERSION` 和 `SIGIL_ANTHROPIC_MAX_TOKENS` 覆盖对应配置字段。只有明确知道 Anthropic 功能需要时才使用 `beta_headers`。
+`anthropic_version`、`max_tokens` 与 `beta_headers` 是 `[connections.anthropic-default.options]` 下的 provider 专项字段。只有明确知道 Anthropic 功能需要时才使用 `beta_headers`。
 
 图片只支持已识别的 Claude 模型 ID 和允许的带日期版本。未知名称和别名会在发送前被拒绝。
 
 ## 验证
 
-运行 `sigil doctor`，确认模型服务、具体模型、基础 URL、API 版本、令牌上限和凭据来源。
+运行 `sigil doctor`，确认 `default=anthropic-default/claude-sonnet-4-5`、端点、凭据来源和就绪状态。
 
 ## 常见问题
 
 - 版本或请求头被拒绝：检查 `anthropic_version` 与 `beta_headers`。
 - 输出提前结束：检查 `max_tokens` 和模型上限。
-- 认证失败：检查环境变量或配置中的备用凭据。
+- 认证失败：检查绑定的环境变量，或在 `/config` 中修复当前连接。
 - 工具行为异常：确认所选 Claude 模型支持工具调用。
 
 <!-- public-doc-cta: return-providers -->

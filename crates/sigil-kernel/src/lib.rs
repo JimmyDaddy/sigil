@@ -19,6 +19,7 @@ pub mod hosted;
 pub mod image_attachment;
 pub mod integration;
 pub mod memory;
+pub mod model_route;
 pub mod mutation;
 pub mod orchestration;
 pub mod permission;
@@ -105,8 +106,9 @@ pub use compaction_token_proof::{
     VersionedProfileIdentity,
 };
 pub use config::{
-    AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
-    CompactionThresholdStatus, DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
+    AgentConfig, AppearanceConfig, CONFIG_VERSION_V2, CodeIntelStartup, CodeIntelligenceConfig,
+    CompactionConfig, CompactionThresholdStatus, ConfigPublishError, ConfigUpdateLockGuard,
+    CredentialStorageMode, DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_SESSION_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_MAX_SESSIONS,
@@ -122,8 +124,9 @@ pub use config::{
     TerminalKeyboardEnhancement, TerminalNotificationConfig, TerminalNotificationMethod,
     ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WebBundledSearchConfig,
     WebConfig, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute,
-    WorkspaceConfig, default_user_config_dir, default_user_config_path, preferred_config_path,
-    resolve_workspace_root,
+    WorkspaceConfig, atomic_publish_private_file, default_user_config_dir,
+    default_user_config_path, preferred_config_path, private_path_permissions_are_restricted,
+    resolve_workspace_root, secure_private_path_permissions,
 };
 pub use context_engine::{
     CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
@@ -269,6 +272,7 @@ pub use integration::{
     task_integration_review_product,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
+pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};
 pub use mutation::{
     CheckpointRestoreConflict, CheckpointRestoreConflictReason, CheckpointRestored,
     CommittedDirectoryMutation, CommittedFileMutation, ExecutionMutationProfile,

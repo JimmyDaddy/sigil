@@ -4,16 +4,32 @@ use super::{
     formatting::{human_file_size, relative_age_label},
 };
 use crate::slash::{
-    EFFORT_SELECTOR_OPTIONS, MODEL_SELECTOR_OPTIONS, ResolvedSlashCommand, SLASH_COMMANDS,
-    SlashArgumentOption, SlashCommandSpec, SlashSelectorEntry,
+    EFFORT_SELECTOR_OPTIONS, ResolvedSlashCommand, SLASH_COMMANDS, SlashArgumentOption,
+    SlashCommandSpec, SlashSelectorEntry,
 };
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    AgentProfileKind, AgentProfileSource, AgentTrustState, SkillDescriptor, SkillRunMode,
+    AgentProfileKind, AgentProfileSource, AgentTrustState, ModelRef, SkillDescriptor, SkillRunMode,
     SkillTrustState, default_user_config_dir,
 };
-use sigil_runtime::{AgentProfileRegistry, ResolvedAgentProfile};
-use std::path::Path;
+use sigil_runtime::{
+    AgentProfileRegistry, ResolvedAgentProfile,
+    provider_connections::{
+        ConfigMode, ConnectionReadiness, bundled_model_entries, load_provider_connections,
+    },
+};
+use std::{collections::HashSet, path::Path};
+
+fn connection_label(
+    loaded: &sigil_runtime::provider_connections::LoadedProviderConnections,
+    model_ref: &ModelRef,
+) -> String {
+    loaded
+        .connections
+        .get(&model_ref.connection_id)
+        .map(|connection| connection.config.label.clone())
+        .unwrap_or_else(|| model_ref.connection_id.to_string())
+}
 
 impl AppState {
     fn slash_query(prompt: &str) -> Option<(&str, String)> {
@@ -149,60 +165,120 @@ impl AppState {
             .collect()
     }
 
-    fn model_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
+    pub(super) fn model_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
         let trimmed = arg.trim();
         let query = trimmed.to_ascii_lowercase();
-        let current = self.runtime.model_name.as_str();
-        let current_is_known = MODEL_SELECTOR_OPTIONS
+        let mut ranked_entries = Vec::new();
+        let Some(root_config) = self.config_snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let loaded = load_provider_connections(root_config);
+        let Some(inventory) = self.runtime.connection_inventory.as_ref() else {
+            return Vec::new();
+        };
+        let ready_connections = inventory
+            .entries
             .iter()
-            .any(|option| option.value == current);
-        let mut entries = Vec::new();
-
-        if !current_is_known
-            && (query.is_empty() || current.to_ascii_lowercase().starts_with(&query))
+            .filter(|entry| {
+                entry.readiness == ConnectionReadiness::Ready
+                    || (inventory.mode == ConfigMode::LegacyV1
+                        && entry.readiness == ConnectionReadiness::Unverified)
+            })
+            .map(|entry| entry.id.clone())
+            .collect::<HashSet<_>>();
+        let current = self
+            .runtime
+            .model_route
+            .as_ref()
+            .map(|route| route.model_ref.clone())
+            .or_else(|| loaded.default_model.clone());
+        let mut candidates = Vec::<(ModelRef, String, &'static str)>::new();
+        if let Some(current) = current
+            .as_ref()
+            .filter(|current| ready_connections.contains(&current.connection_id))
         {
-            entries.push(SlashSelectorEntry {
-                fill: format!("/model {current}"),
-                label: "current".to_owned(),
-                description: format!("{current}  current custom model"),
-                resolved: ResolvedSlashCommand {
-                    canonical: "/model".to_owned(),
-                    arg: current.to_owned(),
+            candidates.push((
+                current.clone(),
+                connection_label(&loaded, current),
+                "current session",
+            ));
+        }
+        for recent in &self.recent_model_refs {
+            if ready_connections.contains(&recent.connection_id) {
+                candidates.push((recent.clone(), connection_label(&loaded, recent), "recent"));
+            }
+        }
+        for connection in loaded.connections.values() {
+            if !ready_connections.contains(&connection.config.id) {
+                continue;
+            }
+            for entry in bundled_model_entries(&connection.config) {
+                candidates.push((
+                    entry.model_ref,
+                    connection.config.label.clone(),
+                    "provider catalog",
+                ));
+            }
+            if let Some(default_model) = loaded
+                .default_model
+                .as_ref()
+                .filter(|model| model.connection_id == connection.config.id)
+            {
+                candidates.push((
+                    default_model.clone(),
+                    connection.config.label.clone(),
+                    "saved default",
+                ));
+            }
+        }
+        let mut seen = HashSet::new();
+        for (model_ref, connection_label, source) in candidates {
+            if !seen.insert(model_ref.clone()) {
+                continue;
+            }
+            let compound = format!("{}/{}", model_ref.connection_id, model_ref.model_id);
+            let model_search = model_ref.model_id.to_ascii_lowercase();
+            let connection_search = model_ref.connection_id.as_str().to_ascii_lowercase();
+            let label_search = connection_label.to_ascii_lowercase();
+            let rank = if query.is_empty()
+                || model_search == query
+                || compound.to_ascii_lowercase() == query
+            {
+                0
+            } else if model_search
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|segment| segment.starts_with(&query))
+            {
+                1
+            } else if model_search.contains(&query) {
+                2
+            } else if query.len() >= 3
+                && (connection_search.contains(&query) || label_search.contains(&query))
+            {
+                3
+            } else {
+                continue;
+            };
+            ranked_entries.push((
+                rank,
+                SlashSelectorEntry {
+                    fill: format!("/model {compound}"),
+                    label: model_ref.model_id.clone(),
+                    description: format!("{connection_label}  {compound}  {source}"),
+                    resolved: ResolvedSlashCommand {
+                        canonical: "/model".to_owned(),
+                        arg: compound,
+                    },
                 },
-            });
+            ));
         }
 
-        let mut options = MODEL_SELECTOR_OPTIONS
-            .iter()
-            .copied()
-            .filter(|option| Self::slash_option_matches(option, &query))
-            .collect::<Vec<_>>();
-        options.sort_by_key(|option| option.value != current);
-
-        entries.extend(options.into_iter().map(|option| SlashSelectorEntry {
-            fill: format!("/model {}", option.value),
-            label: option.label.to_owned(),
-            description: format!("{}  {}", option.value, option.description),
-            resolved: ResolvedSlashCommand {
-                canonical: "/model".to_owned(),
-                arg: option.value.to_owned(),
-            },
-        }));
-
-        if entries.is_empty() && !trimmed.is_empty() {
-            let custom = trimmed.to_owned();
-            entries.push(SlashSelectorEntry {
-                fill: format!("/model {custom}"),
-                label: "custom".to_owned(),
-                description: format!("{custom}  use typed model id"),
-                resolved: ResolvedSlashCommand {
-                    canonical: "/model".to_owned(),
-                    arg: custom,
-                },
-            });
-        }
-
-        entries
+        let best_rank = ranked_entries.iter().map(|(rank, _)| *rank).min();
+        ranked_entries
+            .into_iter()
+            .filter(|(rank, _)| Some(*rank) == best_rank)
+            .map(|(_, entry)| entry)
+            .collect()
     }
 
     fn resume_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
@@ -639,6 +715,53 @@ impl AppState {
         self.complete_slash_entry(&entry);
     }
 
+    pub(super) fn set_selected_model_as_default(&mut self) -> Result<Option<AppAction>> {
+        let Some(entry) = self.selected_slash_entry() else {
+            return Ok(None);
+        };
+        if entry.resolved.canonical != "/model" {
+            return Ok(None);
+        }
+        let Some((connection_id, model_id)) = entry.resolved.arg.split_once('/') else {
+            self.last_notice =
+                Some("set default requires an exact connection/model selection".to_owned());
+            return Ok(None);
+        };
+        let model_ref = ModelRef::new(
+            sigil_kernel::ConnectionId::new(connection_id.to_owned())?,
+            model_id.to_owned(),
+        )?;
+        let Some(mut root_config) = self.config_snapshot.clone() else {
+            return Ok(None);
+        };
+        let expected_root_config = root_config.clone();
+        let loaded = load_provider_connections(&root_config);
+        if loaded.mode == sigil_runtime::provider_connections::ConfigMode::LegacyV1 {
+            let current = loaded
+                .default_model
+                .ok_or_else(|| anyhow!("model_route_not_configured"))?;
+            anyhow::ensure!(
+                current.connection_id == model_ref.connection_id,
+                "legacy config cannot set another connection as default before migration"
+            );
+            sigil_runtime::set_active_provider_model(&mut root_config, &model_ref.model_id)?;
+        } else {
+            sigil_runtime::provider_connections::resolve_model_route(&root_config, &model_ref)
+                .map_err(anyhow::Error::new)?;
+            root_config.agent.connection = Some(model_ref.connection_id.clone());
+            root_config.agent.model = model_ref.model_id.clone();
+        }
+        self.pending_mouse_slash_confirmation = None;
+        self.last_notice = Some(format!(
+            "saving default {}/{}; current session remains unchanged",
+            model_ref.connection_id, model_ref.model_id
+        ));
+        Ok(Some(AppAction::SetDefaultModel {
+            root_config: Box::new(root_config),
+            expected_root_config: Box::new(expected_root_config),
+        }))
+    }
+
     fn complete_slash_entry(&mut self, entry: &SlashSelectorEntry) {
         let trimmed = self.composer.input.trim_start();
         let leading_len = self.composer.input.len().saturating_sub(trimmed.len());
@@ -745,6 +868,7 @@ impl AppState {
         let (token, _) = Self::slash_query(&self.composer.input)?;
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/agent") => Some("Agent"),
+            Some("/model") => Some("Model · Enter starts fresh session · D sets saved default"),
             Some("/resume") => Some("Resume session"),
             _ => None,
         }

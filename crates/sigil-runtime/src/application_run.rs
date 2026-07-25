@@ -11,19 +11,19 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentProfileId, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
-    AssistantMessageKind, ControlEntry, ConversationRunFinalizedEntryV1,
+    AssistantMessageKind, ConnectionId, ControlEntry, ConversationRunFinalizedEntryV1,
     ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
     ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
     FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MessageRole, ModelMessage, MutationEventRecorder, NoopEventHandler, PermissionMode,
-    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
-    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
-    Session, SessionLogEntry, SessionRef, TaskId, TaskRunStatus, TaskVerificationRerunRequest,
-    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
-    resolve_workspace_root, safe_persistence_text, verification_product_view,
-    workspace_trust_from_entries,
+    MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler, PermissionMode,
+    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
+    ResolvedModelRoute, RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle,
+    RunCancellationOwner, RunCancellationRecorder, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
+    RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskRunStatus,
+    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -110,6 +110,8 @@ pub enum ApplicationRunPrepareErrorClass {
     InvalidInvocation,
     /// Root configuration or provider construction was invalid.
     Configuration,
+    /// No saved or explicit compound model route was available.
+    ModelRouteNotConfigured,
     /// Durable session, tool, or extension assembly failed.
     Execution,
     /// The owned blocking preparation worker itself failed.
@@ -131,6 +133,9 @@ pub enum ApplicationRunPrepareError {
         #[source]
         source: anyhow::Error,
     },
+    /// Headless startup cannot choose a provider/model route without an explicit user decision.
+    #[error("model route is not configured")]
+    ModelRouteNotConfigured,
     /// Runtime/session/tool preparation failure.
     #[error("application run preparation failed")]
     Execution {
@@ -152,6 +157,9 @@ impl ApplicationRunPrepareError {
         match self {
             Self::InvalidInvocation { .. } => ApplicationRunPrepareErrorClass::InvalidInvocation,
             Self::Configuration { .. } => ApplicationRunPrepareErrorClass::Configuration,
+            Self::ModelRouteNotConfigured => {
+                ApplicationRunPrepareErrorClass::ModelRouteNotConfigured
+            }
             Self::Execution { .. } => ApplicationRunPrepareErrorClass::Execution,
             Self::Internal { .. } => ApplicationRunPrepareErrorClass::Internal,
         }
@@ -203,7 +211,17 @@ pub struct ApplicationSessionBinding {
 /// Exact reasoning-effort capabilities for one selectable provider model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationModelOptionView {
-    /// Exact provider model accepted by the current session.
+    /// Exact connection/model identity accepted when creating a fresh session.
+    pub model_ref: ModelRef,
+    /// Provider-owned display label.
+    pub display_name: String,
+    /// Whether the catalog proved the ID or presents it as a conservative reference.
+    pub availability: crate::provider_connections::ModelAvailability,
+    /// Provider-owned recommendation classification.
+    pub recommendation: crate::provider_connections::ModelRecommendation,
+    /// Catalog source for this exact connection.
+    pub provenance: crate::provider_connections::ModelCatalogProvenance,
+    /// Compatibility model-id projection for reasoning-effort lookup.
     pub model_name: String,
     /// Reasoning-effort values implemented for this model.
     pub available_reasoning_efforts: Vec<ReasoningEffort>,
@@ -216,15 +234,15 @@ pub struct ApplicationModelOptionView {
 /// Provider-neutral facts needed to configure and explain the next application run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationRunContextView {
+    /// Compound connection/model identity durably frozen for this session.
+    pub model_ref: ModelRef,
     /// Provider identity durably frozen for this session.
     pub provider_name: String,
     /// Model identity durably frozen for this session.
     pub model_name: String,
-    /// Models this application surface may bind for the next run with the same provider.
-    pub available_models: Vec<String>,
-    /// Exact effort capability projection for every entry in `available_models`.
+    /// Exact connection-scoped catalog and effort projection for fresh-session selection.
     pub model_options: Vec<ApplicationModelOptionView>,
-    /// Opaque binding proving the exact current-model and available-model selection set.
+    /// Opaque binding proving the exact current model and connection-scoped catalog.
     pub model_selection_binding: String,
     /// Configured permission mode used when a client does not override one run.
     pub default_permission_mode: PermissionMode,
@@ -263,6 +281,8 @@ pub struct ApplicationRunRequest {
     pub permission_mode: Option<PermissionMode>,
     /// Optional model selected for this run and subsequent runs in the same durable session.
     pub model_name: Option<String>,
+    /// Optional exact connection selected by a headless caller; must accompany `model_name`.
+    pub model_connection_id: Option<ConnectionId>,
     /// Opaque binding returned with the run-context model selection capability.
     pub model_selection_binding: Option<String>,
     /// Optional exact effort selected for this run.
@@ -306,6 +326,7 @@ impl ApplicationRunRequest {
             interaction: ApplicationRunInteraction::NonInteractive,
             permission_mode: None,
             model_name: None,
+            model_connection_id: None,
             model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
@@ -1485,7 +1506,7 @@ async fn prepare_application_run_internal(
         cancellation_owner,
         cancellation_handle,
         root_task_guard,
-        provider,
+        model_ref,
         options,
         target_max_tokens,
         mut input,
@@ -1498,6 +1519,9 @@ async fn prepare_application_run_internal(
         agent_invocation,
         task_agent_registry,
     } = prepared;
+    let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+        .await
+        .map_err(ApplicationRunPrepareError::configuration)?;
     let surface =
         build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
             &root_config,
@@ -1741,35 +1765,46 @@ pub fn bind_application_session(
 ///
 /// # Errors
 ///
-/// Returns a typed preparation error when the model is unavailable for the configured provider,
-/// or configuration/session recovery fails.
+/// Returns a typed preparation error when the model identifier is invalid, the selected
+/// connection is unavailable, or configuration/session recovery fails.
 pub fn bind_application_session_with_model(
     config_path: &Path,
     launch_cwd: &Path,
     session_path: Option<&Path>,
     model_name: Option<&str>,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
-    let mut root_config =
-        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
-    if let Some(model_name) = model_name {
-        let requested =
-            crate::normalize_provider_model_alias(&root_config.agent.provider, model_name)
-                .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
-                    message: "application session model must not be empty".to_owned(),
-                })?;
-        let available =
-            application_model_options(&root_config.agent.provider, &root_config.agent.model);
-        if !available.contains(&requested) {
-            return Err(ApplicationRunPrepareError::InvalidInvocation {
-                message: format!("model {requested} is not available for the configured provider"),
-            });
-        }
-        root_config.agent.model = requested;
-    }
+    bind_application_session_with_model_ref(config_path, launch_cwd, session_path, None, model_name)
+}
+
+/// Creates or reopens a durable V2 session using an exact optional connection/model identity.
+pub fn bind_application_session_with_model_ref(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+    connection_id: Option<&ConnectionId>,
+    model_name: Option<&str>,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let root_config = load_application_root_config(config_path)?;
+    let (_, selected_route) =
+        application_selected_model_route(&root_config, connection_id, model_name)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let sigil_paths =
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    if connection_id.is_some()
+        && !application_model_ref_is_selectable(
+            &root_config,
+            &selected_route.model_ref,
+            &sigil_paths.cache_root,
+        )
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: format!(
+                "model {}/{} is not admitted by the exact connection catalog",
+                selected_route.model_ref.connection_id, selected_route.model_ref.model_id
+            ),
+        });
+    }
     let requested_path = session_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
@@ -1777,62 +1812,144 @@ pub fn bind_application_session_with_model(
         .map_err(ApplicationRunPrepareError::execution)?;
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let session =
-        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
-            .map_err(ApplicationRunPrepareError::execution)?;
+    let session = load_application_session_for_route(&root_config, &selected_route, store)
+        .map_err(ApplicationRunPrepareError::execution)?;
     Ok(ApplicationSessionBinding {
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
     })
 }
 
-fn application_model_options(provider_name: &str, current_model: &str) -> Vec<String> {
-    let mut models = vec![current_model.to_owned()];
-    if crate::normalize_provider_name(provider_name) == crate::DEEPSEEK_PROVIDER_KEY {
-        models.push("deepseek-v4-flash".to_owned());
-        models.push("deepseek-v4-pro".to_owned());
+fn application_model_ref_is_selectable(
+    root_config: &RootConfig,
+    requested: &ModelRef,
+    cache_root: &Path,
+) -> bool {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    let Some(connection) = loaded.connections.get(&requested.connection_id) else {
+        return false;
+    };
+    if let Some(cached) = crate::provider_connections::fresh_cached_model_entries_native(
+        cache_root,
+        root_config,
+        &requested.connection_id,
+    ) {
+        return cached.iter().any(|entry| {
+            entry.model_ref == *requested
+                && entry.availability
+                    != crate::provider_connections::ModelAvailability::ConfiguredUnavailable
+        });
     }
-    models.sort();
-    models.dedup();
-    models
+    crate::provider_connections::bundled_model_entries(&connection.config)
+        .iter()
+        .any(|entry| entry.model_ref == *requested)
+        || loaded.default_model.as_ref() == Some(requested)
+}
+
+fn application_model_catalog_entries(
+    root_config: &RootConfig,
+    current_model: &ModelRef,
+    cache_root: &Path,
+) -> Vec<crate::provider_connections::ModelCatalogEntry> {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    let connection = loaded.connections.get(&current_model.connection_id);
+    let cached = crate::provider_connections::fresh_cached_model_entries_native(
+        cache_root,
+        root_config,
+        &current_model.connection_id,
+    );
+    let cache_proved_absence = cached.is_some();
+    let mut entries = cached.unwrap_or_else(|| {
+        connection
+            .map(|connection| {
+                crate::provider_connections::bundled_model_entries(&connection.config)
+            })
+            .unwrap_or_default()
+    });
+    if !entries
+        .iter()
+        .any(|entry| entry.model_ref == *current_model)
+    {
+        entries.push(crate::provider_connections::ModelCatalogEntry {
+            model_ref: current_model.clone(),
+            display_name: current_model.model_id.clone(),
+            availability: if cache_proved_absence {
+                crate::provider_connections::ModelAvailability::ConfiguredUnavailable
+            } else {
+                crate::provider_connections::ModelAvailability::Unverified
+            },
+            recommendation: crate::provider_connections::ModelRecommendation::Standard,
+            provenance: crate::provider_connections::ModelCatalogProvenance::Configured,
+        });
+    }
+    entries.sort_by(|left, right| {
+        let left_current = left.model_ref != *current_model;
+        let right_current = right.model_ref != *current_model;
+        left_current
+            .cmp(&right_current)
+            .then_with(|| {
+                let left_standard = left.recommendation
+                    != crate::provider_connections::ModelRecommendation::Recommended;
+                let right_standard = right.recommendation
+                    != crate::provider_connections::ModelRecommendation::Recommended;
+                left_standard.cmp(&right_standard)
+            })
+            .then_with(|| left.model_ref.model_id.cmp(&right.model_ref.model_id))
+    });
+    entries
 }
 
 fn application_model_selection_binding(
-    provider_name: &str,
-    current_model: &str,
-    available_models: &[String],
+    current_model: &ModelRef,
+    model_options: &[ApplicationModelOptionView],
 ) -> String {
-    let material = format!(
-        "sigil-application-model-selection-v1\n{}\n{}\n{}",
-        provider_name,
-        current_model,
-        available_models.join("\n"),
+    let mut material = format!(
+        "sigil-application-model-selection-v2\n{}/{}\n",
+        current_model.connection_id, current_model.model_id,
     );
+    for option in model_options {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            material,
+            "{}/{}|{:?}|{:?}|{:?}",
+            option.model_ref.connection_id,
+            option.model_ref.model_id,
+            option.availability,
+            option.recommendation,
+            option.provenance,
+        );
+    }
     format!("{:x}", Sha256::digest(material.as_bytes()))
 }
 
 fn application_model_option_views(
     root_config: &RootConfig,
     provider_name: &str,
-    available_models: &[String],
+    catalog_entries: Vec<crate::provider_connections::ModelCatalogEntry>,
 ) -> Vec<ApplicationModelOptionView> {
-    available_models
-        .iter()
-        .map(|model_name| {
+    catalog_entries
+        .into_iter()
+        .map(|entry| {
+            let model_name = entry.model_ref.model_id.clone();
             let mut model_config = root_config.clone();
             model_config.agent.provider = provider_name.to_owned();
             model_config.agent.model = model_name.clone();
             let available_reasoning_efforts =
-                crate::reasoning_effort::supported_reasoning_efforts(provider_name, model_name);
+                crate::reasoning_effort::supported_reasoning_efforts(provider_name, &model_name);
             let default_reasoning_effort =
                 crate::reasoning_effort::configured_default_reasoning_effort(&model_config);
             let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
                 provider_name,
-                model_name,
+                &model_name,
                 &available_reasoning_efforts,
             );
             ApplicationModelOptionView {
-                model_name: model_name.clone(),
+                model_ref: entry.model_ref,
+                display_name: entry.display_name,
+                availability: entry.availability,
+                recommendation: entry.recommendation,
+                provenance: entry.provenance,
+                model_name,
                 available_reasoning_efforts,
                 default_reasoning_effort,
                 reasoning_effort_binding,
@@ -1855,8 +1972,7 @@ pub fn bind_existing_application_session(
     config_path: &Path,
     session_path: &Path,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
-    let root_config =
-        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    let root_config = load_application_root_config(config_path)?;
     let metadata = std::fs::symlink_metadata(session_path)
         .with_context(|| {
             format!(
@@ -1876,13 +1992,109 @@ pub fn bind_existing_application_session(
         .map_err(ApplicationRunPrepareError::execution)?;
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let session =
-        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
-            .map_err(ApplicationRunPrepareError::execution)?;
+    let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
+    let session = load_application_session_for_route(&root_config, &fallback_route, store)
+        .map_err(ApplicationRunPrepareError::execution)?;
     Ok(ApplicationSessionBinding {
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
     })
+}
+
+fn load_application_root_config(
+    config_path: &Path,
+) -> std::result::Result<RootConfig, ApplicationRunPrepareError> {
+    match std::fs::symlink_metadata(config_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApplicationRunPrepareError::ModelRouteNotConfigured);
+        }
+        Err(error) => return Err(ApplicationRunPrepareError::configuration(error)),
+        Ok(_) => {}
+    }
+    RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)
+}
+
+fn application_selected_model_route(
+    root_config: &RootConfig,
+    connection_id: Option<&ConnectionId>,
+    model_name: Option<&str>,
+) -> std::result::Result<(String, ResolvedModelRoute), ApplicationRunPrepareError> {
+    if let (Some(connection_id), Some(model_name)) = (connection_id, model_name) {
+        let model_ref = ModelRef::new(connection_id.clone(), model_name).map_err(|error| {
+            ApplicationRunPrepareError::InvalidInvocation {
+                message: error.to_string(),
+            }
+        })?;
+        return crate::provider_connections::resolve_model_route(root_config, &model_ref).map_err(
+            |error| match error {
+                crate::provider_connections::ResolvedRouteError::NotConfigured => {
+                    ApplicationRunPrepareError::ModelRouteNotConfigured
+                }
+                other => ApplicationRunPrepareError::configuration(other),
+            },
+        );
+    }
+    if connection_id.is_some() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "connection and model must be supplied together".to_owned(),
+        });
+    }
+    let (provider_name, default_route) =
+        crate::provider_connections::resolve_default_model_route(root_config).map_err(|error| {
+            match error {
+                crate::provider_connections::ResolvedRouteError::NotConfigured => {
+                    ApplicationRunPrepareError::ModelRouteNotConfigured
+                }
+                other => ApplicationRunPrepareError::configuration(other),
+            }
+        })?;
+    let Some(model_name) = model_name else {
+        return Ok((provider_name, default_route));
+    };
+    let requested = if root_config.config_version.is_none() {
+        crate::normalize_provider_model_alias(&provider_name, model_name)
+    } else {
+        let trimmed = model_name.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+    .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
+        message: "application session model must not be empty".to_owned(),
+    })?;
+    let model_ref = ModelRef::new(default_route.model_ref.connection_id.clone(), requested)
+        .map_err(|error| ApplicationRunPrepareError::InvalidInvocation {
+            message: error.to_string(),
+        })?;
+    crate::provider_connections::resolve_model_route(root_config, &model_ref)
+        .map_err(ApplicationRunPrepareError::configuration)
+}
+
+fn load_application_session_for_route(
+    root_config: &RootConfig,
+    fallback_route: &ResolvedModelRoute,
+    store: JsonlSessionStore,
+) -> Result<Session> {
+    let existing_entries = JsonlSessionStore::read_entries(store.path())
+        .context("failed to inspect durable session route")?;
+    let fallback_for_new_session = existing_entries.is_empty().then(|| fallback_route.clone());
+    let provider_name =
+        crate::provider_connections::validate_persisted_model_route(root_config, fallback_route)
+            .map_err(anyhow::Error::new)?;
+    let session = Session::load_from_store_with_route(
+        provider_name,
+        fallback_route.model_ref.model_id.clone(),
+        fallback_for_new_session,
+        store,
+    )?;
+    let persisted = session.resolved_model_route().ok_or_else(|| {
+        anyhow!("session_route_missing: start a new session or fork with the current route")
+    })?;
+    crate::provider_connections::validate_persisted_model_route(root_config, persisted)
+        .map_err(anyhow::Error::new)?;
+    anyhow::ensure!(
+        persisted.model_ref.model_id == session.model_name(),
+        "session_route_drift: durable model identity does not match its frozen route"
+    );
+    Ok(session)
 }
 
 /// Projects the current model and bounded context usage for one bound durable session.
@@ -1904,16 +2116,17 @@ pub fn application_run_context_view(
     if expected_session_scope_id.is_empty() {
         bail!("expected run-context session scope must not be empty");
     }
-    let mut root_config = RootConfig::load(config_path)?;
+    let root_config = RootConfig::load(config_path)?;
     let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
-    let (provider_name, model_name) = application_session_identity(&entries).unwrap_or_else(|| {
-        (
-            root_config.agent.provider.clone(),
-            root_config.agent.model.clone(),
+    let route = application_session_route(&entries).ok_or_else(|| {
+        anyhow!(
+            "session_route_missing: restore the referenced connection or fork with current route"
         )
-    });
-    root_config.agent.provider = provider_name.clone();
-    root_config.agent.model = model_name.clone();
+    })?;
+    let provider_name =
+        crate::provider_connections::validate_persisted_model_route(&root_config, &route)
+            .map_err(anyhow::Error::new)?;
+    let model_name = route.model_ref.model_id.clone();
     let resolved = crate::resolve_context_window_tokens(
         &provider_name,
         &model_name,
@@ -1930,8 +2143,11 @@ pub fn application_run_context_view(
         .next_back();
     let available_reasoning_efforts =
         crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name);
+    let mut identity_config = root_config.clone();
+    identity_config.agent.provider = provider_name.clone();
+    identity_config.agent.model = model_name.clone();
     let default_reasoning_effort =
-        crate::reasoning_effort::configured_default_reasoning_effort(&root_config);
+        crate::reasoning_effort::configured_default_reasoning_effort(&identity_config);
     let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
         &provider_name,
         &model_name,
@@ -1939,17 +2155,20 @@ pub fn application_run_context_view(
     );
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let sigil_paths =
+        resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let extension_catalog =
         crate::application_extension_catalog_view(&root_config, &workspace_root, &entries)?;
-    let available_models = application_model_options(&provider_name, &model_name);
+    let catalog_entries =
+        application_model_catalog_entries(&root_config, &route.model_ref, &sigil_paths.cache_root);
     let model_options =
-        application_model_option_views(&root_config, &provider_name, &available_models);
+        application_model_option_views(&root_config, &provider_name, catalog_entries);
     let model_selection_binding =
-        application_model_selection_binding(&provider_name, &model_name, &available_models);
+        application_model_selection_binding(&route.model_ref, &model_options);
     Ok(ApplicationRunContextView {
+        model_ref: route.model_ref,
         provider_name,
         model_name,
-        available_models,
         model_options,
         model_selection_binding,
         default_permission_mode: root_config.permission.mode,
@@ -1963,34 +2182,14 @@ pub fn application_run_context_view(
     })
 }
 
-fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, String)> {
-    let mut identity = None;
-    let mut identity_is_explicit = false;
-    for entry in entries {
-        match entry {
-            SessionLogEntry::Control(ControlEntry::SessionIdentity {
-                provider_name,
-                model_name,
-            }) if !identity_is_explicit => {
-                identity = Some((provider_name.clone(), model_name.clone()));
-                identity_is_explicit = true;
-            }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
-                if identity_is_explicit =>
-            {
-                if let Some((_, current_model)) = identity.as_mut() {
-                    *current_model = model_name.clone();
-                }
-            }
-            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot))
-                if identity.is_none() =>
-            {
-                identity = Some((snapshot.provider_name.clone(), snapshot.model_name.clone()));
-            }
-            _ => {}
-        }
-    }
-    identity
+fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedModelRoute> {
+    entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            resolved_model_route: Some(route),
+            ..
+        }) => Some(route.clone()),
+        _ => None,
+    })
 }
 
 fn application_bound_session_entries(
@@ -2296,11 +2495,9 @@ pub async fn rerun_application_verification(
             resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
         let store = JsonlSessionStore::new(&session_path)?;
         let session_lease = session_leases.acquire(store.path())?;
-        let session = Session::load_from_store(
-            root_config.agent.provider.clone(),
-            root_config.agent.model.clone(),
-            store,
-        )?;
+        let (_, fallback_route) = application_selected_model_route(&root_config, None, None)
+            .map_err(|error| anyhow!(error))?;
+        let session = load_application_session_for_route(&root_config, &fallback_route, store)?;
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before verification rerun");
         }
@@ -2350,15 +2547,14 @@ pub fn record_application_preparation_cancellation(
             message: "run id must be non-empty and persistence-safe".to_owned(),
         });
     }
-    let root_config =
-        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    let root_config = load_application_root_config(config_path)?;
     let canonical_path = canonical_session_lease_path(session_path)
         .map_err(ApplicationRunPrepareError::execution)?;
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let session =
-        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
-            .map_err(ApplicationRunPrepareError::execution)?;
+    let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
+    let session = load_application_session_for_route(&root_config, &fallback_route, store)
+        .map_err(ApplicationRunPrepareError::execution)?;
     let recorder = session
         .run_cancellation_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -2428,7 +2624,7 @@ struct BlockingApplicationRunPreparation {
     cancellation_owner: RunCancellationOwner,
     cancellation_handle: RunCancellationHandle,
     root_task_guard: RunTaskGuard,
-    provider: Box<dyn sigil_kernel::Provider>,
+    model_ref: sigil_kernel::ModelRef,
     options: AgentRunOptions,
     target_max_tokens: Option<u32>,
     input: AgentRunInput,
@@ -2456,8 +2652,7 @@ fn prepare_application_run_blocking(
             message: "application run constraints must be non-zero and non-empty".to_owned(),
         });
     }
-    let mut root_config = RootConfig::load(&request.config_path)
-        .map_err(ApplicationRunPrepareError::configuration)?;
+    let root_config = load_application_root_config(&request.config_path)?;
     let workspace_root = resolve_workspace_root(
         &request.config_path,
         &request.launch_cwd,
@@ -2478,23 +2673,34 @@ fn prepare_application_run_blocking(
             .map_err(ApplicationRunPrepareError::execution)?,
     );
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
-    let (mut session, workspace_trust) = load_application_session_with_workspace_trust(
-        root_config.agent.provider.clone(),
-        root_config.agent.model.clone(),
-        session_store,
-        &workspace_root,
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
+    let (_, fallback_route) = application_selected_model_route(
+        &root_config,
+        request.model_connection_id.as_ref(),
+        request.model_name.as_deref(),
+    )?;
+    let mut session =
+        load_application_session_for_route(&root_config, &fallback_route, session_store)
+            .map_err(ApplicationRunPrepareError::execution)?;
+    let workspace_trust = workspace_trust_from_entries(session.entries(), &workspace_root)
+        .map_err(ApplicationRunPrepareError::execution)?;
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
     conversation_lifecycle
         .reconcile_unfinished(current_unix_time_ms())
         .map_err(ApplicationRunPrepareError::execution)?;
-    admit_application_model_selection(&request, &mut session)?;
-    root_config.agent.provider = session.provider_name().to_owned();
-    root_config.agent.model = session.model_name().to_owned();
-    admit_application_reasoning_effort(&request, &root_config)?;
+    admit_application_model_selection(&request, &root_config, &session, &sigil_paths.cache_root)?;
+    let session_route = session
+        .resolved_model_route()
+        .cloned()
+        .ok_or_else(|| ApplicationRunPrepareError::execution(anyhow!("session_route_missing")))?;
+    let runtime_provider_name =
+        crate::provider_connections::validate_persisted_model_route(&root_config, &session_route)
+            .map_err(ApplicationRunPrepareError::configuration)?;
+    let mut identity_config = root_config.clone();
+    identity_config.agent.provider = runtime_provider_name;
+    identity_config.agent.model = session_route.model_ref.model_id.clone();
+    admit_application_reasoning_effort(&request, &identity_config)?;
     if request.skill_binding.is_some() && request.agent_binding.is_some() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "a run cannot invoke an inline skill and an agent profile together".to_owned(),
@@ -2521,8 +2727,7 @@ fn prepare_application_run_blocking(
         } else {
             None
         };
-    let provider =
-        crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
+    let model_ref = session_route.model_ref.clone();
     attach_session_url_capability_store(&mut session)
         .map_err(ApplicationRunPrepareError::execution)?;
 
@@ -2535,7 +2740,7 @@ fn prepare_application_run_blocking(
         .register_task()
         .map_err(ApplicationRunPrepareError::execution)?;
     let mut options = crate::build_run_options(
-        &root_config,
+        &identity_config,
         workspace_root.clone(),
         request.interaction.kernel_mode(),
     );
@@ -2576,7 +2781,7 @@ fn prepare_application_run_blocking(
         cancellation_owner,
         cancellation_handle,
         root_task_guard,
-        provider,
+        model_ref,
         options,
         target_max_tokens,
         input,
@@ -2747,8 +2952,40 @@ fn admit_application_reasoning_effort(
 
 fn admit_application_model_selection(
     request: &ApplicationRunRequest,
-    session: &mut Session,
+    root_config: &RootConfig,
+    session: &Session,
+    cache_root: &Path,
 ) -> std::result::Result<(), ApplicationRunPrepareError> {
+    match (
+        request.model_connection_id.as_ref(),
+        request.model_name.as_deref(),
+        request.model_selection_binding.as_deref(),
+    ) {
+        (Some(connection_id), Some(model_name), None) => {
+            let route = session.resolved_model_route().ok_or_else(|| {
+                ApplicationRunPrepareError::execution(anyhow!("session_route_missing"))
+            })?;
+            if &route.model_ref.connection_id != connection_id
+                || route.model_ref.model_id != model_name
+            {
+                return Err(ApplicationRunPrepareError::InvalidInvocation {
+                    message:
+                        "explicit connection/model route requires binding a fresh exact session"
+                            .to_owned(),
+                });
+            }
+            return Ok(());
+        }
+        (Some(_), None, _) | (None, Some(_), None) | (Some(_), Some(_), Some(_)) => {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message:
+                    "connection and model must be supplied together without a UI capability binding"
+                        .to_owned(),
+            });
+        }
+        (None, None, None) => return Ok(()),
+        (None, _, _) => {}
+    }
     let (requested_model, binding) = match (
         request.model_name.as_deref(),
         request.model_selection_binding.as_deref(),
@@ -2767,27 +3004,36 @@ fn admit_application_model_selection(
             .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
                 message: "application run model must not be empty".to_owned(),
             })?;
-    let available_models = application_model_options(session.provider_name(), session.model_name());
-    let expected_binding = application_model_selection_binding(
-        session.provider_name(),
-        session.model_name(),
-        &available_models,
-    );
+    let route = session
+        .resolved_model_route()
+        .ok_or_else(|| ApplicationRunPrepareError::execution(anyhow!("session_route_missing")))?;
+    let catalog_entries =
+        application_model_catalog_entries(root_config, &route.model_ref, cache_root);
+    let available_models =
+        application_model_option_views(root_config, session.provider_name(), catalog_entries);
+    let expected_binding = application_model_selection_binding(&route.model_ref, &available_models);
     if binding != expected_binding {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "model selection capability binding is stale".to_owned(),
         });
     }
-    if !available_models.contains(&requested_model) {
+    if !available_models.iter().any(|option| {
+        option.model_ref.connection_id == route.model_ref.connection_id
+            && option.model_ref.model_id == requested_model
+    }) {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: format!(
                 "model {requested_model} is not available for the configured provider"
             ),
         });
     }
-    session
-        .select_model(requested_model)
-        .map_err(ApplicationRunPrepareError::execution)
+    if requested_model != session.model_name() {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "model switching requires binding a fresh session before preparing the run"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn constrain_application_tool_registry(
@@ -2816,17 +3062,6 @@ fn constrain_application_tool_registry(
         bail!("application tool scope produced an empty registry");
     }
     Ok(scoped)
-}
-
-fn load_application_session_with_workspace_trust(
-    provider_name: impl Into<String>,
-    model_name: impl Into<String>,
-    session_store: JsonlSessionStore,
-    workspace_root: &Path,
-) -> Result<(Session, WorkspaceTrust)> {
-    let session = Session::load_from_store(provider_name, model_name, session_store)?;
-    let workspace_trust = workspace_trust_from_entries(session.entries(), workspace_root)?;
-    Ok((session, workspace_trust))
 }
 
 fn canonical_session_lease_path(path: &Path) -> Result<PathBuf> {

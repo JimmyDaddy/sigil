@@ -26,6 +26,7 @@ libc.workspace = true
 portable-pty.workspace = true
 sigil-desktop = { path = "../sigil-desktop" }
 tempfile.workspace = true
+walkdir.workspace = true
 
 [lints]
 workspace = true

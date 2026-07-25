@@ -14,6 +14,7 @@ fn profile(
             instructions: "inspect only".to_owned(),
             model: None,
             provider: None,
+            connection: None,
             reasoning_effort: None,
             tool_scope: Default::default(),
             permission_policy: Default::default(),

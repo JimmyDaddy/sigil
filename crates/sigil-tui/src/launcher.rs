@@ -383,6 +383,7 @@ fn run_app(
         attention.update_config(app.terminal_notification_config());
         let mut dirty = needs_render;
         dirty |= drain_worker_messages_with_attention(app, worker, &mut attention)?;
+        dirty |= restart_worker_after_session_transition(app, worker, spawn_worker)?;
         attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
         dirty |= expire_unready_worker(app, worker)?;
@@ -666,10 +667,26 @@ where
         }
         AppAction::ConfigSaved { root_config }
         | AppAction::RuntimeConfigUpdated { root_config } => {
+            let Some(runtime_config) = app.runtime_config_for_current_session(*root_config)? else {
+                return Ok(());
+            };
             if let Some(runtime) = worker.take() {
                 let _ = runtime.worker_tx.send(AppState::shutdown_command());
             }
-            *worker = Some(spawn_worker_fn(*root_config, app)?);
+            *worker = Some(spawn_worker_fn(runtime_config, app)?);
+        }
+        AppAction::SetDefaultModel {
+            root_config,
+            expected_root_config,
+        } => {
+            root_config.save_if_unchanged(&app.config_path, &expected_root_config)?;
+            app.apply_saved_default_model(*root_config);
+        }
+        AppAction::StartNewModelSession { runtime_config } => {
+            if let Some(runtime) = worker.take() {
+                let _ = runtime.worker_tx.send(AppState::shutdown_command());
+            }
+            *worker = Some(spawn_worker_fn(*runtime_config, app)?);
         }
         AppAction::CopyToClipboard { text } => {
             if app.terminal_osc52_clipboard_enabled() {
@@ -927,6 +944,35 @@ fn drain_worker_messages_inner(
         dirty = true;
     }
     Ok(dirty | app.flush_timeline_render_batch())
+}
+
+fn restart_worker_after_session_transition<F>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    mut spawn_worker_fn: F,
+) -> Result<bool>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    if !app.take_worker_rebind_required() {
+        return Ok(false);
+    }
+    *worker = None;
+    let Some(root_config) = app.root_config_snapshot().cloned() else {
+        report_worker_unavailable(
+            app,
+            "session changed but the runtime config is unavailable; no prompt was sent",
+        )?;
+        return Ok(true);
+    };
+    match spawn_worker_fn(root_config, app) {
+        Ok(runtime) => *worker = Some(runtime),
+        Err(error) => report_worker_unavailable(
+            app,
+            &format!("session changed but the agent worker could not rebind: {error:#}"),
+        )?,
+    }
+    Ok(true)
 }
 
 #[cfg(not(test))]

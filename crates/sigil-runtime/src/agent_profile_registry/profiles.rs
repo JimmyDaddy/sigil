@@ -1,9 +1,7 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
@@ -20,6 +18,7 @@ use super::{
     },
     workspace_path,
 };
+use crate::{definition_file_io::read_definition_text, skills::compatibility_stable_id};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NativeAgentProfileFormat {
@@ -153,6 +152,9 @@ pub(super) fn workspace_agent_profile_from_raw(
         provider: wire
             .provider
             .or_else(|| Some(root_config.agent.provider.clone())),
+        connection: wire
+            .connection
+            .or_else(|| root_config.agent.connection.clone()),
         reasoning_effort: wire.reasoning_effort,
         tool_scope,
         permission_policy,
@@ -181,6 +183,68 @@ pub(super) fn workspace_agent_profile_from_raw(
         model_invocable_override: None,
         source: AgentProfileSource::Workspace,
         trust_state: wire.trust.or(wire.trust_state).unwrap_or_default(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexAgentProfileWire {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    developer_instructions: String,
+}
+
+pub(super) fn codex_agent_profile_from_raw(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    entrypoint: &Path,
+    raw: &str,
+) -> Result<ResolvedAgentProfile> {
+    let wire = toml::from_str::<CodexAgentProfileWire>(raw)?;
+    let name = wire.name.trim();
+    if name.is_empty() {
+        bail!("Codex agent profile name cannot be empty");
+    }
+    let profile_id = AgentProfileId::new(compatibility_stable_id("compat-agent", name))?;
+    let profile = AgentProfile {
+        id: profile_id,
+        kind: AgentProfileKind::Subagent,
+        description: wire.description.trim().to_owned(),
+        instructions: wire.developer_instructions.trim().to_owned(),
+        model: Some(root_config.agent.model.clone()),
+        provider: Some(root_config.agent.provider.clone()),
+        connection: root_config.agent.connection.clone(),
+        reasoning_effort: None,
+        tool_scope: read_only_role_tool_scope(),
+        permission_policy: root_config.permission.clone(),
+        invocation_policy: AgentInvocationPolicy::ManualOnly,
+        result_policy: AgentResultPolicy::SummaryWithPageRef,
+        user_invocable: true,
+        model_invocable: false,
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        nickname_candidates: vec![name.to_owned()],
+        aliases: Vec::new(),
+        slash_names: Vec::new(),
+    };
+    Ok(ResolvedAgentProfile {
+        source_hash: hash_json(&json!({
+            "kind": "codex_compatibility_agent_profile",
+            "entrypoint": display_path(workspace_root, entrypoint),
+            "sha256": hash_bytes(raw.as_bytes()),
+        }))?,
+        execution_role: AgentRole::SubagentRead,
+        profile,
+        enabled: true,
+        enabled_override: None,
+        user_invocable_override: None,
+        model_invocable_override: None,
+        source: AgentProfileSource::Compatibility {
+            provider: "codex".to_owned(),
+        },
+        trust_state: AgentTrustState::Trusted,
     })
 }
 
@@ -244,6 +308,9 @@ pub(super) fn plugin_agent_profile_from_raw(
         provider: wire
             .provider
             .or_else(|| Some(root_config.agent.provider.clone())),
+        connection: wire
+            .connection
+            .or_else(|| root_config.agent.connection.clone()),
         reasoning_effort: wire.reasoning_effort,
         tool_scope,
         permission_policy,
@@ -294,7 +361,7 @@ pub(super) fn child_session_skill_profile(
         descriptor.allowed_tools.clone()
     };
     let entrypoint = workspace_path(workspace_root, &descriptor.entrypoint);
-    let raw = fs::read_to_string(&entrypoint).with_context(|| {
+    let raw = read_definition_text(&entrypoint).with_context(|| {
         format!(
             "failed to read child-session skill {}",
             entrypoint.display()
@@ -308,6 +375,7 @@ pub(super) fn child_session_skill_profile(
         instructions,
         model: Some(root_config.agent.model.clone()),
         provider: Some(root_config.agent.provider.clone()),
+        connection: root_config.agent.connection.clone(),
         reasoning_effort: None,
         tool_scope,
         permission_policy: root_config.permission.clone(),
@@ -380,6 +448,11 @@ fn compatibility_skill_instructions(descriptor: &SkillDescriptor, raw: &str) -> 
 
 fn agent_profile_source_from_skill(descriptor: &SkillDescriptor) -> AgentProfileSource {
     let entrypoint = descriptor.entrypoint.to_string_lossy();
+    if entrypoint.starts_with(".opencode/") || entrypoint.starts_with(".opencode\\") {
+        return AgentProfileSource::Compatibility {
+            provider: "opencode".to_owned(),
+        };
+    }
     if entrypoint.starts_with(".claude/") || entrypoint.starts_with(".claude\\") {
         return AgentProfileSource::Compatibility {
             provider: "claude".to_owned(),

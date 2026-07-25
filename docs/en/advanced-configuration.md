@@ -47,7 +47,7 @@ Add only checks you understand. Repository hints can be suggested but do not run
 
 <!-- public-doc-topic: skills-agents -->
 
-Reusable workspace skills, commands, agents, and plugins live under `.sigil/skills`, `.sigil/commands`, `.sigil/agents`, and `.sigil/plugins`. User resources and compatibility imports are controlled by `[skills]`. Review imported instructions before allowing them to act.
+Sigil-native reusable workspace skills, commands, agents, and plugins live under `.sigil/skills`, `.sigil/commands`, `.sigil/agents`, and `.sigil/plugins`. By default, Sigil also discovers standard `.agents/skills`, Codex `.codex/agents`, OpenCode `.opencode/{skills,commands,agents}`, and Claude Code `.claude/{skills,commands,agents}` resources. Native Sigil resources win name conflicts. Compatible resources inherit workspace trust instead of requiring per-item review or enablement; compatible commands use `/name`, while compatible agents use `@name` and remain manual-only and read-only. Set `[skills].compatibility_auto_discover = false` to disable the default set, or use `compatibility_sources` to add or precisely select sources.
 
 ## Compaction And Code Intelligence
 

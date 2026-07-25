@@ -297,6 +297,7 @@ fn seed_overflow_recovery_history(store: &JsonlSessionStore) -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "openai_responses".to_owned(),
         model_name: "gpt-4.1-2025-04-14".to_owned(),
+        resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::User(ModelMessage::user(
         "older user request",
@@ -449,6 +450,7 @@ fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "planned".to_owned(),
         model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("one")))?;
     store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
@@ -512,6 +514,7 @@ fn compact_preview_rehydrates_folded_image_from_captured_runtime_cache() -> Resu
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "planned".to_owned(),
         model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
     }))?;
     let mut first = ModelMessage::user("inspect the older image");
     first.image_attachments.push(attachment);
@@ -664,6 +667,7 @@ fn manual_compaction_applies_reloads_and_repeats_with_installed_tokenizer() -> R
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     }))?;
     for turn in 0..4 {
         store.append(&SessionLogEntry::User(ModelMessage::user(format!(
@@ -761,6 +765,7 @@ fn hard_threshold_idle_compaction_applies_after_owned_preparation() -> Result<()
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     }))?;
     for turn in 0..4 {
         store.append(&SessionLogEntry::User(ModelMessage::user(format!(

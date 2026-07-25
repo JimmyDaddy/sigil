@@ -75,7 +75,8 @@ where
         &base_registry,
         agent_supervisor,
         role_provider_builder,
-    )?;
+    )
+    .await?;
     orchestrator
         .with_cancellation(cancellation_handle)
         .run(

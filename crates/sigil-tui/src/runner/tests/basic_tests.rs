@@ -864,7 +864,7 @@ fn spawn_agent_worker_reports_provider_configuration_error() -> Result<()> {
     assert!(matches!(
         message,
         WorkerMessage::RunFailed(ref error)
-            if error.contains("missing [providers.deepseek] in sigil.toml")
+            if error.contains("model_route_not_configured")
     ));
     Ok(())
 }
@@ -1322,7 +1322,7 @@ fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
     assert!(matches!(
         failure,
         WorkerMessage::RunFailed(ref error)
-            if error.contains("unsupported provider missing-provider")
+            if error.contains("model_route_not_configured")
     ));
     Ok(())
 }
@@ -1848,6 +1848,7 @@ fn restored_dispatching_queue_item_is_marked_stale() -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "planned".to_owned(),
         model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
     }))?;
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     store.append(&SessionLogEntry::Control(

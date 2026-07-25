@@ -26,7 +26,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 7;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 8;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +66,8 @@ pub struct HttpServerCapabilities {
     pub conversation_recovery: bool,
     /// Redacted local diagnostics and an explicit private support-bundle export are available.
     pub support_diagnostics: bool,
+    /// Secret-free provider connection inventory is available to the native owner.
+    pub provider_connections: bool,
 }
 
 impl HttpServerCapabilities {
@@ -86,6 +88,7 @@ impl HttpServerCapabilities {
             agent_activity: true,
             conversation_recovery: true,
             support_diagnostics: true,
+            provider_connections: true,
         }
     }
 }
@@ -228,6 +231,83 @@ pub struct HttpSupportBundleExport {
     pub content: String,
 }
 
+/// Configuration schema mode projected without exposing raw configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderConfigMode {
+    LegacyV1,
+    V2,
+    Mixed,
+    UnsupportedFuture,
+}
+
+/// Compound connection/model identity used by settings surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderModelRef {
+    pub connection_id: String,
+    pub model_id: String,
+}
+
+/// Secret-free credential source classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderCredentialSource {
+    Environment,
+    SystemKeyring,
+    Stored,
+    None,
+    LegacyPlaintext,
+}
+
+/// Native-owner readiness state for one configured connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderConnectionReadiness {
+    Ready,
+    NeedsCredential,
+    CredentialUnavailable,
+    NeedsModel,
+    Unverified,
+    Invalid,
+}
+
+/// Bounded, stable issue projection that contains neither paths nor provider response bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderConnectionIssue {
+    pub code: String,
+    pub message: String,
+}
+
+/// One secret-free connection row for a native settings owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderConnectionEntry {
+    pub id: String,
+    pub label: String,
+    pub provider_label: String,
+    pub protocol_label: String,
+    pub endpoint_display: String,
+    pub credential_source: HttpProviderCredentialSource,
+    pub readiness: HttpProviderConnectionReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<HttpProviderModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<HttpProviderConnectionIssue>,
+}
+
+/// Full secret-free inventory shared by Doctor, TUI runtime ownership, and Desktop native code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderConnectionInventory {
+    pub config_mode: HttpProviderConfigMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<HttpProviderModelRef>,
+    pub connections: Vec<HttpProviderConnectionEntry>,
+    pub issues: Vec<HttpProviderConnectionIssue>,
+}
+
 /// Immutable, secret-free metadata published after the local listener is ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,9 +358,9 @@ pub struct HttpSessionCreateRequest {
     /// Optional user-facing label for clients that manage multiple sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Optional model for the new durable session, selected from the run-context offer.
+    /// Optional exact connection/model identity for the new durable session.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
+    pub model_ref: Option<HttpProviderModelRef>,
 }
 
 /// Request body for reopening one durable workspace session as a live adapter handle.
@@ -706,6 +786,14 @@ pub enum HttpConversationDisplayAssistantPhase {
     FinalAnswer,
 }
 
+/// User-selected skill bound to one durable prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationDisplaySkillReference {
+    pub id: String,
+    pub name: String,
+}
+
 /// User decision recorded for one approval item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -743,6 +831,8 @@ pub enum HttpConversationDisplayContent {
         role: HttpConversationDisplayMessageRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill: Option<HttpConversationDisplaySkillReference>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<HttpConversationDisplayAssistantPhase>,
         image_attachment_count: u64,
@@ -922,6 +1012,7 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
             ConversationDisplayContentV1::Message {
                 role,
                 text,
+                skill,
                 assistant_phase,
                 image_attachment_count,
                 truncated,
@@ -929,6 +1020,10 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
             } => Self::Message {
                 role: role.into(),
                 text,
+                skill: skill.map(|skill| HttpConversationDisplaySkillReference {
+                    id: skill.id,
+                    name: skill.name,
+                }),
                 assistant_phase: assistant_phase.map(Into::into),
                 image_attachment_count: usize_as_u64(image_attachment_count),
                 truncated,
@@ -1178,8 +1273,8 @@ pub enum HttpReasoningEffort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpModelSelectionPolicy {
-    /// Each run may select an admitted model while retaining the durable session and transcript.
-    PerRun,
+    /// A different model requires creation of a fresh durable session.
+    FreshSession,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -1295,6 +1390,11 @@ pub struct HttpApplicationExtensionCatalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpApplicationModelOption {
+    pub model_ref: HttpProviderModelRef,
+    pub display_name: String,
+    pub availability: String,
+    pub recommendation: String,
+    pub provenance: String,
     pub model_name: String,
     pub available_reasoning_efforts: Vec<HttpReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1307,15 +1407,15 @@ pub struct HttpApplicationModelOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpRunContextView {
+    /// Compound connection/model identity durably frozen for this session.
+    pub model_ref: HttpProviderModelRef,
     /// Provider identity durably frozen for this session.
     pub provider_name: String,
     /// Model identity durably frozen for this session.
     pub model_name: String,
-    /// Models accepted when creating a new session for this provider.
-    pub available_models: Vec<String>,
-    /// Exact effort capabilities for each selectable model.
+    /// Exact connection-scoped catalog and effort capabilities for each selectable model.
     pub model_options: Vec<HttpApplicationModelOption>,
-    /// Whether the model can change without forking the durable session.
+    /// Session boundary required to change the model.
     pub model_selection: HttpModelSelectionPolicy,
     /// Opaque binding proving the exact current and available model set.
     pub model_selection_binding: String,
@@ -2024,6 +2124,7 @@ pub enum HttpConversationRecoveryCommandAction {
     },
     ForkConversation {
         source_turn_digest: String,
+        model_ref: HttpProviderModelRef,
     },
 }
 

@@ -4860,9 +4860,12 @@ dependencies = [
  "sigil-tui",
  "tempfile",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -4953,6 +4956,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "keyring",
+ "libc",
  "ring",
  "serde",
  "serde_json",
@@ -4964,6 +4968,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -5099,8 +5104,10 @@ dependencies = [
  "futures",
  "ignore",
  "image",
+ "keyring",
  "libc",
  "reqwest 0.12.28",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5122,6 +5129,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5183,6 +5191,7 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
 ]
 

@@ -30,7 +30,17 @@ sigil
 
 ## 3. 完成快速设置
 
-缺少配置时，先选择模型服务，再选择对应模型并填写认证信息。`Trust folder, save and start` 是允许把启动目录作为工作区的显式确认，不再提供单独的信任开关。在快速设置或之后的 `/config` 中，将焦点放在 Provider 并按 Enter 即可切换模型服务。临时使用时，优先采用[模型服务指南](providers.md#认证优先级)列出的环境变量。通过快速设置或 `/config` 保存的密钥会以明文写入本机配置文件；不要把包含真实凭据的 `sigil.toml` 提交到仓库。
+缺少配置时，最多做三个主要决定：provider、凭据来源和模型。`Review, trust folder, save and
+start` 会确认 route，并允许把启动目录作为工作区。快速设置会写入一个命名的 V2 connection 和
+复合保存默认值。
+
+普通本机使用请选择安全凭据存储；粘贴的 key 只在创建凭据记录期间保留，`sigil.toml` 仅保存
+随机引用。默认 `auto` 优先系统存储，仅在系统存储不可用时使用 owner-only 的
+`~/.sigil/credentials.json`。CI 或已由 Shell 管理 secret 时选择允许列表中的环境变量。详见
+[模型服务指南](providers.md#认证优先级)。
+
+之后可用 `/model connection-id/model-id` 在 ready route 上创建新会话。在选择器中，Enter
+创建会话，`D` 只修改保存默认值；界面会分别显示当前 route 与保存 route。
 
 ## 4. 跑第一轮检查
 

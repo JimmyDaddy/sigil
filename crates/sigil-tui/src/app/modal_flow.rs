@@ -1,15 +1,22 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::ModelRequestConfig;
+use sigil_kernel::{ModelRequestConfig, SecretString};
 use sigil_runtime::{
     DEFAULT_SETUP_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse,
     ProviderConfigFields, ProviderStatusConfig, default_provider_config_fields,
-    provider_api_key_env_name, provider_model_status_config,
-    provider_model_status_config_from_fields,
+    normalize_provider_name, provider_api_key_env_name,
+    provider_connections::{
+        ModelCatalogEntry as ConnectionModelCatalogEntry,
+        ModelCatalogRequest as ConnectionModelCatalogRequest,
+        ModelCatalogResult as ConnectionModelCatalogResult,
+        ModelCatalogState as ConnectionModelCatalogState, PreparedCredential,
+        connection_semantic_fingerprint, load_provider_connections,
+    },
+    provider_model_status_config, provider_model_status_config_from_fields,
 };
 
 use super::{
     AppState, PaneFocus, TimelineRole,
-    formatting::{build_model_picker_options, non_empty_or},
+    formatting::{ProviderModelIdentity, build_model_picker_options, non_empty_or},
 };
 use crate::commands::{keyboard_help_lines, metadata_slash_commands, metadata_slash_help_lines};
 use crate::config_panel::{ConfigField, config_field_accepts_char};
@@ -33,8 +40,8 @@ impl ModelPickerTarget {
 
     fn summary(self) -> &'static str {
         match self {
-            Self::Setup | Self::Provider => "Choose a known model. Esc to type your own.",
-            Self::ProviderFim => "Choose FIM model. Esc to type your own.",
+            Self::Setup | Self::Provider => "Choose a provider-scoped model.",
+            Self::ProviderFim => "Choose a provider-scoped FIM model.",
         }
     }
 }
@@ -42,14 +49,82 @@ impl ModelPickerTarget {
 #[derive(Debug, Clone)]
 pub(super) struct ModelPickerState {
     pub(super) target: ModelPickerTarget,
+    pub(super) connection_id: Option<sigil_kernel::ConnectionId>,
+    pub(super) provider_name: String,
     pub(super) current: String,
-    pub(super) options: Vec<String>,
+    pub(super) route_base_url: Option<String>,
+    pub(super) catalog_state: ModelCatalogState,
+    pub(super) catalog_entries: Vec<ConnectionModelCatalogEntry>,
+    pub(super) manual_entry_allowed: bool,
+    pub(super) options: Vec<ProviderModelIdentity>,
     pub(super) selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ModelCatalogState {
+    Bundled,
+    Loading,
+    Remote,
+    CacheFresh,
+    CacheStale,
+    Empty,
+    AuthRejected,
+    Offline,
+    Unsupported,
+    Malformed,
+    TlsRejected,
+    ProtocolMismatch,
+    RateLimited(Option<u64>),
+    CredentialUnavailable,
+    Error(String),
+}
+
+impl ModelCatalogState {
+    fn summary(&self) -> String {
+        match self {
+            Self::Bundled => "catalog: bundled provider models".to_owned(),
+            Self::Loading => "catalog: loading remote provider models".to_owned(),
+            Self::Remote => "catalog: remote provider models".to_owned(),
+            Self::CacheFresh => "catalog: exact connection cache · fresh".to_owned(),
+            Self::CacheStale => "catalog: exact connection cache · stale reference".to_owned(),
+            Self::Empty => {
+                "catalog: provider returned no models; press M to enter a model id".to_owned()
+            }
+            Self::Unsupported => {
+                "catalog: remote discovery unsupported; bundled models only".to_owned()
+            }
+            Self::AuthRejected => {
+                "catalog: credential rejected; update authentication or retry".to_owned()
+            }
+            Self::Offline => {
+                "catalog: endpoint offline; exact cache/bundled rows are marked by source"
+                    .to_owned()
+            }
+            Self::Malformed => {
+                "catalog: provider returned a malformed or oversized response".to_owned()
+            }
+            Self::TlsRejected => "catalog: TLS validation rejected the endpoint".to_owned(),
+            Self::ProtocolMismatch => {
+                "catalog: endpoint does not match the selected provider protocol".to_owned()
+            }
+            Self::RateLimited(retry_after) => retry_after.map_or_else(
+                || "catalog: provider rate limited discovery".to_owned(),
+                |seconds| format!("catalog: rate limited; retry in at most {seconds}s"),
+            ),
+            Self::CredentialUnavailable => {
+                "catalog: selected credential source is unavailable".to_owned()
+            }
+            Self::Error(error) => {
+                format!("catalog: remote refresh failed; bundled models remain ({error})")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct ModelPickerRefresh {
     pub(super) target: ModelPickerTarget,
+    pub(super) provider_name: String,
     pub(super) current: String,
     pub(super) base_url: String,
     pub(super) result: Result<Vec<String>, String>,
@@ -59,7 +134,12 @@ pub(super) struct ModelPickerRefresh {
 pub(super) struct PendingModelPickerRefresh {
     pub(super) request_id: u64,
     pub(super) target: ModelPickerTarget,
+    pub(super) provider_name: String,
     pub(super) current: String,
+    pub(super) base_url: String,
+    pub(super) connection_id: Option<sigil_kernel::ConnectionId>,
+    pub(super) draft_revision: u64,
+    pub(super) connection_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,10 +158,14 @@ impl SecretInputTarget {
     fn summary(self, env_name: &str) -> String {
         match self {
             Self::SetupApiKey => {
-                format!("Saved as plaintext with setup. {env_name} can override at runtime.")
+                format!(
+                    "Saved to the secure credential store. The value never enters sigil.toml; {env_name} is a separate selectable source."
+                )
             }
             Self::ConfigProviderApiKey => {
-                format!("Saved as plaintext on Ctrl-S. {env_name} can override at runtime.")
+                format!(
+                    "Staged in memory for secure-store save. The value never enters sigil.toml; {env_name} is a separate source."
+                )
             }
         }
     }
@@ -90,13 +174,15 @@ impl SecretInputTarget {
 #[derive(Debug, Clone)]
 pub(super) struct SecretInputState {
     pub(super) target: SecretInputTarget,
-    pub(super) buffer: String,
+    pub(super) buffer: SecretString,
     pub(super) summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextInputTarget {
     SetupModel,
+    SetupEndpoint,
+    ConfigManualModel,
     ConfigField(ConfigField),
     SkillArguments,
 }
@@ -105,6 +191,8 @@ impl TextInputTarget {
     fn title(self) -> &'static str {
         match self {
             Self::SetupModel => "Model ID",
+            Self::SetupEndpoint => "Custom Endpoint",
+            Self::ConfigManualModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
             Self::SkillArguments => "Use Skill",
         }
@@ -113,6 +201,12 @@ impl TextInputTarget {
     fn summary(self) -> &'static str {
         match self {
             Self::SetupModel => "Custom model id.",
+            Self::SetupEndpoint => {
+                "HTTPS is required except for an explicit loopback development endpoint."
+            }
+            Self::ConfigManualModel => {
+                "Custom model id admitted by the verified connection catalog."
+            }
             Self::ConfigField(field) => field.help_text(),
             Self::SkillArguments => "Optional instructions for how to use the selected skill.",
         }
@@ -120,7 +214,8 @@ impl TextInputTarget {
 
     fn prompt_label(self) -> &'static str {
         match self {
-            Self::SetupModel => "model",
+            Self::SetupModel | Self::ConfigManualModel => "model",
+            Self::SetupEndpoint => "endpoint",
             Self::ConfigField(_) => "value",
             Self::SkillArguments => "instructions",
         }
@@ -128,7 +223,8 @@ impl TextInputTarget {
 
     fn config_key(self) -> Option<&'static str> {
         match self {
-            Self::SetupModel => None,
+            Self::SetupModel | Self::SetupEndpoint => None,
+            Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
             Self::ConfigField(field) => Some(field.label()),
             Self::SkillArguments => None,
         }
@@ -203,11 +299,17 @@ pub(super) enum ModalOutcome {
     Dismissed(String),
     ModelSelected {
         target: ModelPickerTarget,
+        connection_id: Option<sigil_kernel::ConnectionId>,
+        provider_name: String,
         value: String,
+    },
+    ManualModelRequested {
+        target: ModelPickerTarget,
+        current: String,
     },
     SecretSubmitted {
         target: SecretInputTarget,
-        value: String,
+        value: SecretString,
     },
     TextSubmitted {
         target: TextInputTarget,
@@ -241,19 +343,75 @@ impl AppState {
     pub fn modal_lines(&self) -> Vec<String> {
         match self.modal_state.as_ref() {
             Some(ModalState::ModelPicker(state)) => {
+                let actions = if state.manual_entry_allowed {
+                    "Up/Down choose  Enter apply  M manual model id  Esc cancel"
+                } else {
+                    "Up/Down choose  Enter apply  Esc cancel"
+                };
                 let mut lines = vec![
                     state.target.summary().to_owned(),
-                    "Up/Down choose  Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
+                    format!("provider: {}", state.provider_name),
+                    state.catalog_state.summary(),
+                    actions.to_owned(),
                     String::new(),
                 ];
+                if !state.current.trim().is_empty()
+                    && !state
+                        .options
+                        .iter()
+                        .any(|option| option.model_id == state.current)
+                {
+                    let remediation = if state.manual_entry_allowed {
+                        format!("not listed for {}; use M to edit", state.provider_name)
+                    } else {
+                        "not selectable in the current catalog state; repair or retry".to_owned()
+                    };
+                    lines.push(format!("configured: {}  [{remediation}]", state.current));
+                    lines.push(String::new());
+                }
                 for (index, option) in state.options.iter().enumerate() {
                     let marker = if index == state.selected { ">" } else { " " };
-                    let suffix = if option == &state.current {
-                        "  [current]"
+                    let metadata = state.catalog_entries.iter().find(|entry| {
+                        entry.model_ref.connection_id.as_str()
+                            == option
+                                .connection_id
+                                .as_ref()
+                                .map(sigil_kernel::ConnectionId::as_str)
+                                .unwrap_or_default()
+                            && entry.model_ref.model_id == option.model_id
+                    });
+                    let mut tags = Vec::new();
+                    if option.model_id == state.current {
+                        tags.push("current");
+                    }
+                    if metadata.is_some_and(|entry| {
+                        entry.recommendation
+                            == sigil_runtime::provider_connections::ModelRecommendation::Recommended
+                    }) {
+                        tags.push("recommended");
+                    }
+                    if metadata.is_some_and(|entry| {
+                        entry.availability
+                            == sigil_runtime::provider_connections::ModelAvailability::Unverified
+                    }) {
+                        tags.push("unverified");
+                    }
+                    if metadata.is_some_and(|entry| {
+                        entry.availability
+                            == sigil_runtime::provider_connections::ModelAvailability::ConfiguredUnavailable
+                    }) {
+                        tags.push("configured · not returned");
+                    }
+                    let suffix = if tags.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!("  [{}]", tags.join(" · "))
                     };
-                    lines.push(format!("{marker} {option}{suffix}"));
+                    lines.push(format!("{marker} {}{suffix}", option.model_id));
+                }
+                lines.push(String::new());
+                if state.manual_entry_allowed {
+                    lines.push("  Enter model ID manually…  [M]".to_owned());
                 }
                 lines
             }
@@ -262,7 +420,7 @@ impl AppState {
                 "key: api_key".to_owned(),
                 "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
                 String::new(),
-                format!("api_key: {}|", "*".repeat(state.buffer.chars().count())),
+                format!("api_key: {}|", "*".repeat(state.buffer.char_count())),
             ],
             Some(ModalState::TextInput(state)) => {
                 let mut lines = vec![state.target.summary().to_owned()];
@@ -339,7 +497,7 @@ impl AppState {
     pub fn modal_input_cursor(&self) -> Option<(String, usize, usize)> {
         match self.modal_state.as_ref()? {
             ModalState::SecretInput(state) => {
-                Some(("api_key".to_owned(), state.buffer.chars().count(), 4))
+                Some(("api_key".to_owned(), state.buffer.char_count(), 4))
             }
             ModalState::TextInput(state) => {
                 let line_index = if state.target.config_key().is_some() {
@@ -380,37 +538,351 @@ impl AppState {
     }
 
     pub(super) fn open_model_picker(&mut self, target: ModelPickerTarget, current: &str) {
-        let options = build_model_picker_options(current, Vec::new());
+        let provider_name = self.provider_name_for_model_picker();
+        let options = if matches!(
+            target,
+            ModelPickerTarget::Setup | ModelPickerTarget::Provider
+        ) {
+            Vec::new()
+        } else {
+            build_model_picker_options(&provider_name, current, None)
+        };
         let selected = options
             .iter()
-            .position(|option| option == current)
+            .position(|option| option.model_id == current)
             .unwrap_or(0);
         self.modal_state = Some(ModalState::ModelPicker(ModelPickerState {
             target,
+            connection_id: None,
+            provider_name: provider_name.clone(),
             current: current.to_owned(),
+            route_base_url: None,
+            catalog_state: ModelCatalogState::Bundled,
+            catalog_entries: Vec::new(),
+            manual_entry_allowed: target == ModelPickerTarget::ProviderFim,
             options,
             selected,
         }));
-        let notice = self.schedule_model_picker_refresh(target, current);
+        if matches!(
+            target,
+            ModelPickerTarget::Setup | ModelPickerTarget::Provider
+        ) {
+            if let Some(notice) = self.schedule_connection_model_refresh(target, current) {
+                self.last_notice = Some(notice);
+                return;
+            }
+            if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut() {
+                state.catalog_state = ModelCatalogState::Error(
+                    "exact connection draft is unavailable; repair provider settings".to_owned(),
+                );
+                state.manual_entry_allowed = false;
+            }
+            self.last_notice =
+                Some("model list unavailable: repair the exact connection settings".to_owned());
+            return;
+        }
+        let notice = self.schedule_model_picker_refresh(target, &provider_name, current);
         self.last_notice = Some(notice);
+    }
+
+    fn schedule_connection_model_refresh(
+        &mut self,
+        target: ModelPickerTarget,
+        current: &str,
+    ) -> Option<String> {
+        self.cancel_model_picker_refresh();
+        let (root_config, connection_id, draft_revision, provider_name, prepared_credential) =
+            match target {
+                ModelPickerTarget::Setup => {
+                    let state = self.setup_state.as_ref()?;
+                    let root_config = super::setup_flow::build_setup_root_config(state).ok()?;
+                    let loaded = load_provider_connections(&root_config);
+                    let model_ref = loaded.default_model?;
+                    let connection = loaded.connections.get(&model_ref.connection_id)?;
+                    let prepared_credential = (state.credential_source
+                        == crate::setup::SetupCredentialSource::SecureStore
+                        && !state.api_key.expose_secret().trim().is_empty())
+                    .then(|| {
+                        PreparedCredential::api_key(
+                            connection.config.provider,
+                            state.api_key.expose_secret().trim().to_owned(),
+                        )
+                    });
+                    (
+                        root_config,
+                        connection.config.id.clone(),
+                        state.draft_revision,
+                        state.provider_name.clone(),
+                        prepared_credential,
+                    )
+                }
+                ModelPickerTarget::Provider => {
+                    if let Some(state) = self.config_state.as_ref() {
+                        let root_config = state.draft.to_root_config().ok()?;
+                        (
+                            root_config,
+                            state.draft.selected_connection_id.clone(),
+                            state.draft_revision,
+                            state.draft.provider_name.clone(),
+                            state.draft.selected_prepared_credential(),
+                        )
+                    } else {
+                        let root_config = self.config_snapshot.as_ref()?.clone();
+                        let loaded = load_provider_connections(&root_config);
+                        let model_ref = self
+                            .runtime
+                            .model_route
+                            .as_ref()
+                            .map(|route| route.model_ref.clone())
+                            .or(loaded.default_model)?;
+                        let connection = loaded.connections.get(&model_ref.connection_id)?;
+                        (
+                            root_config,
+                            connection.config.id.clone(),
+                            0,
+                            self.runtime.provider_name.clone(),
+                            None,
+                        )
+                    }
+                }
+                ModelPickerTarget::ProviderFim => return None,
+            };
+        let loaded = load_provider_connections(&root_config);
+        let connection = loaded.connections.get(&connection_id)?;
+        let fingerprint = connection_semantic_fingerprint(&connection.config);
+        if let Some(ModalState::ModelPicker(picker)) = self.modal_state.as_mut() {
+            picker.connection_id = Some(connection_id.clone());
+            for option in &mut picker.options {
+                option.connection_id = Some(connection_id.clone());
+            }
+            picker.catalog_state = ModelCatalogState::Loading;
+            picker.manual_entry_allowed = false;
+        }
+        let request_id = self.next_background_request_id();
+        self.runtime.active_model_picker_refresh = Some(PendingModelPickerRefresh {
+            request_id,
+            target,
+            provider_name,
+            current: current.to_owned(),
+            base_url: String::new(),
+            connection_id: Some(connection_id.clone()),
+            draft_revision,
+            connection_fingerprint: Some(fingerprint.clone()),
+        });
+        let request = ConnectionModelCatalogRequest {
+            request_id,
+            connection_id,
+            draft_revision,
+            connection_fingerprint: fingerprint,
+            explicit_refresh: true,
+        };
+        if target == ModelPickerTarget::Setup {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let cache_root = self.sigil_paths.cache_root.clone();
+            let _ = std::thread::Builder::new()
+                .name("sigil-setup-model-catalog".to_owned())
+                .spawn(move || {
+                    let result = (|| -> anyhow::Result<ConnectionModelCatalogResult> {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        let service = sigil_runtime::provider_connections::ProviderModelCatalogService::new(
+                            cache_root,
+                            std::sync::Arc::new(
+                                sigil_runtime::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
+                                    &root_config,
+                                ),
+                            ),
+                            std::sync::Arc::new(
+                                sigil_runtime::provider_connections::ProcessCredentialEnvironment,
+                            ),
+                        )?;
+                        Ok(runtime.block_on(service.models_with_prepared_credential(
+                            &root_config,
+                            request,
+                            prepared_credential.as_ref(),
+                        )))
+                    })();
+                    let _ = sender.send(
+                        result.map_err(|_| "model catalog worker unavailable".to_owned()),
+                    );
+                });
+            self.runtime.setup_model_catalog_rx = Some(receiver);
+        } else {
+            self.enqueue_worker_command(WorkerCommand::RefreshConnectionModels {
+                cache_root: self.sigil_paths.cache_root.clone(),
+                root_config: Box::new(root_config),
+                request,
+                prepared_credential,
+            });
+        }
+        Some("loading models for the exact connection".to_owned())
+    }
+
+    pub(super) fn apply_connection_model_catalog(
+        &mut self,
+        result: ConnectionModelCatalogResult,
+    ) -> bool {
+        let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut() else {
+            return false;
+        };
+        if !matches!(
+            state.target,
+            ModelPickerTarget::Setup | ModelPickerTarget::Provider
+        ) || state.connection_id.as_ref() != Some(&result.connection_id)
+        {
+            return false;
+        }
+        let selected = state.options.get(state.selected).cloned();
+        state.options = result
+            .entries
+            .iter()
+            .filter(|entry| entry.model_ref.connection_id == result.connection_id)
+            .map(|entry| ProviderModelIdentity {
+                connection_id: Some(entry.model_ref.connection_id.clone()),
+                provider_name: state.provider_name.clone(),
+                model_id: entry.model_ref.model_id.clone(),
+            })
+            .collect();
+        state.catalog_entries = result.entries.clone();
+        state.manual_entry_allowed = result.manual_entry_allowed;
+        state.selected = selected
+            .and_then(|selected| state.options.iter().position(|entry| entry == &selected))
+            .or_else(|| {
+                state
+                    .options
+                    .iter()
+                    .position(|entry| entry.model_id == state.current)
+            })
+            .unwrap_or_default();
+        state.catalog_state = match result.state {
+            ConnectionModelCatalogState::Remote => ModelCatalogState::Remote,
+            ConnectionModelCatalogState::CacheFresh => ModelCatalogState::CacheFresh,
+            ConnectionModelCatalogState::CacheStale => ModelCatalogState::CacheStale,
+            ConnectionModelCatalogState::Bundled => ModelCatalogState::Bundled,
+            ConnectionModelCatalogState::Empty => ModelCatalogState::Empty,
+            ConnectionModelCatalogState::AuthRejected => ModelCatalogState::AuthRejected,
+            ConnectionModelCatalogState::Offline => ModelCatalogState::Offline,
+            ConnectionModelCatalogState::Unsupported => ModelCatalogState::Unsupported,
+            ConnectionModelCatalogState::Malformed => ModelCatalogState::Malformed,
+            ConnectionModelCatalogState::TlsRejected => ModelCatalogState::TlsRejected,
+            ConnectionModelCatalogState::ProtocolMismatch => ModelCatalogState::ProtocolMismatch,
+            ConnectionModelCatalogState::RateLimited => {
+                ModelCatalogState::RateLimited(result.retry_after_secs)
+            }
+            ConnectionModelCatalogState::CredentialUnavailable => {
+                ModelCatalogState::CredentialUnavailable
+            }
+        };
+        if state.target == ModelPickerTarget::Setup
+            && let Some(setup) = self.setup_state.as_mut()
+        {
+            setup.catalog_admission = Some(crate::setup::SetupCatalogAdmission {
+                draft_revision: result.draft_revision,
+                available_models: result
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.availability
+                            == sigil_runtime::provider_connections::ModelAvailability::Available
+                    })
+                    .map(|entry| entry.model_ref.model_id.clone())
+                    .collect(),
+                manual_entry_allowed: result.manual_entry_allowed,
+                manual_model: None,
+            });
+        }
+        let notice = format!(
+            "model catalog {} for {}",
+            result.state.code(),
+            result.connection_id
+        );
+        self.last_notice = Some(notice.clone());
+        self.push_event("model_list", notice);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_connection_model_refresh_for_test(
+        &self,
+    ) -> Option<(u64, sigil_kernel::ConnectionId, u64, String)> {
+        let pending = self.runtime.active_model_picker_refresh.as_ref()?;
+        Some((
+            pending.request_id,
+            pending.connection_id.clone()?,
+            pending.draft_revision,
+            pending.connection_fingerprint.clone()?,
+        ))
+    }
+
+    fn provider_name_for_model_picker(&self) -> String {
+        let provider_name = self
+            .config_state
+            .as_ref()
+            .map(|state| state.draft.provider_name.as_str())
+            .or_else(|| {
+                self.setup_state
+                    .as_ref()
+                    .map(|state| state.provider_name.as_str())
+            })
+            .or_else(|| {
+                self.config_snapshot
+                    .as_ref()
+                    .map(|config| config.agent.provider.as_str())
+            })
+            .unwrap_or(DEFAULT_SETUP_PROVIDER_KEY);
+        normalize_provider_name(provider_name).to_owned()
     }
 
     fn schedule_model_picker_refresh(
         &mut self,
         target: ModelPickerTarget,
+        provider_name: &str,
         current: &str,
     ) -> String {
         self.cancel_model_picker_refresh();
         let provider_config = match self.provider_status_config_for_model_picker(target, current) {
-            Ok(config) => config,
-            Err(error) => return format!("model list unavailable: {error}"),
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut()
+                    && state.target == target
+                    && state.provider_name == provider_name
+                    && state.current == current
+                {
+                    state.catalog_state = ModelCatalogState::Unsupported;
+                }
+                return format!("remote model discovery unsupported for {provider_name}");
+            }
+            Err(error) => {
+                if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut()
+                    && state.target == target
+                    && state.provider_name == provider_name
+                    && state.current == current
+                {
+                    state.catalog_state = ModelCatalogState::Error(error.to_string());
+                }
+                return format!("model list unavailable for {provider_name}: {error}");
+            }
         };
         let base_url = provider_config.base_url.clone();
+        if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut()
+            && state.target == target
+            && state.provider_name == provider_name
+            && state.current == current
+        {
+            state.route_base_url = Some(base_url.clone());
+            state.catalog_state = ModelCatalogState::Loading;
+        }
         let request_id = self.next_background_request_id();
         self.runtime.active_model_picker_refresh = Some(PendingModelPickerRefresh {
             request_id,
             target,
+            provider_name: provider_name.to_owned(),
             current: current.to_owned(),
+            base_url: base_url.clone(),
+            connection_id: None,
+            draft_revision: 0,
+            connection_fingerprint: None,
         });
         self.enqueue_worker_command(WorkerCommand::RefreshProviderModels {
             request_id,
@@ -422,17 +894,30 @@ impl AppState {
     pub(super) fn apply_model_picker_refresh(&mut self, refresh: ModelPickerRefresh) -> bool {
         let mut notice = None;
         if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut() {
-            if state.target != refresh.target || state.current != refresh.current {
+            if state.target != refresh.target
+                || state.provider_name != refresh.provider_name
+                || state.current != refresh.current
+                || state.route_base_url.as_deref() != Some(refresh.base_url.as_str())
+            {
                 return false;
             }
             match refresh.result {
                 Ok(remote) if !remote.is_empty() => {
-                    let selected_value = state
-                        .options
-                        .get(state.selected)
-                        .cloned()
-                        .unwrap_or_else(|| state.current.clone());
-                    state.options = build_model_picker_options(&state.current, remote);
+                    let selected_value =
+                        state
+                            .options
+                            .get(state.selected)
+                            .cloned()
+                            .unwrap_or_else(|| ProviderModelIdentity {
+                                connection_id: state.connection_id.clone(),
+                                provider_name: state.provider_name.clone(),
+                                model_id: state.current.clone(),
+                            });
+                    state.options = build_model_picker_options(
+                        &state.provider_name,
+                        &state.current,
+                        Some(remote),
+                    );
                     state.selected = state
                         .options
                         .iter()
@@ -441,16 +926,21 @@ impl AppState {
                             state
                                 .options
                                 .iter()
-                                .position(|option| option == &state.current)
+                                .position(|option| option.model_id == state.current)
                         })
                         .unwrap_or(0);
+                    state.catalog_state = ModelCatalogState::Remote;
                     notice = Some(format!("loaded provider model list ({})", refresh.base_url));
                 }
                 Ok(_) => {
-                    notice = Some("using local model list".to_owned());
+                    state.catalog_state = ModelCatalogState::Empty;
+                    state.options.clear();
+                    state.selected = 0;
+                    notice = Some("provider returned an empty model list".to_owned());
                 }
                 Err(error) => {
-                    notice = Some(format!("using local model list: {error}"));
+                    state.catalog_state = ModelCatalogState::Error(error.clone());
+                    notice = Some(format!("provider model list failed: {error}"));
                 }
             }
         }
@@ -467,7 +957,7 @@ impl AppState {
         &self,
         target: ModelPickerTarget,
         current: &str,
-    ) -> Result<ProviderStatusConfig, anyhow::Error> {
+    ) -> Result<Option<ProviderStatusConfig>, anyhow::Error> {
         if let Some(state) = &self.config_state {
             let fallback_model = match target {
                 ModelPickerTarget::ProviderFim => state.draft.provider_model.trim(),
@@ -481,15 +971,19 @@ impl AppState {
             );
             let fields = ProviderConfigFields {
                 model: fallback_model.to_owned(),
-                api_key: state.draft.provider_api_key.trim().to_owned(),
+                api_key: state
+                    .draft
+                    .provider_api_key
+                    .expose_secret()
+                    .trim()
+                    .to_owned(),
                 base_url: non_empty_or(&state.draft.provider_base_url, &defaults.base_url),
             };
             return provider_model_status_config_from_fields(
                 provider_name,
                 &fields,
                 &model_request,
-            )?
-            .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
+            );
         }
 
         if let Some(state) = &self.setup_state {
@@ -497,20 +991,18 @@ impl AppState {
             let defaults = default_provider_config_fields(provider_name, current.trim());
             let fields = ProviderConfigFields {
                 model: current.trim().to_owned(),
-                api_key: state.api_key.trim().to_owned(),
+                api_key: state.api_key.expose_secret().trim().to_owned(),
                 base_url: defaults.base_url,
             };
             return provider_model_status_config_from_fields(
                 provider_name,
                 &fields,
                 &ModelRequestConfig::default(),
-            )?
-            .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
+            );
         }
 
         if let Some(root_config) = self.config_snapshot.as_ref() {
-            return provider_model_status_config(root_config)?
-                .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
+            return provider_model_status_config(root_config);
         }
 
         provider_model_status_config_from_fields(
@@ -518,14 +1010,17 @@ impl AppState {
             &default_provider_config_fields(DEFAULT_SETUP_PROVIDER_KEY, current.trim()),
             &ModelRequestConfig::default(),
         )
-        .and_then(|config| config.ok_or_else(|| anyhow::anyhow!("provider model list unavailable")))
     }
 
-    pub(super) fn open_secret_input(&mut self, target: SecretInputTarget, current: &str) {
+    pub(super) fn open_secret_input(
+        &mut self,
+        target: SecretInputTarget,
+        current: impl Into<SecretString>,
+    ) {
         let summary = self.secret_input_summary(target);
         self.modal_state = Some(ModalState::SecretInput(SecretInputState {
             target,
-            buffer: current.to_owned(),
+            buffer: current.into(),
             summary,
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
@@ -539,7 +1034,7 @@ impl AppState {
         let summary = self.secret_input_summary(target);
         self.modal_state = Some(ModalState::SecretInput(SecretInputState {
             target,
-            buffer: character.to_string(),
+            buffer: SecretString::new(character.to_string()),
             summary,
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
@@ -619,56 +1114,99 @@ impl AppState {
         };
 
         match modal_state {
-            ModalState::ModelPicker(state) => match key.code {
-                KeyCode::Esc => {
-                    self.cancel_model_picker_refresh();
-                    self.modal_state = None;
-                    ModalOutcome::Dismissed("closed picker".to_owned())
-                }
-                KeyCode::Up => {
-                    if state.selected == 0 {
-                        state.selected = state.options.len().saturating_sub(1);
-                    } else {
-                        state.selected -= 1;
-                    }
-                    self.last_notice = Some(format!(
-                        "{} {}",
-                        state.target.title().to_lowercase(),
-                        state
-                            .options
-                            .get(state.selected)
-                            .cloned()
-                            .unwrap_or_default()
-                    ));
-                    ModalOutcome::None
-                }
-                KeyCode::Down => {
-                    if !state.options.is_empty() {
-                        state.selected = (state.selected + 1) % state.options.len();
-                    }
-                    self.last_notice = Some(format!(
-                        "{} {}",
-                        state.target.title().to_lowercase(),
-                        state
-                            .options
-                            .get(state.selected)
-                            .cloned()
-                            .unwrap_or_default()
-                    ));
-                    ModalOutcome::None
-                }
-                KeyCode::Enter => {
-                    let Some(value) = state.options.get(state.selected).cloned() else {
+            ModalState::ModelPicker(state) => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.cancel_model_picker_refresh();
                         self.modal_state = None;
-                        return ModalOutcome::Dismissed("closed picker".to_owned());
-                    };
-                    let target = state.target;
-                    self.cancel_model_picker_refresh();
-                    self.modal_state = None;
-                    ModalOutcome::ModelSelected { target, value }
+                        ModalOutcome::Dismissed("closed picker".to_owned())
+                    }
+                    KeyCode::Up => {
+                        if state.selected == 0 {
+                            state.selected = state.options.len().saturating_sub(1);
+                        } else {
+                            state.selected -= 1;
+                        }
+                        self.last_notice = Some(format!(
+                            "{} {}",
+                            state.target.title().to_lowercase(),
+                            state
+                                .options
+                                .get(state.selected)
+                                .map(|option| option.model_id.clone())
+                                .unwrap_or_default()
+                        ));
+                        ModalOutcome::None
+                    }
+                    KeyCode::Down => {
+                        if !state.options.is_empty() {
+                            state.selected = (state.selected + 1) % state.options.len();
+                        }
+                        self.last_notice = Some(format!(
+                            "{} {}",
+                            state.target.title().to_lowercase(),
+                            state
+                                .options
+                                .get(state.selected)
+                                .map(|option| option.model_id.clone())
+                                .unwrap_or_default()
+                        ));
+                        ModalOutcome::None
+                    }
+                    KeyCode::Enter => {
+                        let Some(identity) = state.options.get(state.selected).cloned() else {
+                            self.last_notice = Some(if state.manual_entry_allowed {
+                                "no verified model is selectable; retry or press M".to_owned()
+                            } else {
+                                "no verified model is selectable; repair connection or retry"
+                                    .to_owned()
+                            });
+                            return ModalOutcome::None;
+                        };
+                        if matches!(
+                            state.target,
+                            ModelPickerTarget::Setup | ModelPickerTarget::Provider
+                        ) && !state.catalog_entries.iter().any(|entry| {
+                            identity.connection_id.as_ref().is_some_and(|connection_id| {
+                            entry.model_ref.connection_id == *connection_id
+                        })
+                            && entry.model_ref.model_id == identity.model_id
+                            && entry.availability
+                                == sigil_runtime::provider_connections::ModelAvailability::Available
+                        }) {
+                            self.last_notice = Some(
+                                "that model is an unverified reference; retry discovery or press M"
+                                    .to_owned(),
+                            );
+                            return ModalOutcome::None;
+                        }
+                        let target = state.target;
+                        self.cancel_model_picker_refresh();
+                        self.modal_state = None;
+                        ModalOutcome::ModelSelected {
+                            target,
+                            connection_id: identity.connection_id,
+                            provider_name: identity.provider_name,
+                            value: identity.model_id,
+                        }
+                    }
+                    KeyCode::Char('m' | 'M') if state.manual_entry_allowed => {
+                        let target = state.target;
+                        let current = state.current.clone();
+                        self.cancel_model_picker_refresh();
+                        self.modal_state = None;
+                        ModalOutcome::ManualModelRequested { target, current }
+                    }
+                    KeyCode::Char('m' | 'M') => {
+                        self.last_notice = Some(
+                            "manual model entry is unavailable until this connection is verified"
+                                .to_owned(),
+                        );
+                        ModalOutcome::None
+                    }
+                    _ => ModalOutcome::None,
                 }
-                _ => ModalOutcome::None,
-            },
+            }
             ModalState::SecretInput(state) => match key.code {
                 KeyCode::Esc => {
                     self.modal_state = None;
@@ -681,7 +1219,7 @@ impl AppState {
                 }
                 KeyCode::Enter => {
                     let target = state.target;
-                    let value = state.buffer.clone();
+                    let value = std::mem::take(&mut state.buffer);
                     self.modal_state = None;
                     ModalOutcome::SecretSubmitted { target, value }
                 }
@@ -812,27 +1350,61 @@ impl AppState {
     }
 
     pub(super) fn submit_modal(&mut self) -> ModalOutcome {
+        if matches!(self.modal_state, Some(ModalState::SecretInput(_))) {
+            let Some(ModalState::SecretInput(state)) = self.modal_state.take() else {
+                unreachable!("secret input was matched before taking modal state");
+            };
+            return ModalOutcome::SecretSubmitted {
+                target: state.target,
+                value: state.buffer,
+            };
+        }
         let Some(modal_state) = self.modal_state.as_ref() else {
             return ModalOutcome::None;
         };
 
         match modal_state {
             ModalState::ModelPicker(state) => {
-                let Some(value) = state.options.get(state.selected).cloned() else {
-                    self.cancel_model_picker_refresh();
-                    self.modal_state = None;
-                    return ModalOutcome::Dismissed("closed picker".to_owned());
+                let Some(identity) = state.options.get(state.selected).cloned() else {
+                    self.last_notice = Some(if state.manual_entry_allowed {
+                        "no verified model is selectable; retry or press M".to_owned()
+                    } else {
+                        "no verified model is selectable; repair connection or retry".to_owned()
+                    });
+                    return ModalOutcome::None;
+                };
+                if matches!(
+                    state.target,
+                    ModelPickerTarget::Setup | ModelPickerTarget::Provider
+                ) && !state.catalog_entries.iter().any(|entry| {
+                    identity
+                        .connection_id
+                        .as_ref()
+                        .is_some_and(|connection_id| {
+                            entry.model_ref.connection_id == *connection_id
+                        })
+                        && entry.model_ref.model_id == identity.model_id
+                        && entry.availability
+                            == sigil_runtime::provider_connections::ModelAvailability::Available
+                }) {
+                    self.last_notice = Some(
+                        "that model is an unverified reference; retry discovery or press M"
+                            .to_owned(),
+                    );
+                    return ModalOutcome::None;
                 };
                 let target = state.target;
                 self.cancel_model_picker_refresh();
                 self.modal_state = None;
-                ModalOutcome::ModelSelected { target, value }
+                ModalOutcome::ModelSelected {
+                    target,
+                    connection_id: identity.connection_id,
+                    provider_name: identity.provider_name,
+                    value: identity.model_id,
+                }
             }
-            ModalState::SecretInput(state) => {
-                let target = state.target;
-                let value = state.buffer.clone();
-                self.modal_state = None;
-                ModalOutcome::SecretSubmitted { target, value }
+            ModalState::SecretInput(_) => {
+                unreachable!("secret input is handled before borrowing modal state")
             }
             ModalState::TextInput(state) => {
                 let target = state.target;
@@ -869,39 +1441,82 @@ impl AppState {
             ModalOutcome::Dismissed(message) => {
                 self.last_notice = Some(message);
             }
-            ModalOutcome::ModelSelected { target, value } => match target {
-                ModelPickerTarget::Setup => {
-                    if let Some(state) = self.setup_state.as_mut() {
-                        state.model = value.clone();
-                    }
-                    self.last_notice = Some(format!("selected model {value}"));
+            ModalOutcome::ModelSelected {
+                target,
+                connection_id,
+                provider_name,
+                value,
+            } => {
+                let active_provider = self.provider_name_for_model_picker();
+                if active_provider != provider_name {
+                    self.last_notice = Some(format!(
+                        "ignored stale model selection for {provider_name}; active provider is {active_provider}"
+                    ));
+                    return;
                 }
-                ModelPickerTarget::Provider => {
-                    if let Some(state) = self.config_state.as_mut() {
-                        state.draft.provider_model = value.clone();
-                        state.dirty = true;
+                if target == ModelPickerTarget::Setup
+                    && let Some(expected_connection) = connection_id.as_ref()
+                {
+                    let current_connection = self
+                        .setup_state
+                        .as_ref()
+                        .and_then(|state| super::setup_flow::build_setup_root_config(state).ok())
+                        .and_then(|root| {
+                            sigil_runtime::provider_connections::load_provider_connections(&root)
+                                .default_model
+                        })
+                        .map(|model| model.connection_id);
+                    if current_connection.as_ref() != Some(expected_connection) {
+                        self.last_notice =
+                            Some("ignored stale model selection for another connection".to_owned());
+                        return;
                     }
-                    self.last_notice = Some(format!("selected model {value}"));
                 }
-                ModelPickerTarget::ProviderFim => {
-                    if let Some(state) = self.config_state.as_mut() {
-                        state.draft.provider_fim_model = value.clone();
-                        state.dirty = true;
+                match target {
+                    ModelPickerTarget::Setup => {
+                        if let Some(state) = self.setup_state.as_mut() {
+                            state.model = value.clone();
+                        }
+                        self.last_notice = Some(format!("selected model {value}"));
                     }
-                    self.last_notice = Some(format!("selected fim model {value}"));
+                    ModelPickerTarget::Provider => {
+                        if let Some(state) = self.config_state.as_mut() {
+                            state.draft.provider_model = value.clone();
+                            state.mark_dirty();
+                        }
+                        self.last_notice = Some(format!("selected model {value}"));
+                    }
+                    ModelPickerTarget::ProviderFim => {
+                        if let Some(state) = self.config_state.as_mut() {
+                            state.draft.provider_fim_model = value.clone();
+                            state.mark_dirty();
+                        }
+                        self.last_notice = Some(format!("selected fim model {value}"));
+                    }
                 }
-            },
+            }
+            ModalOutcome::ManualModelRequested { target, current } => {
+                let target = match target {
+                    ModelPickerTarget::Setup => TextInputTarget::SetupModel,
+                    ModelPickerTarget::Provider => TextInputTarget::ConfigManualModel,
+                    ModelPickerTarget::ProviderFim => {
+                        TextInputTarget::ConfigField(ConfigField::ProviderFimModel)
+                    }
+                };
+                self.open_text_input(target, &current);
+            }
             ModalOutcome::SecretSubmitted { target, value } => match target {
                 SecretInputTarget::SetupApiKey => {
                     if let Some(state) = self.setup_state.as_mut() {
                         state.api_key = value;
+                        state.bump_revision();
                     }
                     self.last_notice = Some("updated api key".to_owned());
                 }
                 SecretInputTarget::ConfigProviderApiKey => {
                     if let Some(state) = self.config_state.as_mut() {
                         state.draft.provider_api_key = value;
-                        state.dirty = true;
+                        state.mark_dirty();
                     }
                     self.last_notice = Some("updated api key".to_owned());
                 }
@@ -909,9 +1524,34 @@ impl AppState {
             ModalOutcome::TextSubmitted { target, value } => match target {
                 TextInputTarget::SetupModel => {
                     if let Some(state) = self.setup_state.as_mut() {
-                        state.model = value.clone();
+                        if state.admit_manual_model(&value) {
+                            state.model = value.clone();
+                            self.last_notice = Some(format!("updated model {value}"));
+                        } else {
+                            self.last_notice = Some(
+                                "manual model entry is unavailable for the current catalog state"
+                                    .to_owned(),
+                            );
+                        }
                     }
-                    self.last_notice = Some(format!("updated model {value}"));
+                }
+                TextInputTarget::SetupEndpoint => {
+                    if let Some(state) = self.setup_state.as_mut() {
+                        state.base_url = value;
+                        state.bump_revision();
+                    }
+                    self.last_notice = Some("updated custom endpoint".to_owned());
+                }
+                TextInputTarget::ConfigManualModel => {
+                    if let Some(state) = self.config_state.as_mut() {
+                        let changed = state.draft.provider_model != value;
+                        state.draft.provider_model = value.clone();
+                        if changed {
+                            state.mark_dirty();
+                        }
+                    }
+                    self.last_notice =
+                        Some(format!("updated {}", ConfigField::ProviderModel.label()));
                 }
                 TextInputTarget::ConfigField(field) => {
                     if let Some(state) = self.config_state.as_mut() {
@@ -1159,7 +1799,9 @@ fn model_request_config_from_draft_or_default(
 
 fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> bool {
     match target {
-        TextInputTarget::SetupModel => !character.is_control(),
+        TextInputTarget::SetupModel
+        | TextInputTarget::SetupEndpoint
+        | TextInputTarget::ConfigManualModel => !character.is_control(),
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
         TextInputTarget::SkillArguments => !character.is_control(),
     }

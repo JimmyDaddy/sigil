@@ -23,7 +23,8 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
             "api_key": "super-secret-test-key"
         }),
     );
-    config.save(&config_path)?;
+    // Deliberately materialize a legacy fixture. Product saves must reject new inline secrets.
+    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
     let mut app = AppState::from_root_config(&config_path, &config);
     app.composer.input = "/doctor".to_owned();
 

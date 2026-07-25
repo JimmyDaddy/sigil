@@ -1,10 +1,23 @@
-use std::{sync::mpsc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::Client;
+use sigil_kernel::RootConfig;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
-use crate::ProviderStatusConfig;
+use crate::{
+    ProviderStatusConfig,
+    provider_connections::{
+        ConfiguredProviderCredentialStore, ModelCatalogRequest, ModelCatalogResult,
+        ModelCatalogState, PreparedCredential, ProcessCredentialEnvironment,
+        ProviderModelCatalogService,
+    },
+};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BalanceSnapshot {
@@ -25,12 +38,17 @@ pub enum ProviderStatusTaskResult {
         base_url: String,
         result: std::result::Result<Vec<String>, String>,
     },
+    ConnectionModels {
+        request_id: u64,
+        result: ModelCatalogResult,
+    },
 }
 
 #[derive(Default)]
 pub struct ProviderStatusTaskManager {
     active_balance_refresh: Option<ActiveProviderStatusTask>,
     active_model_refresh: Option<ActiveProviderStatusTask>,
+    connection_catalog_services: HashMap<PathBuf, ProviderModelCatalogService>,
 }
 
 struct ActiveProviderStatusTask {
@@ -89,6 +107,61 @@ impl ProviderStatusTaskManager {
         self.active_model_refresh = Some(ActiveProviderStatusTask { request_id, handle });
     }
 
+    pub fn refresh_connection_models(
+        &mut self,
+        runtime: &Runtime,
+        cache_root: PathBuf,
+        root_config: RootConfig,
+        request: ModelCatalogRequest,
+        prepared_credential: Option<PreparedCredential>,
+        result_tx: mpsc::Sender<ProviderStatusTaskResult>,
+    ) {
+        abort_task(&mut self.active_model_refresh);
+        let request_id = request.request_id;
+        let service = if let Some(service) = self.connection_catalog_services.get(&cache_root) {
+            Some(service.clone())
+        } else {
+            ProviderModelCatalogService::new(
+                cache_root.clone(),
+                Arc::new(ConfiguredProviderCredentialStore::from_root_config(
+                    &root_config,
+                )),
+                Arc::new(ProcessCredentialEnvironment),
+            )
+            .ok()
+            .inspect(|service| {
+                self.connection_catalog_services
+                    .insert(cache_root, service.clone());
+            })
+        };
+        let handle = runtime.spawn(async move {
+            let result = match service {
+                Some(service) => {
+                    service
+                        .models_with_prepared_credential(
+                            &root_config,
+                            request,
+                            prepared_credential.as_ref(),
+                        )
+                        .await
+                }
+                None => ModelCatalogResult {
+                    request_id: request.request_id,
+                    connection_id: request.connection_id,
+                    draft_revision: request.draft_revision,
+                    connection_fingerprint: request.connection_fingerprint,
+                    state: ModelCatalogState::Malformed,
+                    entries: Vec::new(),
+                    retry_after_secs: None,
+                    manual_entry_allowed: false,
+                },
+            };
+            let _ =
+                result_tx.send(ProviderStatusTaskResult::ConnectionModels { request_id, result });
+        });
+        self.active_model_refresh = Some(ActiveProviderStatusTask { request_id, handle });
+    }
+
     pub fn accept_balance_result(&mut self, request_id: u64) -> bool {
         accept_result(&mut self.active_balance_refresh, request_id)
     }
@@ -134,10 +207,7 @@ pub async fn fetch_remote_model_ids(config: &ProviderStatusConfig) -> Result<Vec
         .json::<serde_json::Value>()
         .await
         .map_err(|error| anyhow!("failed to decode provider models: {error}"))?;
-    let models = parse_remote_model_ids(&payload);
-    if models.is_empty() {
-        bail!("provider returned no model ids");
-    }
+    let models = parse_remote_model_ids(&payload)?;
     Ok(models)
 }
 
@@ -179,20 +249,26 @@ pub async fn fetch_provider_balance_snapshot(
 }
 
 #[cfg_attr(coverage, allow(dead_code))]
-fn parse_remote_model_ids(payload: &serde_json::Value) -> Vec<String> {
-    let Some(items) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
+fn parse_remote_model_ids(payload: &serde_json::Value) -> Result<Vec<String>> {
+    let items = payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("provider model response is missing a data array"))?;
     let mut model_ids = Vec::new();
-    for item in items {
-        let Some(model_id) = item.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
+    for (index, item) in items.iter().enumerate() {
+        let model_id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|model_id| !model_id.is_empty())
+            .ok_or_else(|| {
+                anyhow!("provider model response item {index} is missing a non-empty string id")
+            })?;
         if !model_ids.iter().any(|existing| existing == model_id) {
             model_ids.push(model_id.to_owned());
         }
     }
-    model_ids
+    Ok(model_ids)
 }
 
 fn provider_request_timeout_secs(config: &ProviderStatusConfig) -> u64 {

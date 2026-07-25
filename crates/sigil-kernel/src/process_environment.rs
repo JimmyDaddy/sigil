@@ -182,6 +182,67 @@ impl SecretString {
     pub fn expose_secret(&self) -> &str {
         self.0.as_str()
     }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn char_count(&self) -> usize {
+        self.0.chars().count()
+    }
+
+    pub fn push(&mut self, character: char) {
+        self.0.push(character);
+    }
+
+    pub fn pop(&mut self) -> Option<char> {
+        self.0.pop()
+    }
+
+    pub fn clear(&mut self) {
+        use zeroize::Zeroize;
+
+        self.0.zeroize();
+        self.0.clear();
+    }
+}
+
+impl Default for SecretString {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for SecretString {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&SecretString> for SecretString {
+    fn from(value: &SecretString) -> Self {
+        value.clone()
+    }
+}
+
+impl PartialEq<str> for SecretString {
+    fn eq(&self, other: &str) -> bool {
+        self.expose_secret() == other
+    }
+}
+
+impl PartialEq<&str> for SecretString {
+    fn eq(&self, other: &&str) -> bool {
+        self.expose_secret() == *other
+    }
 }
 
 impl fmt::Debug for SecretString {

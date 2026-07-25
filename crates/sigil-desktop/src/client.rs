@@ -15,19 +15,19 @@ use crate::{
         DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
         DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
-        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopRunCancelCommandReceipt,
-        DesktopRunCancelRequest, DesktopRunSnapshot, DesktopRunStartCommandReceipt,
-        DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
-        DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanRequest,
-        DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogPage, DesktopSessionContinuityView,
-        DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-        DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
-        DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
-        DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
-        DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
-        DesktopSupportBundleExport, DesktopSupportDoctorReport, DesktopTranscriptQuery,
-        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
-        DesktopVerificationView,
+        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopProviderConnectionInventory,
+        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
+        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
+        DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
+        DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
+        DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteReceipt,
+        DesktopSessionInvalidSourceDeleteRequest, DesktopSessionListResponse,
+        DesktopSessionMutationReceipt, DesktopSessionOpenRequest, DesktopSessionQuarantineReceipt,
+        DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopSessionSnapshot,
+        DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
+        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
+        DesktopVerificationRerunRequest, DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -82,6 +82,17 @@ impl DesktopHttpClient {
     pub async fn support_bundle(&self) -> Result<DesktopSupportBundleExport, DesktopClientError> {
         self.post_json(self.route(["support", "bundle"])?, &(), StatusCode::OK)
             .await
+    }
+
+    /// Reads the secret-free provider inventory through the native owner boundary.
+    pub async fn provider_connections(
+        &self,
+    ) -> Result<DesktopProviderConnectionInventory, DesktopClientError> {
+        self.get_json(
+            self.route(["settings", "provider-connections"])?,
+            StatusCode::OK,
+        )
+        .await
     }
 
     /// Creates a new durable session through the server-owned runtime path.
@@ -970,8 +981,13 @@ fn validate_conversation_recovery_action(
             validate_recovery_token(checkpoint_id)?;
             validate_recovery_token(checkpoint_digest)
         }
-        DesktopConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
-            validate_recovery_token(source_turn_digest)
+        DesktopConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest,
+            model_ref,
+        } => {
+            validate_recovery_token(source_turn_digest)?;
+            validate_recovery_token(&model_ref.connection_id)?;
+            validate_recovery_token(&model_ref.model_id)
         }
     }
 }

@@ -5,6 +5,10 @@ use sigil_kernel::{RootConfig, resolve_workspace_root};
 use sigil_runtime::{
     current_unix_time_ms,
     doctor::build_doctor_report,
+    provider_connections::{
+        ConfigMode, ConnectionInventory, ConnectionReadiness, CredentialSourceView,
+        connection_inventory_native,
+    },
     resolve_sigil_paths, secret_redactor_for_root_config,
     support::{
         DoctorSupportProjectionContext, DoctorSupportReportV1, SupportBuildInfo, SupportBundleV1,
@@ -13,7 +17,11 @@ use sigil_runtime::{
     },
 };
 
-use crate::dto::{HttpSupportBundleExport, HttpSupportDoctorReport};
+use crate::dto::{
+    HttpProviderConfigMode, HttpProviderConnectionEntry, HttpProviderConnectionInventory,
+    HttpProviderConnectionIssue, HttpProviderConnectionReadiness, HttpProviderCredentialSource,
+    HttpProviderModelRef, HttpSupportBundleExport, HttpSupportDoctorReport,
+};
 
 /// Process-private inputs used to project path-free desktop diagnostics.
 #[derive(Debug, Clone)]
@@ -64,6 +72,19 @@ impl HttpSupportContext {
         })
     }
 
+    /// Builds a credential-store-aware, secret-free provider connection inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root configuration cannot be loaded safely.
+    pub fn provider_connections(&self) -> Result<HttpProviderConnectionInventory> {
+        let root_config =
+            RootConfig::load(&self.config_path).context("load provider connection config")?;
+        Ok(project_provider_connections(connection_inventory_native(
+            &root_config,
+        )))
+    }
+
     fn project_doctor(&self) -> Result<DoctorSupportReportV1> {
         let report = build_doctor_report(&self.config_path, &self.launch_cwd);
         let root_config = RootConfig::load(&self.config_path).ok();
@@ -104,5 +125,71 @@ impl HttpSupportContext {
             },
         )
         .context("project redacted desktop support report")
+    }
+}
+
+fn project_provider_connections(inventory: ConnectionInventory) -> HttpProviderConnectionInventory {
+    HttpProviderConnectionInventory {
+        config_mode: match inventory.mode {
+            ConfigMode::LegacyV1 => HttpProviderConfigMode::LegacyV1,
+            ConfigMode::V2 => HttpProviderConfigMode::V2,
+            ConfigMode::Mixed => HttpProviderConfigMode::Mixed,
+            ConfigMode::UnsupportedFuture => HttpProviderConfigMode::UnsupportedFuture,
+        },
+        default_model: inventory.default_model.map(project_model_ref),
+        connections: inventory
+            .entries
+            .into_iter()
+            .map(|entry| HttpProviderConnectionEntry {
+                id: entry.id.to_string(),
+                label: entry.label,
+                provider_label: entry.provider_label,
+                protocol_label: entry.protocol_label,
+                endpoint_display: entry.endpoint_display,
+                credential_source: match entry.credential_source {
+                    CredentialSourceView::Environment => HttpProviderCredentialSource::Environment,
+                    CredentialSourceView::SystemKeyring => {
+                        HttpProviderCredentialSource::SystemKeyring
+                    }
+                    CredentialSourceView::Stored => HttpProviderCredentialSource::Stored,
+                    CredentialSourceView::None => HttpProviderCredentialSource::None,
+                    CredentialSourceView::LegacyPlaintext => {
+                        HttpProviderCredentialSource::LegacyPlaintext
+                    }
+                },
+                readiness: match entry.readiness {
+                    ConnectionReadiness::Ready => HttpProviderConnectionReadiness::Ready,
+                    ConnectionReadiness::NeedsCredential => {
+                        HttpProviderConnectionReadiness::NeedsCredential
+                    }
+                    ConnectionReadiness::CredentialUnavailable => {
+                        HttpProviderConnectionReadiness::CredentialUnavailable
+                    }
+                    ConnectionReadiness::NeedsModel => HttpProviderConnectionReadiness::NeedsModel,
+                    ConnectionReadiness::Unverified => HttpProviderConnectionReadiness::Unverified,
+                    ConnectionReadiness::Invalid => HttpProviderConnectionReadiness::Invalid,
+                },
+                default_model: entry.default_model.map(project_model_ref),
+                issue: entry.issue.map(|issue| HttpProviderConnectionIssue {
+                    code: issue.code,
+                    message: issue.message,
+                }),
+            })
+            .collect(),
+        issues: inventory
+            .issues
+            .into_iter()
+            .map(|issue| HttpProviderConnectionIssue {
+                code: issue.code.to_owned(),
+                message: issue.message,
+            })
+            .collect(),
+    }
+}
+
+fn project_model_ref(model_ref: sigil_kernel::ModelRef) -> HttpProviderModelRef {
+    HttpProviderModelRef {
+        connection_id: model_ref.connection_id.to_string(),
+        model_id: model_ref.model_id,
     }
 }

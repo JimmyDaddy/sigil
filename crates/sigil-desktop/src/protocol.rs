@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-const SERVER_INFO_SCHEMA_VERSION: u16 = 7;
+const SERVER_INFO_SCHEMA_VERSION: u16 = 8;
 const HTTP_PROTOCOL_VERSION: u16 = 2;
 
 /// Authentication mode required by the desktop runtime bridge.
@@ -43,6 +43,8 @@ pub struct DesktopServerCapabilities {
     pub agent_activity: bool,
     /// Redacted diagnostics and native-only support bundle export are available.
     pub support_diagnostics: bool,
+    /// Secret-free provider connection settings are available to the native owner.
+    pub provider_connections: bool,
 }
 
 impl DesktopServerCapabilities {
@@ -60,6 +62,7 @@ impl DesktopServerCapabilities {
             && self.run_context
             && self.agent_activity
             && self.support_diagnostics
+            && self.provider_connections
     }
 }
 

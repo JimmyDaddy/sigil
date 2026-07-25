@@ -17,6 +17,7 @@ globset.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
 keyring.workspace = true
+libc.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,7 @@ toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 url.workspace = true
+windows-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

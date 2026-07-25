@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fmt};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const OPENAI_COMPATIBLE_API_KEY_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_API_KEY";
 pub const OPENAI_COMPATIBLE_BASE_URL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_BASE_URL";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiCompatibleProviderConfig {
     #[serde(default = "default_base_url")]
@@ -24,6 +24,19 @@ pub struct OpenAiCompatibleProviderConfig {
     pub organization: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
+}
+
+impl fmt::Debug for OpenAiCompatibleProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiCompatibleProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("organization", &self.organization)
+            .field("project", &self.project)
+            .finish()
+    }
 }
 
 impl OpenAiCompatibleProviderConfig {

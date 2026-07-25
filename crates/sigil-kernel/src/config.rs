@@ -2,18 +2,25 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    fs,
+    fmt, fs,
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+
 use anyhow::{Context, Result};
+use fs2::FileExt as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use url::Url;
 
 use crate::{
     execution_backend::ExecutionConfig,
+    model_route::{ConnectionId, ModelRef},
     mutation::MutationArtifactRetentionPolicy,
     permission::{ApprovalMode, NetworkPolicy, PermissionConfig},
     process_environment::normalize_environment_variable_names,
@@ -22,14 +29,17 @@ use crate::{
     verification::VerificationConfig,
 };
 
+pub const CONFIG_VERSION_V2: u32 = 2;
 pub const SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_REQUEST_TIMEOUT_SECS";
 pub const SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS";
 pub const SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS";
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RootConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<u32>,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     #[serde(default)]
@@ -61,10 +71,46 @@ pub struct RootConfig {
     pub task: TaskConfig,
     #[serde(default)]
     pub web: WebConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub connections: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+impl fmt::Debug for RootConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RootConfig")
+            .field("config_version", &self.config_version)
+            .field("workspace", &self.workspace)
+            .field("storage", &self.storage)
+            .field("session", &self.session)
+            .field("agent", &self.agent)
+            .field("model_request", &self.model_request)
+            .field("permission", &self.permission)
+            .field("memory", &self.memory)
+            .field("skills", &self.skills)
+            .field("compaction", &self.compaction)
+            .field("code_intelligence", &self.code_intelligence)
+            .field("terminal", &self.terminal)
+            .field("execution", &self.execution)
+            .field("verification", &self.verification)
+            .field("appearance", &self.appearance)
+            .field("task", &self.task)
+            .field("web", &self.web)
+            .field(
+                "providers",
+                &format_args!("[{} redacted]", self.providers.len()),
+            )
+            .field(
+                "connections",
+                &format_args!("[{} redacted]", self.connections.len()),
+            )
+            .field("mcp_server_count", &self.mcp_servers.len())
+            .finish()
+    }
 }
 
 /// Root Web V1 policy shared by every entrypoint and task role.
@@ -1077,24 +1123,95 @@ pub struct LanguageServerConfig {
 impl RootConfig {
     /// Loads and parses a TOML configuration file from `path`.
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_with_model_request_env(path, |name| env::var(name).ok())
+    }
+
+    fn load_with_model_request_env(
+        path: &Path,
+        read_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        let mut config: Self =
-            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
-        config.apply_model_request_env_overrides()?;
+        let raw_value: toml::Value = toml::from_str(&raw)
+            .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))?;
+        let providers_present = raw_value.get("providers").is_some();
+        let connections_present = raw_value.get("connections").is_some();
+        let mut config: Self = toml::from_str(&raw)
+            .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))?;
+        config.validate_config_schema(providers_present, connections_present)?;
+        config.apply_model_request_env_overrides_with(read_env)?;
         Ok(config)
     }
 
-    /// Serializes the config to TOML and writes it to `path`, creating parent directories first.
+    /// Serializes the config to TOML and atomically publishes it to `path`.
+    ///
+    /// On Unix, the published file is always mode `0600`. A symbolic-link destination is rejected
+    /// instead of followed.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+        let lock = ConfigUpdateLockGuard::acquire(path)?;
+        self.save_with_update_lock(path, &lock)
+    }
+
+    /// Publishes only when the live config still matches the caller's parsed source snapshot.
+    pub fn save_if_unchanged(&self, path: &Path, expected: &Self) -> Result<()> {
+        let lock = ConfigUpdateLockGuard::acquire(path)?;
+        let live = Self::load(path)?;
+        let expected =
+            toml::to_string(expected).context("failed to fingerprint expected config")?;
+        let live = toml::to_string(&live).context("failed to fingerprint live config")?;
+        anyhow::ensure!(
+            expected == live,
+            "config changed since it was loaded; reload and retry"
+        );
+        self.save_with_update_lock(path, &lock)
+    }
+
+    /// Publishes only when the exact source bytes are still current under the update lock.
+    pub fn save_if_source_bytes_unchanged(
+        &self,
+        path: &Path,
+        expected_source: &[u8],
+    ) -> Result<()> {
+        let lock = ConfigUpdateLockGuard::acquire(path)?;
+        let live = fs::read(path)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        anyhow::ensure!(
+            live == expected_source,
+            "config changed since it was loaded; reload and retry"
+        );
+        self.save_with_update_lock(path, &lock)
+    }
+
+    /// Serializes and publishes while the caller holds this config's update lock.
+    ///
+    /// This is used by multi-resource transactions that must keep credential and config updates
+    /// under one cross-process lock.
+    pub fn save_with_update_lock(&self, path: &Path, lock: &ConfigUpdateLockGuard) -> Result<()> {
+        anyhow::ensure!(
+            lock.config_path == path,
+            "config update lock does not match publication path"
+        );
+        anyhow::ensure!(
+            !self.contains_legacy_inline_provider_secret(),
+            "legacy_secret_migration_required: migrate provider credentials before saving config"
+        );
         let rendered =
             toml::to_string_pretty(self).context("failed to serialize root config to toml")?;
-        fs::write(path, rendered)
+        atomic_publish_private_file(path, rendered.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
+    }
+
+    fn contains_legacy_inline_provider_secret(&self) -> bool {
+        self.providers.values().any(|provider| {
+            provider
+                .as_object()
+                .and_then(|object| object.get("api_key"))
+                .is_some_and(|value| match value {
+                    Value::Null => false,
+                    Value::String(secret) => !secret.is_empty(),
+                    _ => true,
+                })
+        })
     }
 
     /// Applies provider-neutral model request timeout environment overrides.
@@ -1103,22 +1220,1255 @@ impl RootConfig {
     ///
     /// Returns an error when a configured override is not a positive integer.
     pub fn apply_model_request_env_overrides(&mut self) -> Result<()> {
-        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV)? {
+        self.apply_model_request_env_overrides_with(|name| env::var(name).ok())
+    }
+
+    fn apply_model_request_env_overrides_with(
+        &mut self,
+        read_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<()> {
+        if let Some(value) =
+            read_positive_env_u64_with(SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, &read_env)?
+        {
             self.model_request.request_timeout_secs = value;
         }
-        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV)? {
+        if let Some(value) =
+            read_positive_env_u64_with(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, &read_env)?
+        {
             self.model_request.stream_idle_timeout_secs = value;
         }
-        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV)? {
+        if let Some(value) =
+            read_positive_env_u64_with(SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, &read_env)?
+        {
             self.model_request.stream_total_timeout_secs = Some(value);
+        }
+        Ok(())
+    }
+
+    fn validate_config_schema(
+        &self,
+        providers_present: bool,
+        connections_present: bool,
+    ) -> Result<()> {
+        match self.config_version {
+            None => {
+                anyhow::ensure!(
+                    !connections_present
+                        && self.connections.is_empty()
+                        && self.agent.connection.is_none()
+                        && self
+                            .task
+                            .role_configs()
+                            .all(|(_, role)| role.connection.is_none()),
+                    "config_version = 2 is required when [connections], agent.connection, or a task role connection is present"
+                );
+            }
+            Some(CONFIG_VERSION_V2) => {
+                anyhow::ensure!(
+                    self.agent.connection.is_some(),
+                    "config_version = 2 requires [agent].connection"
+                );
+                anyhow::ensure!(
+                    self.agent.provider.trim().is_empty()
+                        && !providers_present
+                        && self.providers.is_empty(),
+                    "config_version = 2 cannot include legacy agent.provider or [providers]"
+                );
+                for (name, role) in self.task.role_configs() {
+                    anyhow::ensure!(
+                        role.provider.is_none(),
+                        "config_version = 2 cannot include legacy [{name}].provider"
+                    );
+                    anyhow::ensure!(
+                        role.connection.is_some() == role.model.is_some(),
+                        "config_version = 2 requires [{name}].connection and [{name}].model to be configured together"
+                    );
+                    if let (Some(connection), Some(model)) =
+                        (role.connection.as_ref(), role.model.as_ref())
+                    {
+                        ModelRef::new(connection.clone(), model.clone())
+                            .map_err(anyhow::Error::new)
+                            .with_context(|| format!("invalid [{name}] model route"))?;
+                    }
+                }
+            }
+            Some(version) => anyhow::bail!("unsupported config_version {version}"),
         }
         Ok(())
     }
 }
 
-fn read_positive_env_u64(name: &str) -> Result<Option<u64>> {
-    let Some(value) = env::var(name)
-        .ok()
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigPublishError {
+    #[error(
+        "config replacement for {path} was partially applied; preserve recovery file {recovery_path}"
+    )]
+    ReplacementPartiallyApplied {
+        path: PathBuf,
+        recovery_path: PathBuf,
+        previous_path: Option<PathBuf>,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "config {path} was published, but parent-directory synchronization failed; durability is uncertain"
+    )]
+    PublishedButDurabilityUncertain {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "config {path} was published through its opened parent, but pathname visibility is uncertain"
+    )]
+    PublishedButVisibilityUncertain { path: PathBuf },
+}
+
+/// Exclusive cross-process guard for one root-config update transaction.
+#[derive(Debug)]
+pub struct ConfigUpdateLockGuard {
+    config_path: PathBuf,
+    file: File,
+    #[cfg(unix)]
+    _parent_directory: File,
+    #[cfg(windows)]
+    _parent_guards: Vec<File>,
+}
+
+impl ConfigUpdateLockGuard {
+    /// Acquires the lock associated with `config_path`.
+    ///
+    /// The lock file is owner-only and rejects symlink traversal on Unix.
+    pub fn acquire(config_path: &Path) -> Result<Self> {
+        let parent = config_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_created = secure_config_parent(parent)?;
+        #[cfg(unix)]
+        let parent_directory = open_config_parent_directory(parent)?;
+        #[cfg(unix)]
+        if parent_created {
+            secure_opened_config_parent(&parent_directory, parent)?;
+        }
+        #[cfg(windows)]
+        let parent_guards = lock_windows_config_parent_ancestors(parent)?;
+        #[cfg(windows)]
+        if parent_created {
+            secure_private_path_permissions(parent)?;
+        }
+        let file_name = config_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("sigil.toml");
+        let lock_path = parent.join(format!(".{file_name}.update.lock"));
+        #[cfg(unix)]
+        let file = open_config_update_lock_at(
+            &parent_directory,
+            lock_path
+                .file_name()
+                .expect("config update lock path always has a file name"),
+            &lock_path,
+        )?;
+        #[cfg(not(unix))]
+        let file = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            let file = options.open(&lock_path).with_context(|| {
+                format!("failed to open config update lock {}", lock_path.display())
+            })?;
+            secure_private_path_permissions(&lock_path)?;
+            file
+        };
+        file.lock_exclusive().with_context(|| {
+            format!(
+                "failed to acquire config update lock {}",
+                lock_path.display()
+            )
+        })?;
+        Ok(Self {
+            config_path: config_path.to_path_buf(),
+            file,
+            #[cfg(unix)]
+            _parent_directory: parent_directory,
+            #[cfg(windows)]
+            _parent_guards: parent_guards,
+        })
+    }
+}
+
+impl Drop for ConfigUpdateLockGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+#[cfg(unix)]
+fn open_config_update_lock_at(
+    parent: &File,
+    lock_name: &std::ffi::OsStr,
+    display_path: &Path,
+) -> Result<File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+
+    let name = std::ffi::CString::new(lock_name.as_bytes())
+        .context("config update lock name contains a NUL byte")?;
+    // SAFETY: the directory descriptor and relative C string are valid. O_NOFOLLOW makes an
+    // existing symbolic-link lock fail instead of resolving it.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to open config update lock {}",
+                display_path.display()
+            )
+        });
+    }
+    // SAFETY: descriptor was returned by openat and transfers to File exactly once.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", display_path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "config update lock is not a regular file: {}",
+        display_path.display()
+    );
+    // SAFETY: file owns a valid descriptor.
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to secure {}", display_path.display()));
+    }
+    Ok(file)
+}
+
+/// Atomically publishes one private local-state file using the same path, permission, no-follow,
+/// durability, and Windows replacement guarantees as the root configuration.
+///
+/// The caller owns serialization and must create any missing parent hierarchy before calling.
+///
+/// # Errors
+///
+/// Returns an error when the path is unsafe, private permissions cannot be established, the
+/// create-new temporary file cannot be synced, or atomic publication is not durable.
+pub fn atomic_publish_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_publish_private_config_with_parent_sync(path, bytes, sync_config_parent)
+}
+
+/// Reports whether one existing private file or directory is restricted to the current user
+/// (plus Local System on Windows).
+///
+/// This is a read-only diagnostic counterpart to [`secure_private_path_permissions`].
+///
+/// # Errors
+///
+/// Returns an error when the path cannot be inspected or its Windows security descriptor cannot
+/// be read.
+pub fn private_path_permissions_are_restricted(path: &Path) -> Result<bool> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect private path {}", path.display()))?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && (metadata.is_file() || metadata.is_dir()),
+        "private path is not a regular file or directory: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        Ok(metadata.permissions().mode() & 0o077 == 0)
+    }
+    #[cfg(windows)]
+    {
+        let current_user_sid = current_windows_user_sid_string()?;
+        let sddl = windows_private_dacl_sddl(path)?;
+        let owner_is_current_user = sddl.contains(&format!("O:{current_user_sid}"));
+        let protected = sddl.contains("D:P");
+        let current_user_allowed = sddl.contains(&format!(";;;{current_user_sid})"));
+        let system_allowed = sddl.contains(";;;SY)");
+        let broad_principal_allowed = [";;;OW)", ";;;WD)", ";;;BU)", ";;;AU)", ";;;AN)"]
+            .iter()
+            .any(|principal| sddl.contains(principal));
+        Ok(owner_is_current_user
+            && protected
+            && current_user_allowed
+            && system_allowed
+            && !broad_principal_allowed)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Ok(true)
+    }
+}
+
+/// Tightens one already-created private file or directory using the platform's native access
+/// controls.
+///
+/// Unix callers receive owner-only mode (`0600` for files, `0700` for directories). Windows
+/// callers receive a protected DACL that grants full access only to the current process user and
+/// Local System, and the current user becomes the object owner.
+/// Symbolic links and Windows reparse points are rejected.
+///
+/// # Errors
+///
+/// Returns an error when the path is not a regular file/directory or the platform cannot establish
+/// the private permissions.
+pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect private path {}", path.display()))?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && (metadata.is_file() || metadata.is_dir()),
+        "private path is not a regular file or directory: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to secure {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                },
+                DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+                PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+            },
+        };
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        anyhow::ensure!(
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "private path is a Windows reparse point: {}",
+            path.display()
+        );
+        let current_user_sid = current_windows_user_sid_string()?;
+        let sddl =
+            format!("O:{current_user_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{current_user_sid})")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: the SDDL buffer is NUL terminated and descriptor is writable for the duration of
+        // the call. Windows owns the returned allocation until LocalFree below.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to construct private Windows DACL");
+        }
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the path is NUL terminated and descriptor remains valid until LocalFree.
+        let applied = unsafe {
+            SetFileSecurityW(
+                wide_path.as_ptr(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        let source = (applied == 0).then(std::io::Error::last_os_error);
+        // SAFETY: descriptor was allocated by LocalAlloc through the conversion API and is freed
+        // exactly once here.
+        unsafe {
+            let _ = LocalFree(descriptor);
+        }
+        if let Some(source) = source {
+            return Err(source)
+                .with_context(|| format!("failed to secure Windows ACL for {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn current_windows_user_sid_string() -> Result<String> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a process pseudo-handle and token is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to open current user token");
+    }
+    // SAFETY: OpenProcessToken transferred ownership of one valid handle.
+    let token = unsafe { fs::File::from_raw_handle(token) };
+    let mut bytes = 0_u32;
+    // SAFETY: the zero-length probe intentionally supplies a null output buffer.
+    let first = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes,
+        )
+    };
+    // SAFETY: GetLastError reads thread-local Win32 error state after the immediately preceding
+    // failed sizing call.
+    let first_error = unsafe { GetLastError() };
+    anyhow::ensure!(
+        first == 0 && first_error == ERROR_INSUFFICIENT_BUFFER && bytes > 0,
+        "failed to size current Windows user token"
+    );
+    let mut storage = vec![0_u8; bytes as usize];
+    // SAFETY: storage has the exact byte capacity requested by the sizing call.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            storage.as_mut_ptr().cast(),
+            bytes,
+            &mut bytes,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to read current Windows user token");
+    }
+    // SAFETY: GetTokenInformation initialized a TOKEN_USER structure at the start of storage.
+    let token_user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    let mut rendered = std::ptr::null_mut();
+    // SAFETY: token_user.User.Sid is owned by storage and rendered is writable.
+    if unsafe { ConvertSidToStringSidW(token_user.User.Sid, &mut rendered) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to render current Windows user SID");
+    }
+    let len = {
+        let mut len = 0_usize;
+        // SAFETY: ConvertSidToStringSidW returned a NUL-terminated UTF-16 allocation.
+        while unsafe { *rendered.add(len) } != 0 {
+            len += 1;
+        }
+        len
+    };
+    // SAFETY: rendered points to len initialized UTF-16 code units.
+    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(rendered, len) });
+    // SAFETY: rendered was allocated by LocalAlloc through ConvertSidToStringSidW.
+    unsafe {
+        let _ = LocalFree(rendered.cast());
+    }
+    Ok(value)
+}
+
+#[cfg(windows)]
+fn windows_private_dacl_sddl(path: &Path) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::{
+        Foundation::{ERROR_SUCCESS, LocalFree},
+        Security::{
+            Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+                SDDL_REVISION_1, SE_FILE_OBJECT,
+            },
+            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        },
+    };
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut owner = std::ptr::null_mut();
+    // SAFETY: the path is NUL terminated and descriptor is writable for the API call.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(status as i32))
+            .with_context(|| format!("failed to read Windows ACL for {}", path.display()));
+    }
+    let mut rendered = std::ptr::null_mut();
+    let mut rendered_len = 0_u32;
+    // SAFETY: descriptor remains valid and both output pointers are writable.
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut rendered,
+            &mut rendered_len,
+        )
+    };
+    let source = (converted == 0).then(std::io::Error::last_os_error);
+    let value = if source.is_none() {
+        // SAFETY: the conversion API returned a valid UTF-16 buffer with the reported length.
+        Some(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(rendered, rendered_len as usize)
+        }))
+    } else {
+        None
+    };
+    // SAFETY: both allocations, when non-null, were returned by Windows LocalAlloc APIs.
+    unsafe {
+        if !rendered.is_null() {
+            let _ = LocalFree(rendered.cast());
+        }
+        let _ = LocalFree(descriptor);
+    }
+    if let Some(source) = source {
+        return Err(source)
+            .with_context(|| format!("failed to render Windows ACL for {}", path.display()));
+    }
+    Ok(value.expect("successful SDDL conversion produced a value"))
+}
+
+fn atomic_publish_private_config_with_parent_sync<F>(
+    path: &Path,
+    bytes: &[u8],
+    sync_parent: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let secure_existing_parent = path
+        .parent()
+        .zip(
+            default_user_config_path()
+                .ok()
+                .and_then(|default_path| default_path.parent().map(Path::to_path_buf)),
+        )
+        .is_some_and(|(parent, default_parent)| parent == default_parent);
+    atomic_publish_private_config_with_parent_policy(
+        path,
+        bytes,
+        secure_existing_parent,
+        sync_parent,
+    )
+}
+
+fn atomic_publish_private_config_with_parent_policy<F>(
+    path: &Path,
+    bytes: &[u8],
+    secure_existing_parent: bool,
+    sync_parent: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let explicit_parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let parent = explicit_parent.unwrap_or_else(|| Path::new("."));
+    let parent_created = secure_config_parent(parent)?;
+    #[cfg(windows)]
+    let _windows_parent_guards = lock_windows_config_parent_ancestors(parent)?;
+    #[cfg(windows)]
+    if parent_created || secure_existing_parent {
+        secure_private_path_permissions(parent)?;
+    }
+    #[cfg(unix)]
+    let parent_directory = open_config_parent_directory(parent)?;
+    #[cfg(unix)]
+    if parent_created || secure_existing_parent {
+        secure_opened_config_parent(&parent_directory, parent)?;
+    }
+    #[cfg(unix)]
+    let parent_identity = config_parent_file_identity(&parent_directory)?;
+    #[cfg(not(unix))]
+    let parent_identity = config_parent_identity(parent)?;
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path has no file name: {}", path.display()))?;
+    #[cfg(unix)]
+    let _target_exists = inspect_config_target_at(&parent_directory, file_name, path)?;
+    #[cfg(not(unix))]
+    let target_exists = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing to replace symbolic-link config {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if metadata.is_file() => true,
+        Ok(_) => {
+            anyhow::bail!(
+                "config destination is not a regular file: {}",
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect config {}", path.display()));
+        }
+    };
+
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let temp_path = parent.join(&temp_name);
+
+    let result = (|| -> Result<()> {
+        #[cfg(unix)]
+        let mut file = create_private_config_temp_at(&parent_directory, &temp_name, &temp_path)?;
+        #[cfg(not(unix))]
+        let mut file = {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            options
+                .open(&temp_path)
+                .with_context(|| format!("failed to create {}", temp_path.display()))?
+        };
+        #[cfg(windows)]
+        secure_private_path_permissions(&temp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to secure {}", temp_path.display()))?;
+        }
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+        drop(file);
+        #[cfg(windows)]
+        if target_exists {
+            secure_private_path_permissions(path)?;
+        }
+        anyhow::ensure!(
+            config_parent_identity(parent)? == parent_identity,
+            "config parent changed while publishing {}",
+            path.display()
+        );
+        #[cfg(unix)]
+        replace_config_file_at(&parent_directory, &temp_name, file_name, path)?;
+        #[cfg(not(unix))]
+        replace_config_file(&temp_path, path, target_exists)?;
+        #[cfg(windows)]
+        if secure_private_path_permissions(path).is_err() {
+            return Err(ConfigPublishError::PublishedButVisibilityUncertain {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        #[cfg(unix)]
+        if config_parent_identity(parent).ok().as_ref() != Some(&parent_identity) {
+            return Err(ConfigPublishError::PublishedButVisibilityUncertain {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        if let Err(source) = sync_parent(parent) {
+            return Err(ConfigPublishError::PublishedButDurabilityUncertain {
+                path: path.to_path_buf(),
+                source,
+            }
+            .into());
+        }
+        #[cfg(unix)]
+        if let Err(source) = parent_directory.sync_all() {
+            return Err(ConfigPublishError::PublishedButDurabilityUncertain {
+                path: path.to_path_buf(),
+                source,
+            }
+            .into());
+        }
+        Ok(())
+    })();
+
+    let preserve_recovery_file = result.as_ref().err().is_some_and(|error| {
+        matches!(
+            error.downcast_ref::<ConfigPublishError>(),
+            Some(ConfigPublishError::ReplacementPartiallyApplied { .. })
+        )
+    });
+    if result.is_err() && !preserve_recovery_file {
+        #[cfg(unix)]
+        let _ = remove_config_temp_at(&parent_directory, &temp_name);
+        #[cfg(not(unix))]
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn secure_config_parent(parent: &Path) -> Result<bool> {
+    reject_config_parent_symlink_components(parent)?;
+    let created = match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing to use symbolic-link config parent {}",
+                parent.display()
+            );
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            anyhow::bail!(
+                "failed to create config parent because it is not a directory: {}",
+                parent.display()
+            );
+        }
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+            let metadata = fs::symlink_metadata(parent)
+                .with_context(|| format!("failed to inspect {}", parent.display()))?;
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "config parent is not a private directory: {}",
+                parent.display()
+            );
+            true
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", parent.display()));
+        }
+    };
+
+    Ok(created)
+}
+
+fn reject_config_parent_symlink_components(parent: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let is_root_level_alias = current
+                    .parent()
+                    .is_some_and(|ancestor| ancestor == Path::new("/"));
+                anyhow::ensure!(
+                    is_root_level_alias,
+                    "refusing to traverse symbolic-link config ancestor {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_config_parent_directory(parent: &Path) -> Result<fs::File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+
+    let walk_path = config_parent_walk_path(parent)?;
+    let mut directory = if walk_path.is_absolute() {
+        fs::File::open("/").context("failed to open filesystem root for config publish")?
+    } else {
+        fs::File::open(".").context("failed to open current directory for config publish")?
+    };
+    for component in walk_path.components() {
+        let name = match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => std::ffi::OsStr::new(".."),
+            std::path::Component::Normal(name) => name,
+            std::path::Component::Prefix(_) => {
+                anyhow::bail!(
+                    "unsupported Unix config parent prefix {}",
+                    walk_path.display()
+                );
+            }
+        };
+        let name = std::ffi::CString::new(name.as_bytes())
+            .context("config parent component contains a NUL byte")?;
+        // SAFETY: directory owns a valid descriptor and name is a valid relative C string.
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "failed to open config parent component without following links: {}",
+                    parent.display()
+                )
+            });
+        }
+        // SAFETY: descriptor was returned by openat and transfers to File exactly once.
+        directory = unsafe { fs::File::from_raw_fd(descriptor) };
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn config_parent_walk_path(parent: &Path) -> Result<PathBuf> {
+    if !parent.is_absolute() {
+        return Ok(parent.to_path_buf());
+    }
+    let mut components = parent.components();
+    let Some(std::path::Component::RootDir) = components.next() else {
+        return Ok(parent.to_path_buf());
+    };
+    let Some(first) = components.next() else {
+        return Ok(parent.to_path_buf());
+    };
+    let std::path::Component::Normal(first_name) = first else {
+        return Ok(parent.to_path_buf());
+    };
+    let first_path = Path::new("/").join(first_name);
+    let metadata = fs::symlink_metadata(&first_path)
+        .with_context(|| format!("failed to inspect {}", first_path.display()))?;
+    if !metadata.file_type().is_symlink() {
+        return Ok(parent.to_path_buf());
+    }
+    let mut resolved = first_path.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve root-level alias {}",
+            first_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        resolved.is_absolute(),
+        "root-level config alias did not resolve to an absolute directory"
+    );
+    for component in components {
+        resolved.push(component.as_os_str());
+    }
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn secure_opened_config_parent(directory: &fs::File, display_path: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: directory owns a valid descriptor for the exact opened parent.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to secure {}", display_path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn config_parent_file_identity(directory: &fs::File) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = directory
+        .metadata()
+        .context("failed to inspect opened config parent")?;
+    anyhow::ensure!(metadata.is_dir(), "opened config parent is not a directory");
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(unix)]
+fn inspect_config_target_at(
+    parent: &fs::File,
+    file_name: &std::ffi::OsStr,
+    display_path: &Path,
+) -> Result<bool> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let name = std::ffi::CString::new(file_name.as_bytes())
+        .context("config file name contains a NUL byte")?;
+    // SAFETY: stat points to initialized writable storage; directory fd and C string are valid.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: arguments remain valid for the duration of the syscall.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        let file_type = stat.st_mode & libc::S_IFMT;
+        anyhow::ensure!(
+            file_type != libc::S_IFLNK,
+            "refusing to replace symbolic-link config {}",
+            display_path.display()
+        );
+        anyhow::ensure!(
+            file_type == libc::S_IFREG,
+            "config destination is not a regular file: {}",
+            display_path.display()
+        );
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOENT) {
+        Ok(false)
+    } else {
+        Err(error).with_context(|| format!("failed to inspect config {}", display_path.display()))
+    }
+}
+
+#[cfg(unix)]
+fn create_private_config_temp_at(
+    parent: &fs::File,
+    temp_name: &std::ffi::OsStr,
+    display_path: &Path,
+) -> Result<fs::File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+
+    let name = std::ffi::CString::new(temp_name.as_bytes())
+        .context("temporary config file name contains a NUL byte")?;
+    // SAFETY: directory fd and C string are valid; returned descriptor is uniquely owned below.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to create {}", display_path.display()));
+    }
+    // SAFETY: descriptor was returned by openat and ownership transfers to File exactly once.
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    // SAFETY: file owns a valid descriptor.
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to secure {}", display_path.display()));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn replace_config_file_at(
+    parent: &fs::File,
+    temp_name: &std::ffi::OsStr,
+    file_name: &std::ffi::OsStr,
+    display_path: &Path,
+) -> Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let temp = std::ffi::CString::new(temp_name.as_bytes())
+        .context("temporary config file name contains a NUL byte")?;
+    let target = std::ffi::CString::new(file_name.as_bytes())
+        .context("config file name contains a NUL byte")?;
+    // SAFETY: both names are relative to the same valid directory descriptor.
+    let result = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            temp.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to atomically replace config {} through opened parent",
+                display_path.display()
+            )
+        })
+    }
+}
+
+#[cfg(unix)]
+fn remove_config_temp_at(parent: &fs::File, temp_name: &std::ffi::OsStr) -> std::io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let name = std::ffi::CString::new(temp_name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "temporary config file name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: directory descriptor and relative C string are valid.
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn config_parent_identity(parent: &Path) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    reject_config_parent_symlink_components(parent)?;
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("failed to inspect {}", parent.display()))?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "config parent is no longer a directory: {}",
+        parent.display()
+    );
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn config_parent_identity(parent: &Path) -> Result<PathBuf> {
+    reject_config_parent_symlink_components(parent)?;
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("failed to inspect {}", parent.display()))?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "config parent is no longer a directory: {}",
+        parent.display()
+    );
+    parent
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", parent.display()))
+}
+
+#[cfg(windows)]
+fn lock_windows_config_parent_ancestors(parent: &Path) -> Result<Vec<fs::File>> {
+    use std::{
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        ptr::{null, null_mut},
+    };
+
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+            OPEN_EXISTING,
+        },
+    };
+
+    let absolute = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory for config publish")?
+            .join(parent)
+    };
+    let mut current = PathBuf::new();
+    let mut rooted = false;
+    let mut guards = Vec::new();
+    for component in absolute.components() {
+        use std::path::Component;
+
+        match component {
+            Component::Prefix(_) => current.push(component.as_os_str()),
+            Component::RootDir => {
+                current.push(component.as_os_str());
+                rooted = true;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "config parent must not contain parent traversal: {}",
+                    parent.display()
+                );
+            }
+            Component::Normal(_) => current.push(component.as_os_str()),
+        }
+        if !rooted {
+            continue;
+        }
+
+        let wide = current
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // Omitting FILE_SHARE_DELETE pins every lexical ancestor against rename/deletion while
+        // the later pathname-based ReplaceFileW/MoveFileExW sequence is in flight.
+        // SAFETY: wide is NUL-terminated and the returned handle is checked before ownership.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "failed to lock Windows config ancestor {}",
+                    current.display()
+                )
+            });
+        }
+        // SAFETY: CreateFileW returned an owned, non-sentinel handle.
+        let file = unsafe { fs::File::from_raw_handle(raw) };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: file is live and info is a valid output pointer.
+        if unsafe { GetFileInformationByHandle(raw, &raw mut info) } == 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "failed to inspect locked Windows config ancestor {}",
+                    current.display()
+                )
+            });
+        }
+        anyhow::ensure!(
+            info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                && info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "refusing Windows reparse or non-directory config ancestor {}",
+            current.display()
+        );
+        guards.push(file);
+    }
+    anyhow::ensure!(
+        !guards.is_empty(),
+        "config parent does not resolve to a rooted Windows directory"
+    );
+    Ok(guards)
+}
+
+#[cfg(windows)]
+fn replace_config_file(temp_path: &Path, path: &Path, target_exists: bool) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
+    };
+
+    let source = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // Existing files use ReplaceFileW so the destination's DACL is retained. New files inherit
+    // the user-local parent ACL and use MoveFileExW for a write-through publish. No replacement
+    // backup is ever requested: an old V1 config can contain a plaintext credential and must not
+    // be copied into a Sigil recovery file.
+    // SAFETY: both buffers are valid NUL-terminated UTF-16 strings and remain alive for the call.
+    let replaced = if target_exists {
+        unsafe {
+            ReplaceFileW(
+                destination.as_ptr(),
+                source.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        }
+    } else {
+        unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    if replaced == 0 {
+        let source = std::io::Error::last_os_error();
+        if target_exists && windows_replace_error_requires_recovery(source.raw_os_error()) {
+            return Err(ConfigPublishError::ReplacementPartiallyApplied {
+                path: path.to_path_buf(),
+                recovery_path: temp_path.to_path_buf(),
+                previous_path: None,
+                source,
+            }
+            .into());
+        }
+        return Err(source).with_context(|| {
+            format!(
+                "failed to atomically replace {} with {}",
+                path.display(),
+                temp_path.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn windows_replace_error_requires_recovery(raw_os_error: Option<i32>) -> bool {
+    matches!(raw_os_error, Some(1175..=1177))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_config_file(temp_path: &Path, path: &Path, _target_exists: bool) -> Result<()> {
+    fs::rename(temp_path, path).with_context(|| {
+        format!(
+            "failed to atomically replace {} with {}",
+            path.display(),
+            temp_path.display()
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn sync_config_parent(parent: &Path) -> std::io::Result<()> {
+    fs::File::open(parent).and_then(|directory| directory.sync_all())
+}
+
+#[cfg(windows)]
+fn sync_config_parent(_parent: &Path) -> std::io::Result<()> {
+    // ReplaceFileW and MoveFileExW are the platform publication barriers. Windows does not expose
+    // a portable directory-fsync equivalent; a successful replacement is therefore the strongest
+    // available committed state and permits verified keyring retirement.
+    Ok(())
+}
+
+fn read_positive_env_u64_with(
+    name: &str,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<u64>> {
+    let Some(value) = read_env(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     else {
@@ -1327,6 +2677,10 @@ pub struct StorageConfig {
     pub cache_root: StorageRoot,
     #[serde(default)]
     pub mutation_artifact_retention: MutationArtifactRetentionConfig,
+    /// Provider-login credential persistence. `auto` prefers the OS store and falls back to the
+    /// owner-only Sigil credential file when the OS store is unavailable.
+    #[serde(default)]
+    pub credential_store: CredentialStorageMode,
 }
 
 impl Default for StorageConfig {
@@ -1335,6 +2689,31 @@ impl Default for StorageConfig {
             state_root: StorageRoot::Auto,
             cache_root: StorageRoot::Auto,
             mutation_artifact_retention: MutationArtifactRetentionConfig::default(),
+            credential_store: CredentialStorageMode::Auto,
+        }
+    }
+}
+
+/// Local provider credential persistence policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStorageMode {
+    /// Prefer the OS credential store and fall back to an owner-only local credential file.
+    #[default]
+    Auto,
+    /// Require the OS credential store and fail when it is unavailable.
+    Keyring,
+    /// Use the owner-only local credential file.
+    File,
+}
+
+impl CredentialStorageMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Keyring => "keyring",
+            Self::File => "file",
         }
     }
 }
@@ -1437,7 +2816,10 @@ impl<'de> Deserialize<'de> for StorageRoot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionId>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
@@ -1517,6 +2899,16 @@ impl TaskConfig {
             AgentRole::SubagentWrite => &self.subagent_write,
         }
     }
+
+    fn role_configs(&self) -> impl Iterator<Item = (&'static str, &RoleModelConfig)> {
+        [
+            ("task.planner", &self.planner),
+            ("task.executor", &self.executor),
+            ("task.subagent_read", &self.subagent_read),
+            ("task.subagent_write", &self.subagent_write),
+        ]
+        .into_iter()
+    }
 }
 
 /// Admission policy for ordinary conversation-to-task routing.
@@ -1583,6 +2975,8 @@ pub struct RoleModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -1628,6 +3022,8 @@ pub struct SkillConfig {
     pub user_skills: bool,
     #[serde(default = "default_skill_user_agents")]
     pub user_agents: bool,
+    #[serde(default = "default_skill_compatibility_auto_discover")]
+    pub compatibility_auto_discover: bool,
     #[serde(default = "default_skill_compatibility_sources")]
     pub compatibility_sources: Vec<String>,
 }
@@ -1638,6 +3034,7 @@ impl Default for SkillConfig {
             enabled: default_skill_enabled(),
             user_skills: default_skill_user_skills(),
             user_agents: default_skill_user_agents(),
+            compatibility_auto_discover: default_skill_compatibility_auto_discover(),
             compatibility_sources: default_skill_compatibility_sources(),
         }
     }
@@ -2480,6 +3877,10 @@ fn default_skill_user_skills() -> bool {
 }
 
 fn default_skill_user_agents() -> bool {
+    true
+}
+
+fn default_skill_compatibility_auto_discover() -> bool {
     true
 }
 

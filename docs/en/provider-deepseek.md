@@ -12,12 +12,20 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
 base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-default.options]
 fim_model = "deepseek-v4-pro"
 ```
 
@@ -25,22 +33,22 @@ See [deepseek-basic.toml](../examples/config/deepseek-basic.toml) for a copyable
 
 ## Authentication
 
-`SIGIL_API_KEY` takes priority over `[providers.deepseek].api_key`. Prefer the environment for local and CI use; a saved config key is plaintext.
+The example binds this connection to `SIGIL_API_KEY`. You can instead choose the **secure credential store** in setup or `/config`; `sigil.toml` stores only an opaque `stored` ID. Default `auto` prefers the system store and may use owner-only `~/.sigil/credentials.json` only when it is unavailable. Pasted secrets are never valid connection fields.
 
 ## Options And Visible Limits
 
-`base_url`, `beta_base_url`, `anthropic_base_url`, `fim_model`, `strict_tools_mode`, and `user_id_strategy` are DeepSeek-specific. Environment overrides use `SIGIL_BASE_URL`, `SIGIL_BETA_BASE_URL`, `SIGIL_ANTHROPIC_BASE_URL`, `SIGIL_FIM_MODEL`, `SIGIL_STRICT_TOOLS_MODE`, and `SIGIL_USER_ID_STRATEGY`.
+`base_url` belongs to this exact connection. `beta_base_url`, `anthropic_base_url`, `fim_model`, `strict_tools_mode`, and `user_id_strategy` belong under `[connections.deepseek-default.options]` and apply only to this DeepSeek route.
 
 DeepSeek image input is not enabled. An attached image is rejected before a request is sent; choose a supported image provider instead.
 
 ## Verify
 
-Run `sigil doctor` and confirm provider, model, base URL, and credential source.
+Run `sigil doctor` and confirm `default=deepseek-default/deepseek-v4-flash`, the endpoint, credential source, and readiness.
 
 ## Common Problems
 
 - Authentication: export `SIGIL_API_KEY` in the same shell that launches Sigil.
-- Wrong model: check `[agent].model` and any task-role override.
+- Wrong model: check the exact `[agent].connection` plus `[agent].model` route and any task-role override.
 - FIM unavailable: confirm `fim_model` and endpoint support.
 - Slow stream: check network access and model-request timeouts.
 

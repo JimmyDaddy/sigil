@@ -38,6 +38,7 @@ import type {
   RunStreamStatus,
   RunAttachment,
   PermissionMode,
+  ProviderModelRef,
   ReasoningEffort,
   SkillBinding,
   RunContext,
@@ -66,7 +67,11 @@ export interface DesktopBridge {
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
   catalog(workspaceId: string, request: CatalogRequest): Promise<CatalogPage>;
-  createSession(workspaceId: string, label?: string, modelName?: string): Promise<SessionSummary>;
+  createSession(
+    workspaceId: string,
+    label?: string,
+    modelRef?: ProviderModelRef,
+  ): Promise<SessionSummary>;
   openSession(
     workspaceId: string,
     input: SessionOpenInput,
@@ -170,10 +175,10 @@ export const desktopBridge: DesktopBridge = {
     }),
   catalog: (workspaceId, request) =>
     invoke<CatalogPage>("desktop_catalog", { workspaceId, request }),
-  createSession: (workspaceId, label, modelName) =>
+  createSession: (workspaceId, label, modelRef) =>
     invoke<SessionSummary>("desktop_create_session", {
       workspaceId,
-      input: { label, modelName },
+      input: { label, modelRef },
     }),
   openSession: (workspaceId, input) =>
     invoke<SessionSummary>("desktop_open_session", { workspaceId, input }),

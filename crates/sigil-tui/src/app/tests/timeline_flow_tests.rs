@@ -117,6 +117,7 @@ fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
                     effective_tool_scope_hash: "sha256:tools".to_owned(),
@@ -469,6 +470,36 @@ fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> 
     let expanded = transcript_plain(app.transcript_lines(20));
     assert!(expanded.contains("Ctrl-T collapse"));
     assert!(expanded.contains("planning step 5"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_o_expands_latest_diagram_source_and_copy_preserves_raw_markdown() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let response = "Architecture:\n\n```mermaid\nflowchart TD\nA --> B\n```\n\nDone.".to_owned();
+    app.push_timeline(TimelineRole::Assistant, response.clone());
+
+    let collapsed = transcript_plain(app.transcript_lines(48));
+    assert!(collapsed.contains("diagram"));
+    assert!(collapsed.contains("flowchart"));
+    assert!(!collapsed.contains("A --> B"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+
+    let expanded = transcript_plain(app.transcript_lines(48));
+    assert!(expanded.contains("A --> B"));
+    assert_eq!(
+        app.last_notice(),
+        Some("diagram source expanded · Ctrl-L copies response")
+    );
+
+    let action = app
+        .request_copy_selection_or_latest_response()
+        .expect("latest response should be copyable");
+    assert!(matches!(
+        action,
+        AppAction::CopyToClipboard { text } if text == response
+    ));
     Ok(())
 }
 
@@ -2477,6 +2508,7 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
                     profile_snapshot_id: snapshot_id.clone(),
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
                         "/tmp/workspace".to_owned(),

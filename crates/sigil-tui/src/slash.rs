@@ -24,8 +24,6 @@ pub(crate) struct SlashArgumentOption {
     pub(crate) keywords: &'static [&'static str],
 }
 
-pub(crate) const KNOWN_MODEL_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
-
 pub(crate) const EFFORT_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
     SlashArgumentOption {
         label: "low",
@@ -50,20 +48,5 @@ pub(crate) const EFFORT_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
         value: "max",
         description: "strongest reasoning",
         keywords: &["max"],
-    },
-];
-
-pub(crate) const MODEL_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
-    SlashArgumentOption {
-        label: "flash",
-        value: "deepseek-v4-flash",
-        description: "fast default model",
-        keywords: &["flash", "v4-flash", "deepseek-v4-flash"],
-    },
-    SlashArgumentOption {
-        label: "pro",
-        value: "deepseek-v4-pro",
-        description: "stronger reasoning model",
-        keywords: &["pro", "v4-pro", "deepseek-v4-pro"],
     },
 ];

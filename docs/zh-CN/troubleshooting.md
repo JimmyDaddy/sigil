@@ -16,7 +16,8 @@ sigil doctor
 
 | 现象 | 先检查 | 下一步 |
 |---|---|---|
-| 每次都进入快速设置 | 模型服务凭据 | 重新打开 `/config`，选择可用的模型服务并保存 |
+| 每次都进入快速设置 | Connection 就绪状态 | 重新打开 `/config`，保存一条就绪 connection 与模型 |
+| 模型列表不对 | 当前选择的 connection | 核对 `connection-id/model-id`，不要期待其他 connection 的模型 |
 | 文件范围不对 | 工作区路径 | 从目标目录重新启动 |
 | 工具被阻止 | 审批或沙箱提示 | 阅读原因；仅在确有需要时调整策略 |
 | MCP 不可用 | `/config` → MCP Servers | 修正认证、配置或启动模式 |
@@ -25,11 +26,28 @@ sigil doctor
 
 ## 每次都会进入快速设置
 
-当前没有可用的模型服务配置或凭据。打开 `/config`，选择模型服务，保存后运行 `/doctor`。精确字段见[模型服务指南](providers.md)和[配置字段参考](configuration-reference.md)。
+当前没有可用的模型服务 connection、凭据或默认模型路由。打开 `/config`，依次选择 provider、凭据来源和模型，检查后保存；首次设置最多要求这三个决定。运行 `sigil doctor`，确认存在 `default=connection-id/model-id` 复合路由。精确字段见[模型服务指南](providers.md)和[配置字段参考](configuration-reference.md)。
 
 ## Sigil 找不到 API 密钥
 
-确认凭据名称与所选模型服务匹配，并且启动 Sigil 的终端能够读取它。修改 Shell 环境变量后请重启 Sigil。优先使用文档中的环境变量或系统凭据流程；不要把密钥粘贴到问题单中。
+确认环境变量名属于当前 connection，并且启动 Sigil 的终端能够读取它。修改 Shell 环境变量后请重启 Sigil。使用 stored credential 时，在 `/config` 中修复当前 connection。默认 `auto` 模式遇到系统存储 unavailable 时可使用 owner-only 的 `~/.sigil/credentials.json`；系统记录被拒绝或损坏时不会静默回退。不要把 API key 写进 `sigil.toml` 或问题单。
+
+### Provider connection 或模型目录未就绪
+
+`sigil doctor` 会独立报告每条 connection，且不会打印 secret 值或 credential ID。按 UI 状态处理：
+
+| 状态 | 含义 | 处理方式 |
+|---|---|---|
+| `needs_credential` / `credential_unavailable` | 当前凭据来源缺失，或 configured store 无法读取 | 修复该 connection 的环境变量绑定或 stored record，并检查 `[storage].credential_store` |
+| `auth_rejected` | 端点拒绝了当前 connection 的凭据 | 替换该凭据；Sigil 不会尝试其他 connection |
+| `offline`、`tls_rejected`、`protocol_mismatch` | 当前协议无法安全访问已配置端点 | 检查网络、TLS、端点和协议 |
+| `remote_empty` | Discovery 成功，但没有返回模型 | 手动输入精确模型 ID |
+| `catalog_unsupported` | 当前 provider/端点不提供 discovery | 使用 provider 自带列表或手动输入 |
+| `catalog_malformed` | 返回值不是合法模型目录 | 修复端点或网关；远端元数据不会扩展本地能力 |
+
+如果 Doctor 报告 `mode=legacy_v1`，可以在 `/config` 中显式迁移。保存前检查投影后的
+connection 和精确模型。旧配置不一致只会给出警告，不会暗中切换 provider；V1/V2 混合配置和
+未来版本配置会失败关闭。
 
 ## 主题颜色难以阅读
 

@@ -1,6 +1,8 @@
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };

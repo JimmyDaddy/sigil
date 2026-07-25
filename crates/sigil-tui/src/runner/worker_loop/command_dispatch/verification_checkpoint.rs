@@ -165,6 +165,7 @@ where
                 let output = match fork_current_conversation(
                     &state.session.log_path,
                     state.session.current.as_ref(),
+                    root_config,
                     &request,
                 ) {
                     Ok(output) => output,
@@ -194,6 +195,7 @@ where
                             copied_message_count: output.copied_message_count,
                             entries: transition.entries,
                         });
+                        return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {

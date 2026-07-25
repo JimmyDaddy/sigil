@@ -29,6 +29,7 @@ fn session_with_messages(path: &Path, messages: &[&str]) -> Result<String> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     for message in messages {
         session.append_user_message(ModelMessage::user(*message))?;

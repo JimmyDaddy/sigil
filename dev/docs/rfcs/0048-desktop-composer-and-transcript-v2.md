@@ -128,6 +128,7 @@ R48.1、R48.2 与 R48.3 在 contract 冻结后可独立实施；R48.4 必须等�
 - DeepSeek exact supported model 显示四档 effort；OpenAI Responses exact supported model 不显示 `max`；unsupported/unknown model 不显示伪造默认值。
 - 服务端拒绝不属于 exact support set 的 effort，且不会发 provider 请求。
 - 可用 slash item 均能解析到 typed client/session/run route；未知、stale、disabled skill/agent 在 runtime admission 失败且不发 provider 请求。
+- 用户显式选择的 skill 必须在乐观用户消息中立即可见，并由带 `run_id` 的 append-only `SkillLoaded` 证据在重开会话后恢复；模型内部加载的 skill 不得伪装成用户消息上下文。
 - GFM table/task list/strikethrough/link 和常用 Rust/TypeScript/JSON/shell fenced code 正确渲染；恶意 HTML/URL 不执行。
 - `https:` link 不能导航当前 WebView；typed native open、拒绝与 copy fallback 均有测试，DOM 保留 `noreferrer noopener`。
 - 30/100 session、long transcript、active run、approval、tool error、light/dark、900 px 和 200% zoom 不产生 document horizontal scroll。

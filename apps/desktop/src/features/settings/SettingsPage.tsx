@@ -4,7 +4,8 @@ import type { ThemePreference } from "../../appearance/contract";
 import { useAppearance } from "../../appearance/ThemeProvider";
 import { type Locale, useLocale } from "../../i18n";
 import { readReopenLastWorkspace, writeDefaultModel, writeReopenLastWorkspace } from "../../preferences";
-import type { RunContext } from "../../types";
+import { modelOptionIsSelectable } from "../../types";
+import type { ProviderModelRef, RunContext } from "../../types";
 import { Icon } from "../../ui/icons";
 import { useNotifications } from "../../ui/feedback";
 import { Button, Checkbox, Select } from "../../ui/primitives";
@@ -33,8 +34,8 @@ export function SettingsPage({
   readonly supportAvailable: boolean;
   readonly workspaceId?: string;
   readonly modelContext?: RunContext;
-  readonly defaultModel?: string;
-  readonly onDefaultModelChange: (modelName?: string) => void;
+  readonly defaultModel?: ProviderModelRef;
+  readonly onDefaultModelChange: (modelRef?: ProviderModelRef) => void;
   readonly onBack: () => void;
   readonly onOpenSupport: () => void;
 }) {
@@ -51,8 +52,17 @@ export function SettingsPage({
     setReopenLastWorkspace(enabled);
   };
 
-  const updateDefaultModel = (modelName: string) => {
-    const preference = modelName === "" ? undefined : modelName;
+  const modelRefKey = (modelRef: ProviderModelRef) =>
+    `${modelRef.connectionId}/${modelRef.modelId}`;
+  const updateDefaultModel = (selection: string) => {
+    const selected = modelContext?.modelOptions.find(
+      (option) => modelRefKey(option.modelRef) === selection,
+    );
+    const preference = selection === ""
+      || selected === undefined
+      || !modelOptionIsSelectable(selected)
+      ? undefined
+      : selected.modelRef;
     if (workspaceId === undefined || !writeDefaultModel(workspaceId, preference)) {
       notify({ tone: "error", message: t("settingsSaveFailed") });
       return;
@@ -84,12 +94,27 @@ export function SettingsPage({
             <Select
               label={t("defaultModel")}
               description={t("defaultModelProvider", { provider: modelContext.providerName })}
-              value={defaultModel ?? ""}
+              value={
+                defaultModel === undefined ? "" : modelRefKey(defaultModel)
+              }
               onChange={(event) => updateDefaultModel(event.currentTarget.value)}
             >
               <option value="">{t("workspaceDefaultModel")}</option>
               {modelContext.modelOptions.map((option) => (
-                <option key={option.modelName} value={option.modelName}>{option.modelName}</option>
+                <option
+                  key={modelRefKey(option.modelRef)}
+                  value={modelRefKey(option.modelRef)}
+                  disabled={!modelOptionIsSelectable(option)}
+                >
+                  {option.displayName === option.modelName
+                    ? option.modelName
+                    : `${option.displayName} · ${option.modelName}`}
+                  {option.availability === "available"
+                    ? ""
+                    : option.availability === "unverified"
+                      ? ` · ${t("unverified")}`
+                      : ` · ${t("unavailable")}`}
+                </option>
               ))}
             </Select>
           )}

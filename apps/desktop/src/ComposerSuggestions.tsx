@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef } from "react";
+
 import type { ApplicationClientAction } from "./types";
 import { Button } from "./ui/primitives";
 
@@ -32,9 +34,25 @@ export function ComposerSuggestions({
   onSelect: (suggestion: ComposerSuggestion) => void;
   onActiveIndexChange: (index: number) => void;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (list === null) return;
+    const activeOption = list.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (activeOption === null) return;
+    const optionTop = activeOption.offsetTop;
+    const optionBottom = optionTop + activeOption.offsetHeight;
+    const visibleTop = list.scrollTop;
+    const visibleBottom = visibleTop + list.clientHeight;
+    if (optionTop < visibleTop) {
+      list.scrollTop = activeOption === list.firstElementChild ? 0 : optionTop;
+    } else if (optionBottom > visibleBottom) {
+      list.scrollTop = optionBottom - list.clientHeight;
+    }
+  }, [activeIndex, suggestions.length]);
   if (suggestions.length === 0) return null;
   return (
-    <div id={id} className="composer-suggestions" role="listbox" aria-label={label}>
+    <div ref={listRef} id={id} className="composer-suggestions" role="listbox" aria-label={label}>
       {suggestions.map((suggestion, index) => (
         <Button
           id={`${id}-option-${index}`}

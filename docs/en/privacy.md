@@ -22,7 +22,7 @@ Per-user configuration, input history, session logs, change artifacts, cache fil
 
 <!-- public-doc-topic: credentials-plaintext -->
 
-Prefer the provider-specific environment variable listed in [Providers](providers.md#authentication-priority). A key saved through Quick Setup or `/config` is plaintext in the per-user `sigil.toml`; never commit or share a real config file. `sigil doctor` reports the credential source without printing the value.
+Use the provider-specific environment variable listed in [Providers](providers.md#authentication-priority), or save the secret through the secure credential store in Quick Setup or `/config`. This does not mean a secret is never persisted anywhere. The default `auto` policy prefers durable encrypted operating-system storage, but falls back when that store is unavailable to owner-only `~/.sigil/credentials.json`; that dedicated file is protected plaintext, not encryption. V2 configuration stores only an allowlisted environment-variable name or opaque stored-credential ID. Sigil never writes a newly entered key to `sigil.toml`, workspace data, model cache, session logs, snapshots, logs, or diagnostic output. Select strict `keyring` mode to prohibit the file backend. Older V1 files may already contain plaintext; review and explicitly migrate them in `/config`, then remove any backup that still contains the old value. `sigil doctor` reports only the credential source and readiness.
 
 OAuth credentials for a configured remote MCP server are kept in the native system credential store rather than TOML. See [MCP](mcp.md) for sign-in, sign-out, and local-clear behavior.
 

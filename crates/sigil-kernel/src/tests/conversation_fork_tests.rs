@@ -6,17 +6,17 @@ use serde_json::json;
 use super::*;
 use crate::{
     AssistantMessageKind, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan,
-    CompactionInitiation, CompletionRequest, ContinuationCheckpointV1, ContinuationItemPriority,
-    ContinuationModelOutputItemV1, ContinuationModelOutputV1, ControlledCheckpointProjection,
-    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
-    ConversationInputQueuedEntry, ConversationInputTarget, EffectiveTokenBudget,
-    ExternalEvidenceLevel, ExternalSourceRecord, ExternalTrust, FrozenProviderRequestMaterial,
-    InputTokenEvidence, ModelMessage, MutationEventRecorder, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, RequestFitProof, SourceCacheStatus, SourceFreshness,
-    TaskMemoryV1, TokenMeasurementBinding, TokenMeasurementScope, ToolOutputProjectionPolicy,
-    ToolRestartPolicy, UsageStats, VersionedProfileIdentity,
-    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
-    write_file_with_mutation,
+    CompactionInitiation, CompletionRequest, ConnectionId, ContinuationCheckpointV1,
+    ContinuationItemPriority, ContinuationModelOutputItemV1, ContinuationModelOutputV1,
+    ControlledCheckpointProjection, ConversationInputKind, ConversationInputPromotedEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputTarget,
+    EffectiveTokenBudget, ExternalEvidenceLevel, ExternalSourceRecord, ExternalTrust,
+    FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage, ModelRef,
+    MutationEventRecorder, PortableSemanticCompactionRequest, PortableTargetRequestMaterial,
+    RequestFitProof, SourceCacheStatus, SourceFreshness, TaskMemoryV1, TokenMeasurementBinding,
+    TokenMeasurementScope, ToolOutputProjectionPolicy, ToolRestartPolicy, UsageStats,
+    VersionedProfileIdentity, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence, write_file_with_mutation,
 };
 
 fn portable_target_profile(profile_id: &str) -> VersionedProfileIdentity {
@@ -106,6 +106,7 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
     source.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "chat".to_owned(),
+        resolved_model_route: None,
     })?;
     source.append_user_message(ModelMessage::user("edit note"))?;
     let recorder = MutationEventRecorder::with_artifact_root(source_store.clone(), artifacts);
@@ -204,6 +205,12 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
         .expect("checkpoint");
     let before_parent = fs::read(&source_path)?;
     let destination_path = temp.path().join("fork.jsonl");
+    let destination_route = ResolvedModelRoute::new(
+        ModelRef::new(ConnectionId::new("deepseek-default")?, "chat")?,
+        "deepseek",
+        "deepseek",
+        "fork-route-fingerprint",
+    )?;
 
     let output = fork_conversation_at_checkpoint(
         &source_store,
@@ -215,6 +222,7 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
             destination_path: destination_path.clone(),
             provider_name: "deepseek".to_owned(),
             model_name: "chat".to_owned(),
+            resolved_model_route: Some(destination_route.clone()),
         },
     )?;
 
@@ -251,6 +259,7 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
     )?;
     assert_eq!(destination.entries().len(), 4);
     assert_eq!(destination.messages().len(), 2);
+    assert_eq!(destination.resolved_model_route(), Some(&destination_route));
     let rebound = destination.external_provenance_entries();
     assert_eq!(rebound.len(), 1);
     assert_eq!(rebound[0].session_scope_id, output.destination_session_id);
@@ -302,6 +311,7 @@ fn conversation_fork_rejects_unfinalized_turn_without_creating_destination() -> 
             destination_path: destination_path.clone(),
             provider_name: "deepseek".to_owned(),
             model_name: "chat".to_owned(),
+            resolved_model_route: None,
         },
     )
     .expect_err("unfinished turn must not fork");
@@ -320,6 +330,7 @@ fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Re
     source.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "chat".to_owned(),
+        resolved_model_route: None,
     })?;
     source.append_user_message(ModelMessage::user("explain the repository"))?;
     let assistant = ModelMessage::assistant_with_kind(
@@ -361,6 +372,7 @@ fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Re
             destination_path: destination_path.clone(),
             provider_name: "deepseek".to_owned(),
             model_name: "chat".to_owned(),
+            resolved_model_route: None,
         },
     )?;
 
@@ -381,6 +393,32 @@ fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Re
     assert!(fork_payload.source_checkpoint_id.is_none());
     assert!(fork_payload.source_checkpoint_digest.is_none());
     assert_eq!(fork_payload.source_turn_digest, point.source_turn_digest);
+
+    let mismatched_path = temp.path().join("mismatched-route.jsonl");
+    let error = fork_conversation_at_turn(
+        &source_store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest,
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: mismatched_path.clone(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "chat".to_owned(),
+            resolved_model_route: Some(ResolvedModelRoute::new(
+                ModelRef::new(ConnectionId::new("deepseek-default")?, "other-model")?,
+                "deepseek",
+                "deepseek",
+                "mismatched-route-fingerprint",
+            )?),
+        },
+    )
+    .expect_err("mismatched route identity must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("route model does not match destination identity")
+    );
+    assert!(!mismatched_path.exists());
     Ok(())
 }
 
@@ -398,6 +436,7 @@ fn promoted_user_is_checkpoint_and_fork_boundary_without_a_second_user_event() -
     source.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "chat".to_owned(),
+        resolved_model_route: None,
     })?;
     let queue_id = ConversationInputQueueId::new("fork-promoted-user")?;
     let prompt = project_conversation_prompt_for_persistence("edit the promoted note");
@@ -490,6 +529,7 @@ fn promoted_user_is_checkpoint_and_fork_boundary_without_a_second_user_event() -
             destination_path: destination_path.clone(),
             provider_name: "deepseek".to_owned(),
             model_name: "chat".to_owned(),
+            resolved_model_route: None,
         },
     )?;
     assert_eq!(output.copied_message_count, 2);
@@ -533,6 +573,7 @@ fn conversation_turn_fork_rejects_stale_digest_before_creating_destination() -> 
             destination_path: destination_path.clone(),
             provider_name: "deepseek".to_owned(),
             model_name: "chat".to_owned(),
+            resolved_model_route: None,
         },
     )
     .expect_err("stale digest must fail");

@@ -18,12 +18,14 @@ import {
   readReopenLastWorkspace,
   writeLastSession,
 } from "./preferences";
+import { modelOptionIsSelectable } from "./types";
 import type {
   CatalogEntry,
   CatalogPage,
   CatalogRequest,
   CatalogSourceState,
   DesktopBootstrap,
+  ProviderModelRef,
   RecentWorkspaceSummary,
   RunContext,
   SessionSummary,
@@ -113,7 +115,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
   const [selectedDurableSessionId, setSelectedDurableSessionId] = useState<string>();
   const [workspaceRunContext, setWorkspaceRunContext] = useState<RunContext>();
-  const [defaultModel, setDefaultModel] = useState<string>();
+  const [defaultModel, setDefaultModel] = useState<ProviderModelRef>();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
@@ -369,7 +371,18 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const captureRunContext = useCallback((context: RunContext) => {
     setWorkspaceRunContext(context);
     setDefaultModel((current) =>
-      current === undefined || context.availableModels.includes(current) ? current : undefined,
+      current === undefined
+        || (
+          current.connectionId === context.modelRef.connectionId
+          && context.modelOptions.some(
+            (option) =>
+              option.modelRef.connectionId === current.connectionId
+              && option.modelRef.modelId === current.modelId
+              && modelOptionIsSelectable(option),
+          )
+        )
+        ? current
+        : undefined,
     );
   }, []);
 
@@ -515,8 +528,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
-  const createSession = async (modelName?: string): Promise<boolean> => {
-    if (activeWorkspaceId === undefined) return false;
+  const createSession = async (
+    requestedModel?: ProviderModelRef,
+  ): Promise<SessionSummary | undefined> => {
+    if (activeWorkspaceId === undefined) return undefined;
     const selectionEpoch = ++sessionSelectionEpoch.current;
     const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
@@ -524,15 +539,28 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
     try {
+      const selectedDefaultModel = requestedModel ?? (
+        defaultModel !== undefined
+          && workspaceRunContext !== undefined
+          && defaultModel.connectionId === workspaceRunContext.modelRef.connectionId
+          && workspaceRunContext.modelOptions.some(
+            (option) =>
+              option.modelRef.connectionId === defaultModel.connectionId
+              && option.modelRef.modelId === defaultModel.modelId
+              && modelOptionIsSelectable(option),
+          )
+          ? defaultModel
+          : undefined
+      );
       const session = await bridge.createSession(
         activeWorkspaceId,
         t("newConversation"),
-        modelName ?? defaultModel,
+        selectedDefaultModel,
       );
       setConversationNavigation((current) =>
         current?.kind === "creating" ? { ...current, targetSessionId: session.id } : current,
       );
-      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
+      if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
       setSelectedSession(session);
       setSelectedDurableSessionId(undefined);
       setNavigationOpen(false);
@@ -550,12 +578,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           label: createdEntry.title ?? session.label,
         });
       }
-      return true;
+      return session;
     } catch {
       setSessionActionState("error");
       setSessionMessage(t("conversationCreateFailed"));
       setConversationNavigation(undefined);
-      return false;
+      return undefined;
     }
   };
 
@@ -1004,7 +1032,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 session={selectedSession}
                 onInitialLoadComplete={finishConversationNavigation}
                 onRunContextChange={captureRunContext}
-                onNewSession={() => createSession()}
+                onNewSession={async () => (await createSession()) !== undefined}
+                onCreateSessionForModel={createSession}
                 onOpenWorkspacePicker={() => void pickWorkspace()}
                 onOpenSessionPicker={(query) => {
                   navigate("conversation");

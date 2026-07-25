@@ -3,7 +3,100 @@ use crate::app::tests::common::test_config;
 use crate::config_panel::ConfigState;
 
 #[test]
+fn disconnected_setup_catalog_worker_leaves_loading_with_a_repairable_error() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    app.modal_state = Some(ModalState::ModelPicker(ModelPickerState {
+        target: ModelPickerTarget::Setup,
+        connection_id: Some(
+            sigil_kernel::ConnectionId::new("deepseek-default").expect("connection id"),
+        ),
+        provider_name: "deepseek".to_owned(),
+        current: "deepseek-v4-flash".to_owned(),
+        route_base_url: None,
+        catalog_state: ModelCatalogState::Loading,
+        catalog_entries: Vec::new(),
+        options: Vec::new(),
+        selected: 0,
+        manual_entry_allowed: false,
+    }));
+    app.runtime.active_model_picker_refresh = Some(PendingModelPickerRefresh {
+        request_id: 1,
+        target: ModelPickerTarget::Setup,
+        provider_name: "deepseek".to_owned(),
+        current: "deepseek-v4-flash".to_owned(),
+        base_url: String::new(),
+        connection_id: Some(
+            sigil_kernel::ConnectionId::new("deepseek-default").expect("connection id"),
+        ),
+        draft_revision: 0,
+        connection_fingerprint: Some("fingerprint".to_owned()),
+    });
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    drop(sender);
+    app.runtime.setup_model_catalog_rx = Some(receiver);
+
+    assert!(app.poll_setup_model_catalog());
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert!(matches!(
+        app.modal_state,
+        Some(ModalState::ModelPicker(ModelPickerState {
+            catalog_state: ModelCatalogState::Error(_),
+            manual_entry_allowed: false,
+            ..
+        }))
+    ));
+    assert_eq!(app.last_notice(), Some("model catalog worker disconnected"));
+}
+
+#[test]
+fn connection_inventory_poll_replaces_the_offline_snapshot_without_selector_io() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let mut refreshed = app
+        .runtime
+        .connection_inventory
+        .clone()
+        .expect("offline inventory should exist");
+    refreshed.entries[0].readiness =
+        sigil_runtime::provider_connections::ConnectionReadiness::NeedsCredential;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    sender
+        .send((app.runtime.connection_inventory_revision, refreshed.clone()))
+        .expect("inventory send");
+    app.runtime.connection_inventory_rx = Some(receiver);
+
+    assert!(app.poll_connection_inventory());
+    assert_eq!(app.runtime.connection_inventory, Some(refreshed));
+    assert!(app.runtime.connection_inventory_rx.is_none());
+}
+
+#[test]
+fn connection_inventory_poll_rejects_a_stale_revision() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let current = app
+        .runtime
+        .connection_inventory
+        .clone()
+        .expect("offline inventory should exist");
+    let mut stale = current.clone();
+    stale.entries[0].readiness =
+        sigil_runtime::provider_connections::ConnectionReadiness::NeedsCredential;
+    let stale_revision = app.runtime.connection_inventory_revision.saturating_sub(1);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    sender
+        .send((stale_revision, stale))
+        .expect("stale inventory send");
+    app.runtime.connection_inventory_rx = Some(receiver);
+
+    assert!(!app.poll_connection_inventory());
+    assert_eq!(app.runtime.connection_inventory, Some(current));
+    assert!(app.runtime.connection_inventory_rx.is_none());
+}
+
+#[test]
 fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
+    let _environment_lock = crate::test_env::lock();
+    let _deepseek_environment = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let _openai_environment = crate::test_env::EnvScope::unset("SIGIL_OPENAI_COMPATIBLE_API_KEY");
     let root_config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
     app.config_state = Some(ConfigState::from_root_config(&root_config));
@@ -15,7 +108,7 @@ fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
         state.draft.provider_base_url = "https://models.example.com".to_owned();
         state.draft.provider_beta_base_url = "https://beta.example.com".to_owned();
         state.draft.provider_anthropic_base_url = "https://anthropic.example.com".to_owned();
-        state.draft.provider_api_key = "config-secret".to_owned();
+        state.draft.provider_api_key = SecretString::new("config-secret");
         state.draft.provider_model = "base-model".to_owned();
         state.draft.provider_fim_model = "base-fim".to_owned();
         state.draft.model_request_timeout_secs = "45".to_owned();
@@ -23,14 +116,16 @@ fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
 
     let provider = app
         .provider_status_config_for_model_picker(ModelPickerTarget::Provider, "picked")
-        .expect("provider status config should resolve");
+        .expect("provider status config should resolve")
+        .expect("deepseek should support model discovery");
     assert_eq!(provider.base_url, "https://models.example.com");
     assert_eq!(provider.api_key.as_deref(), Some("config-secret"));
     assert_eq!(provider.request_timeout_secs, 45);
 
     let fim = app
         .provider_status_config_for_model_picker(ModelPickerTarget::ProviderFim, "picked-fim")
-        .expect("fim provider status config should resolve");
+        .expect("fim provider status config should resolve")
+        .expect("deepseek should support model discovery");
     assert_eq!(fim.base_url, "https://models.example.com");
     assert_eq!(fim.request_timeout_secs, 45);
 
@@ -42,18 +137,20 @@ fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
     );
     if let Some(state) = setup_app.setup_state.as_mut() {
         state.provider_name = "openai_compat".to_owned();
-        state.api_key = "setup-secret".to_owned();
+        state.api_key = SecretString::new("setup-secret");
     }
     let setup_provider = setup_app
         .provider_status_config_for_model_picker(ModelPickerTarget::Setup, "setup-model")
-        .expect("setup provider status config should resolve");
+        .expect("setup provider status config should resolve")
+        .expect("openai compatible should support model discovery");
     assert_eq!(setup_provider.api_key.as_deref(), Some("setup-secret"));
     assert_eq!(setup_provider.base_url, "https://api.openai.com/v1");
 
     let snapshot_provider =
         AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config)
             .provider_status_config_for_model_picker(ModelPickerTarget::Provider, "snapshot")
-            .expect("snapshot provider status config should resolve");
+            .expect("snapshot provider status config should resolve")
+            .expect("snapshot provider should support model discovery");
     assert!(!snapshot_provider.base_url.is_empty());
 }
 
@@ -67,11 +164,23 @@ fn modal_outcomes_update_setup_and_config_state() {
     );
     setup_app.apply_modal_outcome(ModalOutcome::ModelSelected {
         target: ModelPickerTarget::Setup,
+        connection_id: None,
+        provider_name: "deepseek".to_owned(),
         value: "setup-model".to_owned(),
     });
     setup_app.apply_modal_outcome(ModalOutcome::SecretSubmitted {
         target: SecretInputTarget::SetupApiKey,
-        value: "setup-secret".to_owned(),
+        value: SecretString::new("setup-secret"),
+    });
+    let setup_state = setup_app
+        .setup_state
+        .as_mut()
+        .expect("setup state should exist");
+    setup_state.catalog_admission = Some(crate::setup::SetupCatalogAdmission {
+        draft_revision: setup_state.draft_revision,
+        available_models: Default::default(),
+        manual_entry_allowed: true,
+        manual_model: None,
     });
     setup_app.apply_modal_outcome(ModalOutcome::TextSubmitted {
         target: TextInputTarget::SetupModel,
@@ -87,15 +196,19 @@ fn modal_outcomes_update_setup_and_config_state() {
     config_app.config_state = Some(ConfigState::from_root_config(&root_config));
     config_app.apply_modal_outcome(ModalOutcome::ModelSelected {
         target: ModelPickerTarget::Provider,
+        connection_id: None,
+        provider_name: "deepseek".to_owned(),
         value: "provider-model".to_owned(),
     });
     config_app.apply_modal_outcome(ModalOutcome::ModelSelected {
         target: ModelPickerTarget::ProviderFim,
+        connection_id: None,
+        provider_name: "deepseek".to_owned(),
         value: "fim-model".to_owned(),
     });
     config_app.apply_modal_outcome(ModalOutcome::SecretSubmitted {
         target: SecretInputTarget::ConfigProviderApiKey,
-        value: "config-secret".to_owned(),
+        value: SecretString::new("config-secret"),
     });
     config_app.apply_modal_outcome(ModalOutcome::TextSubmitted {
         target: TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl),
@@ -219,7 +332,7 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
     assert_eq!(ModelPickerTarget::ProviderFim.title(), "FIM Model");
     assert_eq!(
         SecretInputTarget::SetupApiKey.summary("SIGIL_API_KEY"),
-        "Saved as plaintext with setup. SIGIL_API_KEY can override at runtime."
+        "Saved to the secure credential store. The value never enters sigil.toml; SIGIL_API_KEY is a separate selectable source."
     );
     assert_eq!(
         TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl).config_key(),
@@ -229,14 +342,21 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     app.modal_state = Some(ModalState::ModelPicker(ModelPickerState {
         target: ModelPickerTarget::Provider,
+        connection_id: None,
+        provider_name: "deepseek".to_owned(),
         current: "current".to_owned(),
+        route_base_url: None,
+        catalog_state: ModelCatalogState::Bundled,
+        catalog_entries: Vec::new(),
         options: Vec::new(),
         selected: 0,
+        manual_entry_allowed: false,
     }));
-    assert!(matches!(
-        app.submit_modal(),
-        ModalOutcome::Dismissed(message) if message == "closed picker"
-    ));
+    assert!(matches!(app.submit_modal(), ModalOutcome::None));
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("no verified model is selectable; repair connection or retry")
+    );
 }
 
 #[test]
@@ -245,7 +365,7 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
 
     assert_eq!(
         ModelPickerTarget::ProviderFim.summary(),
-        "Choose FIM model. Esc to type your own."
+        "Choose a provider-scoped FIM model."
     );
     assert_eq!(SecretInputTarget::ConfigProviderApiKey.title(), "API Key");
     assert_eq!(TextInputTarget::SetupModel.title(), "Model ID");
@@ -256,7 +376,7 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
     app.open_secret_input(SecretInputTarget::SetupApiKey, "abc");
     assert_eq!(app.modal_title(), Some("API Key"));
     let secret_lines = app.modal_lines().join("\n");
-    assert!(secret_lines.contains("SIGIL_API_KEY can override"));
+    assert!(secret_lines.contains("SIGIL_API_KEY is a separate selectable source"));
     assert!(secret_lines.contains("api_key: ***|"));
     assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 3, 4)));
 
@@ -273,7 +393,10 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
         .provider_name = "openai_compat".to_owned();
     setup_app.open_secret_input(SecretInputTarget::SetupApiKey, "");
     let openai_secret_lines = setup_app.modal_lines().join("\n");
-    assert!(openai_secret_lines.contains("SIGIL_OPENAI_COMPATIBLE_API_KEY can override"));
+    assert!(
+        openai_secret_lines
+            .contains("SIGIL_OPENAI_COMPATIBLE_API_KEY is a separate selectable source")
+    );
 
     app.open_text_input(TextInputTarget::SetupModel, "flash");
     assert_eq!(app.modal_title(), Some("Model ID"));
@@ -380,12 +503,26 @@ fn model_picker_and_input_key_events_cover_wrap_dismiss_and_submission() {
 
     app.modal_state = Some(ModalState::ModelPicker(ModelPickerState {
         target: ModelPickerTarget::Provider,
+        connection_id: None,
+        provider_name: "deepseek".to_owned(),
         current: "current".to_owned(),
+        route_base_url: None,
+        catalog_state: ModelCatalogState::Bundled,
+        catalog_entries: Vec::new(),
         options: Vec::new(),
         selected: 0,
+        manual_entry_allowed: false,
     }));
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("no verified model is selectable; repair connection or retry")
+    );
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         ModalOutcome::Dismissed(message) if message == "closed picker"
     ));
 
@@ -554,32 +691,38 @@ fn modal_helper_edge_cases_cover_refresh_defaults_and_empty_values() {
 
     assert_eq!(
         SecretInputTarget::ConfigProviderApiKey.summary("SIGIL_API_KEY"),
-        "Saved as plaintext on Ctrl-S. SIGIL_API_KEY can override at runtime."
+        "Staged in memory for secure-store save. The value never enters sigil.toml; SIGIL_API_KEY is a separate source."
     );
 
-    app.open_model_picker(ModelPickerTarget::Provider, "current-model");
+    app.open_model_picker(ModelPickerTarget::ProviderFim, "current-model");
     if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
-        state.options = vec!["stale-model".to_owned()];
+        state.options = vec![ProviderModelIdentity {
+            connection_id: None,
+            provider_name: "deepseek".to_owned(),
+            model_id: "stale-model".to_owned(),
+        }];
         state.selected = 0;
     }
     assert!(app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
+        target: ModelPickerTarget::ProviderFim,
+        provider_name: "deepseek".to_owned(),
         current: "current-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
+        base_url: "https://api.deepseek.com".to_owned(),
         result: Ok(vec!["current-model".to_owned(), "remote-model".to_owned()]),
     }));
     if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_ref() {
         assert_eq!(state.selected, 0);
-        assert_eq!(state.options[0], "current-model");
+        assert_eq!(state.options[0].model_id, "current-model");
     } else {
         panic!("expected model picker modal");
     }
 
     app.modal_state = None;
     assert!(!app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
+        target: ModelPickerTarget::ProviderFim,
+        provider_name: "deepseek".to_owned(),
         current: "current-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
+        base_url: "https://api.deepseek.com".to_owned(),
         result: Ok(vec!["remote-model".to_owned()]),
     }));
     assert!(matches!(
@@ -612,13 +755,14 @@ fn modal_helper_edge_cases_cover_refresh_defaults_and_empty_values() {
         ModalOutcome::None
     ));
 
-    app.open_model_picker(ModelPickerTarget::ProviderFim, "fim-model");
+    app.open_model_picker(ModelPickerTarget::ProviderFim, "deepseek-v4-pro");
     assert!(matches!(
         app.submit_modal(),
         ModalOutcome::ModelSelected {
             target: ModelPickerTarget::ProviderFim,
-            value
-        } if value == "fim-model"
+            value,
+            ..
+        } if value == "deepseek-v4-pro"
     ));
 
     let root_config = test_config();

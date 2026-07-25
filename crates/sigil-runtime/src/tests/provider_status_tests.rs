@@ -72,22 +72,21 @@ fn parse_remote_model_ids_keeps_order_and_deduplicates() {
         "data": [
             {"id": "deepseek-v4-flash"},
             {"id": "deepseek-v4-pro"},
-            {"id": "deepseek-v4-flash"},
-            {"missing": true}
+            {"id": "deepseek-v4-flash"}
         ]
     });
 
     assert_eq!(
-        parse_remote_model_ids(&payload),
+        parse_remote_model_ids(&payload).expect("valid model payload should parse"),
         vec!["deepseek-v4-flash", "deepseek-v4-pro"]
     );
 }
 
 #[test]
-fn parse_remote_model_ids_returns_empty_for_missing_or_invalid_data() {
-    assert!(parse_remote_model_ids(&json!({})).is_empty());
-    assert!(parse_remote_model_ids(&json!({"data": "not-array"})).is_empty());
-    assert!(parse_remote_model_ids(&json!({"data": [{"id": 42}, null]})).is_empty());
+fn parse_remote_model_ids_rejects_missing_or_invalid_data() {
+    assert!(parse_remote_model_ids(&json!({})).is_err());
+    assert!(parse_remote_model_ids(&json!({"data": "not-array"})).is_err());
+    assert!(parse_remote_model_ids(&json!({"data": [{"id": 42}, null]})).is_err());
 }
 
 #[test]
@@ -150,7 +149,8 @@ fn provider_status_task_manager_accepts_only_active_balance_request() {
             assert_eq!(request_id, 42);
             assert_eq!(snapshot.status, "balance unavailable");
         }
-        ProviderStatusTaskResult::Models { .. } => {
+        ProviderStatusTaskResult::Models { .. }
+        | ProviderStatusTaskResult::ConnectionModels { .. } => {
             panic!("balance refresh should not send model result");
         }
     }
@@ -285,9 +285,9 @@ fn test_provider_config(timeout_secs: u64) -> ProviderStatusConfig {
 }
 
 #[test]
-fn parse_remote_model_ids_returns_empty_when_payload_has_no_data_array() {
-    assert!(parse_remote_model_ids(&json!({"data": null})).is_empty());
-    assert!(parse_remote_model_ids(&json!({"missing": true})).is_empty());
+fn parse_remote_model_ids_rejects_payload_without_data_array() {
+    assert!(parse_remote_model_ids(&json!({"data": null})).is_err());
+    assert!(parse_remote_model_ids(&json!({"missing": true})).is_err());
 }
 
 #[test]
@@ -441,16 +441,48 @@ async fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
 }
 
 #[tokio::test]
-async fn fetch_remote_model_ids_rejects_empty_remote_model_list() {
+async fn fetch_remote_model_ids_returns_empty_remote_model_list() {
     let (base_url, server) = spawn_mock_http_server(200, json!({"data": []}).to_string());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let models = fetch_remote_model_ids(&config)
+        .await
+        .expect("an explicit empty model list should remain distinct from an error");
+
+    assert!(models.is_empty());
+    let _ = server.join();
+}
+
+#[tokio::test]
+async fn fetch_remote_model_ids_rejects_missing_data_array() {
+    let (base_url, server) = spawn_mock_http_server(200, json!({"models": []}).to_string());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
     let error = fetch_remote_model_ids(&config)
         .await
-        .expect_err("empty model list should fail");
+        .expect_err("a malformed model payload should fail");
 
-    assert_eq!(error.to_string(), "provider returned no model ids");
+    assert_eq!(
+        error.to_string(),
+        "provider model response is missing a data array"
+    );
+    let _ = server.join();
+}
+
+#[tokio::test]
+async fn fetch_remote_model_ids_rejects_malformed_array_items() {
+    let (base_url, server) =
+        spawn_mock_http_server(200, json!({"data": [{"id": 42}, null]}).to_string());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_remote_model_ids(&config)
+        .await
+        .expect_err("malformed model items should fail");
+
+    assert!(error.to_string().contains("missing a non-empty string id"));
     let _ = server.join();
 }
 

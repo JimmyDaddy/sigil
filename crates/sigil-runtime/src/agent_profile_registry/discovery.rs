@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -6,15 +6,17 @@ use sigil_kernel::{
 };
 
 use crate::{
-    plugins::discover_workspace_plugins, resolve_sigil_paths,
-    skills::discover_skill_index_with_user_dir,
+    definition_file_io::{prepare_definition_roots, read_definition_text},
+    plugins::discover_workspace_plugins,
+    resolve_sigil_paths,
+    skills::{compatibility_source_enabled, discover_skill_index_with_user_dir},
 };
 
 use super::{
-    ResolvedAgentProfile, agent_profile_source_label, child_session_skill_profile, display_path,
-    fallback_plugin_agent_id, native_agent_entrypoint, path_stays_in_workspace,
-    plugin_agent_profile_format, plugin_agent_profile_from_raw, sorted_dir_entries,
-    tool_scope_is_empty, workspace_agent_profile_from_raw, workspace_path,
+    ResolvedAgentProfile, agent_profile_source_label, child_session_skill_profile,
+    codex_agent_profile_from_raw, display_path, fallback_plugin_agent_id, native_agent_entrypoint,
+    path_stays_in_workspace, plugin_agent_profile_format, plugin_agent_profile_from_raw,
+    sorted_dir_entries, tool_scope_is_empty, workspace_agent_profile_from_raw, workspace_path,
 };
 
 pub(super) fn discover_workspace_agent_profiles(
@@ -91,7 +93,7 @@ pub(super) fn discover_workspace_agent_profiles(
             ));
             continue;
         }
-        let raw = match fs::read_to_string(&entrypoint) {
+        let raw = match read_definition_text(&entrypoint) {
             Ok(raw) => raw,
             Err(error) => {
                 warnings.push(format!(
@@ -136,6 +138,98 @@ pub(super) fn discover_workspace_agent_profiles(
         profiles.push(resolved);
     }
     Ok(())
+}
+
+pub(super) fn discover_codex_agent_profiles(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    profiles: &mut Vec<ResolvedAgentProfile>,
+    warnings: &mut Vec<String>,
+) {
+    if !root_config.skills.enabled || !compatibility_source_enabled(&root_config.skills, "codex") {
+        return;
+    }
+    let agents_dir = workspace_root.join(".codex").join("agents");
+    if !agents_dir.exists() {
+        return;
+    }
+    if !agents_dir.is_dir() {
+        warnings.push(format!(
+            "Codex agent discovery path is not a directory: {}",
+            agents_dir.display()
+        ));
+        return;
+    }
+    let canonical_workspace = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    if !path_stays_in_workspace(&canonical_workspace, &agents_dir) {
+        warnings.push(format!(
+            "Codex agent discovery path escapes workspace root: {}",
+            agents_dir.display()
+        ));
+        return;
+    }
+    prepare_definition_roots(std::slice::from_ref(&agents_dir));
+
+    let mut claimed_ids = profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.profile.id.as_str().to_owned(),
+                agent_profile_source_label(&profile.source).to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for entry in sorted_dir_entries(&agents_dir, warnings) {
+        let entrypoint = entry.path();
+        if entrypoint.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+        if !path_stays_in_workspace(&canonical_workspace, &entrypoint) {
+            warnings.push(format!(
+                "Codex agent profile entrypoint escapes workspace root: {}",
+                entrypoint.display()
+            ));
+            continue;
+        }
+        let raw = match read_definition_text(&entrypoint) {
+            Ok(raw) => raw,
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to read Codex agent profile {}: {error}",
+                    entrypoint.display()
+                ));
+                continue;
+            }
+        };
+        let resolved =
+            match codex_agent_profile_from_raw(root_config, workspace_root, &entrypoint, &raw) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    warnings.push(format!(
+                        "invalid Codex agent profile {}: {error}",
+                        entrypoint.display()
+                    ));
+                    continue;
+                }
+            };
+        let id = resolved.profile.id.as_str().to_owned();
+        if let Some(existing) = claimed_ids.get(&id) {
+            warnings.push(format!(
+                "Codex agent profile id {id:?} from {} is shadowed by {existing}",
+                entrypoint.display()
+            ));
+            continue;
+        }
+        claimed_ids.insert(
+            id,
+            display_path(workspace_root, &entrypoint)
+                .display()
+                .to_string(),
+        );
+        profiles.push(resolved);
+    }
 }
 
 pub(super) fn discover_plugin_agent_profiles(
@@ -192,7 +286,7 @@ pub(super) fn discover_plugin_agent_profiles(
                 continue;
             }
         };
-        let raw = match fs::read_to_string(&entrypoint) {
+        let raw = match read_definition_text(&entrypoint) {
             Ok(raw) => raw,
             Err(error) => {
                 warnings.push(format!(

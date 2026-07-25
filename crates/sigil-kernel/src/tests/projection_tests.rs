@@ -286,6 +286,7 @@ fn sample_agent_started_entry() -> Result<AgentThreadStartedEntry> {
             profile_snapshot_id: AgentProfileSnapshotId::new("snapshot_explore_1")?,
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-pro".to_owned(),
+            model_ref: None,
             reasoning_effort: None,
             workspace_root: WorkspaceRootSnapshot::new("/workspace")?,
             effective_tool_scope_hash: "sha256:tools".to_owned(),
@@ -430,6 +431,7 @@ fn session_list_projection_rebuilds_v2_stream_metadata() -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
+        resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::User(crate::ModelMessage::user(
         "Investigate session projection",

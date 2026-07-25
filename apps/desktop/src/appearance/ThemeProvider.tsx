@@ -30,6 +30,16 @@ export interface ThemeProviderProps {
   readonly children: ReactNode;
 }
 
+function releaseSubscription(unsubscribe: (() => void) | undefined) {
+  if (unsubscribe === undefined) return;
+  try {
+    unsubscribe();
+  } catch {
+    // A WebView reload can clear Tauri's listener registry before React disposes
+    // this effect. Cleanup is already complete in that case.
+  }
+}
+
 export function ThemeProvider({ bridge, children }: ThemeProviderProps) {
   const [appearance, setAppearance] = useState(appearanceFromDocument);
   const appearanceRef = useRef(appearance);
@@ -74,12 +84,12 @@ export function ThemeProvider({ bridge, children }: ThemeProviderProps) {
     void bridge.subscribeAppearance((snapshot) => {
       if (!disposed) sync(snapshot);
     }).then((next) => {
-      if (disposed) next();
+      if (disposed) releaseSubscription(next);
       else unsubscribe = next;
     });
     return () => {
       disposed = true;
-      unsubscribe?.();
+      releaseSubscription(unsubscribe);
     };
   }, [bridge, sync]);
 

@@ -30,7 +30,19 @@ The launch directory becomes the normal active workspace when Quick Setup saves 
 
 ## 3. Complete Quick Setup
 
-When configuration is missing, choose the provider first, then choose its model and add authentication. `Trust folder, save and start` is the explicit confirmation that the launch directory may be used as the workspace; there is no separate trust toggle. Press Enter on Provider to switch services in Quick Setup or later in `/config`. For temporary use, prefer the environment variable listed in the [provider guide](providers.md#authentication-priority). A key saved through Quick Setup or `/config` is plaintext in the local config file; never commit a real `sigil.toml`.
+When configuration is missing, make at most three main choices: provider, credential source, and
+model. `Review, trust folder, save and start` confirms the route and allows the launch directory to
+be used as the workspace. Quick Setup writes a named V2 connection and the compound saved default.
+
+For normal local use, choose the secure credential store; a pasted key is held only long enough
+to create a credential record, and `sigil.toml` stores a random reference. The default `auto`
+policy prefers the system store and uses owner-only `~/.sigil/credentials.json` only when the
+system store is unavailable. Choose an allowlisted environment variable for CI or an already
+managed shell secret. See the [provider guide](providers.md#authentication-priority).
+
+Later, `/model connection-id/model-id` starts a fresh session on a ready route. In its selector,
+Enter starts the session and `D` changes only the saved default; the current and saved routes are
+shown separately.
 
 ## 4. Run The First Checks
 

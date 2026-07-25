@@ -1,8 +1,10 @@
+config_version = 2
+
 [workspace]
 root = "."
 
 [agent]
-provider = "anthropic"
+connection = "anthropic-default"
 model = "claude-sonnet-4-5"
 tool_timeout_secs = 30
 
@@ -13,9 +15,14 @@ stream_idle_timeout_secs = 180
 [permission]
 mode = "manual"
 
-[providers.anthropic]
+[connections.anthropic-default]
+label = "Anthropic"
+provider = "anthropic"
+protocol = "anthropic_messages"
 base_url = "https://api.anthropic.com"
+credential = { source = "environment", name = "SIGIL_ANTHROPIC_API_KEY" }
+
+[connections.anthropic-default.options]
 anthropic_version = "2023-06-01"
 max_tokens = 4096
-# Prefer SIGIL_ANTHROPIC_API_KEY.
-# api_key = "sk-ant-..."
+beta_headers = []

@@ -12,29 +12,35 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "gemini"
+connection = "gemini-default"
 model = "gemini-2.5-pro"
 
-[providers.gemini]
+[connections.gemini-default]
+label = "Google Gemini"
+provider = "gemini"
+protocol = "generate_content"
 base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = { source = "environment", name = "SIGIL_GEMINI_API_KEY" }
 ```
 
 可复制文件见 [gemini.toml](../examples/config/gemini.toml)。
 
 ## 认证
 
-`SIGIL_GEMINI_API_KEY` 优先于 `[providers.gemini].api_key`，并且不会改变其他 Google 工具使用的凭据。
+示例只把当前连接绑定到 `SIGIL_GEMINI_API_KEY`，不会改变其他 Google 工具使用的凭据。也可以选择安全凭据存储；`sigil.toml` 中只保存不透明凭据引用。
 
 ## 选项与可见限制
 
-`SIGIL_GEMINI_BASE_URL` 可以临时覆盖 `base_url`。模型可用性可能因账户和区域而异；请明确设置 `[agent].model`。
+模型可用性可能因账户和区域而异；请明确设置 `[agent].connection` 与 `[agent].model`。第二个 Gemini 账户应使用独立连接，拥有自己的端点、凭据和模型目录。
 
 图片只支持已识别的 Gemini 模型 ID。浮动的 `latest` 名称、未知 ID 和别名会在发送前被拒绝。
 
 ## 验证
 
-运行 `sigil doctor`，确认模型服务、具体模型、基础 URL 与凭据来源。
+运行 `sigil doctor`，确认 `default=gemini-default/gemini-2.5-pro`、端点、凭据来源和就绪状态。
 
 ## 常见问题
 

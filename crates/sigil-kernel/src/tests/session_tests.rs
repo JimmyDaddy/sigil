@@ -11,33 +11,33 @@ use crate::{
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, CandidateCheck, ChangeSet,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompletionCriteria, ContextBodyRef, ContextInclusionReason,
-    ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel, ConversationInputKind,
-    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ChildVerificationReceiptLinked, CompletionCriteria, ConnectionId, ContextBodyRef,
+    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
+    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
     MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig, MemoryLoadReport,
-    MemorySnapshot, MutationEventRecorder, PlanApprovalExpiry, PlanApprovalPermission,
+    MemorySnapshot, ModelRef, MutationEventRecorder, PlanApprovalExpiry, PlanApprovalPermission,
     PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanSourceRef, PluginCapability, PluginManifestSnapshot,
     PluginTrustDecision, PluginTrustEntry, ProjectionCursor, ProviderContinuationState,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
-    ResponseHandle, RunStatus, RuntimeContextCandidates, SandboxProfileRequirement, SessionRef,
-    SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
-    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationReceiptLinkRecorded,
-    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, plan_draft_created_entry,
-    provider::ModelMessage, stable_event_hash,
+    ResolvedModelRoute, ResponseHandle, RunStatus, RuntimeContextCandidates,
+    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
+    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit, ToolSubjectKind,
+    ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
+    VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
+    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -378,6 +378,7 @@ fn test_agent_run_context() -> AgentRunContextSnapshot {
         profile_snapshot_id: test_agent_profile_snapshot_id(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-flash".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: WorkspaceRootSnapshot::new("/workspace").expect("valid workspace root"),
         effective_tool_scope_hash: "tool-scope-hash".to_owned(),
@@ -670,6 +671,7 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
     let identity = SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     });
     let non_identity_control =
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats::default()));
@@ -856,6 +858,7 @@ fn load_from_store_keeps_existing_identity_without_duplicate_append() -> Result<
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     }))?;
 
     let session = Session::load_from_store("other-provider", "other-model", store)?;
@@ -876,6 +879,47 @@ fn load_from_store_keeps_existing_identity_without_duplicate_append() -> Result<
 
     let records = JsonlSessionStore::read_event_records(&path)?;
     assert_eq!(records.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn new_session_persists_exact_route_while_legacy_identity_is_not_silently_rebound() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let route = ResolvedModelRoute::new(
+        ModelRef::new(ConnectionId::new("openai-personal")?, "gpt-5.4")?,
+        "openai",
+        "openai_responses",
+        "sha256:0123456789abcdef",
+    )?;
+    let new_path = temp.path().join("new.jsonl");
+    let new_store = JsonlSessionStore::new(&new_path)?;
+    let created = Session::load_from_store_with_route(
+        "openai_responses",
+        "gpt-5.4",
+        Some(route.clone()),
+        new_store.clone(),
+    )?;
+    assert_eq!(created.resolved_model_route(), Some(&route));
+    let reloaded = Session::load_from_store("ignored", "ignored", new_store)?;
+    assert_eq!(reloaded.resolved_model_route(), Some(&route));
+
+    let legacy_path = temp.path().join("legacy.jsonl");
+    let legacy_store = JsonlSessionStore::new(&legacy_path)?;
+    legacy_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "openai_responses".to_owned(),
+        model_name: "gpt-5.4".to_owned(),
+        resolved_model_route: None,
+    }))?;
+    let legacy = Session::load_from_store_with_route(
+        "openai_responses",
+        "gpt-5.4",
+        Some(route),
+        legacy_store,
+    )?;
+    assert!(
+        legacy.resolved_model_route().is_none(),
+        "an existing route-less session needs an explicit recovery action"
+    );
     Ok(())
 }
 
@@ -1156,6 +1200,7 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
         (
             SessionLogEntry::Control(ControlEntry::SkillLoaded(SkillLoadEntry {
                 skill_id: "review".to_owned(),
+                display_name: None,
                 sha256: "sha256:skill".to_owned(),
                 source: SkillSource::Workspace,
                 entrypoint: "skills/review/SKILL.md".into(),
@@ -2345,6 +2390,7 @@ fn load_from_store_recovers_identity_from_prefix_snapshot() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name,
                 model_name,
+                ..
             }) if provider_name == "deepseek" && model_name == "deepseek-v4-flash"
         )
     }));
@@ -2996,6 +3042,7 @@ fn session_list_projection_replays_from_session_durable_stream() -> Result<()> {
     let identity = SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
+        resolved_model_route: None,
     });
     store.append_session_entry_event(&identity)?;
     store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user(
@@ -3786,6 +3833,7 @@ fn session_skill_state_projection_replays_control_entries() -> Result<()> {
     session.append_control(ControlEntry::SkillIndexCaptured(snapshot.clone()))?;
     session.append_control(ControlEntry::SkillLoaded(SkillLoadEntry {
         skill_id: "repo-review".to_owned(),
+        display_name: None,
         sha256: "hash".to_owned(),
         source: SkillSource::Workspace,
         entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
@@ -3839,6 +3887,7 @@ fn skill_state_projection_replays_durable_stream_records() -> Result<()> {
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::SkillLoaded(
         SkillLoadEntry {
             skill_id: "repo-review".to_owned(),
+            display_name: None,
             sha256: "hash".to_owned(),
             source: SkillSource::Workspace,
             entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),

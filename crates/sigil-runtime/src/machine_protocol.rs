@@ -99,6 +99,8 @@ pub enum MachineErrorCode {
     InvalidInvocation,
     /// Configuration could not be loaded or validated.
     ConfigurationInvalid,
+    /// Headless startup has no saved or explicit compound model route.
+    ModelRouteNotConfigured,
     /// Provider, tool, or runtime execution failed.
     ExecutionFailed,
     /// The run was cooperatively cancelled before a result could be produced.
@@ -166,9 +168,9 @@ impl MachineExitCode {
     #[must_use]
     pub const fn for_error(code: MachineErrorCode) -> Self {
         match code {
-            MachineErrorCode::InvalidInvocation | MachineErrorCode::ConfigurationInvalid => {
-                Self::InvalidInput
-            }
+            MachineErrorCode::InvalidInvocation
+            | MachineErrorCode::ConfigurationInvalid
+            | MachineErrorCode::ModelRouteNotConfigured => Self::InvalidInput,
             MachineErrorCode::Cancelled => Self::Cancelled,
             MachineErrorCode::ExecutionFailed | MachineErrorCode::Internal => Self::ExecutionFailed,
         }

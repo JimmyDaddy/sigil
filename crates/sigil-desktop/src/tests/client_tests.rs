@@ -34,19 +34,38 @@ fn typed_client_debug_never_projects_transport_or_bearer_material() {
 #[test]
 fn run_context_decodes_exact_typed_server_contract() {
     let context: crate::DesktopRunContextView = serde_json::from_value(serde_json::json!({
+        "model_ref": {
+            "connection_id": "deepseek-default",
+            "model_id": "deepseek-v4-flash"
+        },
         "provider_name": "deepseek",
         "model_name": "deepseek-v4-flash",
-        "model_selection": "per_run",
+        "model_selection": "fresh_session",
         "model_selection_binding": "model-binding",
-        "available_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "model_options": [
             {
+                "model_ref": {
+                    "connection_id": "deepseek-default",
+                    "model_id": "deepseek-v4-flash"
+                },
+                "display_name": "DeepSeek V4 Flash",
+                "availability": "available",
+                "recommendation": "recommended",
+                "provenance": "bundled",
                 "model_name": "deepseek-v4-flash",
                 "available_reasoning_efforts": ["low", "medium", "high", "max"],
                 "default_reasoning_effort": "max",
                 "reasoning_effort_binding": "effort-binding-flash"
             },
             {
+                "model_ref": {
+                    "connection_id": "deepseek-default",
+                    "model_id": "deepseek-v4-pro"
+                },
+                "display_name": "DeepSeek V4 Pro",
+                "availability": "available",
+                "recommendation": "standard",
+                "provenance": "bundled",
                 "model_name": "deepseek-v4-pro",
                 "available_reasoning_efforts": ["low", "medium", "high", "max"],
                 "default_reasoning_effort": "max",
@@ -69,6 +88,8 @@ fn run_context_decodes_exact_typed_server_contract() {
     }))
     .expect("run context should decode");
 
+    assert_eq!(context.model_ref.connection_id, "deepseek-default");
+    assert_eq!(context.model_ref.model_id, "deepseek-v4-flash");
     assert_eq!(context.model_name, "deepseek-v4-flash");
     assert_eq!(context.last_prompt_tokens, Some(42_000));
     assert_eq!(context.available_reasoning_efforts.len(), 4);
@@ -83,7 +104,7 @@ fn run_context_decodes_exact_typed_server_contract() {
     );
     assert_eq!(
         context.model_selection,
-        crate::DesktopModelSelectionPolicy::PerRun
+        crate::DesktopModelSelectionPolicy::FreshSession
     );
 }
 
@@ -520,6 +541,46 @@ fn support_report_decodes_only_the_path_free_contract() {
     assert_eq!(report.summary.warn, 1);
     assert_eq!(report.checks[0].name, "configuration");
     assert_eq!(report.privacy.excluded, ["local paths"]);
+}
+
+#[test]
+fn provider_connection_inventory_decodes_only_the_secret_free_native_contract() {
+    let inventory: crate::DesktopProviderConnectionInventory =
+        serde_json::from_value(serde_json::json!({
+            "config_mode": "v2",
+            "default_model": {
+                "connection_id": "openai-personal",
+                "model_id": "gpt-4.1"
+            },
+            "connections": [{
+                "id": "openai-personal",
+                "label": "OpenAI personal",
+                "provider_label": "OpenAI",
+                "protocol_label": "Responses",
+                "endpoint_display": "api.openai.com",
+                "credential_source": "stored",
+                "readiness": "ready",
+                "default_model": {
+                    "connection_id": "openai-personal",
+                    "model_id": "gpt-4.1"
+                }
+            }],
+            "issues": []
+        }))
+        .expect("provider connection inventory should decode");
+
+    assert_eq!(inventory.config_mode, crate::DesktopProviderConfigMode::V2);
+    assert_eq!(
+        inventory
+            .default_model
+            .as_ref()
+            .map(|route| { (route.connection_id.as_str(), route.model_id.as_str()) }),
+        Some(("openai-personal", "gpt-4.1"))
+    );
+    assert_eq!(
+        inventory.connections[0].credential_source,
+        crate::DesktopProviderCredentialSource::Stored
+    );
 }
 
 #[test]

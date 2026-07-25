@@ -28,6 +28,7 @@
 | 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |
 | 打开最近一次检查点恢复 | `Ctrl-R`；`Enter` 恢复，`F` 分叉会话，`Esc` 关闭 |
 | 打开已保存会话的操作菜单 | 选择 `/resume` 行，再按 `Ctrl-O` 或右键 |
+| 切换最近一张 Mermaid 图表源码 | 没有已保存会话、工具卡片或其他更高优先级操作时按 `Ctrl-O` |
 | 切换可见的子智能体会话 | 子智能体面板、`Alt-A`、`Shift-Alt-A` |
 | 展开或折叠推理过程与活动 | `Ctrl-T` |
 | 检查已修改源码 | `Alt-D` |
@@ -52,7 +53,7 @@
 | `/plan [prompt]` | 运行只读计划；接受计划后开始任务 |
 | `/task <任务>` | 开始多步骤执行 |
 | `/task continue` | 继续最近的未完成任务 |
-| `/model <flash|pro|id>` | 为下一轮切换模型，并新建会话 |
+| `/model <model-id|connection-id/model-id>` | 切换到准确的 ready route 并新建会话；在选择器中按 `D` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
 | `/compact` | 检查上下文精简方案，并在就绪时应用一次 |
 | `/quit` | 退出 TUI |
@@ -65,7 +66,7 @@
 | --- | --- |
 | `sigil` | 在当前工作区打开 TUI |
 | `sigil doctor [--output text|json]` | 运行本机诊断 |
-| `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务 |
+| `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | 运行非交互任务；connection 与 model 必须同时提供 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复会话 |
 | `sigil serve` | 启动带认证且只监听回环地址的本机服务 |
 | `sigil --version` | 打印已安装版本 |
@@ -109,7 +110,8 @@ sigil serve --startup-output json --shutdown-on-stdin-close
 | 状态根目录 `workspaces/<workspace-id>/artifacts/` | 终端任务与变更记录 |
 | 缓存根目录 `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
 | 用户配置 `~/.sigil/sigil.toml` | 默认本机配置 |
-| `.sigil/agents`、`.sigil/commands`、`.sigil/skills`、`.sigil/plugins` | 工作区资源 |
+| `.sigil/agents`、`.sigil/commands`、`.sigil/skills`、`.sigil/plugins` | Sigil 原生工作区资源 |
+| `.agents/skills`、`.codex/agents`、`.opencode/{skills,commands,agents}`、`.claude/{skills,commands,agents}` | 默认发现并继承工作区信任的兼容资源；command 使用斜杠前缀名称，agent 使用 `@名称` |
 | `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` | 工作区指令 |
 
 不要在配置或本机指令文件中提交真实密钥。

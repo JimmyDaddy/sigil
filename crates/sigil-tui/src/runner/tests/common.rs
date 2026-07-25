@@ -11,10 +11,11 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
-    Agent, AgentConfig, CompactionConfig, McpServerConfig, MemoryConfig, PermissionConfig,
-    Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig,
-    SessionConfig, SessionLogEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    Agent, AgentConfig, CompactionConfig, ConnectionId, ControlEntry, McpServerConfig,
+    MemoryConfig, ModelRef, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningStreamSupport, RootConfig, SessionConfig, SessionLogEntry, Tool, ToolAccess, ToolCall,
+    ToolCategory, ToolContext, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
+    WorkspaceConfig,
 };
 
 use super::super::{
@@ -29,6 +30,7 @@ use super::super::{
 
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -39,6 +41,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         },
         agent: AgentConfig {
             provider: provider.to_owned(),
+            connection: None,
             model: model.to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -55,9 +58,51 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }
+}
+
+pub(super) fn routed_test_root_config(workspace_root: &Path, model: &str) -> RootConfig {
+    let mut config = test_root_config(workspace_root, "", model);
+    let connection_id = ConnectionId::new("test-default").expect("test connection id");
+    config.config_version = Some(sigil_kernel::CONFIG_VERSION_V2);
+    config.agent.connection = Some(connection_id);
+    config.connections.insert(
+        "test-default".to_owned(),
+        serde_json::json!({
+            "label": "Test default",
+            "provider": "deepseek",
+            "protocol": "deepseek",
+            "base_url": "https://api.deepseek.com",
+            "credential": {
+                "source": "environment",
+                "name": "SIGIL_API_KEY"
+            }
+        }),
+    );
+    config
+}
+
+pub(super) fn routed_session_identity(
+    root_config: &RootConfig,
+    model: &str,
+) -> Result<ControlEntry> {
+    let connection_id = root_config
+        .agent
+        .connection
+        .clone()
+        .context("test route requires a default connection")?;
+    let model_ref = ModelRef::new(connection_id, model.to_owned())?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_model_route(root_config, &model_ref)
+            .map_err(anyhow::Error::new)?;
+    Ok(ControlEntry::SessionIdentity {
+        provider_name,
+        model_name: model.to_owned(),
+        resolved_model_route: Some(route),
+    })
 }
 
 pub(super) struct TestWorker {
@@ -277,8 +322,9 @@ struct PlannedRoleProviderBuilder {
     plans: Arc<Mutex<VecDeque<StreamPlan>>>,
 }
 
+#[async_trait]
 impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
-    fn build(
+    async fn build(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,

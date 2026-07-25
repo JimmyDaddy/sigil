@@ -1,5 +1,58 @@
-use super::super::modal_flow::ModalOutcome;
+use super::super::modal_flow::{ModalOutcome, ModelCatalogState, ModelPickerState};
 use super::*;
+use anyhow::{Context, bail};
+
+fn apply_available_connection_models(app: &mut AppState, models: &[&str]) -> Result<()> {
+    apply_connection_catalog(
+        app,
+        sigil_runtime::provider_connections::ModelCatalogState::Remote,
+        models,
+    )
+}
+
+fn apply_connection_catalog(
+    app: &mut AppState,
+    state: sigil_runtime::provider_connections::ModelCatalogState,
+    models: &[&str],
+) -> Result<()> {
+    let connection_id = match app.modal_state.as_ref() {
+        Some(ModalState::ModelPicker(state)) => state
+            .connection_id
+            .clone()
+            .context("connection-scoped picker should carry a connection id")?,
+        _ => bail!("expected model picker"),
+    };
+    let draft_revision = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .map_or(0, |pending| pending.draft_revision);
+    let entries = models
+        .iter()
+        .map(|model| {
+            Ok(sigil_runtime::provider_connections::ModelCatalogEntry {
+                model_ref: sigil_kernel::ModelRef::new(connection_id.clone(), (*model).to_owned())?,
+                display_name: (*model).to_owned(),
+                availability: sigil_runtime::provider_connections::ModelAvailability::Available,
+                recommendation: sigil_runtime::provider_connections::ModelRecommendation::Standard,
+                provenance: sigil_runtime::provider_connections::ModelCatalogProvenance::Remote,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert!(app.apply_connection_model_catalog(
+        sigil_runtime::provider_connections::ModelCatalogResult {
+            request_id: 1,
+            connection_id,
+            draft_revision,
+            connection_fingerprint: "test-fingerprint".to_owned(),
+            state,
+            entries,
+            retry_after_secs: None,
+            manual_entry_allowed: false,
+        }
+    ));
+    Ok(())
+}
 
 #[test]
 fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
@@ -76,7 +129,7 @@ fn ctrl_c_quits_while_keyboard_help_modal_is_open() -> Result<()> {
 }
 
 #[test]
-fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
+fn model_picker_waits_for_exact_connection_catalog_before_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
@@ -85,15 +138,78 @@ fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
     assert!(app.runtime.active_model_picker_refresh.is_some());
     assert!(matches!(
         app.runtime.pending_worker_commands.last(),
-        Some(WorkerCommand::RefreshProviderModels { .. })
+        Some(WorkerCommand::RefreshConnectionModels { .. })
     ));
     assert_eq!(
         app.last_notice(),
-        Some("loading provider model list (https://api.deepseek.com)")
+        Some("loading models for the exact connection")
     );
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("deepseek-v4-flash"));
-    assert!(lines.contains("custom-model"));
+    assert!(lines.contains("catalog: loading remote provider models"));
+    assert!(lines.contains("configured: custom-model"));
+    assert!(!lines.contains("> deepseek-v4-flash"));
+    Ok(())
+}
+
+#[test]
+fn invalid_connection_picker_does_not_fall_back_to_legacy_provider_discovery() -> Result<()> {
+    let mut config = test_config();
+    config.agent.provider = "anthropic".to_owned();
+    config.agent.model = "claude-sonnet-4-5".to_owned();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    app.open_model_picker(ModelPickerTarget::Provider, "claude-sonnet-4-5");
+
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("model list unavailable: repair the exact connection settings")
+    );
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("provider: anthropic"));
+    assert!(lines.contains("exact connection draft is unavailable"));
+    assert!(lines.contains("claude-sonnet-4-5"));
+    assert!(!lines.contains("M manual model id"));
+    assert!(!lines.contains("deepseek-v4-"));
+
+    let outcome = app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(matches!(outcome, ModalOutcome::None));
+    assert!(matches!(
+        app.modal_state,
+        Some(ModalState::ModelPicker(ModelPickerState {
+            catalog_state: ModelCatalogState::Error(_),
+            manual_entry_allowed: false,
+            ..
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn setup_picker_with_invalid_exact_draft_stays_repairable_and_blocks_manual_entry() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().join("workspace"),
+        None,
+    );
+    let setup = app.setup_state.as_mut().expect("setup state");
+    setup.base_url = "not-a-provider-url".to_owned();
+    setup.credential_source = crate::setup::SetupCredentialSource::SecureStore;
+    setup.api_key = SecretString::new("staged-secret");
+
+    app.open_model_picker(ModelPickerTarget::Setup, "deepseek-v4-flash");
+
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("model list unavailable: repair the exact connection settings")
+    );
+    assert!(!app.modal_lines().join("\n").contains("M manual model id"));
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
     Ok(())
 }
 
@@ -214,20 +330,11 @@ fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
 
-    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
-        result: Ok(vec![
-            "remote-model-a".to_owned(),
-            "remote-model-b".to_owned(),
-        ]),
-    });
+    apply_available_connection_models(&mut app, &["remote-model-a", "remote-model-b"])?;
 
-    assert!(changed);
-    assert_eq!(
-        app.last_notice(),
-        Some("loaded provider model list (https://example.com)")
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| { notice.starts_with("model catalog remote for ") })
     );
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("remote-model-a"));
@@ -244,15 +351,16 @@ fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
 
     let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
         target: ModelPickerTarget::ProviderFim,
+        provider_name: "deepseek".to_owned(),
         current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
+        base_url: "https://api.deepseek.com".to_owned(),
         result: Ok(vec!["remote-model".to_owned()]),
     });
 
     assert!(!changed);
     assert_eq!(
         app.last_notice(),
-        Some("loading provider model list (https://api.deepseek.com)")
+        Some("loading models for the exact connection")
     );
     assert_eq!(app.modal_lines().join("\n"), before);
     let lines = app.modal_lines().join("\n");
@@ -262,48 +370,88 @@ fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
 }
 
 #[test]
-fn model_picker_remote_refresh_error_keeps_local_options() -> Result<()> {
+fn model_picker_rejects_cross_provider_refresh_and_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
-    let before = app.modal_lines().join("\n");
+    app.open_model_picker(ModelPickerTarget::Provider, "shared-model");
+    let before = app.modal_lines();
 
-    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+    assert!(!app.apply_model_picker_refresh(ModelPickerRefresh {
         target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
-        result: Err("network timeout".to_owned()),
-    });
+        provider_name: "openai_responses".to_owned(),
+        current: "shared-model".to_owned(),
+        base_url: "https://api.deepseek.com".to_owned(),
+        result: Ok(vec!["gpt-4.1".to_owned()]),
+    }));
+    assert_eq!(app.modal_lines(), before);
 
-    assert!(changed);
+    app.apply_modal_outcome(ModalOutcome::ModelSelected {
+        target: ModelPickerTarget::Provider,
+        connection_id: None,
+        provider_name: "openai_responses".to_owned(),
+        value: "gpt-4.1".to_owned(),
+    });
     assert_eq!(
         app.last_notice(),
-        Some("using local model list: network timeout")
+        Some("ignored stale model selection for openai_responses; active provider is deepseek")
     );
-    assert_eq!(app.modal_lines().join("\n"), before);
-    assert!(
-        app.events
-            .iter()
-            .any(|event| event.label == "model_list" && event.detail.contains("network timeout"))
+    assert_eq!(
+        app.root_config_snapshot()
+            .expect("root config should remain available")
+            .agent
+            .model,
+        "deepseek-v4-flash"
     );
     Ok(())
 }
 
 #[test]
-fn model_picker_empty_refresh_keeps_local_options() -> Result<()> {
+fn model_picker_remote_refresh_error_keeps_local_options() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
     let before = app.modal_lines().join("\n");
 
-    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
-        base_url: "https://empty.example".to_owned(),
-        result: Ok(Vec::new()),
-    });
+    apply_connection_catalog(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::Offline,
+        &[],
+    )?;
 
-    assert!(changed);
-    assert_eq!(app.last_notice(), Some("using local model list"));
-    assert_eq!(app.modal_lines().join("\n"), before);
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| { notice.starts_with("model catalog offline for ") })
+    );
+    let after = app.modal_lines().join("\n");
+    assert_ne!(after, before);
+    assert!(after.contains("catalog: endpoint offline"));
+    assert!(after.contains("custom-model"));
+    Ok(())
+}
+
+#[test]
+fn model_picker_empty_refresh_clears_local_options() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let before = app.modal_lines().join("\n");
+
+    apply_connection_catalog(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::Empty,
+        &[],
+    )?;
+
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| { notice.starts_with("model catalog remote_empty for ") })
+    );
+    let after = app.modal_lines().join("\n");
+    assert_ne!(after, before);
+    assert!(after.contains("provider returned no models"));
+    assert!(after.contains("configured: custom-model"));
+    if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_ref() {
+        assert!(state.options.is_empty());
+    } else {
+        panic!("expected model picker modal");
+    }
     Ok(())
 }
 
@@ -316,6 +464,7 @@ fn model_picker_submit_updates_setup_and_fim_targets() -> Result<()> {
         None,
     );
     setup_app.open_model_picker(ModelPickerTarget::Setup, "deepseek-v4-flash");
+    apply_available_connection_models(&mut setup_app, &["deepseek-v4-flash", "deepseek-v4-pro"])?;
 
     assert!(matches!(
         setup_app.handle_modal_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
@@ -383,6 +532,8 @@ fn skill_arguments_modal_outcome_has_default_notice_fallback() {
 fn model_picker_key_edges_cover_up_decrement_and_empty_selection() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash", "deepseek-v4-pro"])
+        .expect("test catalog should apply");
 
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
@@ -401,20 +552,25 @@ fn model_picker_key_edges_cover_up_decrement_and_empty_selection() {
     }
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("no verified model is selectable; repair connection or retry")
+    );
+    assert!(app.has_modal());
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         ModalOutcome::Dismissed(message) if message == "closed picker"
     ));
-    assert!(!app.has_modal());
 
     app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
     if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
         state.options.clear();
         state.selected = 0;
     }
-    assert!(matches!(
-        app.submit_modal(),
-        ModalOutcome::Dismissed(message) if message == "closed picker"
-    ));
-    assert!(!app.has_modal());
+    assert!(matches!(app.submit_modal(), ModalOutcome::None));
+    assert!(app.has_modal());
 }
 
 #[test]
@@ -823,12 +979,13 @@ fn config_escape_cancels_text_modal_before_closing_panel() -> Result<()> {
 }
 
 #[test]
-fn config_inline_api_key_uses_secret_modal_and_persists_to_disk() -> Result<()> {
+fn config_inline_api_key_uses_secret_modal_without_persisting_plaintext() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     app.config_state
@@ -852,23 +1009,16 @@ fn config_inline_api_key_uses_secret_modal_and_persists_to_disk() -> Result<()> 
         panic!("expected config save action");
     };
     assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("runtime-secret")
+        root_config.config_version,
+        Some(sigil_kernel::CONFIG_VERSION_V2)
     );
+    assert!(!toml::to_string(&root_config)?.contains("runtime-secret"));
+    assert!(root_config.providers.is_empty());
+    assert!(root_config.connections.contains_key("deepseek-default"));
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("runtime-secret")
-    );
+    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert!(!std::fs::read_to_string(&config_path)?.contains("runtime-secret"));
     Ok(())
 }
 
@@ -876,9 +1026,10 @@ fn config_inline_api_key_uses_secret_modal_and_persists_to_disk() -> Result<()> 
 fn config_modal_ctrl_s_applies_field_and_saves() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     app.config_state
@@ -899,22 +1050,14 @@ fn config_modal_ctrl_s_applies_field_and_saves() -> Result<()> {
     };
     assert!(!app.has_modal());
     assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-modal")
+        root_config.config_version,
+        Some(sigil_kernel::CONFIG_VERSION_V2)
     );
+    assert!(!toml::to_string(&root_config)?.contains("saved-from-modal"));
+    assert!(root_config.connections.contains_key("deepseek-default"));
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-modal")
-    );
+    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert!(!std::fs::read_to_string(&config_path)?.contains("saved-from-modal"));
     Ok(())
 }
 
@@ -930,6 +1073,7 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
             .as_mut()
             .expect("setup state should exist in setup mode");
         state.selected_field = SetupField::ApiKey;
+        state.credential_source = crate::setup::SetupCredentialSource::SecureStore;
     }
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -937,6 +1081,11 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
         let _ =
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .admit_current_model_for_test();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
@@ -950,23 +1099,15 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
     assert_eq!(saved_path, config_path);
     assert!(!app.has_modal());
     assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("setup-saved-key")
+        root_config.config_version,
+        Some(sigil_kernel::CONFIG_VERSION_V2)
     );
+    assert!(!toml::to_string(&root_config)?.contains("setup-saved-key"));
+    assert!(root_config.connections.contains_key("deepseek-default"));
 
     let saved = RootConfig::load(&saved_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("setup-saved-key")
-    );
+    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert!(!std::fs::read_to_string(saved_path)?.contains("setup-saved-key"));
     Ok(())
 }
 
@@ -977,28 +1118,30 @@ fn model_picker_refresh_ignores_stale_results_and_reports_fallbacks() -> Result<
 
     assert!(!app.apply_model_picker_refresh(ModelPickerRefresh {
         target: ModelPickerTarget::Setup,
+        provider_name: "deepseek".to_owned(),
         current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
+        base_url: "https://api.deepseek.com".to_owned(),
         result: Ok(vec!["remote-model".to_owned()]),
     }));
 
-    assert!(app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
-        result: Ok(Vec::new()),
-    }));
-    assert_eq!(app.last_notice(), Some("using local model list"));
+    apply_connection_catalog(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::Empty,
+        &[],
+    )?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| { notice.starts_with("model catalog remote_empty for ") })
+    );
 
-    assert!(app.apply_model_picker_refresh(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
-        base_url: "https://example.com".to_owned(),
-        result: Err("network down".to_owned()),
-    }));
-    assert_eq!(
-        app.last_notice(),
-        Some("using local model list: network down")
+    apply_connection_catalog(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::Offline,
+        &[],
+    )?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| { notice.starts_with("model catalog offline for ") })
     );
     Ok(())
 }

@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fmt};
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ pub const SIGIL_USER_ID_STRATEGY_ENV: &str = "SIGIL_USER_ID_STRATEGY";
 pub const SIGIL_FIM_MODEL_ENV: &str = "SIGIL_FIM_MODEL";
 pub const SIGIL_STRICT_TOOLS_MODE_ENV: &str = "SIGIL_STRICT_TOOLS_MODE";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeepSeekProviderConfig {
     #[serde(default = "default_primary_base_url")]
@@ -37,6 +37,22 @@ pub struct DeepSeekProviderConfig {
     pub strict_tools_mode: StrictToolsMode,
     #[serde(default = "default_fim_model")]
     pub fim_model: String,
+}
+
+impl fmt::Debug for DeepSeekProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeepSeekProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("beta_base_url", &self.beta_base_url)
+            .field("anthropic_base_url", &self.anthropic_base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("user_id_strategy", &self.user_id_strategy)
+            .field("strict_tools_mode", &self.strict_tools_mode)
+            .field("fim_model", &self.fim_model)
+            .finish()
+    }
 }
 
 impl DeepSeekProviderConfig {

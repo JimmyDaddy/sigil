@@ -27,6 +27,7 @@ fn resolved_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
             instructions: "Use read-only tools.".to_owned(),
             model: None,
             provider: None,
+            connection: None,
             reasoning_effort: None,
             tool_scope: Default::default(),
             permission_policy: Default::default(),
@@ -64,17 +65,19 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.selected_section = ConfigSection::Provider;
     state.selected_field = Some(ConfigField::ProviderApiKey);
     let api_key_details = render_config_selection_details(&state).join("\n");
-    assert!(api_key_details.contains("override: SIGIL_API_KEY"));
-    assert!(api_key_details.contains("storage: saved api_key is plaintext in sigil.toml"));
+    assert!(api_key_details.contains("environment option: SIGIL_API_KEY"));
+    assert!(api_key_details.contains(
+        "storage: pasted API keys are saved only to the configured secure credential store"
+    ));
     state.draft.provider_name = "openai_compat".to_owned();
     let api_key_details = render_config_selection_details(&state).join("\n");
-    assert!(api_key_details.contains("override: SIGIL_OPENAI_COMPATIBLE_API_KEY"));
+    assert!(api_key_details.contains("environment option: SIGIL_OPENAI_COMPATIBLE_API_KEY"));
     state.draft.provider_name = "anthropic".to_owned();
     let api_key_details = render_config_selection_details(&state).join("\n");
-    assert!(api_key_details.contains("override: SIGIL_ANTHROPIC_API_KEY"));
+    assert!(api_key_details.contains("environment option: SIGIL_ANTHROPIC_API_KEY"));
     state.draft.provider_name = "gemini".to_owned();
     let api_key_details = render_config_selection_details(&state).join("\n");
-    assert!(api_key_details.contains("override: SIGIL_GEMINI_API_KEY"));
+    assert!(api_key_details.contains("environment option: SIGIL_GEMINI_API_KEY"));
 
     state.selected_field = Some(ConfigField::ProviderFimModel);
     let fim_details = render_config_selection_details(&state).join("\n");
@@ -431,6 +434,7 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
             instructions: "inspect only".to_owned(),
             model: None,
             provider: None,
+            connection: None,
             reasoning_effort: None,
             tool_scope: Default::default(),
             permission_policy: sigil_kernel::AgentPermissionPolicy {

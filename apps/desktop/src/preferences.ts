@@ -1,5 +1,7 @@
+import type { ProviderModelRef } from "./types";
+
 const REOPEN_LAST_WORKSPACE_KEY = "sigil.desktop.reopen-last-workspace.v1";
-const DEFAULT_MODELS_KEY = "sigil.desktop.default-models.v1";
+const DEFAULT_MODELS_KEY = "sigil.desktop.default-models.v2";
 const LAST_SESSIONS_KEY = "sigil.desktop.last-sessions.v1";
 
 export interface LastSessionPreference {
@@ -25,24 +27,23 @@ export function writeReopenLastWorkspace(enabled: boolean): boolean {
   }
 }
 
-export function readDefaultModel(workspaceId: string): string | undefined {
+export function readDefaultModel(workspaceId: string): ProviderModelRef | undefined {
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(DEFAULT_MODELS_KEY) ?? "{}");
-    if (!isStringRecord(value)) return undefined;
-    const model = value[workspaceId];
-    return typeof model === "string" && model.trim() !== "" ? model : undefined;
+    if (!isUnknownRecord(value)) return undefined;
+    return parseProviderModelRef(value[workspaceId]);
   } catch {
     return undefined;
   }
 }
 
-export function writeDefaultModel(workspaceId: string, modelName?: string): boolean {
+export function writeDefaultModel(workspaceId: string, modelRef?: ProviderModelRef): boolean {
   try {
     const current: unknown = JSON.parse(window.localStorage.getItem(DEFAULT_MODELS_KEY) ?? "{}");
-    const models = isStringRecord(current) ? current : {};
+    const models = isUnknownRecord(current) ? current : {};
     const next = { ...models };
-    if (modelName === undefined) delete next[workspaceId];
-    else next[workspaceId] = modelName;
+    if (modelRef === undefined) delete next[workspaceId];
+    else next[workspaceId] = modelRef;
     window.localStorage.setItem(DEFAULT_MODELS_KEY, JSON.stringify(next));
     return true;
   } catch {
@@ -77,12 +78,23 @@ export function writeLastSession(
   }
 }
 
-function isStringRecord(value: unknown): value is Record<string, string> {
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function parseProviderModelRef(value: unknown): ProviderModelRef | undefined {
+  if (!isUnknownRecord(value)) return undefined;
+  const connectionId = value.connectionId;
+  const modelId = value.modelId;
+  if (
+    typeof connectionId !== "string"
+    || connectionId.trim() === ""
+    || typeof modelId !== "string"
+    || modelId.trim() === ""
+  ) {
+    return undefined;
+  }
+  return { connectionId, modelId };
 }
 
 function parseLastSession(value: unknown): LastSessionPreference | undefined {

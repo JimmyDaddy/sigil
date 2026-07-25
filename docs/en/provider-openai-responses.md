@@ -12,34 +12,40 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "openai_responses"
+connection = "openai-default"
 model = "gpt-4.1"
 
-[providers.openai_responses]
+[connections.openai-default]
+label = "OpenAI"
+provider = "openai"
+protocol = "responses"
 base_url = "https://api.openai.com/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
 ```
 
 See [openai-responses.toml](../examples/config/openai-responses.toml) for a copyable file.
 
 ## Authentication
 
-`SIGIL_OPENAI_RESPONSES_API_KEY` takes priority over `[providers.openai_responses].api_key`. `organization` and `project` are optional account fields.
+The example binds only this connection to `SIGIL_OPENAI_RESPONSES_API_KEY`. You can instead choose the secure credential store; `sigil.toml`, model cache, and session files contain no secret value. `organization` and `project` are optional connection options.
 
 ## Options And Visible Limits
 
-`SIGIL_OPENAI_RESPONSES_BASE_URL` temporarily overrides `base_url`. This provider uses the Responses route, not Chat Completions. Background requests and provider-hosted tools are not enabled.
+This connection uses the Responses route, not Chat Completions. Keep endpoint and account options on this connection so another OpenAI or compatible account cannot supply a fallback. Background requests and provider-hosted tools are not enabled.
 
 Image attachments work only for model IDs Sigil recognizes as image-capable. Unknown names and aliases are rejected before sending. On the official endpoint and supported dated snapshot, one context-window rejection before output may trigger one compact-and-retry attempt; compatible endpoints, aliases, restored sessions, and repeated failures do not.
 
 ## Verify
 
-Run `sigil doctor` and confirm `openai_responses`, the `/v1` base URL, model, and credential source.
+Run `sigil doctor` and confirm `default=openai-default/gpt-4.1`, the `responses` protocol, `/v1` endpoint, credential source, and readiness.
 
 ## Common Problems
 
 - 404: confirm the service exposes `/v1/responses`, not only Chat Completions.
-- Authentication: check the environment variable or config fallback.
+- Authentication: check the environment variable or repair this connection in `/config`; Sigil does not fall back to another connection.
 - Stream ends early: confirm the endpoint emits a completed Responses event.
 - Tool or image input fails: confirm the selected model supports that input.
 

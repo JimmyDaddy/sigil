@@ -86,9 +86,10 @@ fn hidden_model_eval_process_rejects_missing_credential_before_provider_io() -> 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let base_url = format!("http://{}", listener.local_addr()?);
+    let secured_base_url = base_url.replacen("http://", "https://", 1);
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    write_model_eval_config(&config_path, &base_url)?;
+    write_credentialed_model_eval_config(&config_path, &secured_base_url)?;
     let output_dir = temp.path().join("campaign");
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
@@ -108,10 +109,8 @@ fn hidden_model_eval_process_rejects_missing_credential_before_provider_io() -> 
             output_dir.to_str().context("output path is not UTF-8")?,
         ])
         .current_dir(&repo_root)
-        .env_remove("SIGIL_API_KEY")
-        .env_remove("SIGIL_BASE_URL")
-        .env_remove("SIGIL_BETA_BASE_URL")
-        .env_remove("SIGIL_ANTHROPIC_BASE_URL")
+        .env_remove("SIGIL_OPENAI_COMPATIBLE_API_KEY")
+        .env_remove("SIGIL_OPENAI_COMPATIBLE_BASE_URL")
         .output()?;
 
     assert!(!output.status.success());
@@ -131,21 +130,54 @@ fn write_model_eval_config(path: &Path, base_url: &str) -> Result<()> {
     fs::write(
         path,
         format!(
-            r#"[workspace]
+            r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
+connection = "local-eval"
+model = "gpt-test"
 max_turns = 12
 
 [permission]
 mode = "auto-edit"
 
-[providers.deepseek]
+[connections.local-eval]
+label = "Local eval"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{base_url}"
-beta_base_url = "{base_url}"
-anthropic_base_url = "{base_url}"
+credential = {{ source = "none" }}
+"#
+        ),
+    )?;
+    Ok(())
+}
+
+fn write_credentialed_model_eval_config(path: &Path, base_url: &str) -> Result<()> {
+    fs::write(
+        path,
+        format!(
+            r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "credentialed-eval"
+model = "gpt-test"
+max_turns = 12
+
+[permission]
+mode = "auto-edit"
+
+[connections.credentialed-eval]
+label = "Credentialed eval"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "{base_url}"
+credential = {{ source = "environment", name = "SIGIL_OPENAI_COMPATIBLE_API_KEY" }}
 "#
         ),
     )?;

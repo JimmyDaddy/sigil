@@ -22,6 +22,7 @@ fn identity_log(path: &std::path::Path, provider: &str, model: &str) -> Result<(
     JsonlSessionStore::new(path)?.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: provider.to_owned(),
         model_name: model.to_owned(),
+        resolved_model_route: None,
     }))
 }
 

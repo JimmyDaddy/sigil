@@ -266,13 +266,14 @@ pub fn application_extension_catalog_view(
         .snapshot
         .descriptors
         .iter()
+        .filter(|descriptor| descriptor.run_as == SkillRunMode::Inline)
         .take(MAX_CATALOG_ENTRIES_PER_KIND)
         .map(|descriptor| {
             let unavailable_reason = skill_unavailable_reason(descriptor);
             let available = unavailable_reason.is_none();
             ApplicationSkillCatalogEntry {
                 id: descriptor.id.clone(),
-                invocation_token: format!("${}", descriptor.id),
+                invocation_token: skill_invocation_token(descriptor),
                 name: bounded_catalog_text(if descriptor.name.trim().is_empty() {
                     &descriptor.id
                 } else {
@@ -329,7 +330,7 @@ pub fn application_extension_catalog_view(
                 });
             ApplicationAgentCatalogEntry {
                 id: profile.id().as_str().to_owned(),
-                invocation_token: format!("@{}", profile.id().as_str()),
+                invocation_token: agent_invocation_token(profile),
                 description: bounded_catalog_text(&profile.profile.description),
                 source: agent_source_label(&profile.source).to_owned(),
                 kind: agent_kind_label(profile.profile.kind).to_owned(),
@@ -349,6 +350,66 @@ pub fn application_extension_catalog_view(
         skills,
         agents,
     })
+}
+
+fn agent_catalog_name(profile: &crate::ResolvedAgentProfile) -> &str {
+    if matches!(profile.source, AgentProfileSource::Compatibility { .. })
+        && let Some(name) = profile
+            .profile
+            .nickname_candidates
+            .first()
+            .filter(|name| !name.trim().is_empty())
+    {
+        return name;
+    }
+    profile.id().as_str()
+}
+
+fn skill_invocation_token(descriptor: &sigil_kernel::SkillDescriptor) -> String {
+    let prefix = if skill_is_command(descriptor) {
+        '/'
+    } else {
+        '$'
+    };
+    let preferred = if prefix == '/' {
+        descriptor.name.as_str()
+    } else {
+        descriptor.id.as_str()
+    };
+    format!(
+        "{prefix}{}",
+        invocation_token_segment(preferred, &descriptor.id)
+    )
+}
+
+fn agent_invocation_token(profile: &crate::ResolvedAgentProfile) -> String {
+    let name = agent_catalog_name(profile);
+    format!("@{}", invocation_token_segment(name, profile.id().as_str()))
+}
+
+fn skill_is_command(descriptor: &sigil_kernel::SkillDescriptor) -> bool {
+    descriptor
+        .entrypoint
+        .file_name()
+        .is_some_and(|name| name != "SKILL.md")
+        && descriptor
+            .entrypoint
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "commands")
+}
+
+fn invocation_token_segment(preferred: &str, fallback: &str) -> String {
+    let segment = preferred.split_whitespace().collect::<Vec<_>>().join("-");
+    if segment.is_empty()
+        || segment
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '$' | '@'))
+    {
+        fallback.to_owned()
+    } else {
+        segment
+    }
 }
 
 fn skill_unavailable_reason(descriptor: &sigil_kernel::SkillDescriptor) -> Option<String> {

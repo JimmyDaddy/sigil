@@ -5,6 +5,14 @@ pub(super) fn check_provider(
     root_config: &RootConfig,
     cache_root: &std::path::Path,
 ) {
+    if root_config.config_version.is_some()
+        || !root_config.connections.is_empty()
+        || root_config.agent.connection.is_some()
+    {
+        check_connection_inventory(report, root_config);
+        return;
+    }
+    check_legacy_connection_state(report, root_config);
     match provider_config_key(&root_config.agent.provider) {
         "deepseek" => check_deepseek_provider(report, root_config, cache_root),
         "openai_compat" => check_openai_compat_provider(report, root_config),
@@ -17,6 +25,114 @@ pub(super) fn check_provider(
             format!("unsupported provider {other}"),
             Some("set [agent].provider to \"deepseek\", \"openai_compat\", \"openai_responses\", \"anthropic\", or \"gemini\""),
         ),
+    }
+}
+
+fn check_legacy_connection_state(report: &mut DoctorReport, root_config: &RootConfig) {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    report.push(
+        DoctorStatus::Warn,
+        "provider:connections",
+        format!(
+            "mode=legacy_v1 connections={} default={} migration_required={}",
+            loaded.connections.len(),
+            loaded
+                .default_model
+                .as_ref()
+                .map(|model| format!("{}/{}", model.connection_id, model.model_id))
+                .unwrap_or_else(|| "not_configured".to_owned()),
+            loaded.migration_required()
+        ),
+    );
+    if loaded.migration_required() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "provider:migration",
+            "legacy plaintext credential requires explicit migration",
+            Some(
+                "open Provider settings and save the connection to the secure store or environment",
+            ),
+        );
+    }
+}
+
+fn check_connection_inventory(report: &mut DoctorReport, root_config: &RootConfig) {
+    use crate::provider_connections::{
+        ConfigMode, ConnectionReadiness, CredentialSourceView, connection_inventory_native,
+    };
+
+    let inventory = connection_inventory_native(root_config);
+    let mode = match inventory.mode {
+        ConfigMode::LegacyV1 => "legacy_v1",
+        ConfigMode::V2 => "v2",
+        ConfigMode::Mixed => "mixed_invalid",
+        ConfigMode::UnsupportedFuture => "unsupported_future",
+    };
+    report.push(
+        if matches!(inventory.mode, ConfigMode::V2) {
+            DoctorStatus::Ok
+        } else {
+            DoctorStatus::Error
+        },
+        "provider:connections",
+        format!(
+            "mode={mode} connections={} default={}",
+            root_config.connections.len(),
+            inventory
+                .default_model
+                .as_ref()
+                .map(|model| format!("{}/{}", model.connection_id, model.model_id))
+                .unwrap_or_else(|| "not_configured".to_owned())
+        ),
+    );
+    for issue in &inventory.issues {
+        report.push_with_remediation(
+            DoctorStatus::Error,
+            "provider:connection:config",
+            format!(
+                "connection={} code={}",
+                issue.connection_id.as_deref().unwrap_or("root"),
+                issue.code
+            ),
+            Some("fix the named connection in sigil.toml or open Provider settings"),
+        );
+    }
+    for entry in &inventory.entries {
+        let readiness = match entry.readiness {
+            ConnectionReadiness::Ready => "ready",
+            ConnectionReadiness::NeedsCredential => "needs_credential",
+            ConnectionReadiness::CredentialUnavailable => "credential_unavailable",
+            ConnectionReadiness::NeedsModel => "needs_model",
+            ConnectionReadiness::Unverified => "unverified",
+            ConnectionReadiness::Invalid => "invalid",
+        };
+        let source = match entry.credential_source {
+            CredentialSourceView::Environment => "environment",
+            CredentialSourceView::SystemKeyring => "system_keyring",
+            CredentialSourceView::Stored => "stored",
+            CredentialSourceView::None => "none",
+            CredentialSourceView::LegacyPlaintext => "legacy_plaintext",
+        };
+        let status = match entry.readiness {
+            ConnectionReadiness::Ready => DoctorStatus::Ok,
+            ConnectionReadiness::Unverified => DoctorStatus::Warn,
+            ConnectionReadiness::NeedsCredential
+            | ConnectionReadiness::CredentialUnavailable
+            | ConnectionReadiness::NeedsModel
+            | ConnectionReadiness::Invalid => DoctorStatus::Error,
+        };
+        report.push_with_remediation(
+            status,
+            format!("provider:connection:{}", entry.id),
+            format!(
+                "provider={} protocol={} endpoint={} credential_source={source} readiness={readiness}",
+                entry.provider_label, entry.protocol_label, entry.endpoint_display
+            ),
+            entry
+                .issue
+                .as_ref()
+                .map(|issue| format!("{}; open Provider settings to resolve", issue.code)),
+        );
     }
 }
 
@@ -113,7 +229,7 @@ fn check_deepseek_provider(
     report.push(
         DoctorStatus::Ok,
         "provider:deepseek",
-        format!("model={} base_url={}", config.model, config.base_url),
+        format!("model={} endpoint=configured", config.model),
     );
 
     push_provider_auth_check(
@@ -160,7 +276,7 @@ fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootCon
     report.push(
         DoctorStatus::Ok,
         "provider:openai_compat",
-        format!("model={} base_url={}", config.model, config.base_url),
+        format!("model={} endpoint=configured", config.model),
     );
 
     push_provider_auth_check(
@@ -189,7 +305,7 @@ fn check_openai_responses_provider(report: &mut DoctorReport, root_config: &Root
     report.push(
         DoctorStatus::Ok,
         "provider:openai_responses",
-        format!("model={} base_url={}", config.model, config.base_url),
+        format!("model={} endpoint=configured", config.model),
     );
 
     push_provider_auth_check(
@@ -218,8 +334,8 @@ fn check_anthropic_provider(report: &mut DoctorReport, root_config: &RootConfig)
         DoctorStatus::Ok,
         "provider:anthropic",
         format!(
-            "model={} base_url={} version={} max_tokens={}",
-            config.model, config.base_url, config.anthropic_version, config.max_tokens
+            "model={} endpoint=configured version={} max_tokens={}",
+            config.model, config.anthropic_version, config.max_tokens
         ),
     );
 
@@ -248,7 +364,7 @@ fn check_gemini_provider(report: &mut DoctorReport, root_config: &RootConfig) {
     report.push(
         DoctorStatus::Ok,
         "provider:gemini",
-        format!("model={} base_url={}", config.model, config.base_url),
+        format!("model={} endpoint=configured", config.model),
     );
 
     push_provider_auth_check(

@@ -12,7 +12,7 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&self.draft.provider_name),
             ConfigField::ProviderModel => Some(&self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => Some(self.draft.provider_api_key.expose_secret()),
             ConfigField::ModelRequestTimeoutSecs => Some(&self.draft.model_request_timeout_secs),
             ConfigField::ModelRequestStreamIdleTimeoutSecs => {
                 Some(&self.draft.model_request_stream_idle_timeout_secs)
@@ -82,7 +82,7 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&mut self.draft.provider_name),
             ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&mut self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => None,
             ConfigField::ModelRequestTimeoutSecs => {
                 Some(&mut self.draft.model_request_timeout_secs)
             }
@@ -148,12 +148,13 @@ impl ConfigState {
 
     pub(crate) fn display_value(&self, field: ConfigField) -> String {
         let text_value = match field {
+            ConfigField::ProviderName => return self.draft.selected_connection_summary(),
             ConfigField::ProviderFimModel
                 if normalize_provider_name(&self.draft.provider_name) != DEEPSEEK_PROVIDER_KEY =>
             {
                 return "not supported".to_owned();
             }
-            ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => return self.draft.selected_credential_summary(),
             ConfigField::SkillId => {
                 if self.selected_section == ConfigSection::Agents {
                     return self
@@ -357,14 +358,6 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpName => false,
         ConfigField::AppearanceUsageCostCurrency => false,
         ConfigField::AppearanceColorGroup | ConfigField::AppearanceColorToken => false,
-    }
-}
-
-fn mask_secret(value: &str) -> String {
-    if value.is_empty() {
-        "not set".to_owned()
-    } else {
-        "set (hidden)".to_owned()
     }
 }
 

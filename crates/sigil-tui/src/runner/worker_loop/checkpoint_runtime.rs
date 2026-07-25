@@ -45,9 +45,25 @@ pub(in crate::runner) fn execute_current_checkpoint_restore(
 pub(in crate::runner) fn fork_current_conversation(
     session_log_path: &Path,
     current_session: Option<&Session>,
+    root_config: &RootConfig,
     request: &ControlledCheckpointRestoreRequest,
 ) -> Result<ConversationForkOutput, String> {
     let session = current_session.ok_or_else(|| "session state is unavailable".to_owned())?;
+    let resolved_model_route = session.resolved_model_route().cloned().map_or_else(
+        || {
+            sigil_runtime::provider_connections::resolve_default_model_route(root_config)
+                .map(|(_, route)| route)
+                .map_err(|error| {
+                    format!("fork with current route requires a valid saved default: {error}")
+                })
+        },
+        Ok,
+    )?;
+    let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
+        root_config,
+        &resolved_model_route,
+    )
+    .map_err(|error| format!("fork route is not available: {error}"))?;
     let parent = session_log_path
         .parent()
         .ok_or_else(|| "current session log has no parent directory".to_owned())?;
@@ -69,8 +85,9 @@ pub(in crate::runner) fn fork_current_conversation(
             checkpoint_digest: request.checkpoint_digest.clone(),
             source_session_ref,
             destination_path,
-            provider_name: session.provider_name().to_owned(),
-            model_name: session.model_name().to_owned(),
+            provider_name,
+            model_name: resolved_model_route.model_ref.model_id.clone(),
+            resolved_model_route: Some(resolved_model_route),
         },
     )
     .map_err(|error| format!("failed to fork conversation: {error:#}"))

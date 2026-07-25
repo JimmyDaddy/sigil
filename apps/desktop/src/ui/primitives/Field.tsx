@@ -121,6 +121,26 @@ export function Checkbox({
   );
 }
 
+export function ReadonlyCheckbox({
+  checked,
+  className = "",
+  "aria-label": ariaLabel,
+}: {
+  readonly checked?: boolean;
+  readonly className?: string;
+  readonly "aria-label": string;
+}) {
+  return (
+    <input
+      className={`sg-readonly-checkbox ${className}`.trim()}
+      type="checkbox"
+      checked={checked}
+      disabled
+      aria-label={ariaLabel}
+    />
+  );
+}
+
 export function Radio({
   label,
   description,

@@ -366,6 +366,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 content: DesktopConversationDisplayContent::Message {
                     role: DesktopConversationDisplayMessageRole::Assistant,
                     text: Some("done".to_owned()),
+                    skill: None,
                     assistant_phase: Some(DesktopConversationDisplayAssistantPhase::FinalAnswer),
                     image_attachment_count: 0,
                     truncated: false,

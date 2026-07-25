@@ -6,6 +6,7 @@
 //! response items without changing Chat Completions semantics.
 
 mod capabilities;
+mod catalog;
 mod client;
 mod config;
 mod errors;
@@ -17,6 +18,10 @@ mod request;
 mod stream;
 
 pub use capabilities::openai_responses_capabilities;
+pub use catalog::{
+    BUNDLED_OPENAI_RESPONSES_MODELS, OpenAiCatalogModel, OpenAiModelAdmission,
+    parse_openai_responses_model_list,
+};
 pub use config::{
     OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_BASE_URL_ENV, OpenAiResponsesProviderConfig,
 };
@@ -28,6 +33,9 @@ pub use provider::{
 pub use reasoning_effort::openai_responses_reasoning_efforts;
 pub use request::OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND;
 
+#[cfg(test)]
+#[path = "tests/catalog_tests.rs"]
+mod catalog_tests;
 #[cfg(test)]
 #[path = "tests/reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;

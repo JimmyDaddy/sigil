@@ -20,7 +20,9 @@ fn test_workspace(name: &str) -> PathBuf {
 fn write_config(path: &Path, base_url: &str) {
     let workspace = path.parent().expect("config should have a parent");
     let config = format!(
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [storage]
@@ -28,19 +30,19 @@ state_root = "{}"
 cache_root = "{}"
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
+connection = "local-test"
+model = "gpt-4.1"
 tool_timeout_secs = 5
 
 [model_request]
 request_timeout_secs = 5
 
-[providers.deepseek]
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{base_url}"
-beta_base_url = "{base_url}"
-anthropic_base_url = "{base_url}"
-api_key = "test-key"
-strict_tools_mode = "auto"
+credential = {{ source = "none" }}
 "#,
         workspace.join("state").display(),
         workspace.join("cache").display()
@@ -51,7 +53,27 @@ strict_tools_mode = "auto"
 fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("provider fixture should bind");
     let address = listener.local_addr().expect("provider fixture address");
-    let server = thread::spawn(move || {
+    (
+        format!("http://{address}"),
+        spawn_provider_fixture_with_listener(listener, answer),
+    )
+}
+
+fn restart_provider_fixture(base_url: &str, answer: &'static str) -> thread::JoinHandle<()> {
+    let address = base_url
+        .strip_prefix("http://")
+        .expect("fixture URL should use http")
+        .parse::<std::net::SocketAddr>()
+        .expect("fixture URL should contain a socket address");
+    let listener = TcpListener::bind(address).expect("provider fixture should rebind");
+    spawn_provider_fixture_with_listener(listener, answer)
+}
+
+fn spawn_provider_fixture_with_listener(
+    listener: TcpListener,
+    answer: &'static str,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         let (mut stream, _) = listener
             .accept()
             .expect("provider request should reach fixture");
@@ -69,8 +91,7 @@ fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<(
         stream
             .write_all(response.as_bytes())
             .expect("provider response should write");
-    });
-    (format!("http://{address}"), server)
+    })
 }
 
 fn read_http_message(stream: &mut TcpStream) {
@@ -558,7 +579,7 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
     let session = client
         .create_session(sigil_desktop::DesktopSessionCreateRequest {
             label: Some("desktop smoke".to_owned()),
-            model_name: None,
+            model_ref: None,
         })
         .await
         .expect("typed create route should use the production runtime binding");
@@ -636,7 +657,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
     let session = client
         .create_session(sigil_desktop::DesktopSessionCreateRequest {
             label: Some("desktop run".to_owned()),
-            model_name: None,
+            model_ref: None,
         })
         .await
         .expect("session should create");
@@ -695,7 +716,10 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
                 .kind,
         );
     }
-    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted));
+    assert!(
+        kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted),
+        "run stream omitted start event: {kinds:?}"
+    );
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantMessage));
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
@@ -855,7 +879,10 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     );
     assert_eq!(events_status, 200);
     assert!(events_body.contains("event: run_event"));
-    assert!(events_body.contains("\"type\":\"run_finished\""));
+    assert!(
+        events_body.contains("\"type\":\"run_finished\""),
+        "run stream omitted terminal event: {events_body}"
+    );
     assert!(events_body.contains("serve process answer"));
     let last_event_id = events_body
         .lines()
@@ -897,8 +924,7 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     assert!(startup.contains("status: listening; press Ctrl-C for graceful shutdown"));
     assert!(!startup.contains(token));
 
-    let (restart_base_url, restart_provider) = spawn_provider_fixture("reopened process answer");
-    write_config(&config_path, &restart_base_url);
+    let restart_provider = restart_provider_fixture(&base_url, "reopened process answer");
     let restarted = spawn_serve(&workspace, &config_path, token);
     let (catalog_status, catalog_body) = http_request(
         restarted.address,

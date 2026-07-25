@@ -50,22 +50,40 @@ use super::{
     HttpForegroundRunOwner, HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer,
     HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent,
     HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
-    HttpProtocolReplayError, HttpProtocolVersionError, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
+    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError,
+    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer,
+    HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig,
+    HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
+    HttpSupportContext, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[tokio::test]
 async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
     let temp = tempfile::tempdir().expect("temporary directory should open");
-    let config_path = temp.path().join("missing-sigil.toml");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[agent]
+connection = "local"
+model = "local-model"
+
+[connections.local]
+label = "Local loopback"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+"#,
+    )
+    .expect("provider settings fixture should write");
     let server = HttpLocalServer::bind(
         HttpServerConfig::default(),
         Some("secret-token"),
@@ -124,6 +142,24 @@ async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
         .expect("support bundle content should be encoded only for native client");
     serde_json::from_str::<Value>(content).expect("support bundle should be valid json");
     assert!(!content.contains(&temp.path().display().to_string()));
+
+    let (status, body) = http_raw_request(
+        address,
+        http_get("/settings/provider-connections", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["config_mode"], "v2");
+    assert_eq!(body["default_model"]["connection_id"], "local");
+    assert_eq!(body["default_model"]["model_id"], "local-model");
+    assert_eq!(body["connections"][0]["credential_source"], "none");
+    assert_eq!(body["connections"][0]["readiness"], "ready");
+    assert!(body["connections"][0].get("credential_id").is_none());
+    assert!(
+        !body
+            .to_string()
+            .contains(&temp.path().display().to_string())
+    );
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
@@ -535,6 +571,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.run_context);
     assert!(server_info.capabilities.agent_activity);
     assert!(server_info.capabilities.support_diagnostics);
+    assert!(server_info.capabilities.provider_connections);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -1078,6 +1115,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
             content: HttpConversationDisplayContent::Message {
                 role: HttpConversationDisplayMessageRole::User,
                 text: Some("hello".to_owned()),
+                skill: None,
                 assistant_phase: None,
                 image_attachment_count: 0,
                 truncated: false,
@@ -1227,11 +1265,22 @@ async fn local_server_projects_typed_run_context() {
     assert_eq!(status, 201);
     let session_id = session["id"].as_str().expect("session id");
     driver.set_run_context_view(HttpRunContextView {
+        model_ref: HttpProviderModelRef {
+            connection_id: "deepseek-default".to_owned(),
+            model_id: "deepseek-v4-flash".to_owned(),
+        },
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
-        available_models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
         model_options: vec![
             HttpApplicationModelOption {
+                model_ref: HttpProviderModelRef {
+                    connection_id: "deepseek-default".to_owned(),
+                    model_id: "deepseek-v4-flash".to_owned(),
+                },
+                display_name: "DeepSeek V4 Flash".to_owned(),
+                availability: "available".to_owned(),
+                recommendation: "recommended".to_owned(),
+                provenance: "bundled".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
                 available_reasoning_efforts: vec![
                     HttpReasoningEffort::Low,
@@ -1243,6 +1292,14 @@ async fn local_server_projects_typed_run_context() {
                 reasoning_effort_binding: Some("effort-binding-flash".to_owned()),
             },
             HttpApplicationModelOption {
+                model_ref: HttpProviderModelRef {
+                    connection_id: "deepseek-default".to_owned(),
+                    model_id: "deepseek-v4-pro".to_owned(),
+                },
+                display_name: "DeepSeek V4 Pro".to_owned(),
+                availability: "available".to_owned(),
+                recommendation: "standard".to_owned(),
+                provenance: "bundled".to_owned(),
                 model_name: "deepseek-v4-pro".to_owned(),
                 available_reasoning_efforts: vec![
                     HttpReasoningEffort::Low,
@@ -1254,7 +1311,7 @@ async fn local_server_projects_typed_run_context() {
                 reasoning_effort_binding: Some("effort-binding-pro".to_owned()),
             },
         ],
-        model_selection: HttpModelSelectionPolicy::PerRun,
+        model_selection: HttpModelSelectionPolicy::FreshSession,
         model_selection_binding: "model-binding".to_owned(),
         default_permission_mode: HttpPermissionMode::Manual,
         available_permission_modes: vec![
@@ -1286,14 +1343,17 @@ async fn local_server_projects_typed_run_context() {
         http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
     assert_eq!(status, 200);
     assert_eq!(body["model_name"], "deepseek-v4-flash");
-    assert_eq!(body["available_models"][1], "deepseek-v4-pro");
     assert_eq!(body["model_options"][1]["model_name"], "deepseek-v4-pro");
+    assert_eq!(
+        body["model_options"][1]["model_ref"]["connection_id"],
+        "deepseek-default"
+    );
     assert_eq!(body["model_options"][1]["default_reasoning_effort"], "max");
     assert_eq!(
         body["model_options"][1]["reasoning_effort_binding"],
         "effort-binding-pro"
     );
-    assert_eq!(body["model_selection"], "per_run");
+    assert_eq!(body["model_selection"], "fresh_session");
     assert_eq!(body["model_selection_binding"], "model-binding");
     assert_eq!(body["default_permission_mode"], "manual");
     assert_eq!(body["available_permission_modes"][2], "auto-edit");
@@ -2106,10 +2166,22 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/support/doctor"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/support/bundle"]["post"]["responses"]["200"].is_object());
+    assert!(
+        document["paths"]["/settings/provider-connections"]["get"]["responses"]["200"].is_object()
+    );
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["support_diagnostics"]
             ["type"],
         "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_connections"]
+            ["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProviderConnectionInventory"]["additionalProperties"],
+        false
     );
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
@@ -2196,6 +2268,21 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(
         document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
             .is_object()
+    );
+    assert!(
+        document["components"]["schemas"]["RunContextView"]["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "model_ref"))
+    );
+    assert_eq!(
+        document["components"]["schemas"]["RunContextView"]["properties"]["model_selection"]["enum"]
+            [0],
+        "fresh_session"
+    );
+    assert!(
+        document["components"]["schemas"]["ProviderCredentialSource"]["enum"]
+            .as_array()
+            .is_some_and(|sources| sources.iter().any(|source| source == "stored"))
     );
     assert!(
         document["paths"]["/sessions/{session_id}/agent-activity"]["get"]["responses"]["200"]
@@ -3595,7 +3682,10 @@ fn session_create_get_returns_stable_snapshot() {
         &registry,
         HttpSessionCreateRequest {
             label: Some("mobile-client".to_owned()),
-            model_name: Some("deepseek-v4-pro".to_owned()),
+            model_ref: Some(HttpProviderModelRef {
+                connection_id: "deepseek-default".to_owned(),
+                model_id: "deepseek-v4-pro".to_owned(),
+            }),
         },
     );
 
@@ -3603,7 +3693,10 @@ fn session_create_get_returns_stable_snapshot() {
     assert_eq!(session.label.as_deref(), Some("mobile-client"));
     assert_eq!(
         driver.bound_models(),
-        vec![Some("deepseek-v4-pro".to_owned())]
+        vec![Some(HttpProviderModelRef {
+            connection_id: "deepseek-default".to_owned(),
+            model_id: "deepseek-v4-pro".to_owned(),
+        })]
     );
     assert!(session.run_ids.is_empty());
     assert_eq!(session.durable_session_scope_id, "scope-http-session-1");
@@ -4442,7 +4535,7 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
         &registry,
         HttpSessionCreateRequest {
             label: Some("desktop".to_owned()),
-            model_name: None,
+            model_ref: None,
         },
     );
     let prompt = format!("{}{}", "x".repeat(120), "tail");
@@ -5634,9 +5727,9 @@ impl HttpRunDriver for QueueTestDriver {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        self.recording.bind_session(session_id, model_name)
+        self.recording.bind_session(session_id, model_ref)
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
@@ -5811,7 +5904,7 @@ impl HttpRunDriver for QueueTestDriver {
 
 #[derive(Default)]
 struct RecordingRunDriver {
-    bound_models: Mutex<Vec<Option<String>>>,
+    bound_models: Mutex<Vec<Option<HttpProviderModelRef>>>,
     purged_session_scopes: Mutex<Vec<String>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
@@ -5839,7 +5932,7 @@ struct RecordingRunDriver {
 }
 
 impl RecordingRunDriver {
-    fn bound_models(&self) -> Vec<Option<String>> {
+    fn bound_models(&self) -> Vec<Option<HttpProviderModelRef>> {
         lock(&self.bound_models).clone()
     }
 
@@ -5953,9 +6046,9 @@ impl HttpRunDriver for RecordingRunDriver {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        lock(&self.bound_models).push(model_name.map(str::to_owned));
+        lock(&self.bound_models).push(model_ref.cloned());
         if let Some(message) = lock(&self.next_binding_error).take() {
             return Err(HttpRunDriverError::new(message));
         }
@@ -6158,6 +6251,7 @@ fn write_catalog_session(path: &std::path::Path, prompt: &str, provider: &str, m
         .append_control(ControlEntry::SessionIdentity {
             provider_name: provider.to_owned(),
             model_name: model.to_owned(),
+            resolved_model_route: None,
         })
         .expect("identity should persist");
     session

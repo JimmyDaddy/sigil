@@ -54,6 +54,7 @@ where
             SessionCommand::ForkLocalSession {
                 request_id,
                 source_path,
+                current_model_route,
             } => {
                 if let Err(error) =
                     ensure_session_transition_allowed(SessionTransitionKind::LocalFork, state)
@@ -63,7 +64,12 @@ where
                     continue;
                 }
                 let service = local_session_lifecycle_service(root_config, workspace_root);
-                let output = match fork_local_session(&service, &source_path) {
+                let output = match fork_local_session(
+                    &service,
+                    &source_path,
+                    root_config,
+                    &current_model_route,
+                ) {
                     Ok(output) => output,
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
@@ -93,6 +99,7 @@ where
                             copied_message_count: output.copied_message_count,
                             entries: transition.entries,
                         });
+                        return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
@@ -297,6 +304,7 @@ where
                             model_name: transition.model_name,
                             entries: transition.entries,
                         });
+                        return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -323,6 +331,7 @@ where
                             model_name: transition.model_name,
                             entries: transition.entries,
                         });
+                        return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));

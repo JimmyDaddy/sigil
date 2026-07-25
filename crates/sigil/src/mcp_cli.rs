@@ -461,10 +461,9 @@ fn load_config_for_update(path: &Path) -> Result<LoadedConfigForUpdate> {
 }
 
 fn publish_config_update(path: &Path, loaded: LoadedConfigForUpdate) -> Result<()> {
-    if fs::read(path).ok().as_deref() != Some(loaded.source_bytes.as_slice()) {
-        bail!("Sigil config changed before publication; retry the command");
-    }
-    loaded.config.save(path)
+    loaded
+        .config
+        .save_if_source_bytes_unchanged(path, &loaded.source_bytes)
 }
 
 fn quoted(value: &str) -> String {

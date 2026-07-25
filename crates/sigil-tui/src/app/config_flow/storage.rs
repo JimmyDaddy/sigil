@@ -12,6 +12,15 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         &paths.cache_root.display().to_string(),
     ));
     lines.push(render_config_readonly_row(
+        "Credential store",
+        config_state
+            .draft
+            .base_root_config
+            .storage
+            .credential_store
+            .as_str(),
+    ));
+    lines.push(render_config_readonly_row(
         "Workspace state",
         &paths.workspace_state_root.display().to_string(),
     ));
@@ -78,6 +87,9 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push("[details]".to_owned());
     lines.push(render_config_hint_row(
         "read-only; state/cache roots can be overridden, project assets are fixed under workspace .sigil",
+    ));
+    lines.push(render_config_hint_row(
+        "credential store: auto prefers the system store; file uses owner-only ~/.sigil/credentials.json",
     ));
     lines.push(render_config_hint_row(
         "footer clean records lifecycle events; artifact details are audit/debug",

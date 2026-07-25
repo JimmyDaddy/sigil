@@ -122,19 +122,22 @@ It should not replay every old tool output into transcript.
   evidence.
 - TaskMemoryV1 can be converted into RFC-0006 ContextItems with TaskDigest
   source, trust/sensitivity labels, token cost and durable event provenance.
-- `/compact` currently provides a read-only V2 fold/keep/protection preview. It
-  does not create a checkpoint or present legacy memory data. Lifecycle and memory
-  rendering become a user-facing flow only after the verified request-fit admission
-  and confirmed apply slice are complete.
-- K25.3 has added the inactive V2 initiated lifecycle (`CompactionStarted` plus
+
+以下是保留用于审计的历史 rollout checkpoint，**不是当前 K25 core 的未完成前置**：
+
+- 在 K25.2 checkpoint，`/compact` 只提供 read-only V2 fold/keep/protection preview，尚未创建
+  checkpoint 或呈现 legacy memory data。
+- K25.3 checkpoint 加入 inactive V2 initiated lifecycle（`CompactionStarted` plus
   exactly one `CompactionAppliedV2` or `CompactionFailed`) with strict durable
-  lineage and explicit idempotent recovery. It does not yet let a V2 record
+  lineage and explicit idempotent recovery；该阶段尚不让 V2 record
   alter task memory, continuation state, chat context or the TUI flow.
-- K25.4 now persists strict, canonical-hashed `TaskMemoryRecordedV1` sidecars
-  and checkpoint bindings. They remain inactive until the same Start lineage
+- K25.4 checkpoint 开始持久化 strict、canonical-hashed `TaskMemoryRecordedV1` sidecars
+  and checkpoint bindings；它们在该阶段要等同一 Start lineage
   writes `CompactionAppliedV2`; resolver replay validates memory/checkpoint id,
   branch, snapshot, cursor and supersedes lineage, while explicit invalidation
-  removes the sidecar. This still does not inject context or change the TUI.
+  removes the sidecar。
+- K25.5-K25.18F 后续切片已完成 accepted core；页首状态是当前实施结论。上述 checkpoint 只说明
+  演进顺序，P10 implementer 不得把“inactive/preview-only”历史描述当作当前 prerequisite。
 
 Productization remains:
 
@@ -145,9 +148,7 @@ Productization remains:
   implemented K25 core; their executable productization plan is frozen in §8.2.
 - The current K25 surface intentionally offers no in-place memory editing; P10 correction appends a
   superseding version instead of rewriting history.
-- K25.5 consumes only K25.4-resolved sidecars in a chat-only context projection,
-  preserving raw messages before the first V2 activation and never letting an orphan
-  record affect context.
+- Project Memory P10 继续以 K25.1-K25.18F accepted core 为基线，不重复实施历史 checkpoint。
 
 ## 8.2 P10 Project Memory productization
 
@@ -169,7 +170,8 @@ Project Memory 与既有 `TaskMemoryV1` 分层：
 
 每个 project memory entry 至少记录：
 
-- runtime 分配的 `memory_id`、version、`supersedes` 与 workspace scope；
+- runtime 分配的 stable `logical_memory_id`、per-version `memory_id`、version、`supersedes` 与
+  workspace scope；
 - kind：constraint、decision、convention、known_failure、validated_workflow、unresolved_risk；
 - bounded statement 与 structured payload；
 - exact source refs、source snapshot/branch/intent/task、created/last_validated time；
@@ -183,6 +185,8 @@ excerpt、embedding 或 content-derived digest 内联进 append-only event JSON�
 event ids 和非内容型状态；sidecar 自己保存并校验 content digest。这样 resolver 可以在内容存在
 时验证 integrity，又能在 physical delete 后只留下不可用于重建或字典匹配正文的 tombstone。
 任何 adapter 不得为了方便 projection 把正文复制回 recovery-critical event。
+Project Memory 正文 sidecar 按 entry/version 独立存储，不跨 logical memory 做 content
+deduplication；否则一个 lineage 的 physical delete 无法删除其受控副本。
 
 TTL 只表示“需要重验”，不能单独证明事实过期或仍有效。source artifact/receipt 不可用、workspace
 identity 改变、用户删除或新的 durable evidence 冲突时，entry 必须 fail closed 为 stale/
@@ -206,12 +210,14 @@ invalidated，不能继续作为高信任约束注入。
 TUI 项目记忆视图必须支持按 kind/trust/validity 检查来源、最后验证时间、适用范围和使用历史，
 并提供 `Keep`、`Mark stale`、`Forget` 三类清晰动作：
 
-- `Mark stale` 追加 invalidation，不删除历史来源；
-- `Forget` 追加 tombstone，使所有 retrieval/projection 立即停止使用该 entry；
-- 用户显式选择 physical delete 时，必须删除 memory statement/payload、embedding/index/cache
-  副本与可选独占 sidecar。append-only lifecycle 只保留 opaque id/version、workspace scope、
-  deletion reason/time 和不可恢复状态；面向隐私删除的 entry 不保留可对短正文做字典匹配的
-  content-derived digest；
+- `Mark stale` 可以只针对一个 version，追加 invalidation 但不删除历史来源；`Forget` 默认且仅针对整个 `logical_memory_id`
+  supersedes lineage，原子追加所有已知 version 的 tombstone，使 retrieval/projection 立即停止
+  使用任何版本。V1 不提供容易误解的“只 Forget 当前版本但旧正文仍 active”动作；
+- 用户显式选择 physical delete 时，目标同样是已 tombstone 的完整 lineage。必须删除每个 version
+  的 memory statement/payload、embedding/index/cache 副本和 entry-owned sidecar。append-only
+  lifecycle 只保留 opaque logical/version ids、workspace scope、deletion reason/time 和不可恢复
+  状态；旧 version inspect 统一显示 tombstone，不保留可对短正文做字典匹配的 content-derived
+  digest；
 - tombstone 保留 source lineage ids 与 version（不保留 source excerpt），阻止 deterministic/
   model candidate 从同一已删除 lineage 自动重新 admission。新的独立 evidence 只能形成新的
   pending candidate，且必须再次由用户确认，不能用“新 id”绕过 Forget；
@@ -222,7 +228,8 @@ TUI 项目记忆视图必须支持按 kind/trust/validity 检查来源、最后�
   记录 remote deletion receipt，不能把本地成功伪装成远端已删除；
 - secret-like/credential material 不进入 Project Memory。删除、索引清理、cache eviction 与
   Context Engine projection 必须幂等；use history 只保留 id/version 与 decision，不复制正文，
-  restart 后 tombstone 仍生效。
+  restart 后 tombstone cascade 仍覆盖后来发现的 orphan/superseded sidecar。独立审计/source
+  artifact 的 refcount 与 retention 不由 memory lineage delete 改写。
 
 ### 8.2.4 Retrieval and use
 
@@ -243,15 +250,20 @@ TUI 项目记忆视图必须支持按 kind/trust/validity 检查来源、最后�
 | P10.1 | 冻结 ProjectMemory schema、workspace identity、trust/validity/sensitivity taxonomy 与 config migration | canonical digest/schema fixtures；旧 TaskMemory 行为不变；unknown version fail closed |
 | P10.2 | ref-only durable candidate/admit/supersede/invalidate/tombstone lifecycle、deletable sidecar 与 resolver | event JSON 零正文/embedding/content-derived digest；crash/replay/idempotency/property tests；orphan/partial batch 不进入 active projection |
 | P10.3 | deterministic extraction 与 Intent/Task parent-evidence bridge | model suggestion 不自动升信；child/failed/stale receipt negative corpus |
-| P10.4 | cross-session store/index、retention、cache eviction 与 physical delete | restart/delete/source-retention/index consistency tests；event/provider boundary UX；secret fixtures 零持久化 |
+| P10.4 | cross-session store/index、retention、cache eviction 与 whole-lineage physical delete | version/tombstone cascade、no-body-dedupe、restart/orphan/delete/source-retention/index consistency tests；旧 version inspect 降级；event/provider boundary UX；secret fixtures 零持久化 |
 | P10.5 | RFC-0006 retrieval、egress/token gate 与 planner stable-ref consumption | stale/deleted/cross-workspace 零召回；injection audit；provider text 不能复活 tombstone |
 | P10.6 | TUI inspect/source/validity/use-history/forget surface 与 dogfood | narrow-layout/input/session-switch/stale-request tests；跨三次真实任务保持、纠正并删除一条记忆 |
 
-依赖顺序固定为：
+跨 RFC 前置与依赖顺序固定为：
 
 ```text
-P10.1 -> P10.2 -> P10.3 -> P10.4 -> P10.5 -> P10.6
+RFC-0051 R51.0 ---------> P10.1 -> P10.2 -> P10.3 -> P10.4 -> P10.5 -> P10.6
+RFC-0051 R51.2 + RFC-0053 O6f ----^
 ```
+
+P10.1 只有在 R51.0 冻结 stable Intent ref wire shape 后才加入 Intent source variant；P10.3 只有在
+R51.2/O6f 完成 execution/promotion bridge 后才提升 Intent/Task parent evidence。实现者不能提前
+猜 schema 或把 child proposal 当 parent fact。
 
 默认启用 cross-session retrieval 前，必须满足：跨 workspace、stale、invalidated、deleted 和
 secret-like entry 的注入数为 0；所有注入均可追溯 source/trust/version；`Forget` 在 restart、
@@ -264,9 +276,9 @@ fork 和 cache rebuild 后仍生效。
 - Task memory binds to branch/snapshot and can be invalidated.
 - Legacy compaction payloads are rejected rather than reconstructed from a text summary.
 - Project Memory 开启后，每条跨 session 注入都带 source、trust、validity、version 与 use record。
-- 用户可以 inspect、supersede、invalidate 和 forget；physical delete 后正文不会被
-  Sigil-controlled sidecar/index/cache/Git reconstruction 复活，UI 也不会声称能撤回历史 provider
-  egress 或独立审计来源。
+- 用户可以 inspect、supersede、invalidate 和 whole-lineage forget；physical delete 后该 lineage
+  的正文不会被 Sigil-controlled sidecar/index/cache/Git reconstruction 复活，UI 也不会声称能
+  撤回历史 provider egress 或独立审计来源。
 - stale、deleted、cross-workspace、secret-like 与 orphan candidate 不进入 planner/provider context。
 
 ## 10. Validation

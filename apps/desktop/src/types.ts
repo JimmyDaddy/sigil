@@ -337,7 +337,7 @@ export interface CheckpointRestoreReview {
 export type ConversationRecoveryAction =
   | { kind: "apply_compaction"; previewId: string }
   | { kind: "restore_checkpoint"; checkpointId: string; checkpointDigest: string }
-  | { kind: "fork_conversation"; sourceTurnDigest: string };
+  | { kind: "fork_conversation"; sourceTurnDigest: string; modelRef: ProviderModelRef };
 
 export interface ConversationRecoveryCommandInput {
   sessionId: string;
@@ -545,6 +545,10 @@ export type ConversationDisplayContent =
       type: "message";
       role: "user" | "assistant";
       text?: string;
+      skill?: {
+        id: string;
+        name: string;
+      };
       assistantPhase?: "tool_preamble" | "progress" | "final_answer";
       imageAttachmentCount: number;
       truncated: boolean;
@@ -698,6 +702,7 @@ export interface SkillCatalogEntry {
 export interface AgentCatalogEntry {
   id: string;
   invocationToken: string;
+  name: string;
   description: string;
   source: string;
   kind: string;
@@ -765,11 +770,11 @@ export interface ExtensionCatalog {
 }
 
 export interface RunContext {
+  modelRef: ProviderModelRef;
   providerName: string;
   modelName: string;
-  availableModels: string[];
   modelOptions: ModelOption[];
-  modelSelection: "per_run";
+  modelSelection: "fresh_session";
   modelSelectionBinding: string;
   defaultPermissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
@@ -782,11 +787,25 @@ export interface RunContext {
   extensionCatalog: ExtensionCatalog;
 }
 
+export interface ProviderModelRef {
+  connectionId: string;
+  modelId: string;
+}
+
 export interface ModelOption {
+  modelRef: ProviderModelRef;
+  displayName: string;
+  availability: "available" | "unverified" | "configured_unavailable";
+  recommendation: "recommended" | "standard";
+  provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
   modelName: string;
   availableReasoningEfforts: ReasoningEffort[];
   defaultReasoningEffort?: ReasoningEffort;
   reasoningEffortBinding?: string;
+}
+
+export function modelOptionIsSelectable(option: ModelOption): boolean {
+  return option.availability !== "configured_unavailable";
 }
 
 export interface RunSummary {

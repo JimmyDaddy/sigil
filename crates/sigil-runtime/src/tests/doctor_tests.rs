@@ -88,6 +88,59 @@ fn doctor_reports_missing_config_without_panicking() {
     assert!(report.checks.iter().any(|check| check.name == "terminal"));
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_warns_when_the_default_sigil_directory_is_too_permissive() -> Result<()> {
+    let _env_lock = crate::test_env::lock();
+    let temp = tempdir()?;
+    let home = temp.path().join("home");
+    let config_dir = home.join(".sigil");
+    fs::create_dir_all(&config_dir)?;
+    let _env = EnvScope::set_many(&[("HOME", home.to_str().expect("UTF-8 temp path"))]);
+    let config_path = config_dir.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+[storage]
+credential_store = "file"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = ""
+"#,
+    )?;
+    let credential_path = config_dir.join("credentials.json");
+    fs::write(&credential_path, b"{}")?;
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&credential_path, fs::Permissions::from_mode(0o644))?;
+    fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o755))?;
+
+    let report = build_doctor_report(&config_path, temp.path());
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "config:parent_permissions"
+            && check.status == DoctorStatus::Warn
+            && check
+                .message
+                .contains("allows access beyond the current user")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "credential_store:permissions"
+            && check.status == DoctorStatus::Warn
+            && check
+                .message
+                .contains("allows access beyond the current user")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "credential_store:parent_permissions" && check.status == DoctorStatus::Warn
+    }));
+    Ok(())
+}
+
 #[test]
 fn doctor_report_overall_status_prioritizes_errors_then_warnings() {
     assert_eq!(DoctorReport::default().overall_status(), DoctorStatus::Ok);
@@ -140,6 +193,45 @@ fn doctor_reports_invalid_config_parse_error() -> Result<()> {
         && check.status == DoctorStatus::Error
         && !check.message.contains("missing config")));
     assert!(report.checks.iter().any(|check| check.name == "terminal"));
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_legacy_task_provider_as_invalid_in_v2() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+config_version = 2
+
+[agent]
+connection = "primary"
+model = "primary-model"
+
+[connections.primary]
+label = "Primary"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[task.planner]
+provider = "deepseek"
+model = "planner-model"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "config:load"
+            && check.status == DoctorStatus::Error
+            && check
+                .message
+                .contains("cannot include legacy [task.planner].provider")
+    }));
     Ok(())
 }
 
@@ -1100,6 +1192,11 @@ model = "gpt-test"
 
 #[test]
 fn doctor_reports_openai_compat_provider_config_and_plaintext_auth() -> Result<()> {
+    let _env_lock = crate::test_env::lock();
+    let _env_scope = EnvScope::remove_many(&[
+        "SIGIL_OPENAI_COMPATIBLE_API_KEY",
+        "SIGIL_OPENAI_COMPATIBLE_BASE_URL",
+    ]);
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
@@ -1147,6 +1244,80 @@ api_key = "test-secret-key"
             && check.status == DoctorStatus::Ok
             && check.message.contains("supported")
     }));
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_all_v2_connections_without_private_endpoint_or_credential_identity() -> Result<()>
+{
+    let _env_lock = crate::test_env::lock();
+    let _env_scope = EnvScope::remove_many(&["SIGIL_OPENAI_RESPONSES_API_KEY"]);
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    let credential_id = "3b2c8d6e-3fc0-4f52-9daa-15c0ddfe8571";
+    fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "openai-personal"
+model = "gpt-4.1"
+
+[connections.openai-personal]
+label = "OpenAI personal"
+provider = "openai"
+protocol = "responses"
+base_url = "https://private-gateway.example.internal/v1"
+credential = {{ source = "keyring", id = "{credential_id}" }}
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = {{ source = "none" }}
+
+[connections.broken]
+label = "Broken"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "not-a-url"
+credential = {{ source = "none" }}
+"#
+        ),
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:connections"
+            && check.message.contains("connections=3")
+            && check.message.contains("default=openai-personal/gpt-4.1")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:connection:openai-personal"
+            && check.message.contains("credential_source=system_keyring")
+            && (check.message.contains("readiness=needs_credential")
+                || check.message.contains("readiness=credential_unavailable"))
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:connection:local"
+            && check.message.contains("local loopback endpoint")
+            && check.message.contains("readiness=ready")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:connection:config"
+            && check.message.contains("connection=broken")
+            && check.message.contains("invalid_connection")
+    }));
+    let rendered = format!("{report:?}");
+    assert!(!rendered.contains(credential_id));
+    assert!(!rendered.contains("private-gateway.example.internal"));
+    assert!(!rendered.contains("127.0.0.1"));
     Ok(())
 }
 

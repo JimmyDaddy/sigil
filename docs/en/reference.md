@@ -28,6 +28,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
+| Toggle latest Mermaid source | `Ctrl-O` when no saved-session, tool-card, or other higher-priority action is active |
 | Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
 | Expand/collapse thinking or activity | `Ctrl-T` |
 | Run diagnostics on changed source | `Alt-D` |
@@ -52,7 +53,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/plan [prompt]` | Run a read-only plan; accept its card to start a task |
 | `/task <task>` | Start multi-step execution |
 | `/task continue` | Continue the latest unfinished task |
-| `/model <flash|pro|id>` | Switch model for the next run and start a fresh session |
+| `/model <model-id|connection-id/model-id>` | Switch to an exact ready route and start a fresh session; in the selector, `D` changes only the saved default |
 | `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
 | `/compact` | Review and, when ready, apply one context reduction |
 | `/quit` | Quit the TUI |
@@ -65,7 +66,7 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | --- | --- |
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor [--output text|json]` | Run local diagnostics |
-| `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task |
+| `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | Run a non-interactive task; connection and model must appear together |
 | `sigil resume [session-id]` | Open the TUI and restore a session |
 | `sigil serve` | Start the authenticated loopback-only local service |
 | `sigil --version` | Print the installed version |
@@ -109,7 +110,8 @@ Sigil uses `--config <path>` when supplied; otherwise it loads `~/.sigil/sigil.t
 | State root `workspaces/<workspace-id>/artifacts/` | Terminal and change artifacts |
 | Cache root `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
 | User config `~/.sigil/sigil.toml` | Default local config |
-| `.sigil/agents`, `.sigil/commands`, `.sigil/skills`, `.sigil/plugins` | Workspace resources |
+| `.sigil/agents`, `.sigil/commands`, `.sigil/skills`, `.sigil/plugins` | Native workspace resources |
+| `.agents/skills`, `.codex/agents`, `.opencode/{skills,commands,agents}`, `.claude/{skills,commands,agents}` | Compatibility resources discovered by default and covered by workspace trust; commands use slash-prefixed names, agents use `@name` |
 | `SIGIL.md`, `AGENTS.md`, `SIGIL.local.md` | Workspace instructions |
 
 Do not commit real secrets in config or local instruction files.

@@ -17,9 +17,10 @@ use sigil_kernel::{
     ConversationInputTerminalFrontier, ConversationQueueDurableProjection,
     ConversationQueueMutation, ConversationQueueMutationCommand, ConversationQueueRevision,
     JsonlSessionStore, ModelMessage, ProviderPhysicalAttemptOutcome,
-    ProviderPhysicalAttemptProjection, PublicRunEvent, PublicRunEventKind, SecretString,
-    SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision, ToolCall, ToolSpec,
-    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    ProviderPhysicalAttemptProjection, PublicRunEvent, PublicRunEventKind, RootConfig,
+    SecretString, SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision, ToolCall,
+    ToolSpec, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
     project_user_message_for_persistence_with_nonce_and_issued_at, stable_event_uuid,
     tool_approval_session_grant_available_for_facets,
 };
@@ -39,7 +40,7 @@ use sigil_runtime::application_run::{
     ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
     application_agent_activity_view, application_run_context_view,
     application_session_frontier_view, application_session_transcript_page,
-    application_verification_view, bind_application_session_with_model,
+    application_verification_view, bind_application_session_with_model_ref,
     bind_existing_application_session, prepare_application_run,
     record_application_preparation_cancellation, rerun_application_verification,
 };
@@ -681,13 +682,18 @@ impl HttpRunDriver for HttpProductionRunDriver {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&crate::HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        let binding = bind_application_session_with_model(
+        let connection_id = model_ref
+            .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
+            .transpose()
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let binding = bind_application_session_with_model_ref(
             &self.options.config_path,
             &self.options.launch_cwd,
             None,
-            model_name,
+            connection_id.as_ref(),
+            model_ref.map(|model_ref| model_ref.model_id.as_str()),
         )
         .map_err(|error| {
             HttpRunDriverError::new(format!(
@@ -935,13 +941,24 @@ impl HttpRunDriver for HttpProductionRunDriver {
         )
         .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
         Ok(HttpRunContextView {
+            model_ref: crate::HttpProviderModelRef {
+                connection_id: view.model_ref.connection_id.to_string(),
+                model_id: view.model_ref.model_id,
+            },
             provider_name: view.provider_name,
             model_name: view.model_name,
-            available_models: view.available_models,
             model_options: view
                 .model_options
                 .into_iter()
                 .map(|option| HttpApplicationModelOption {
+                    model_ref: crate::HttpProviderModelRef {
+                        connection_id: option.model_ref.connection_id.to_string(),
+                        model_id: option.model_ref.model_id,
+                    },
+                    display_name: option.display_name,
+                    availability: option.availability.as_str().to_owned(),
+                    recommendation: option.recommendation.as_str().to_owned(),
+                    provenance: option.provenance.as_str().to_owned(),
                     model_name: option.model_name,
                     available_reasoning_efforts: option
                         .available_reasoning_efforts
@@ -952,7 +969,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     reasoning_effort_binding: option.reasoning_effort_binding,
                 })
                 .collect(),
-            model_selection: HttpModelSelectionPolicy::PerRun,
+            model_selection: HttpModelSelectionPolicy::FreshSession,
             model_selection_binding: view.model_selection_binding,
             default_permission_mode: view.default_permission_mode.into(),
             available_permission_modes: vec![
@@ -1301,7 +1318,10 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     verification_stale: true,
                 });
             }
-            HttpConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
+            HttpConversationRecoveryCommandAction::ForkConversation {
+                source_turn_digest,
+                model_ref,
+            } => {
                 let recovery = self.conversation_recovery_view(session)?;
                 if !recovery
                     .fork_points
@@ -1321,12 +1341,22 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         .ok_or(HttpConversationRecoveryDriverError::Unavailable)?,
                 )
                 .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let root_config = RootConfig::load(&self.options.config_path)
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let target_model_ref = sigil_kernel::ModelRef::new(
+                    sigil_kernel::ConnectionId::new(model_ref.connection_id.clone())
+                        .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?,
+                    model_ref.model_id.clone(),
+                )
+                .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
                 let output = lifecycle
                     .fork_session_at_turn(
                         &source_ref,
                         &session.durable_session_scope_id,
                         source_turn_digest,
                         &format!("{}:{}", command.client_id, command.command_id),
+                        &root_config,
+                        &target_model_ref,
                     )
                     .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
                 fork_receipt = Some(HttpConversationForkReceipt {
@@ -2283,6 +2313,23 @@ impl HttpRunSupervisor {
         let registry = self.registry.upgrade().ok_or_else(|| {
             HttpRunDriverError::new("production registry closed before run preparation")
         })?;
+        let run_context = application_run_context_view(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            Path::new(&self.start.session.session_log_path),
+            &self.start.session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
+        let model_connection_id = self
+            .start
+            .model_name
+            .is_none()
+            .then(|| run_context.model_ref.connection_id.clone());
+        let model_name = self
+            .start
+            .model_name
+            .clone()
+            .or_else(|| Some(run_context.model_ref.model_id.clone()));
         let request = ApplicationRunRequest {
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
@@ -2291,7 +2338,8 @@ impl HttpRunSupervisor {
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
             interaction: ApplicationRunInteraction::ExternallyInteractive,
             permission_mode: Some(self.start.run.permission_mode.into()),
-            model_name: self.start.model_name.clone(),
+            model_name,
+            model_connection_id,
             model_selection_binding: self.start.model_selection_binding.clone(),
             reasoning_effort: self.start.run.reasoning_effort.map(Into::into),
             reasoning_effort_binding: self.start.reasoning_effort_binding.clone(),

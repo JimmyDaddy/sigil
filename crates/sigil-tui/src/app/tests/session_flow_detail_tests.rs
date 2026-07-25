@@ -1612,6 +1612,7 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
         profile_snapshot_id: snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
         effective_tool_scope_hash: "sha256:tools".to_owned(),
@@ -1977,6 +1978,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
                     )?,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                     effective_tool_scope_hash: "tools".to_owned(),
@@ -2047,6 +2049,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
 fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -2367,6 +2370,7 @@ fn render_session_control_entries_cover_remaining_labels() {
     let skill_loaded = render_session_log_entry(&SessionLogEntry::Control(
         ControlEntry::SkillLoaded(SkillLoadEntry {
             skill_id: "repo-review".to_owned(),
+            display_name: None,
             sha256: "hash".to_owned(),
             source: SkillSource::Workspace,
             entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),

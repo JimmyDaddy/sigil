@@ -1092,7 +1092,10 @@ pub(crate) async fn desktop_create_session(
 ) -> Result<DesktopSessionSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
     validate_optional_label(input.label.as_deref())?;
-    validate_optional_model(input.model_name.as_deref())?;
+    if let Some(model_ref) = input.model_ref.as_ref() {
+        validate_connection_id(&model_ref.connection_id)?;
+        validate_optional_model(Some(&model_ref.model_id))?;
+    }
     let client = state
         .manager
         .lock()
@@ -1102,7 +1105,12 @@ pub(crate) async fn desktop_create_session(
     client
         .create_session(DesktopSessionCreateRequest {
             label: input.label,
-            model_name: input.model_name,
+            model_ref: input
+                .model_ref
+                .map(|model_ref| sigil_desktop::DesktopProviderModelRef {
+                    connection_id: model_ref.connection_id,
+                    model_id: model_ref.model_id,
+                }),
         })
         .await
         .map(Into::into)
@@ -1449,6 +1457,21 @@ fn validate_optional_model(value: Option<&str>) -> Result<(), DesktopCommandErro
     Ok(())
 }
 
+fn validate_connection_id(value: &str) -> Result<(), DesktopCommandError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(DesktopCommandError::new(
+            "session_connection_invalid",
+            "The selected provider connection is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_display_name(value: &str) -> Result<(), DesktopCommandError> {
     if value.is_empty()
         || value.trim() != value
@@ -1614,7 +1637,12 @@ fn validate_recovery_action(
         }
         crate::ipc::DesktopConversationRecoveryActionInput::ForkConversation {
             source_turn_digest,
-        } => validate_recovery_token(source_turn_digest),
+            model_ref,
+        } => {
+            validate_recovery_token(source_turn_digest)?;
+            validate_recovery_token(&model_ref.connection_id)?;
+            validate_recovery_token(&model_ref.model_id)
+        }
     }
 }
 

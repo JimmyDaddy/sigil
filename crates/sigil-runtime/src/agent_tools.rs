@@ -40,8 +40,7 @@ use crate::{
     AgentBudgetPolicy, AgentMailboxMessage, AgentProfileRegistry, AgentSupervisor,
     ResolvedAgentProfile,
     agent_supervisor::{AgentResultMaterialization, materialize_child_agent_final_answer},
-    build_role_provider, build_role_run_options, build_role_tool_registry,
-    chat_agent_thread_id_for_call,
+    build_role_run_options, build_role_tool_registry, chat_agent_thread_id_for_call,
 };
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";

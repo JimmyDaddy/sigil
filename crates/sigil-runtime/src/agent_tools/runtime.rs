@@ -394,8 +394,9 @@ impl EventHandler for NoopAgentToolEventHandler {
     }
 }
 
+#[async_trait]
 pub trait AgentToolProviderFactory: Send + Sync {
-    fn build_provider(
+    async fn build_provider(
         &self,
         root_config: &RootConfig,
         role: AgentRole,
@@ -405,14 +406,15 @@ pub trait AgentToolProviderFactory: Send + Sync {
 
 struct DefaultAgentToolProviderFactory;
 
+#[async_trait]
 impl AgentToolProviderFactory for DefaultAgentToolProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         root_config: &RootConfig,
         role: AgentRole,
         _profile_id: &AgentProfileId,
     ) -> Result<Box<dyn Provider>> {
-        build_role_provider(root_config, role)
+        crate::build_role_provider_async(root_config, role).await
     }
 }
 
@@ -481,7 +483,10 @@ impl AgentToolDelegate for AgentToolRuntime {
                 self.spawn_agent(session, call, &args, options, handler, approval_handler)
                     .await
             }
-            AgentToolKind::SpawnBatch => self.spawn_agents(session, call, &args, options, handler),
+            AgentToolKind::SpawnBatch => {
+                self.spawn_agents(session, call, &args, options, handler)
+                    .await
+            }
             AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
             AgentToolKind::ReadResult => self.read_agent_result(session, call, &args, handler),
             AgentToolKind::List => self.list_agents(session, call),

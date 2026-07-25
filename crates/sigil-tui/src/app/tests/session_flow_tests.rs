@@ -17,6 +17,7 @@ fn plain_transcript(app: &AppState, max_lines: usize) -> String {
 fn latest_session_can_be_restored_on_launch() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -51,6 +52,7 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("read the file")),
         SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
@@ -250,6 +252,7 @@ fn restored_agent_thread_controls_render_user_facing_cards() -> Result<()> {
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                     effective_tool_scope_hash: "tools".to_owned(),
@@ -324,6 +327,7 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("analyze")),
         SessionLogEntry::Control(ControlEntry::Note {
@@ -373,6 +377,7 @@ fn restored_interrupted_tool_execution_renders_user_facing_card() -> Result<()> 
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("run tests")),
         SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
@@ -430,6 +435,7 @@ fn restored_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("write note")),
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)),
@@ -520,6 +526,7 @@ fn restored_delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Res
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("delete note")),
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)),
@@ -652,6 +659,7 @@ fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pres
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
             prompt_tokens: 65,
@@ -700,6 +708,7 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
+                resolved_model_route: None,
             }),
             SessionLogEntry::User(ModelMessage::user("latest prompt")),
         ],
@@ -728,6 +737,7 @@ fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
+                resolved_model_route: None,
             }),
             SessionLogEntry::Control(ControlEntry::ToolEgress(Box::new(ToolEgressEntry {
                 call_id: "call-mcp-1".to_owned(),
@@ -765,6 +775,7 @@ fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
 fn sessions_filter_narrows_sidebar_results() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -788,6 +799,7 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
 fn session_rows_mark_selected_and_current_entry() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -823,6 +835,7 @@ fn session_rows_mark_selected_and_current_entry() -> Result<()> {
 fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -837,6 +850,7 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-pro".to_owned(),
+                resolved_model_route: None,
             }),
             SessionLogEntry::User(ModelMessage::user("Investigate selector title display")),
         ],
@@ -867,6 +881,7 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
 fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -898,6 +913,7 @@ fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
 fn resume_command_shows_session_selector_and_enter_switches_selected_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -933,6 +949,7 @@ fn resume_command_shows_session_selector_and_enter_switches_selected_session() -
 fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1002,6 +1019,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1089,6 +1107,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(
             sigil_kernel::ProviderContinuationState {
@@ -1275,6 +1294,7 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_trace".to_owned(),
@@ -1329,6 +1349,7 @@ fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> R
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_trace".to_owned(),
@@ -1376,6 +1397,7 @@ fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("inspect and summarize")),
         SessionLogEntry::Control(ControlEntry::Note {
@@ -1475,6 +1497,7 @@ fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() 
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
             Some("I will inspect the files first.".to_owned()),
@@ -1517,6 +1540,7 @@ fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() 
 fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1575,6 +1599,7 @@ fn restore_latest_session_returns_false_when_history_is_empty() {
 fn restore_session_path_ignores_non_session_rows_without_raw_decode() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },

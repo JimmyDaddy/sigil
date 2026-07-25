@@ -112,6 +112,7 @@ fn resume_job_intent_roundtrips_as_durable_events() -> anyhow::Result<()> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "provider".to_owned(),
         model_name: "model".to_owned(),
+        resolved_model_route: None,
     })?;
     session.append_control(ControlEntry::JobIntentRecorded(sample_job_intent("job-2")))?;
     session.append_control(ControlEntry::StepLeaseRecorded(sample_step_lease(
