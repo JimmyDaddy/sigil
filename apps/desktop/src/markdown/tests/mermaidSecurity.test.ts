@@ -43,6 +43,24 @@ describe("Mermaid admission and SVG boundary", () => {
     expect(sanitized).toContain('focusable="false"');
   });
 
+  it("removes Mermaid global keyframes while preserving scoped diagram styles", () => {
+    const svg = [
+      '<' + 'svg xmlns="http://www.w3.org/2000/svg" id="diagram-1">',
+      "<style>",
+      "#diagram-1{font-size:16px}",
+      "@keyframes edge-animation-frame{from{stroke-dashoffset:0}}",
+      "@keyframes dash{to{stroke-dashoffset:0}}",
+      "#diagram-1 .edge-animation-fast{animation:dash 20s linear infinite}",
+      "</style>",
+      '<path class="edge-animation-fast" d="M0 0L1 1"/>',
+      "</" + "svg>",
+    ].join("");
+    const sanitized = sanitizeMermaidSvg(svg, "diagram-1");
+    expect(sanitized).toContain("#diagram-1");
+    expect(sanitized).toContain("edge-animation-fast");
+    expect(sanitized).not.toContain("@keyframes");
+  });
+
   it("rejects escaping CSS and removes remote or event-bearing attributes", () => {
     expect(safeScopedStyle("body{background:red}", "diagram-1")).toBe(false);
     expect(safeScopedStyle("#diagram-1{fill:url(https://example.com/a)}", "diagram-1")).toBe(false);
@@ -54,5 +72,14 @@ describe("Mermaid admission and SVG boundary", () => {
     const sanitized = sanitizeMermaidSvg(unsafe, "diagram-1");
     expect(sanitized).not.toContain("https://");
     expect(sanitized).not.toContain("onclick");
+  });
+
+  it("rejects malformed generated keyframe blocks", () => {
+    const malformed = [
+      '<' + 'svg xmlns="http://www.w3.org/2000/svg" id="diagram-1">',
+      "<style>@keyframes dash{to{stroke-dashoffset:0}</style>",
+      "</" + "svg>",
+    ].join("");
+    expect(sanitizeMermaidSvg(malformed, "diagram-1")).toBeUndefined();
   });
 });

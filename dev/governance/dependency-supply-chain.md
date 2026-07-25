@@ -28,10 +28,13 @@ RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也�
 `frame-src 'none'`，所有 CSS、font、KaTeX 和 Mermaid 资源随应用 bundle 分发。
 
 依赖引入前后的 production build 对比：主 JS 从 `770.44 kB / 229.53 kB gzip` 增至
-`817.48 kB / 246.84 kB gzip`；KaTeX 与 Mermaid 保持异步 chunk，其中 KaTeX core 为
+`818.91 kB / 247.35 kB gzip`；KaTeX 与 Mermaid 保持异步 chunk，其中 KaTeX core 为
 `259.63 kB / 77.62 kB gzip`，Mermaid core 为 `36.27 kB / 12.07 kB gzip`，各图种实现继续由
 Vite 拆分。`pnpm audit --audit-level high` 当前为零漏洞；`openapi-typescript` 传递图中的
-`js-yaml` 通过 workspace override 固定为 `4.3.0`，直到上游约束自然覆盖该修复版本。升级
+`js-yaml` 通过 workspace override 固定为 `4.3.0`；其
+`@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.8`，以修复
+`GHSA-mh99-v99m-4gvg` 的无界 expansion-length DoS，直到上游约束自然覆盖对应修复版本。两个
+override 都由 contract regeneration、完整 desktop check 和 high-severity audit 验证。升级
 KaTeX、Mermaid、DOMPurify 或 sanitize pipeline 时必须重跑不可信 URL/HTML/SVG 语料、安全审计和
 bundle 差异检查，不得只以视觉 smoke 通过作为升级依据。
 

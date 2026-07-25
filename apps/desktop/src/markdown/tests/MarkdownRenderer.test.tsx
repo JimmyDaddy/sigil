@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LocaleProvider } from "../../i18n";
@@ -107,5 +108,28 @@ describe("safe conversation Markdown renderer", () => {
       </LocaleProvider>,
     );
     await waitFor(() => expect(view.container.querySelectorAll('svg[role="img"]')).toHaveLength(16));
+  });
+
+  it("keeps diagram disclosure state across an unchanged parent rerender", async () => {
+    const user = userEvent.setup();
+    const source = "```mermaid\nflowchart TD\nA-->B\n```";
+    const view = renderMarkdown(source);
+    await screen.findByText("flowchart · ready");
+
+    await user.click(screen.getByRole("button", { name: "Show source" }));
+    await user.click(screen.getByRole("button", { name: "Expand diagram" }));
+    expect(screen.getByRole("button", { name: "Hide source" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close viewer" })).toBeTruthy();
+
+    view.rerender(
+      <LocaleProvider>
+        <div className="message-content">
+          <SafeMarkdown text={source} phase="complete" contentId="renderer-test" />
+        </div>
+      </LocaleProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: "Hide source" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close viewer" })).toBeTruthy();
   });
 });

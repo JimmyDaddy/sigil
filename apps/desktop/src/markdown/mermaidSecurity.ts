@@ -88,7 +88,9 @@ export function sanitizeMermaidSvg(
   }
 
   for (const style of Array.from(root.querySelectorAll("style"))) {
-    if (!safeScopedStyle(style.textContent ?? "", expectedRootId)) return undefined;
+    const scopedCss = stripKeyframeRules(style.textContent ?? "");
+    if (scopedCss === undefined || !safeScopedStyle(scopedCss, expectedRootId)) return undefined;
+    style.textContent = scopedCss;
   }
   return new XMLSerializer().serializeToString(root);
 }
@@ -111,6 +113,31 @@ export function safeScopedStyle(css: string, expectedRootId: string): boolean {
     if (!safeCssDeclaration(match[2])) return false;
   }
   return blockCount > 0 || css.trim() === "";
+}
+
+function stripKeyframeRules(css: string): string | undefined {
+  const keyframes = /@(?:-webkit-)?keyframes\b/giu;
+  let output = "";
+  let cursor = 0;
+  let match = keyframes.exec(css);
+  while (match !== null) {
+    output += css.slice(cursor, match.index);
+    const openingBrace = css.indexOf("{", keyframes.lastIndex);
+    if (openingBrace === -1) return undefined;
+    const header = css.slice(keyframes.lastIndex, openingBrace).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(header)) return undefined;
+    let depth = 1;
+    let index = openingBrace + 1;
+    for (; index < css.length && depth > 0; index += 1) {
+      if (css[index] === "{") depth += 1;
+      if (css[index] === "}") depth -= 1;
+    }
+    if (depth !== 0) return undefined;
+    cursor = index;
+    keyframes.lastIndex = cursor;
+    match = keyframes.exec(css);
+  }
+  return output + css.slice(cursor);
 }
 
 function safeCssDeclaration(css: string): boolean {

@@ -1993,6 +1993,8 @@ pub fn bind_existing_application_session(
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
     let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
+    migrate_exact_legacy_application_session_route(&root_config, &fallback_route, &store)
+        .map_err(ApplicationRunPrepareError::execution)?;
     let session = load_application_session_for_route(&root_config, &fallback_route, store)
         .map_err(ApplicationRunPrepareError::execution)?;
     Ok(ApplicationSessionBinding {
@@ -2012,6 +2014,36 @@ fn load_application_root_config(
         Ok(_) => {}
     }
     RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)
+}
+
+fn migrate_exact_legacy_application_session_route(
+    root_config: &RootConfig,
+    fallback_route: &ResolvedModelRoute,
+    store: &JsonlSessionStore,
+) -> Result<()> {
+    if root_config.config_version.is_some() {
+        return Ok(());
+    }
+    let entries = JsonlSessionStore::read_entries(store.path())
+        .context("failed to inspect legacy durable session route")?;
+    if entries.is_empty() || application_session_route(&entries).is_some() {
+        return Ok(());
+    }
+    let (provider_name, model_name) = application_session_identity(&entries)
+        .context("session_route_missing: legacy durable session identity is unavailable")?;
+    let expected_provider =
+        crate::provider_connections::validate_persisted_model_route(root_config, fallback_route)
+            .map_err(anyhow::Error::new)?;
+    anyhow::ensure!(
+        provider_name == expected_provider && model_name == fallback_route.model_ref.model_id,
+        "session_route_missing: legacy durable session identity does not match the configured route"
+    );
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name,
+        model_name,
+        resolved_model_route: Some(fallback_route.clone()),
+    }))?;
+    Ok(())
 }
 
 fn application_selected_model_route(
@@ -2190,6 +2222,30 @@ fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedMode
         }) => Some(route.clone()),
         _ => None,
     })
+}
+
+fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, String)> {
+    let mut identity = None;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name,
+                model_name,
+                ..
+            }) if identity.is_none() => {
+                identity = Some((provider_name.clone(), model_name.clone()));
+            }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
+                if identity.is_some() =>
+            {
+                if let Some((_, current_model)) = identity.as_mut() {
+                    *current_model = model_name.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    identity
 }
 
 fn application_bound_session_entries(

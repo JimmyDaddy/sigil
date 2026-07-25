@@ -1,6 +1,6 @@
 # RFC-0054 Conversation Streaming Markdown, Math and Diagrams V1
 
-状态：active / R54.0-R54.7 implemented；R54.6 final cursor-cache re-run and R54.8 current-dev Desktop smoke blocked by concurrent RFC-0056 WIP / absent dev window；R54.9 docs/ledger complete
+状态：completed / R54.0-R54.9 implemented and acceptance gates verified
 
 创建日期：2026-07-24
 
@@ -664,42 +664,29 @@ desktop Mermaid state machine，R54.7 等待 TUI projection。
 | R54.3 | complete | KaTeX 本地 HTML/MathML、显式 sanitize schema、非法命令降级和 lazy chunk 已验证 |
 | R54.4 | complete | Mermaid 闭合/大小/数量 admission、strict config、directive/URL/HTML 拒绝、SVG 二次净化、generation/cache 已验证 |
 | R54.5 | complete | diagram card、source/copy、local zoom、i18n、键盘/AX 和 reduced-motion 行为已验证 |
-| R54.6 | implemented, final re-run pending | TUI projection cursor 已接入真实 timeline render store，并缓存 stable block 的已排版 `Line`，append-only 更新只排版 live tail；replacement/completion/宽度/主题/显示选项变化重建。projection 与 render-store 等价测试已加入独立 sidecar；最终重跑被并行 RFC-0056 的当前编译中间态阻断。5k timeline release benchmark 既有证据为 5000 个 timeline item 30 ms |
+| R54.6 | complete | TUI projection cursor 已接入真实 timeline render store，并缓存 stable block 的已排版 `Line`，append-only 更新只排版 live tail；replacement/completion/宽度/主题/显示选项变化重建。projection/render-store 等价与独立 sidecar 已通过，5k timeline release benchmark 为 5000 个 timeline item 16 ms |
 | R54.7 | complete | TUI formula/diagram theme token、状态、源码 disclosure/copy、20/80/160 columns 与当前源码终端 smoke 已验证；TUI 不执行 Mermaid |
-| R54.8 | in progress | Desktop check、high-severity audit、bundle audit 与 TUI terminal smoke 已通过；当前 dev Desktop 原生窗口未运行，真实 Desktop smoke 待补 |
-| R54.9 | complete except final status | EN/ZH user guide/reference 与 dependency ledger 已同步；不发布版本，因此 site 不增加发布型宣传内容 |
+| R54.8 | complete | Desktop/TUI 全量 gate、high-severity audit、bundle audit 和真实终端 smoke 已通过；当前 dev 原生窗口已验证历史会话、公式、Mermaid、安全降级、源码/查看器交互及跨健康轮询状态保持 |
+| R54.9 | complete | EN/ZH user guide/reference、dependency ledger 与 RFC 验收状态已同步；不发布版本，因此 site 不增加发布型宣传内容 |
 
 当前自动验证记录：
 
-- `pnpm --dir apps/desktop check`：通过，18 个 Vitest 文件、202 个测试，以及 typecheck、contract
+- `pnpm --dir apps/desktop check`：通过，18 个 Vitest 文件、207 个测试，以及 typecheck、contract
   drift 和 production build 全部通过；
 - `pnpm --dir apps/desktop audit --audit-level high --json`：411 个依赖，所有 severity 为 0；
-- RFC-0054 相关 Rust targeted tests 与 `cargo check -p sigil-tui --lib` 在 cursor 接线后通过；
-  随后的最终 `cargo clippy -p sigil-tui --all-targets -- -D warnings` 被并行 RFC-0056 未完成的
-  provider setup dead code、旧 test field 和 import 阻断；
-- `cargo test -p sigil-tui`：1426 passed、20 failed、5 ignored；20 个失败均属于并行中的
-  RFC-0056 provider setup/credential UI 旧断言，RFC-0054 targeted tests 无失败。本 RFC 不通过
-  修改或弱化 RFC-0056 测试来伪造全量 green；
-- `cargo fmt --all --check` 当前同样被 RFC-0056 尚未格式化的 `sigil-kernel`、
-  `sigil-runtime` 和 `worker_loop.rs` 变更阻断；RFC-0054 Rust 文件已用 scoped `rustfmt --check`
-  验证通过；
+- `cargo test -p sigil-tui -- --format terse`：1465 passed、0 failed、5 ignored；
+- `cargo clippy -p sigil-tui --all-targets -- -D warnings`、`cargo fmt --all --check` 和
+  `git diff --check`：通过；
 - `pnpm --dir apps/desktop check` 的最终 production build 主 JS 为
-  `817.48 kB / 246.84 kB gzip`；KaTeX core 为 `259.63 kB / 77.62 kB gzip`，Mermaid core 为
+  `819.68 kB / 247.61 kB gzip`；KaTeX core 为 `259.63 kB / 77.62 kB gzip`，Mermaid core 为
   `36.27 kB / 12.07 kB gzip`，两者均保持 lazy chunk；
+- release-profile 5k timeline evidence 为 5000 个 item 共 16 ms，其中 full rebuild 8 ms、
+  sequential append 8 ms、tail rerender 0 ms；
 - 当前源码 `target/debug/sigil` 真实终端 smoke 已验证 inline/display formula、Mermaid ready
-  section、`Ctrl-O` source disclosure 和原始行边界。
-
-当前收口阻断记录（2026-07-25）：
-
-- Desktop cursor 变更后的 `pnpm --dir apps/desktop check` 已再次通过（18 个文件、202 个测试）；
-- TUI projection cursor 与 timeline render-store 的初版定向测试通过后，又补齐了“stable block 不重复
-  layout”的 renderer cache；补充的独立 sidecar smoke 尚待最终执行；
-- 最终 sidecar 执行时，并行 RFC-0056 正处于未闭合中间态：`sigil-kernel` 缺少
-  `ResolvedModelRoute` 导入/字段处理，TUI provider setup 也存在未完成的 test contract；本 RFC
-  不修改这些文件来伪造 green；
-- 当前机器没有正在运行的 Tauri/Vite/Sigil Desktop dev 原生窗口，只有 `target/debug/sigil` TUI
-  进程；遵守既有 dogfood 约束，不启动过时的已安装 Sigil.app。因此真实 current-dev Desktop smoke
-  仍待用户现有 dev 进程恢复后执行。
+  section、`Ctrl-O` source disclosure 和原始行边界；
+- 当前 `pnpm tauri dev` 原生窗口已验证历史会话重开、inline/display formula、两个闭合
+  `flowchart` 的本地 SVG、源码显示和查看器展开；等待 6 秒跨过三轮 workspace health poll 后，
+  disclosure 状态未被重置。
 
 ## 12. Test matrix
 

@@ -80,6 +80,24 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     Ok(())
 }
 
+fn write_legacy_application_test_config(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-key"
+base_url = "https://api.deepseek.com"
+"#,
+    )?;
+    Ok(())
+}
+
 #[test]
 fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -575,6 +593,72 @@ fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
     let missing = temp.path().join("state/sessions/missing.jsonl");
     assert!(bind_existing_application_session(&config_path, &missing).is_err());
     assert!(!missing.exists());
+    Ok(())
+}
+
+#[test]
+fn session_reopen_binding_migrates_an_exact_legacy_v1_route_once() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_legacy_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/legacy-route.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    })?;
+    session.append_user_message(ModelMessage::user("hello"))?;
+    let expected_scope = session.session_scope_id().to_owned();
+    drop(session);
+
+    let reopened = bind_existing_application_session(&config_path, &session_path)?;
+    assert_eq!(reopened.session_scope_id, expected_scope);
+    let migrated_entries = JsonlSessionStore::read_entries(&session_path)?;
+    let migrated_routes = migrated_entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route: Some(route),
+                ..
+            }) => Some(route),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(migrated_routes.len(), 1);
+    assert_eq!(
+        migrated_routes[0].model_ref.connection_id.as_str(),
+        "deepseek-default"
+    );
+    assert_eq!(migrated_routes[0].model_ref.model_id, "deepseek-v4-flash");
+    let after_first_open = std::fs::read(&session_path)?;
+
+    let reopened_again = bind_existing_application_session(&config_path, &session_path)?;
+    assert_eq!(reopened_again, reopened);
+    assert_eq!(std::fs::read(&session_path)?, after_first_open);
+    let context =
+        application_run_context_view(&config_path, temp.path(), &session_path, &expected_scope)?;
+    assert_eq!(context.model_ref, migrated_routes[0].model_ref);
+    Ok(())
+}
+
+#[test]
+fn session_reopen_binding_does_not_rebind_a_route_less_v2_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/route-less-v2.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    }))?;
+    let before = std::fs::read(&session_path)?;
+
+    assert!(bind_existing_application_session(&config_path, &session_path).is_err());
+    assert_eq!(std::fs::read(&session_path)?, before);
     Ok(())
 }
 

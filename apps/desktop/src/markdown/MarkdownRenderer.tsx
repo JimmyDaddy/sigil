@@ -1,6 +1,8 @@
 import {
+  createContext,
   lazy,
   Suspense,
+  useContext,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -118,27 +120,30 @@ export interface MarkdownDocumentProps extends Omit<MarkdownRendererProps, "text
 }
 
 export function MarkdownDocument(props: MarkdownDocumentProps) {
-  // Component-local diagram admission state must restart for every document
-  // render. Memoizing this object would retain the mutable count across
-  // unrelated parent rerenders and incorrectly demote already-admitted blocks.
-  const components = markdownComponents(props);
+  const componentContext: MarkdownComponentContextValue = {
+    props,
+    diagramCount: 0,
+  };
   if (hasMathCandidate(props.source)) {
     return (
-      <Suspense fallback={<PlainMarkdown {...props} components={components} />}>
-        <MathMarkdownDocument {...props} components={components} schema={SAFE_SCHEMA} />
-      </Suspense>
+      <MarkdownComponentContext.Provider value={componentContext}>
+        <Suspense fallback={<PlainMarkdown {...props} />}>
+          <MathMarkdownDocument {...props} components={MARKDOWN_COMPONENTS} schema={SAFE_SCHEMA} />
+        </Suspense>
+      </MarkdownComponentContext.Provider>
     );
   }
-  return <PlainMarkdown {...props} components={components} />;
+  return (
+    <MarkdownComponentContext.Provider value={componentContext}>
+      <PlainMarkdown {...props} />
+    </MarkdownComponentContext.Provider>
+  );
 }
 
-function PlainMarkdown({
-  source,
-  components,
-}: MarkdownDocumentProps & { readonly components: Components }) {
+function PlainMarkdown({ source }: MarkdownDocumentProps) {
   return (
     <ReactMarkdown
-      components={components}
+      components={MARKDOWN_COMPONENTS}
       rehypePlugins={[
         [rehypeSanitize, SAFE_SCHEMA],
         [rehypeHighlight, { detect: false, plainText: ["text", "txt", "plain"] }],
@@ -153,43 +158,67 @@ function PlainMarkdown({
   );
 }
 
-function markdownComponents(props: MarkdownDocumentProps): Components {
-  let diagramCount = 0;
-  return {
-    a: ({ href, children }) => (
+interface MarkdownComponentContextValue {
+  readonly props: MarkdownDocumentProps;
+  diagramCount: number;
+}
+
+const MarkdownComponentContext = createContext<MarkdownComponentContextValue | undefined>(undefined);
+
+function useMarkdownComponentContext(): MarkdownComponentContextValue {
+  const context = useContext(MarkdownComponentContext);
+  if (context === undefined) throw new Error("Markdown components require a document context");
+  return context;
+}
+
+// Keep component types stable across parent rerenders. The document-scoped
+// context owns the mutable admission counter, so a workspace health poll can
+// rerender the conversation without remounting interactive diagram cards.
+const MARKDOWN_COMPONENTS: Components = {
+  a: function MarkdownLink({ href, children }) {
+    const { props } = useMarkdownComponentContext();
+    return (
       <SafeExternalLink href={href} onOpenExternalUrl={props.onOpenExternalUrl}>
         {children}
       </SafeExternalLink>
-    ),
-    pre: ({ children }) => {
-      const language = codeLanguage(children);
-      if (
-        props.allowMermaid
-        && language === "mermaid"
-        && diagramCount < MAX_MERMAID_DIAGRAMS_PER_MESSAGE
-      ) {
-        diagramCount += 1;
-        return (
-          <MermaidDiagram
-            source={reactNodeText(children).replace(/\n$/, "")}
-            contentId={`${props.contentId}-${diagramCount}`}
-          />
-        );
-      }
+    );
+  },
+  pre: function MarkdownPre({ children }) {
+    const context = useMarkdownComponentContext();
+    const { props } = context;
+    const language = codeLanguage(children);
+    if (
+      props.allowMermaid
+      && language === "mermaid"
+      && context.diagramCount < MAX_MERMAID_DIAGRAMS_PER_MESSAGE
+    ) {
+      context.diagramCount += 1;
       return (
-        <MarkdownCodeBlock
-          variant={props.codeBlockVariant}
-          ariaLabel={props.codeBlockAriaLabel}
-        >
-          {children}
-        </MarkdownCodeBlock>
+        <MermaidDiagram
+          source={reactNodeText(children).replace(/\n$/, "")}
+          contentId={`${props.contentId}-${context.diagramCount}`}
+        />
       );
-    },
-    code: ({ className, children }) => <code className={className}>{children}</code>,
-    table: ({ children }) => <div className="markdown-table-scroll"><table>{children}</table></div>,
-    input: ({ checked }) => <MarkdownTaskCheckbox checked={checked} />,
-  };
-}
+    }
+    return (
+      <MarkdownCodeBlock
+        variant={props.codeBlockVariant}
+        ariaLabel={props.codeBlockAriaLabel}
+      >
+        {children}
+      </MarkdownCodeBlock>
+    );
+  },
+  code: function MarkdownCode({ className, children }) {
+    return <code className={className}>{children}</code>;
+  },
+  table: function MarkdownTable({ children }) {
+    return <div className="markdown-table-scroll"><table>{children}</table></div>;
+  },
+  input: function MarkdownInput({ checked }) {
+    return <MarkdownTaskCheckbox checked={checked} />;
+  },
+};
 
 function MarkdownTaskCheckbox({ checked }: { readonly checked?: boolean }) {
   const { t } = useLocale();
