@@ -17,6 +17,56 @@ The active provider credential must be supplied through its normal environment o
 
 `--max-cost-usd` is a local admission and stop budget. It cannot enforce a provider-side billing cap for an already dispatched request. A single repetition is smoke evidence only; trend eligibility requires at least three provider-admitted repetitions with identical fixture, provider, model parameters, normalized config, tool schema, sandbox backend, OS, and toolchain identities.
 
+## Run an RFC-0053 orchestration candidate campaign
+
+O8c uses the frozen `orchestration-v1` corpus: 20 negative cases and 10 positive cases, with at
+least three homogeneous repetitions per case. Verify that the committed corpus has not drifted:
+
+```bash
+node dev/evals/generate-orchestration-corpus.mjs --check
+```
+
+The candidate release owner must also prepare a route contract for the frozen binary. This is not
+ordinary user configuration and it must not be inferred from a model alias or evaluation result.
+The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
+tool/profile contract digest, Sigil commit, and build must all come from the same candidate build
+metadata. Placeholder values, an older build's digests, or a drifting alias do not qualify rollout
+evidence. The V1 file has these fields:
+
+```toml
+schema_version = 1
+provider_kind = "..."
+endpoint_family = "..."
+canonical_model_version = "..."
+routing_prompt_digest = "sha256:<64 lowercase hex>"
+planner_prompt_digest = "sha256:<64 lowercase hex>"
+system_prompt_digest = "sha256:<64 lowercase hex>"
+tool_profile_contract_digest = "sha256:<64 lowercase hex>"
+sigil_commit = "..."
+sigil_build = "..."
+```
+
+Run the complete candidate campaign explicitly:
+
+```bash
+scripts/run-evals.sh --model \
+  --config ~/.sigil/sigil.toml \
+  --case orchestration-v1 \
+  --repetitions 3 \
+  --max-cost-usd 5.00 \
+  --timeout-secs 3600 \
+  --output-dir .repo-local-dev/evals/orchestration-candidate \
+  --orchestration-route-contract .repo-local-dev/evals/route.toml
+```
+
+The cost shown above is an example local admission ceiling, not a provider-side billing cap; confirm
+the budget against the target route and model price before running it. A campaign cannot mix
+ordinary and orchestration fixtures. In addition to the common V3 artifacts, it writes
+`orchestration/results.jsonl`, `orchestration/manifest.json`, and `orchestration/summary.md`.
+Each exact route is classified independently as `qualified`, `insufficient_evidence`, `blocked`, or
+`stale`. Only a `qualified` report from the same candidate release can enter O8d; every other route
+remains `manual + explicit_request_only`.
+
 ## Committed cases
 
 - `small-doc-edit`: controlled documentation edit and verification.
@@ -69,3 +119,8 @@ scripts/run-evals.sh --deterministic
 ```
 
 Deterministic results prove local contracts; they must not be reported as real-model success rates.
+
+This entry point also checks the generated orchestration corpus for drift and runs the RFC-0053
+permission, whole-batch, reverse-completion, 429, cancel/restart, approval, integration-lane, and
+cleanup-inventory deterministic gates. It still does not replace a real-provider campaign or PTY
+product acceptance.

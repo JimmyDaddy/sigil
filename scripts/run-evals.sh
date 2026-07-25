@@ -7,6 +7,7 @@ Usage:
   scripts/run-evals.sh --deterministic [--output-dir DIR]
   scripts/run-evals.sh --model --config FILE --case ID [--case ID ...]
     --repetitions N --max-cost-usd USD [--timeout-secs N] [--output-dir DIR]
+    [--orchestration-route-contract FILE]
 
 Deterministic mode uses fake provider/tool plumbing only. Model mode is an explicit,
 cost-bounded provider-backed acceptance campaign and may perform network requests.
@@ -20,6 +21,8 @@ Options:
   --max-cost-usd N  Local admission budget; not a provider-side billing cap.
   --timeout-secs N  Campaign wall deadline (default: 300).
   --output-dir DIR  Directory for generated JSONL, summary, and retained artifacts.
+  --orchestration-route-contract FILE
+                     Exact RFC-0053 candidate route identity for orchestration fixtures.
   -h, --help        Show this help.
 USAGE
 }
@@ -30,6 +33,7 @@ config_path=""
 repetitions=""
 max_cost_usd=""
 timeout_secs="300"
+orchestration_route_contract=""
 cases=()
 
 while [[ $# -gt 0 ]]; do
@@ -77,6 +81,11 @@ while [[ $# -gt 0 ]]; do
       output_dir="$2"
       shift 2
       ;;
+    --orchestration-route-contract)
+      [[ $# -ge 2 ]] || { echo "missing value for --orchestration-route-contract" >&2; exit 2; }
+      orchestration_route_contract="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -110,7 +119,13 @@ case "${output_dir}" in
 esac
 
 if [[ "${mode}" == "deterministic" ]]; then
+  if [[ -n "${orchestration_route_contract}" ]]; then
+    echo "--orchestration-route-contract is only valid in model mode" >&2
+    exit 2
+  fi
   mkdir -p "${output_dir}"
+  node dev/evals/generate-orchestration-corpus.mjs --check
+  ./scripts/check-orchestration-deterministic.sh
   SIGIL_DETERMINISTIC_EVAL_REPORT_DIR="${output_dir}" \
     cargo test -p sigil-kernel eval_report_writes_deterministic_artifacts -- --nocapture
 else
@@ -123,6 +138,12 @@ else
     /*) ;;
     *) config_path="${repo_root}/${config_path}" ;;
   esac
+  if [[ -n "${orchestration_route_contract}" ]]; then
+    case "${orchestration_route_contract}" in
+      /*) ;;
+      *) orchestration_route_contract="${repo_root}/${orchestration_route_contract}" ;;
+    esac
+  fi
   model_args=(
     --config "${config_path}"
     model-eval
@@ -134,6 +155,9 @@ else
   for case_id in "${cases[@]}"; do
     model_args+=(--case "${case_id}")
   done
+  if [[ -n "${orchestration_route_contract}" ]]; then
+    model_args+=(--orchestration-route-contract "${orchestration_route_contract}")
+  fi
   if [[ -n "${SIGIL_BIN:-}" ]]; then
     "${SIGIL_BIN}" "${model_args[@]}"
   else
@@ -156,6 +180,25 @@ if [[ "${mode}" == "model" ]]; then
   fi
 fi
 
+if [[ -n "${orchestration_route_contract}" ]]; then
+  for artifact in results.jsonl summary.md manifest.json; do
+    if [[ ! -s "${output_dir}/orchestration/${artifact}" ]]; then
+      echo "orchestration eval did not produce non-empty ${artifact}" >&2
+      exit 1
+    fi
+  done
+  grep -q '"report_schema_version": 1' "${output_dir}/orchestration/manifest.json"
+  if grep -v '"report_schema_version":1' "${output_dir}/orchestration/results.jsonl" >/dev/null; then
+    echo "orchestration eval results contain a non-V1 record" >&2
+    exit 1
+  fi
+fi
+
 echo "wrote ${output_dir}/results.jsonl"
 echo "wrote ${output_dir}/summary.md"
 echo "wrote ${output_dir}/manifest.json"
+if [[ -n "${orchestration_route_contract}" ]]; then
+  echo "wrote ${output_dir}/orchestration/results.jsonl"
+  echo "wrote ${output_dir}/orchestration/summary.md"
+  echo "wrote ${output_dir}/orchestration/manifest.json"
+fi

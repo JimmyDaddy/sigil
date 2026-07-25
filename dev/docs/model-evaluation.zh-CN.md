@@ -17,6 +17,54 @@ active provider 的 credential 必须通过正常环境变量或 secret source �
 
 `--max-cost-usd` 只是本地准入与停止预算，不能对已经发出的请求形成 provider-side billing cap。单次 repetition 只属于 smoke evidence；只有至少三次 provider-admitted repetition 且 fixture、provider、模型参数、归一化配置、tool schema、sandbox backend、OS 与 toolchain identity 全部一致时，才能进入 trend。
 
+## 执行 RFC-0053 orchestration 候选评测
+
+O8c 使用冻结的 `orchestration-v1` corpus：20 个 negative case、10 个 positive case，每个 case
+至少 3 次同质 repetition。执行前先确认 committed corpus 未漂移：
+
+```bash
+node dev/evals/generate-orchestration-corpus.mjs --check
+```
+
+候选 release owner 还必须为冻结 binary 准备一个 route contract。它不是普通配置，也不能从
+model alias 或评测结果反推；其中 provider kind、endpoint family、canonical model version、
+routing/planner/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
+同一候选构建的发布元数据。占位值、旧 build 的 digest 或可漂移 alias 会让报告失去 rollout
+资格。文件使用以下 V1 字段：
+
+```toml
+schema_version = 1
+provider_kind = "..."
+endpoint_family = "..."
+canonical_model_version = "..."
+routing_prompt_digest = "sha256:<64 lowercase hex>"
+planner_prompt_digest = "sha256:<64 lowercase hex>"
+system_prompt_digest = "sha256:<64 lowercase hex>"
+tool_profile_contract_digest = "sha256:<64 lowercase hex>"
+sigil_commit = "..."
+sigil_build = "..."
+```
+
+然后显式运行完整候选 campaign：
+
+```bash
+scripts/run-evals.sh --model \
+  --config ~/.sigil/sigil.toml \
+  --case orchestration-v1 \
+  --repetitions 3 \
+  --max-cost-usd 5.00 \
+  --timeout-secs 3600 \
+  --output-dir .repo-local-dev/evals/orchestration-candidate \
+  --orchestration-route-contract .repo-local-dev/evals/route.toml
+```
+
+上面的成本只是示例性的本地准入上限，不是 provider 侧账单封顶；运行前应按目标 route 和模型
+价格重新确认。Campaign 不允许混合普通 fixture 与 orchestration fixture。除通用 V3 产物外，
+还会生成 `orchestration/results.jsonl`、`orchestration/manifest.json` 和
+`orchestration/summary.md`。每个 exact route 独立计算 `qualified`、`insufficient_evidence`、
+`blocked` 或 `stale`；只有同一候选 release 的 `qualified` report 才能进入 O8d，其他 route 继续
+保持 `manual + explicit_request_only`。
+
 ## 已提交案例
 
 - `small-doc-edit`：受控文档编辑与 verification。
@@ -69,3 +117,7 @@ scripts/run-evals.sh --deterministic
 ```
 
 Deterministic 结果只证明本地 contract，不能表述为真实模型成功率。
+
+该入口同时检查生成的 orchestration corpus 未漂移，并执行 RFC-0053 的 permission、whole-batch、
+reverse completion、429、cancel/restart、approval、integration lane 与 cleanup inventory
+deterministic gate；它仍不替代真实 provider campaign 或 PTY 产品验收。

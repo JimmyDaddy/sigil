@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol slice implemented，O8b application parity、O8c-O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness slice implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
 
 创建日期：2026-07-22
 
@@ -1739,6 +1739,24 @@ O8c：deterministic、real-model 与 chaos acceptance。
 6. gate 按 route fingerprint 独立计算。一个 route/model 的 report 不授权其他 provider、model、
    endpoint 或 prompt/config digest；未出现在候选 release qualified-route manifest 中的 route
    保持 `manual + explicit_request_only`，即使全局新安装默认已经切换。
+
+2026-07-25 已完成 O8c harness slice：
+
+- production `ApplicationRunServices` campaign extension、V1 orchestration report/route gate、
+  exact route identity、zero-tolerance invariant observation 和 20 negative / 10 positive 的
+  committed generated corpus 已接线；`orchestration-v1` selector 只接受完整 30-case corpus，
+  不允许与普通 fixture 混跑。
+- `scripts/run-evals.sh` 可显式传递 bounded route contract，并校验通用 V3 与 orchestration V1
+  三件套产物；deterministic mode 同时执行 corpus drift check 与 permission、whole-batch、
+  reverse completion、429、cancel/restart、approval、lane CAS、partial recovery 和 cleanup
+  inventory gate。CI 对 corpus、wrapper 和 orchestration scripts 的变化会重新运行这些门禁。
+- 本地 fixture-provider PTY campaign 已通过 auto handoff、parallel progress、participant
+  approval、crash/continue、cancel、integration review/promotion 与唯一 final；Pause 的 exact
+  scope 与 resumable lifecycle 由 O8a worker E2E 覆盖。
+
+O8c 尚未完成：仍缺同一候选 release、目标 provider route 的 30 case × 3 provider-admitted
+真实模型报告及 `qualified` route gate。该运行会产生外部请求与费用，必须由 release owner
+显式选择 route、冻结 route contract、确认本地成本准入后执行；在此之前 O8d 继续被阻止。
 
 O8d：默认切换、迁移与回滚。
 

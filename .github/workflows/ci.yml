@@ -12,11 +12,14 @@ on:
       - "crates/**"
       - "rust-toolchain.toml"
       - "rustfmt.toml"
+      - "dev/evals/**"
       - "scripts/coverage.sh"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/check-orchestration-deterministic.sh"
+      - "scripts/run-evals.sh"
+      - "scripts/test-run-evals.py"
       - "scripts/tui-orchestration-pty-acceptance.py"
       - "scripts/test-tui-orchestration-pty-acceptance.py"
       - "scripts/generate-desktop-contract.sh"
@@ -39,11 +42,14 @@ on:
       - "crates/**"
       - "rust-toolchain.toml"
       - "rustfmt.toml"
+      - "dev/evals/**"
       - "scripts/coverage.sh"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/check-orchestration-deterministic.sh"
+      - "scripts/run-evals.sh"
+      - "scripts/test-run-evals.py"
       - "scripts/tui-orchestration-pty-acceptance.py"
       - "scripts/test-tui-orchestration-pty-acceptance.py"
       - "scripts/generate-desktop-contract.sh"
@@ -83,6 +89,7 @@ jobs:
       - name: Verify alpha dogfood runner contracts
         run: |
           python3 scripts/test-alpha-dogfood-campaign.py
+          python3 scripts/test-run-evals.py
           python3 scripts/test-tui-stateful-pty-acceptance.py
           python3 scripts/test-tui-orchestration-pty-acceptance.py
 
@@ -212,7 +219,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run deterministic orchestration acceptance
-        run: ./scripts/check-orchestration-deterministic.sh
+        run: |
+          node dev/evals/generate-orchestration-corpus.mjs --check
+          ./scripts/check-orchestration-deterministic.sh
 
       - name: Build Sigil for orchestration PTY acceptance
         run: cargo build --locked -p sigil
