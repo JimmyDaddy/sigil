@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness 与 typed routing microturn implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness、typed routing microturn 与 confirmed-pre-dispatch connect retry implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
 
 创建日期：2026-07-22
 
@@ -1806,10 +1806,27 @@ TLS handshake EOF 在任何可确认的 provider 输出前失败，route gate �
 上述独立 typed routing microturn，并把两个 routing schema 纳入 exact route digest。由于 prompt
 和 tool contract 已改变，`6432fc5728a6` 的报告只能作为失败诊断，不能用于新候选 qualification。
 
-O8c 尚未完成：仍需在连接失败的“已确认未派发”安全重试收口后，重建同一候选 release 与 route
-contract，重新通过 deterministic、PTY 和目标 provider route 的 30 case × 3 真实模型报告，
-最终得到 `qualified` route gate。运行仍须由 release owner 显式确认 route 与成本准入；在此之前
-O8d 继续被阻止。
+2026-07-26 已完成连接失败的“已确认未派发”安全重试：
+
+- kernel 新增 provider-neutral `ConnectFailedBeforeDispatch` rejection；只有 provider adapter
+  对 typed transport error 给出该证明，且当前 physical attempt 没有 generation、durable output
+  或 side effect 时，host 才允许复用同一冻结请求。
+- DeepSeek adapter 只把 reqwest `is_connect()` 的 DNS/TCP/TLS connect-phase error 映射为该
+  rejection；HTTP status、request timeout、已建立 stream 后的 EOF/error 和未分类 transport
+  failure 不获得透明重试资格。
+- 每次 retry 都先为前一 attempt 追加并同步
+  `ConfirmedNoModelConsumption + ConnectFailedBeforeDispatch` terminal，再以同一 logical run 和
+  request fingerprint 创建新的 physical-attempt Started；默认只重试两次，延迟固定为
+  100ms/250ms。terminal append、notice presenter 或 cancellation 失败都不会继续 dispatch。
+- queue recovery 与 Task retry proof 只接受有序、同 provider/model/purpose/request fingerprint
+  的 connect-retry predecessor chain；任一 predecessor 无 terminal、发生 overlap、携带 output/
+  effect、改变冻结身份或不是该 rejection 时 fail closed 为 stale/non-retryable。最终 effective
+  attempt 仍决定 Delivered/Rejected/Stale 或 429 retry proof。
+
+O8c 尚未完成：仍需从包含 typed routing microturn 和上述 retry contract 的新 HEAD 重建同一候选
+release 与 route contract，重新通过 deterministic、PTY 和目标 provider route 的
+30 case × 3 真实模型报告，最终得到 `qualified` route gate。运行仍须由 release owner 显式确认
+route 与成本准入；在此之前 O8d 继续被阻止。
 
 O8d：默认切换、迁移与回滚。
 

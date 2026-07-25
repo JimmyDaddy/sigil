@@ -737,8 +737,8 @@ pub trait Provider: Send + Sync {
         crate::ImageInputCapability::Unsupported
     }
 
-    /// Classifies a provider-declared request rejection that is proven to have happened before
-    /// any model generation or side effect.
+    /// Classifies an adapter-proven request rejection or transport setup failure that happened
+    /// before any model generation or side effect.
     ///
     /// Providers must return `None` for generic HTTP statuses, free-form error messages, and
     /// compatible endpoints. A non-`None` value permits later recovery logic to reason about the
@@ -826,12 +826,15 @@ where
     }
 }
 
-/// A provider-specific rejection fact expressed without leaking provider error types into the
-/// kernel. Every variant denotes a request the provider proved was rejected before generation.
+/// A provider-adapter rejection fact expressed without leaking transport or provider error types
+/// into the kernel. Every variant proves that model generation could not have started.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderRequestRejection {
     ContextWindowExceeded,
+    /// The provider adapter proved that transport setup failed before any application request
+    /// bytes could be dispatched.
+    ConnectFailedBeforeDispatch,
     /// Provider-owned HTTP 429 or an already-active route cooldown rejected the request before
     /// model generation.
     RateLimited,

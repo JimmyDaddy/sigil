@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
@@ -17,6 +17,9 @@ use crate::{
 #[derive(Debug, thiserror::Error)]
 #[error("run cancellation requested before provider dispatch")]
 struct ProviderConnectCancelledBeforeDispatch;
+
+const MAX_PRE_DISPATCH_CONNECT_RETRIES: usize = 2;
+const PRE_DISPATCH_CONNECT_RETRY_DELAYS_MS: [u64; MAX_PRE_DISPATCH_CONNECT_RETRIES] = [100, 250];
 
 pub(super) struct ProviderTurnOutput {
     pub(super) assistant_text: String,
@@ -78,50 +81,54 @@ where
     if frozen_request.session_scope_id() != session.session_scope_id() {
         anyhow::bail!("frozen provider request belongs to a different session scope");
     }
-    let request = frozen_request.request().clone();
-    crate::validate_request_image_attachments(&request)?;
+    let request_template = frozen_request.request().clone();
+    crate::validate_request_image_attachments(&request_template)?;
     crate::validate_image_input_capability(
-        provider.image_input_capability(&request.model_name),
-        &request,
+        provider.image_input_capability(&request_template.model_name),
+        &request_template,
     )?;
-    let hosted_enabled = !request.hosted_tools.is_empty();
+    let hosted_enabled = !request_template.hosted_tools.is_empty();
     if hosted_enabled && hosted_processor.is_none() {
         return Err(crate::HostedTurnError::MissingProcessor.into());
     }
     if hosted_enabled
         && !provider
-            .hosted_web_search_capability(&request.model_name)
+            .hosted_web_search_capability(&request_template.model_name)
             .is_supported()
     {
         anyhow::bail!("provider model does not support hosted web search");
     }
-    for hosted_tool in &request.hosted_tools {
+    for hosted_tool in &request_template.hosted_tools {
         hosted_tool.validate()?;
     }
-    let hosted_context = crate::HostedFinalizationContext {
-        session_scope_id: session.session_scope_id().to_owned(),
-        provider_name: request.provider_name.clone(),
-        model_name: request.model_name.clone(),
-    };
-    let mut physical_attempt =
-        ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request).await?;
-    let mut generation_observed = false;
-    let result = collect_provider_turn_after_send_barrier(
-        provider,
-        session,
-        request,
-        previous_response_handle,
-        _total_tool_calls,
-        handler,
-        cancellation,
-        hosted_processor,
-        hosted_enabled,
-        hosted_context,
-        &mut physical_attempt,
-        &mut generation_observed,
-    )
-    .await;
-    let rejection = (!generation_observed && !physical_attempt.has_durable_output_or_side_effect())
+    let mut connect_retries = 0usize;
+    loop {
+        let request = request_template.clone();
+        let hosted_context = crate::HostedFinalizationContext {
+            session_scope_id: session.session_scope_id().to_owned(),
+            provider_name: request.provider_name.clone(),
+            model_name: request.model_name.clone(),
+        };
+        let mut physical_attempt =
+            ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request).await?;
+        let mut generation_observed = false;
+        let result = collect_provider_turn_after_send_barrier(
+            provider,
+            session,
+            request,
+            previous_response_handle,
+            _total_tool_calls,
+            handler,
+            cancellation,
+            hosted_processor,
+            hosted_enabled,
+            hosted_context,
+            &mut physical_attempt,
+            &mut generation_observed,
+        )
+        .await;
+        let rejection = (!generation_observed
+            && !physical_attempt.has_durable_output_or_side_effect())
         .then(|| {
             result
                 .as_ref()
@@ -129,35 +136,73 @@ where
                 .and_then(|error| provider.classify_pre_generation_rejection(error))
         })
         .flatten();
-    let outcome = match &result {
-        Ok(_) => ProviderPhysicalAttemptOutcome::Completed,
-        Err(error)
-            if error
-                .downcast_ref::<ProviderConnectCancelledBeforeDispatch>()
-                .is_some() =>
-        {
-            ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+        let outcome = match &result {
+            Ok(_) => ProviderPhysicalAttemptOutcome::Completed,
+            Err(error)
+                if error
+                    .downcast_ref::<ProviderConnectCancelledBeforeDispatch>()
+                    .is_some() =>
+            {
+                ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+            }
+            Err(_) if rejection.is_some() => {
+                ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+            }
+            Err(_) if physical_attempt.has_durable_output_or_side_effect() => {
+                ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
+            }
+            Err(_) if generation_observed => {
+                ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+            }
+            Err(_) => ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+        };
+        let terminal_result = physical_attempt.finish(session, outcome, rejection).await;
+        match (result, terminal_result) {
+            (Ok(output), Ok(())) => return Ok(output),
+            (Ok(_), Err(error)) => {
+                return Err(error.context("provider physical-attempt terminal append failed"));
+            }
+            (Err(_error), Ok(()))
+                if rejection
+                    == Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
+                    && connect_retries < MAX_PRE_DISPATCH_CONNECT_RETRIES =>
+            {
+                let delay =
+                    Duration::from_millis(PRE_DISPATCH_CONNECT_RETRY_DELAYS_MS[connect_retries]);
+                connect_retries = connect_retries.saturating_add(1);
+                handler.handle(RunEvent::Notice(format!(
+                    "provider connection failed before request dispatch; retrying physical attempt {connect_retries}/{MAX_PRE_DISPATCH_CONNECT_RETRIES} after {} ms",
+                    delay.as_millis()
+                )))?;
+                wait_for_pre_dispatch_connect_retry(delay, cancellation).await?;
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Err(error), Err(terminal_error)) => {
+                return Err(error.context(format!(
+                    "provider turn failed and physical-attempt terminal append also failed: {terminal_error:#}"
+                )));
+            }
         }
-        Err(_) if rejection.is_some() => {
-            ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
-        }
-        Err(_) if physical_attempt.has_durable_output_or_side_effect() => {
-            ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
-        }
-        Err(_) if generation_observed => {
-            ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
-        }
-        Err(_) => ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
-    };
-    let terminal_result = physical_attempt.finish(session, outcome, rejection).await;
-    match (result, terminal_result) {
-        (Ok(output), Ok(())) => Ok(output),
-        (Ok(_), Err(error)) => Err(error.context("provider physical-attempt terminal append failed")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(terminal_error)) => Err(error.context(format!(
-            "provider turn failed and physical-attempt terminal append also failed: {terminal_error:#}"
-        ))),
     }
+}
+
+async fn wait_for_pre_dispatch_connect_retry(
+    delay: Duration,
+    cancellation: Option<&crate::RunCancellationHandle>,
+) -> Result<()> {
+    match cancellation {
+        Some(cancellation) => {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    anyhow::bail!("run cancellation requested before provider connect retry");
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+        None => tokio::time::sleep(delay).await,
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

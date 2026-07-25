@@ -89,6 +89,122 @@ fn physical_attempt_projection_accepts_one_started_and_terminal() -> Result<()> 
 }
 
 #[test]
+fn physical_attempt_projection_resolves_confirmed_connect_retry_chain() -> Result<()> {
+    let first_started = started();
+    let first_start = direct_event(
+        DurableEventType::ProviderPhysicalAttemptStarted,
+        "event-start-1",
+        1,
+        serde_json::to_value(&first_started)?,
+        Some("event-start-1"),
+        None,
+    );
+    let mut first_terminal = terminal(ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption);
+    first_terminal.rejection = Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch);
+    let first_terminal = direct_event(
+        DurableEventType::ProviderPhysicalAttemptTerminal,
+        "event-terminal-1",
+        2,
+        serde_json::to_value(first_terminal)?,
+        Some("event-start-1"),
+        Some("event-start-1"),
+    );
+
+    let mut second_started = started();
+    second_started.physical_attempt_id = "attempt-2".to_owned();
+    second_started.started_at_unix_ms = 3;
+    let second_start = direct_event(
+        DurableEventType::ProviderPhysicalAttemptStarted,
+        "event-start-2",
+        3,
+        serde_json::to_value(&second_started)?,
+        Some("event-start-2"),
+        None,
+    );
+    let mut second_terminal = terminal(ProviderPhysicalAttemptOutcome::Completed);
+    second_terminal.physical_attempt_id = second_started.physical_attempt_id.clone();
+    second_terminal.finished_at_unix_ms = 4;
+    let second_terminal = direct_event(
+        DurableEventType::ProviderPhysicalAttemptTerminal,
+        "event-terminal-2",
+        4,
+        serde_json::to_value(second_terminal)?,
+        Some("event-start-2"),
+        Some("event-start-2"),
+    );
+
+    let projection = ProviderPhysicalAttemptProjection::from_records(&[
+        SessionStreamRecord::Stored(first_start),
+        SessionStreamRecord::Stored(first_terminal),
+        SessionStreamRecord::Stored(second_start),
+        SessionStreamRecord::Stored(second_terminal),
+    ])?;
+    let attempts = projection.attempts_for_logical_run_id(first_started.logical_run_id.as_str());
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| attempt.entry.physical_attempt_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["attempt-1", "attempt-2"]
+    );
+    assert_eq!(
+        projection
+            .effective_attempt_for_logical_run_id(first_started.logical_run_id.as_str())?
+            .map(|attempt| attempt.entry.physical_attempt_id.as_str()),
+        Some("attempt-2")
+    );
+    Ok(())
+}
+
+#[test]
+fn physical_attempt_projection_rejects_unsafe_retry_predecessor() -> Result<()> {
+    let first_started = started();
+    let first_start = direct_event(
+        DurableEventType::ProviderPhysicalAttemptStarted,
+        "event-start-1",
+        1,
+        serde_json::to_value(&first_started)?,
+        Some("event-start-1"),
+        None,
+    );
+    let mut first_terminal = terminal(ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption);
+    first_terminal.rejection = Some(crate::ProviderRequestRejection::ContextWindowExceeded);
+    let first_terminal = direct_event(
+        DurableEventType::ProviderPhysicalAttemptTerminal,
+        "event-terminal-1",
+        2,
+        serde_json::to_value(first_terminal)?,
+        Some("event-start-1"),
+        Some("event-start-1"),
+    );
+    let mut second_started = started();
+    second_started.physical_attempt_id = "attempt-2".to_owned();
+    let second_start = direct_event(
+        DurableEventType::ProviderPhysicalAttemptStarted,
+        "event-start-2",
+        3,
+        serde_json::to_value(second_started)?,
+        Some("event-start-2"),
+        None,
+    );
+
+    let projection = ProviderPhysicalAttemptProjection::from_records(&[
+        SessionStreamRecord::Stored(first_start),
+        SessionStreamRecord::Stored(first_terminal),
+        SessionStreamRecord::Stored(second_start),
+    ])?;
+    let error = projection
+        .effective_attempt_for_logical_run_id(first_started.logical_run_id.as_str())
+        .expect_err("a non-connect rejection cannot authorize another physical attempt");
+    assert!(
+        error
+            .to_string()
+            .contains("was not a confirmed pre-dispatch connect failure")
+    );
+    Ok(())
+}
+
+#[test]
 fn physical_attempt_projection_rejects_second_terminal() -> Result<()> {
     let start = direct_event(
         DurableEventType::ProviderPhysicalAttemptStarted,

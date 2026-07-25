@@ -9,9 +9,9 @@ use tracing::debug;
 
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, provider_status_error, read_provider_error_body,
-    timeout_provider_request, timeout_provider_stream_next,
+    ProviderCapabilities, ProviderChunk, ProviderRequestRejection, ProviderStreamTimeoutState,
+    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -131,6 +131,18 @@ impl Provider for DeepSeekProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .filter(|error| error.is_connect())
+                .map(|_| ProviderRequestRejection::ConnectFailedBeforeDispatch)
+        })
     }
 
     async fn stream(

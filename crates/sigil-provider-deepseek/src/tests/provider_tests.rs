@@ -7,8 +7,8 @@ use anyhow::Result;
 use futures::StreamExt;
 use sigil_kernel::{
     ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderChunk,
-    ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
-    provider_rate_limit_from_error,
+    ProviderRequestRejection, ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory,
+    ToolPreviewCapability, ToolSpec, provider_rate_limit_from_error,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -320,6 +320,38 @@ async fn prefix_completion_rejects_unsupported_user_id_strategy() -> Result<()> 
     };
 
     assert!(error.to_string().contains("unsupported user_id strategy"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_classifies_only_transport_connect_failures_as_pre_dispatch() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let base_url = format!("http://{address}");
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: base_url.clone(),
+        beta_base_url: base_url.clone(),
+        anthropic_base_url: base_url,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+    })?;
+
+    let error = match provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await
+    {
+        Ok(_) => panic!("a refused connection should fail before a stream is established"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        provider.classify_pre_generation_rejection(&error),
+        Some(ProviderRequestRejection::ConnectFailedBeforeDispatch)
+    );
     Ok(())
 }
 
@@ -772,6 +804,7 @@ async fn provider_surfaces_rate_limited_status_without_a_second_send() -> Result
         Err(error) => error,
     };
     assert!(error.to_string().contains("deepseek rate limited"));
+    assert_eq!(provider.classify_pre_generation_rejection(&error), None);
     assert_eq!(
         provider_rate_limit_from_error(&error).and_then(|error| error.retry_after_ms()),
         Some(60_000)

@@ -7775,6 +7775,19 @@ struct ContextWindowErrorProvider;
 struct ContextWindowErrorAfterOutputProvider;
 struct ContextWindowErrorAfterGeneratedTextProvider;
 
+#[derive(Debug, thiserror::Error)]
+#[error("transport connect failed before request dispatch")]
+struct ConnectFailedBeforeDispatch;
+
+struct ConnectRetryProvider {
+    connect_failures: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+struct UnclassifiedPreStreamErrorProvider {
+    calls: Arc<AtomicUsize>,
+}
+
 #[async_trait]
 impl Provider for StreamErrorProvider {
     fn name(&self) -> &str {
@@ -7894,6 +7907,60 @@ impl Provider for ContextWindowErrorAfterGeneratedTextProvider {
             Ok(ProviderChunk::TextDelta("partial output".to_owned())),
             Err(ContextWindowRejectedBeforeGeneration.into()),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ConnectRetryProvider {
+    fn name(&self) -> &str {
+        "mock-connect-retry"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        error
+            .downcast_ref::<ConnectFailedBeforeDispatch>()
+            .is_some()
+            .then_some(ProviderRequestRejection::ConnectFailedBeforeDispatch)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index < self.connect_failures {
+            return Err(ConnectFailedBeforeDispatch.into());
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for UnclassifiedPreStreamErrorProvider {
+    fn name(&self) -> &str {
+        "mock-unclassified-pre-stream-error"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("transport outcome is uncertain")
     }
 }
 
@@ -8181,6 +8248,323 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
                     && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::Internal)
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_request() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        ConnectRetryProvider {
+            connect_failures: 2,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-connect-retry", "mock-model").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.final_text, "done");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::Notice(message) if message.contains("connection failed before request dispatch")))
+            .count(),
+        2
+    );
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let started = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str() =>
+            {
+                serde_json::from_value::<ProviderPhysicalAttemptStartedEntry>(event.payload.clone())
+                    .ok()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 3);
+    assert!(
+        started
+            .iter()
+            .all(|entry| entry.logical_run_id == started[0].logical_run_id)
+    );
+    assert!(
+        started
+            .iter()
+            .all(|entry| entry.request_material_fingerprint
+                == started[0].request_material_fingerprint)
+    );
+
+    let projection = session.provider_physical_attempt_projection()?;
+    let attempts = projection.attempts_for_logical_run_id(&started[0].logical_run_id);
+    assert_eq!(attempts.len(), 3);
+    for attempt in &attempts[..2] {
+        assert!(matches!(
+            attempt.terminal.as_ref(),
+            Some(ProviderPhysicalAttemptTerminalEntry {
+                outcome: ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption,
+                rejection: Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        attempts[2].terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::Completed,
+            rejection: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        projection
+            .effective_attempt_for_logical_run_id(&started[0].logical_run_id)?
+            .map(|attempt| attempt.entry.physical_attempt_id.as_str()),
+        Some(attempts[2].entry.physical_attempt_id.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_bounds_confirmed_pre_dispatch_connect_retries() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        ConnectRetryProvider {
+            connect_failures: usize::MAX,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-connect-retry", "mock-model").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("the third confirmed connect failure should exhaust the retry budget");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let projection = session.provider_physical_attempt_projection()?;
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let logical_run_id = records
+        .iter()
+        .find_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str() =>
+            {
+                serde_json::from_value::<ProviderPhysicalAttemptStartedEntry>(event.payload.clone())
+                    .ok()
+                    .map(|entry| entry.logical_run_id)
+            }
+            _ => None,
+        })
+        .expect("provider attempt should be durable");
+    let attempts = projection.attempts_for_logical_run_id(&logical_run_id);
+    assert_eq!(attempts.len(), 3);
+    assert!(attempts.iter().all(|attempt| matches!(
+        attempt.terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption,
+            rejection: Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
+            ..
+        })
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_cancellation_during_connect_backoff_starts_no_new_attempt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        ConnectRetryProvider {
+            connect_failures: usize::MAX,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-connect-retry", "mock-model").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = AgentRunInput::user("hi").with_cancellation(cancellation_owner.handle());
+    let run = agent.run_with_input(
+        &mut session,
+        input,
+        AgentRunOptions {
+            workspace_root: std::env::temp_dir(),
+            max_turns: Some(1),
+            tool_timeout_secs: 5,
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            traffic_partition_key: None,
+            interaction_mode: InteractionMode::Interactive,
+            permission_config: PermissionConfig::default(),
+            permission_context: crate::PermissionEvaluationContext::default(),
+            memory_config: MemoryConfig { enabled: false },
+            compaction_config: CompactionConfig::default(),
+        },
+        &mut handler,
+    );
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => panic!("run ended before entering connect backoff: {result:#?}"),
+        () = async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    assert!(cancellation_owner.request_cancel());
+
+    run.await
+        .expect_err("cancellation should stop before another physical attempt starts");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type
+                        == DurableEventType::ProviderPhysicalAttemptStarted.as_str()
+            ))
+            .count(),
+        1
+    );
+    let terminal = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+        {
+            serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(event.payload.clone())
+                .ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        terminal,
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption,
+            rejection: Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_never_retries_an_unclassified_pre_stream_transport_error() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        UnclassifiedPreStreamErrorProvider {
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session =
+        Session::new("mock-unclassified-pre-stream-error", "mock-model").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("an uncertain transport error must surface without retry");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let terminals = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+            {
+                serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(
+                    event.payload.clone(),
+                )
+                .ok()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        terminals.as_slice(),
+        [ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            rejection: None,
+            ..
+        }]
+    ));
     Ok(())
 }
 

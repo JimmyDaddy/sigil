@@ -94,7 +94,7 @@ pub struct ProviderPhysicalAttemptTerminalEntry {
     pub physical_attempt_id: ProviderPhysicalAttemptId,
     pub request_material_fingerprint: String,
     pub outcome: ProviderPhysicalAttemptOutcome,
-    /// An exact provider-declared pre-generation rejection, if one was proven.
+    /// An exact adapter-proven pre-generation rejection or pre-dispatch transport failure.
     pub rejection: Option<crate::ProviderRequestRejection>,
     pub provider_request_id: Option<String>,
     pub provider_response_id: Option<String>,
@@ -230,17 +230,80 @@ impl ProviderPhysicalAttemptProjection {
 
     /// Returns every attempt with one durable logical-run correlation id.
     ///
-    /// Callers that require a one-to-one handoff must reject zero or multiple matches rather than
-    /// guessing which provider request consumed a queued input.
+    /// Results are ordered by durable start sequence. Callers that accept a bounded safe-connect
+    /// retry chain should use [`Self::effective_attempt_for_logical_run_id`] instead of guessing
+    /// which physical attempt consumed a queued input.
     #[must_use]
     pub fn attempts_for_logical_run_id(
         &self,
         logical_run_id: &str,
     ) -> Vec<&ProviderPhysicalAttemptState> {
-        self.attempts
+        let mut attempts = self
+            .attempts
             .values()
             .filter(|attempt| attempt.entry.logical_run_id == logical_run_id)
-            .collect()
+            .collect::<Vec<_>>();
+        attempts.sort_by_key(|attempt| attempt.started_stream_sequence);
+        attempts
+    }
+
+    /// Resolves the effective physical attempt for one logical run.
+    ///
+    /// Multiple attempts are accepted only when every predecessor is an exact-material,
+    /// durably-terminal connect failure proven to have occurred before dispatch. The final
+    /// attempt remains authoritative even when it is unfinished or terminal with another outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chain changes provider/request identity, overlaps attempts, or
+    /// contains a predecessor that was not a confirmed safe-connect retry.
+    pub fn effective_attempt_for_logical_run_id(
+        &self,
+        logical_run_id: &str,
+    ) -> Result<Option<&ProviderPhysicalAttemptState>> {
+        let attempts = self.attempts_for_logical_run_id(logical_run_id);
+        let Some((effective, predecessors)) = attempts.split_last() else {
+            return Ok(None);
+        };
+        let first = attempts[0];
+        for attempt in &attempts[1..] {
+            if attempt.entry.purpose != first.entry.purpose
+                || attempt.entry.request_material_fingerprint
+                    != first.entry.request_material_fingerprint
+                || attempt.entry.provider_name != first.entry.provider_name
+                || attempt.entry.model_name != first.entry.model_name
+            {
+                bail!("provider physical-attempt retry chain changed frozen request identity");
+            }
+        }
+        for pair in attempts.windows(2) {
+            let [prior, next] = pair else {
+                unreachable!("physical-attempt windows always have two members");
+            };
+            let Some(prior_terminal_sequence) = prior.terminal_stream_sequence else {
+                bail!("provider physical-attempt retry predecessor has no durable terminal");
+            };
+            if prior_terminal_sequence >= next.started_stream_sequence {
+                bail!("provider physical-attempt retry chain overlaps durable lifecycles");
+            }
+        }
+        for predecessor in predecessors {
+            let terminal = predecessor
+                .terminal
+                .as_ref()
+                .context("provider physical-attempt retry predecessor has no terminal")?;
+            if terminal.outcome != ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+                || terminal.rejection
+                    != Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
+                || !terminal.durable_output_event_ids.is_empty()
+                || !terminal.durable_side_effect_event_ids.is_empty()
+            {
+                bail!(
+                    "provider physical-attempt retry predecessor was not a confirmed pre-dispatch connect failure"
+                );
+            }
+        }
+        Ok(Some(effective))
     }
 
     /// Returns every physical attempt that was sent but has no durable terminal.

@@ -28,10 +28,10 @@ use sigil_kernel::{
     IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
     IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
     MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ReasoningStreamSupport, RootConfig,
-    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact,
-    TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ProviderRequestRejection,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
+    SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
     TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose,
@@ -170,6 +170,14 @@ struct ParallelWorktreeWriteProvider {
 struct RateLimitedTaskChildProvider {
     starts: Arc<AtomicUsize>,
     rate_limits_remaining: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("task child connect failed before dispatch")]
+struct TaskChildConnectFailedBeforeDispatch;
+
+struct ConnectThenRateLimitedTaskChildProvider {
+    starts: Arc<AtomicUsize>,
 }
 
 struct OutputThenRateLimitedTaskChildProvider;
@@ -425,6 +433,38 @@ impl Provider for RateLimitedTaskChildProvider {
             Ok(ProviderChunk::TextDelta("provider recovered".to_owned())),
             Ok(ProviderChunk::Done),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ConnectThenRateLimitedTaskChildProvider {
+    fn name(&self) -> &str {
+        "connect-then-rate-limited-task-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        error
+            .downcast_ref::<TaskChildConnectFailedBeforeDispatch>()
+            .is_some()
+            .then_some(ProviderRequestRejection::ConnectFailedBeforeDispatch)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.starts.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            return Err(TaskChildConnectFailedBeforeDispatch.into());
+        }
+        Err(ProviderRateLimitError::new(anyhow!("test provider rate limited"), Some("60")).into())
     }
 }
 
@@ -4307,6 +4347,92 @@ async fn synthesis_rate_limit_preserves_zero_consumption_retry_proof() -> Result
             ))
     );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_rate_limit_retry_proof_survives_a_confirmed_connect_retry_prefix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(ConnectThenRateLimitedTaskChildProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let attempt_id = participant_attempt_id_for("read_connect_then_rate_limit")?;
+    let child_session_ref = participant_session_ref_for("read_connect_then_rate_limit")?;
+    let request = TaskChildSessionRunRequest {
+        task: sigil_kernel::SequentialTaskRequest {
+            task_id: TaskId::new("task_connect_then_rate_limit")?,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "retain a safe rate-limit retry proof after connect retry".to_owned(),
+        },
+        plan_version: 1,
+        step: step("read_connect_then_rate_limit")?,
+        attempt_id: attempt_id.clone(),
+        child_session_ref: child_session_ref.clone(),
+        child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+            "inspect after a transient connect failure",
+        )])
+        .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+        options: run_options(temp.path().to_path_buf()),
+        isolated_base_snapshot_id: None,
+    };
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", parent_store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_child_session(&mut session, request, &mut handler, &mut approval)
+        .await
+        .expect_err("the final rate-limit attempt should remain retryable");
+
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert!(
+        error
+            .downcast_ref::<TaskParticipantRetryError>()
+            .is_some_and(|retry| matches!(
+                retry.proof(),
+                TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
+                    zero_output: true,
+                    zero_tool: true,
+                    zero_effect: true,
+                    ..
+                }
+            ))
+    );
+    let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
+    let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
+    let projection = child.provider_physical_attempt_projection()?;
+    let attempts =
+        projection.attempts_for_logical_run_id(&task_participant_logical_run_id(&attempt_id));
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0]
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.rejection),
+        Some(ProviderRequestRejection::ConnectFailedBeforeDispatch)
+    );
+    assert_eq!(
+        attempts[1]
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.rejection),
+        Some(ProviderRequestRejection::RateLimited)
+    );
     Ok(())
 }
 

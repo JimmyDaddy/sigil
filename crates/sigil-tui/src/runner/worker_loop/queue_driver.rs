@@ -1216,17 +1216,23 @@ pub(in crate::runner) fn classify_promoted_queued_conversation(
                 queue_id.as_str()
             )
         })?;
-    let attempts = physical_attempts.attempts_for_logical_run_id(&promotion.dispatch_run_id);
-    let [attempt] = attempts.as_slice() else {
-        return Ok(match attempts.len() {
-            0 => QueuedConversationTerminalClassification::Rejected {
+    let attempt = match physical_attempts
+        .effective_attempt_for_logical_run_id(&promotion.dispatch_run_id)
+    {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => {
+            return Ok(QueuedConversationTerminalClassification::Rejected {
                 reason: "queued promotion was not followed by a provider physical attempt"
                     .to_owned(),
-            },
-            _ => QueuedConversationTerminalClassification::Stale {
-                reason: "queued promotion has multiple provider physical attempts".to_owned(),
-            },
-        });
+            });
+        }
+        Err(error) => {
+            return Ok(QueuedConversationTerminalClassification::Stale {
+                reason: format!(
+                    "queued promotion has an invalid provider physical-attempt retry chain: {error}"
+                ),
+            });
+        }
     };
     let Some(terminal) = attempt.terminal.as_ref() else {
         return Ok(QueuedConversationTerminalClassification::Stale {

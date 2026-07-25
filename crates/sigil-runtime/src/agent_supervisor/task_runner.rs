@@ -1029,8 +1029,8 @@ impl AgentSupervisorTaskChildRunner {
             return error;
         };
         let logical_run_id = task_participant_logical_run_id(attempt_id);
-        let attempts = projection.attempts_for_logical_run_id(&logical_run_id);
-        let [attempt] = attempts.as_slice() else {
+        let Ok(Some(attempt)) = projection.effective_attempt_for_logical_run_id(&logical_run_id)
+        else {
             return error;
         };
         let Some(terminal) = attempt.terminal.as_ref() else {

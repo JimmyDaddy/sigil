@@ -3,7 +3,7 @@ use sigil_kernel::{
     DurableAuditRecord, DurableAuditWriter, DurableEventType,
     PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptPurpose, ProviderPhysicalAttemptStartedEntry,
-    ProviderPhysicalAttemptTerminalEntry,
+    ProviderPhysicalAttemptTerminalEntry, ProviderRequestRejection,
 };
 
 use super::*;
@@ -16,11 +16,29 @@ fn append_queue_physical_attempt(
     request_material_fingerprint: &str,
     outcome: Option<ProviderPhysicalAttemptOutcome>,
 ) -> Result<()> {
-    let physical_attempt_id = "queue-provider-attempt-1";
-    let started_event_id = "queue-provider-attempt-start";
+    append_queue_physical_attempt_named(
+        store,
+        logical_run_id,
+        request_material_fingerprint,
+        "1",
+        outcome,
+        None,
+    )
+}
+
+fn append_queue_physical_attempt_named(
+    store: &JsonlSessionStore,
+    logical_run_id: &str,
+    request_material_fingerprint: &str,
+    attempt_suffix: &str,
+    outcome: Option<ProviderPhysicalAttemptOutcome>,
+    rejection: Option<ProviderRequestRejection>,
+) -> Result<()> {
+    let physical_attempt_id = format!("queue-provider-attempt-{attempt_suffix}");
+    let started_event_id = format!("queue-provider-attempt-start-{attempt_suffix}");
     let started = ProviderPhysicalAttemptStartedEntry {
         schema_version: PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION,
-        physical_attempt_id: physical_attempt_id.to_owned(),
+        physical_attempt_id: physical_attempt_id.clone(),
         logical_run_id: logical_run_id.to_owned(),
         purpose: ProviderPhysicalAttemptPurpose::ConversationGeneration,
         request_material_fingerprint: request_material_fingerprint.to_owned(),
@@ -31,19 +49,19 @@ fn append_queue_physical_attempt(
     let started_record = DurableAuditRecord::new(
         DurableEventType::ProviderPhysicalAttemptStarted,
         serde_json::to_value(started)?,
-        physical_attempt_id,
+        physical_attempt_id.clone(),
         Some(started_event_id.to_owned()),
     )?
-    .with_event_id(started_event_id)?;
+    .with_event_id(started_event_id.clone())?;
     store.append_and_sync(started_record)?;
 
     if let Some(outcome) = outcome {
         let terminal = ProviderPhysicalAttemptTerminalEntry {
             schema_version: PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION,
-            physical_attempt_id: physical_attempt_id.to_owned(),
+            physical_attempt_id: physical_attempt_id.clone(),
             request_material_fingerprint: request_material_fingerprint.to_owned(),
             outcome,
-            rejection: None,
+            rejection,
             provider_request_id: None,
             provider_response_id: None,
             durable_output_event_ids: Vec::new(),
@@ -56,7 +74,7 @@ fn append_queue_physical_attempt(
             physical_attempt_id,
             Some(started_event_id.to_owned()),
         )?
-        .with_event_id("queue-provider-attempt-terminal")?
+        .with_event_id(format!("queue-provider-attempt-terminal-{attempt_suffix}"))?
         .with_causation_id(started_event_id)?;
         store.append_and_sync(terminal_record)?;
     }
@@ -629,6 +647,79 @@ fn promoted_queue_recovery_classifies_physical_attempt_terminals_without_replay(
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn promoted_queue_recovery_uses_final_attempt_after_confirmed_connect_retry() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (_, dispatch_run_id, frozen_fingerprint) = committed_queued_chat_candidate(&temp, &store)?;
+    append_queue_physical_attempt_named(
+        &store,
+        &dispatch_run_id,
+        &frozen_fingerprint,
+        "1",
+        Some(ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption),
+        Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
+    )?;
+    append_queue_physical_attempt_named(
+        &store,
+        &dispatch_run_id,
+        &frozen_fingerprint,
+        "2",
+        Some(ProviderPhysicalAttemptOutcome::Completed),
+        None,
+    )?;
+
+    let restored = Session::load_from_store("test", "model", store)?;
+    let attempts = restored.provider_physical_attempt_projection()?;
+    assert!(matches!(
+        classify_promoted_queued_conversation(
+            &restored,
+            &attempts,
+            &ConversationInputQueueId::new("queue_1")?,
+        )
+        .map_err(anyhow::Error::msg)?,
+        QueuedConversationTerminalClassification::Delivered { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn promoted_queue_recovery_rejects_an_unsafe_multiple_attempt_chain_as_stale() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (_, dispatch_run_id, frozen_fingerprint) = committed_queued_chat_candidate(&temp, &store)?;
+    append_queue_physical_attempt_named(
+        &store,
+        &dispatch_run_id,
+        &frozen_fingerprint,
+        "1",
+        Some(ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption),
+        Some(ProviderRequestRejection::ContextWindowExceeded),
+    )?;
+    append_queue_physical_attempt_named(
+        &store,
+        &dispatch_run_id,
+        &frozen_fingerprint,
+        "2",
+        Some(ProviderPhysicalAttemptOutcome::Completed),
+        None,
+    )?;
+
+    let restored = Session::load_from_store("test", "model", store)?;
+    let attempts = restored.provider_physical_attempt_projection()?;
+    assert!(matches!(
+        classify_promoted_queued_conversation(
+            &restored,
+            &attempts,
+            &ConversationInputQueueId::new("queue_1")?,
+        )
+        .map_err(anyhow::Error::msg)?,
+        QueuedConversationTerminalClassification::Stale { reason }
+            if reason.contains("invalid provider physical-attempt retry chain")
+    ));
     Ok(())
 }
 
