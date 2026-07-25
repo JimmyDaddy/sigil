@@ -144,6 +144,23 @@ fn mcp_config_updates_fail_closed_for_missing_duplicate_and_ambiguous_inputs() -
             .to_string()
             .contains("failed to load")
     );
+    assert!(
+        execute_mcp_command(
+            &missing,
+            McpCommand::Add {
+                name: "filesystem".to_owned(),
+                url: None,
+                bearer_token_env_var: None,
+                inherit_env: Vec::new(),
+                required: false,
+                startup: McpStartupArg::Eager,
+                command: vec!["node".to_owned()],
+            },
+        )
+        .expect_err("updating a missing config must fail with setup guidance")
+        .to_string()
+        .contains("finish Quick Setup or pass --config first")
+    );
     assert!(!missing.exists());
 
     let config_path = temp.path().join("sigil.toml");

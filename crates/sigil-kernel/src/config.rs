@@ -2,14 +2,17 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    fs,
+    fs::{self, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use tempfile::NamedTempFile;
 use url::Url;
 
 use crate::{
@@ -1085,16 +1088,43 @@ impl RootConfig {
         Ok(config)
     }
 
-    /// Serializes the config to TOML and writes it to `path`, creating parent directories first.
+    /// Serializes the config and atomically replaces `path` under an exclusive sidecar lease.
+    ///
+    /// Existing symbolic-link config paths keep pointing at the same canonical target. Existing
+    /// target permissions are preserved; newly created Unix config files remain owner-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target cannot be resolved, another writer owns the lease, TOML
+    /// serialization fails, or the staged file cannot be durably published.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        let rendered =
-            toml::to_string_pretty(self).context("failed to serialize root config to toml")?;
-        fs::write(path, rendered)
-            .with_context(|| format!("failed to write config at {}", path.display()))
+        let target = canonical_config_write_target(path)?;
+        let _lease = acquire_config_write_lease(&target)?;
+        persist_root_config(&target, self)
+    }
+
+    /// Updates one existing config while holding the same lease used by [`Self::save`].
+    ///
+    /// The callback receives the raw persisted config, without applying environment overrides.
+    /// This prevents a read-modify-write operation from accidentally materializing process-local
+    /// overrides into the user's TOML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config is missing or invalid, another writer owns the lease, the
+    /// callback rejects the update, or the atomic publication fails.
+    pub fn update_file<T>(path: &Path, update: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let target = canonical_existing_config_target(path)?;
+        let _lease = acquire_config_write_lease(&target)?;
+        let raw = fs::read_to_string(&target)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        let mut config: Self =
+            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+        let mut validated = config.clone();
+        validated.apply_model_request_env_overrides()?;
+        let output = update(&mut config)?;
+        persist_root_config(&target, &config)?;
+        Ok(output)
     }
 
     /// Applies provider-neutral model request timeout environment overrides.
@@ -1114,6 +1144,120 @@ impl RootConfig {
         }
         Ok(())
     }
+}
+
+fn canonical_config_write_target(path: &Path) -> Result<PathBuf> {
+    let parent = config_parent(path);
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => canonical_existing_config_target(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let canonical_parent = parent
+                .canonicalize()
+                .with_context(|| format!("failed to resolve config parent {}", parent.display()))?;
+            let file_name = path
+                .file_name()
+                .with_context(|| format!("failed to write config at {}", path.display()))?;
+            Ok(canonical_parent.join(file_name))
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect config at {}", path.display()))
+        }
+    }
+}
+
+fn canonical_existing_config_target(path: &Path) -> Result<PathBuf> {
+    let target = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve config at {}", path.display()))?;
+    if !fs::metadata(&target)
+        .with_context(|| format!("failed to inspect config at {}", path.display()))?
+        .is_file()
+    {
+        anyhow::bail!("failed to write config at {}", path.display());
+    }
+    Ok(target)
+}
+
+fn config_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn acquire_config_write_lease(target: &Path) -> Result<File> {
+    let lease_path = path_with_suffix(target, ".lock");
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lease_path)
+        .with_context(|| format!("failed to open config lease {}", lease_path.display()))?;
+    FileExt::try_lock_exclusive(&lease).with_context(|| {
+        format!(
+            "config {} is already being updated by another process",
+            target.display()
+        )
+    })?;
+    Ok(lease)
+}
+
+fn persist_root_config(target: &Path, config: &RootConfig) -> Result<()> {
+    let rendered =
+        toml::to_string_pretty(config).context("failed to serialize root config to toml")?;
+    let parent = config_parent(target);
+    let existing_permissions = fs::metadata(target)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.permissions());
+    let mut staged = NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create staged config in {}", parent.display()))?;
+    staged
+        .as_file_mut()
+        .write_all(rendered.as_bytes())
+        .with_context(|| format!("failed to write staged config for {}", target.display()))?;
+    if let Some(permissions) = existing_permissions {
+        staged
+            .as_file()
+            .set_permissions(permissions)
+            .with_context(|| {
+                format!(
+                    "failed to preserve config permissions for {}",
+                    target.display()
+                )
+            })?;
+    }
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("failed to sync staged config for {}", target.display()))?;
+    staged.persist(target).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to atomically replace config at {}: {}",
+            target.display(),
+            error.error
+        )
+    })?;
+    sync_config_parent(target)
+}
+
+#[cfg(unix)]
+fn sync_config_parent(path: &Path) -> Result<()> {
+    File::open(config_parent(path))
+        .and_then(|parent| parent.sync_all())
+        .with_context(|| format!("failed to sync config parent for {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_config_parent(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 fn read_positive_env_u64(name: &str) -> Result<Option<u64>> {

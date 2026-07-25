@@ -1510,6 +1510,7 @@ pub struct ProviderCapabilities {
 - 模态或侧栏审批区：展示工具预览、写操作 diff、允许/拒绝动作
 - 会话控制区：新会话、恢复会话、切换 workspace、查看错误详情
 - setup 模式：当没有可用配置时，TUI 内部直接承载首启配置流，而不是把用户赶回命令行手写配置；Provider 作为第一项可直接切换，最终的 `Trust folder, save and start` 同时表达当前启动目录的显式信任与配置保存，不再使用独立且默认关闭的信任开关阻塞启动
+- 用户配置的 setup、`/config` 和 `sigil mcp add/remove` 共用 kernel-owned 独占 sidecar lease 与同目录原子替换；MCP 读改写从读取、校验到发布全程持锁，进程崩溃不会留下半截 TOML，并发入口不能静默覆盖彼此。显式配置符号链接会保持链接身份并更新其 canonical regular-file target。
 - provider 视图：不仅展示当前 provider-visible context，还应承载 compaction preview 这类“提交前先解释后果”的上下文操作
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。

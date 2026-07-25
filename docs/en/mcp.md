@@ -18,7 +18,7 @@ sigil mcp get my-search
 sigil mcp remove filesystem
 ```
 
-Use `--inherit-env NAME` for each environment variable a stdio server needs, or `--bearer-token-env-var NAME` for a remote static bearer token. New entries use `approval_default = "ask"`, do not allow secrets, start eagerly, and remain optional unless `--required` is set. `list` intentionally omits commands, arguments, and credential sources. `get` shows the selected command or safe remote destination plus credential source names, but redacts command arguments and credential values. Both read commands support `--json`. Pass the global `--config PATH` before `mcp` to edit an explicit config.
+Use `--inherit-env NAME` for each environment variable a stdio server needs, or `--bearer-token-env-var NAME` for a remote static bearer token. New entries use `approval_default = "ask"`, do not allow secrets, start eagerly, and remain optional unless `--required` is set. `list` intentionally omits commands, arguments, and credential sources. `get` shows the selected command or safe remote destination plus credential source names, but redacts command arguments and credential values. Both read commands support `--json`. Pass the global `--config PATH` before `mcp` to edit an explicit config. CLI and TUI saves share one exclusive config lease and same-directory atomic replacement; a concurrent writer fails closed instead of silently losing either update.
 
 ## Minimal Config
 

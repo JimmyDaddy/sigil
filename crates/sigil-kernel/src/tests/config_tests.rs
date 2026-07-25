@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, env, path::Path, sync::Mutex, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env,
+    path::Path,
+    sync::{Mutex, mpsc},
+    time::Duration,
+};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform,
@@ -613,6 +619,179 @@ fn root_config_save_handles_paths_without_parent() {
 
     assert!(path.exists());
     std::fs::remove_file(path).expect("temporary config should clean up");
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    std::fs::remove_file(Path::new(&lock_path)).expect("temporary config lease should clean up");
+}
+
+#[test]
+fn root_config_update_file_holds_one_lease_across_read_modify_write() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "initial"
+"#,
+    )
+    .expect("minimal config should parse");
+    config.save(&path).expect("initial config should save");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first_path = path.clone();
+    let first = std::thread::spawn(move || {
+        RootConfig::update_file(&first_path, |config| {
+            config.agent.model = "first-writer".to_owned();
+            started_tx.send(()).expect("start signal should send");
+            release_rx.recv().expect("release signal should arrive");
+            Ok(())
+        })
+    });
+    started_rx.recv().expect("first writer should hold lease");
+
+    let error = RootConfig::update_file(&path, |config| {
+        config.agent.model = "second-writer".to_owned();
+        Ok(())
+    })
+    .expect_err("second writer must fail closed while the lease is held");
+    assert!(error.to_string().contains("already being updated"));
+
+    release_tx.send(()).expect("first writer should release");
+    first
+        .join()
+        .expect("first writer thread should join")
+        .expect("first writer should publish");
+    assert_eq!(
+        RootConfig::load(&path)
+            .expect("updated config should load")
+            .agent
+            .model,
+        "first-writer"
+    );
+}
+
+#[test]
+fn root_config_update_file_does_not_materialize_environment_overrides() {
+    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
+    let _clear = EnvScope::clear_model_request();
+    let _scope = EnvScope::set_many(&[(SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "13")]);
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "initial"
+
+[model_request]
+request_timeout_secs = 7
+"#,
+    )
+    .expect("config should write");
+
+    RootConfig::update_file(&path, |config| {
+        config.agent.model = "updated".to_owned();
+        Ok(())
+    })
+    .expect("config should update");
+
+    let raw = std::fs::read_to_string(&path).expect("updated config should read");
+    let persisted: RootConfig = toml::from_str(&raw).expect("updated config should parse");
+    assert_eq!(persisted.agent.model, "updated");
+    assert_eq!(persisted.model_request.request_timeout_secs, 7);
+}
+
+#[cfg(unix)]
+#[test]
+fn root_config_atomic_save_preserves_symlink_target_and_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let target = temp.path().join("target.toml");
+    let link = temp.path().join("sigil.toml");
+    let mut config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "initial"
+"#,
+    )
+    .expect("minimal config should parse");
+    config.save(&target).expect("target config should save");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+        .expect("target permissions should change");
+    symlink(&target, &link).expect("config symlink should create");
+
+    config.agent.model = "updated".to_owned();
+    config.save(&link).expect("symlinked config should save");
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("symlink metadata should load")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::metadata(&target)
+            .expect("target metadata should load")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+    assert_eq!(
+        RootConfig::load(&link)
+            .expect("symlinked config should load")
+            .agent
+            .model,
+        "updated"
+    );
+    let names = std::fs::read_dir(temp.path())
+        .expect("config directory should list")
+        .map(|entry| {
+            entry
+                .expect("directory entry should load")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(".tmp") && !name.starts_with("tmp"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn root_config_new_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "initial"
+"#,
+    )
+    .expect("minimal config should parse");
+
+    config.save(&path).expect("new config should save");
+
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("config metadata should load")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[test]
