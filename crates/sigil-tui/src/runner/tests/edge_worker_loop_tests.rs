@@ -664,6 +664,24 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
 }
 
 #[test]
+fn resolve_continue_task_rejects_an_exact_cancelled_task() -> Result<()> {
+    let mut session = Session::new("deepseek", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_cancelled")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "do not revive".to_owned(),
+        status: TaskRunStatus::Cancelled,
+        reason: None,
+    }))?;
+
+    let error = resolve_continue_task(&session, Some("task_cancelled".to_owned()))
+        .expect_err("cancelled task must not resume");
+
+    assert_eq!(error, "task task_cancelled is cancelled");
+    Ok(())
+}
+
+#[test]
 fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
     let task_id = TaskId::new("task_1")?;

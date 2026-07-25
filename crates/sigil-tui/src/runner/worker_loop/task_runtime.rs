@@ -162,8 +162,6 @@ pub(in crate::runner) fn spawn_task_continue(
             &mut session,
             TaskContinueOrchestration {
                 task_id,
-                parent_session_ref,
-                objective,
                 guidance,
                 guidance_promotion,
                 root_config,
@@ -303,8 +301,6 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
 
 pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     task_id: TaskId,
-    parent_session_ref: SessionRef,
-    objective: String,
     guidance: Option<String>,
     guidance_promotion: Option<TaskGuidancePromotedEntry>,
     root_config: RootConfig,
@@ -447,8 +443,6 @@ pub(in crate::runner) async fn continue_task_orchestration(
 ) -> std::result::Result<TaskRunStatus, String> {
     let TaskContinueOrchestration {
         task_id,
-        parent_session_ref,
-        objective,
         guidance,
         guidance_promotion,
         root_config,
@@ -460,72 +454,25 @@ pub(in crate::runner) async fn continue_task_orchestration(
         handler,
         cancellation_handle,
     } = request;
-    materialize_task_verification_config(
-        session,
-        handler,
-        &root_config,
-        &options.workspace_root,
-        &task_id,
-    )?;
-    let TaskRoleRuntime {
-        orchestrator,
-        planner_options,
-        executor_options,
-        subagent_read_options,
-        subagent_write_options,
-    } = build_task_role_runtime(
-        &root_config,
-        &options,
-        &base_registry,
-        agent_supervisor,
-        role_provider_builder,
-    )?;
-    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-    let task_request = SequentialTaskRequest {
-        task_id,
-        parent_session_ref,
-        objective,
-    };
-    let output = match (guidance, guidance_promotion) {
-        (Some(guidance), Some(promotion)) => {
-            orchestrator
-                .continue_run_with_guidance_review(
-                    session,
-                    task_request,
-                    planner_options,
-                    executor_options,
-                    subagent_read_options,
-                    subagent_write_options,
-                    root_config.task.max_plan_steps,
-                    guidance,
-                    promotion,
-                    handler,
-                    &mut approval_handler,
-                )
-                .await
-        }
-        (guidance, None) => {
-            orchestrator
-                .continue_run(
-                    session,
-                    task_request,
-                    executor_options,
-                    subagent_read_options,
-                    subagent_write_options,
-                    guidance,
-                    handler,
-                    &mut approval_handler,
-                )
-                .await
-        }
-        (None, Some(_)) => Err(anyhow::anyhow!(
-            "task guidance promotion is missing exact prompt material"
-        )),
-    };
-    output
-        .map(|output| output.status)
-        .map_err(|error| format!("{error:#}"))
+    sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
+        session,
+        sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
+            requested_task_id: Some(task_id),
+            guidance,
+            guidance_promotion,
+            root_config,
+            options,
+            base_registry,
+            agent_supervisor,
+            role_provider_builder,
+            handler,
+            cancellation_handle,
+        },
+        &mut approval_handler,
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))
 }
 
 pub(in crate::runner) async fn run_skill_child_orchestration(
@@ -864,23 +811,6 @@ pub(in crate::runner) fn format_mutation_artifact_delete_report(
         "mutation artifact deleted: {} status={status}",
         payload.artifact_id
     )
-}
-
-pub(in crate::runner) fn build_task_role_runtime(
-    root_config: &RootConfig,
-    options: &AgentRunOptions,
-    base_registry: &ToolRegistry,
-    agent_supervisor: sigil_runtime::AgentSupervisor,
-    role_provider_builder: &dyn TaskRoleProviderBuilder,
-) -> std::result::Result<TaskRoleRuntime, String> {
-    sigil_runtime::agent_supervisor::task_role_runtime::build_task_role_runtime(
-        root_config,
-        options,
-        base_registry,
-        agent_supervisor,
-        role_provider_builder,
-    )
-    .map_err(|error| format!("{error:#}"))
 }
 
 pub(in crate::runner) fn build_skill_child_role_runtime(
@@ -1777,42 +1707,15 @@ pub(in crate::runner) fn resolve_continue_task(
     session: &Session,
     requested_task_id: Option<String>,
 ) -> std::result::Result<(TaskId, String, String, bool), String> {
-    let projection = session.task_state_projection();
-    let task = match requested_task_id {
-        Some(value) => {
-            let task_id = TaskId::new(value.clone())
-                .map_err(|error| format!("invalid task id for continue: {error:#}"))?;
-            projection
-                .tasks
-                .get(&task_id)
-                .ok_or_else(|| format!("task {value} is not present in this session"))?
-        }
-        None => projection
-            .latest_unfinished_task()
-            .or_else(|| projection.latest_task())
-            .ok_or_else(|| "no task is available to continue".to_owned())?,
-    };
-    match task.status {
-        TaskRunStatus::Completed => {
-            return Err(format!(
-                "task {} is already completed",
-                task.task_id.as_str()
-            ));
-        }
-        TaskRunStatus::Cancelled => {
-            return Err(format!("task {} is cancelled", task.task_id.as_str()));
-        }
-        TaskRunStatus::Started
-        | TaskRunStatus::Running
-        | TaskRunStatus::Paused
-        | TaskRunStatus::Failed
-        | TaskRunStatus::Interrupted => {}
-    }
-    let needs_planning = task.latest_plan_version.is_none();
+    let task = sigil_runtime::agent_supervisor::task_execution::resolve_task_continuation(
+        session,
+        requested_task_id.as_deref(),
+    )
+    .map_err(|error| format!("{error:#}"))?;
     Ok((
         task.task_id.clone(),
         task.task_id.as_str().to_owned(),
-        task.objective.clone(),
-        needs_planning,
+        task.objective,
+        task.needs_planning,
     ))
 }
