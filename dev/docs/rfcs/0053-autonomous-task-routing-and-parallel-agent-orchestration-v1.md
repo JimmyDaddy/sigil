@@ -31,7 +31,7 @@ append-only task projection 和 task DAG。下列列表同时保留 RFC 建立�
 
 - RFC 建立时普通 chat 只有显式 `/task`；O2 已接入 structured task admission，剩余问题是
   HTTP/Desktop parity、默认 rollout 和真实 routing eval。
-- `[task].routing_policy` 已在 O1 加入兼容解析，并由 O2 接入 TUI 普通输入；`default_mode` 只保留 composer 偏好语义。尚未拥有 task executor 的 HTTP/Desktop application surface 继续强制 manual。
+- `[task].routing_policy` 已在 O1 加入兼容解析，并由 O2 接入 TUI 普通输入；`default_mode` 只保留 composer 偏好语义。Production HTTP/Desktop 已附加 foreground task executor，但完整 Task control/recovery parity 尚未完成，兼容默认值继续保持 manual。
 - `multi_agent_mode = "explicit_request_only"` 是默认值，`spawn_agent` 描述明确禁止因任务复杂而主动委派。
 - O1 之前 `multi_agent_mode` 只停留在模型提示层；当前 runtime spawn admission 已在 provider、budget 和 thread 创建前执行硬检查。
 - ordinary chat 的显式 delegation hard gate 在 kernel 有类型和测试，但 TUI 生产输入没有稳定绑定。
@@ -992,7 +992,7 @@ allow_write_subagents = true
   revalidation 必须在默认切换前完成。
 - O1c 已落地：proactive Explore 基于冻结 registry 的实际 ToolSpec、network effect 和 `ToolMutationTracking` 证明；Custom/MCP 默认 unknown，已审计的本地只读 Custom tool 显式声明 `None`；detachable 分支复用同一证明。
 - O1d 已落地配置基础：新增 `routing_policy = "manual" | "auto"`，缺字段保持 `manual`；O2 已接入生产 consumer，兼容迁移 warning 和新安装默认值仍留待 O8。
-- O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。HTTP/Desktop application surface 在拥有同一 executor 和 synthesis contract 前强制 manual，不能创建无人执行的 Started task。
+- O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。后续 O8 runtime slice 已让 production HTTP/Desktop 附加同一 foreground executor/synthesis contract；完整 Task control/recovery parity 仍由 O8b 收口。
 - `/task` 已复用相同 admission service；planner prompt 改为 transient context，orchestrator 会复用既有 `TaskRun::Started` 和 accepted plan，不重复 admission 或 replan。
 - TUI 启动及 session switch 都执行本地 handoff reconciliation；Requested→Resolved→TaskRun 的 crash gap 不重放 provider。只有可证明未发起不确定 planner/participant 的 admission gap 才自动接管；stale Running step/lease 先记为 Interrupted、task 置 Paused，等待显式 continue。
 - direct chat 与 queued follow-up 的 task handoff 会在 `TaskHandoffRequested` / `Resolved` / `TaskRun::Started` 之前追加 `TaskRunCancellationScopeBound`，把 task 绑定到继承的 root run scope，避免 admission→binding 崩溃窗口。恢复只认可最新绑定 scope 上的 `Run` 或同 task `Task` cancellation；后续显式 continue 使用新 scope，因此旧取消不会永久污染 task。
@@ -1712,10 +1712,14 @@ O8b：typed public protocol 与 application parity。
 - renderer reducer 为 exact task/entity slot 保留单调 high-watermark，并在 run discard 时同步
   清理；OpenAPI snapshot/generated schema、HTTP、native Desktop、Tauri 与 renderer tests 共同
   形成 drift gate。
+- shared application runtime 与 production HTTP driver 已附加 foreground Task executor；Desktop
+  持有的 `sigil serve` child 复用该路径。显式 `routing_policy=auto` 的 uninterrupted run 可以
+  进入 planner/executor/synthesis，不再产生无人执行的 Started task。
 
-这不代表 O8b application parity 完成：HTTP/Desktop 尚未同时拥有与 TUI 等价的
-coordinator/executor/synthesis/recovery 产品流，继续强制 manual；本 slice 也不授权 O8d 默认
-切换。
+这不代表 O8b application parity 完成：HTTP/Desktop 尚未提供与 TUI 等价的 Task
+pause/continue、task-targeted guidance、integration review/accept 与 restart control。显式
+`auto` 在需要这些动作时会停在 blocked/paused terminal，因此这是必须收口的 interim gap；
+兼容默认值继续为 manual，本 slice 也不授权 O8d 默认切换。
 
 O8c：deterministic、real-model 与 chaos acceptance。
 
