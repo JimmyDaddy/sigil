@@ -89,6 +89,46 @@ fn request_context_v1_messages(request: &crate::CompletionRequest) -> Vec<&Model
         .collect()
 }
 
+#[test]
+fn transient_system_messages_precede_durable_user_messages() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("durable user turn"))?;
+    let transient_messages = [
+        ModelMessage::user("transient follow-up"),
+        ModelMessage::system("transient routing policy"),
+    ];
+
+    let request = session.build_request_with_transient_messages(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        &transient_messages,
+    )?;
+
+    let system_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some("transient routing policy"))
+        .expect("transient system message");
+    let durable_user_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some("durable user turn"))
+        .expect("durable user message");
+    let transient_user_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some("transient follow-up"))
+        .expect("transient user message");
+    assert!(system_index < durable_user_index);
+    assert!(durable_user_index < transient_user_index);
+    Ok(())
+}
+
 fn memory_snapshot_count(entries: &[SessionLogEntry]) -> usize {
     entries
         .iter()

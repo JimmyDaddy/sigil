@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, ConversationTurnRef, DisclosurePresentationError, DisclosurePresentationReceipt,
     EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, ReceiptStatus, Session,
@@ -13,6 +14,7 @@ use sigil_kernel::{
     TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
     TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
+    request_task_planning_tool_spec, task_routing_system_prompt_contract_material,
     write_file_with_mutation,
 };
 use tempfile::tempdir;
@@ -225,6 +227,18 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
         assert_eq!(digest.len(), 71);
         assert!(digest.starts_with("sha256:"));
     }
+    let mut expected_routing_material = b"sigil-orchestration-routing-prompt-v1\0".to_vec();
+    expected_routing_material.extend(
+        serde_json::to_vec(&serde_json::json!({
+            "system_prompt": task_routing_system_prompt_contract_material(),
+            "tool": request_task_planning_tool_spec(),
+        }))
+        .expect("serialize routing contract material"),
+    );
+    assert_eq!(
+        first.routing_prompt_digest,
+        format!("sha256:{:x}", Sha256::digest(expected_routing_material))
+    );
     assert!(first.sigil_build.ends_with(&first.sigil_commit));
 }
 

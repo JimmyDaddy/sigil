@@ -30,7 +30,8 @@ node dev/evals/generate-orchestration-corpus.mjs --check
 model alias 或评测结果反推；其中 provider kind、endpoint family、canonical model version、
 routing/planner/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
 同一候选构建的发布元数据。占位值、旧 build 的 digest 或可漂移 alias 会让报告失去 rollout
-资格。文件使用以下 V1 字段：
+资格。routing digest 同时绑定模型可见的语义路由 system prompt 与内部
+`request_task_planning` schema；host 不使用 prompt 关键词分类器。文件使用以下 V1 字段：
 
 ```toml
 schema_version = 1

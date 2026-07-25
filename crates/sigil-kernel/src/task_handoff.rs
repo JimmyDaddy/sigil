@@ -12,6 +12,28 @@ use crate::{
 pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
 pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 
+/// Stable model-visible policy for semantic conversation-to-task routing.
+///
+/// The host exposes bounded criteria and the handoff tool, but does not inspect prompt keywords or
+/// make the semantic routing decision itself.
+#[must_use]
+pub fn task_routing_system_prompt_contract_material() -> &'static str {
+    r#"You are the semantic task router for the current user turn.
+
+Before answering or using any normal tool, classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents.
+
+You MUST call request_task_planning as the only tool call in this turn, and produce no answer in this turn, when fulfilling the goal clearly requires one or more of:
+- coordinated changes across multiple files, components, or architectural layers;
+- independent work streams that benefit from parallel investigation or implementation;
+- a multi-stage implementation whose stages have dependencies;
+- long-running or multi-part verification;
+- high-risk execution that benefits from a durable reviewed plan.
+
+Do not inspect files, run commands, edit code, or start solving the task in the same turn when you request task planning. The host will start the durable planner and executor.
+
+Do NOT call request_task_planning for an explanation, one symbol lookup, one read-only query, or a small single-file edit. Handle those requests directly. When none of the routing criteria clearly applies, continue normally."#
+}
+
 /// Stable identity for one conversation-to-task handoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]

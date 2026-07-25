@@ -41,7 +41,7 @@ use crate::{
     ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
     ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
     VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    plan_text_hash,
+    plan_text_hash, task_routing_system_prompt_contract_material,
 };
 
 use super::{
@@ -4683,6 +4683,166 @@ async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(_))
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let prompt = "coordinate parser and formatter changes, then run the complete verification";
+    let logical_run_id = "semantic-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn: source_turn.clone(),
+                    routing_policy: TaskRoutingPolicy::Auto,
+                    task_handoff: Some(TaskPlanningHandoffBinding {
+                        handoff_id: TaskHandoffId::new("handoff-semantic-routing")?,
+                        task_id: TaskId::new("task-semantic-routing")?,
+                        source_turn,
+                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                        objective: prompt.to_owned(),
+                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        requested_at_ms: 42,
+                        decided_at_ms: 43,
+                    }),
+                },
+            )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let routing_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.as_deref() == Some(task_routing_system_prompt_contract_material())
+        })
+        .expect("automatic routing request should include the semantic routing policy");
+    let user_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some(prompt))
+        .expect("request should include the user turn");
+    assert!(routing_index < user_index);
+    assert!(
+        request
+            .tools
+            .iter()
+            .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let prompt = "rename one local helper";
+    let logical_run_id = "manual-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn,
+                    routing_policy: TaskRoutingPolicy::Manual,
+                    task_handoff: None,
+                },
+            )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].messages.iter().all(|message| {
+        message.content.as_deref() != Some(task_routing_system_prompt_contract_material())
+    }));
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .all(|tool| tool.name != REQUEST_TASK_PLANNING_TOOL_NAME)
+    );
     Ok(())
 }
 

@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::{
     ControlEntry, ConversationTurnRef, SessionLogEntry, TaskAdmissionReason, TaskAdmissionTrigger,
     TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskId,
+    TaskHandoffResolvedEntry, TaskId, task_routing_system_prompt_contract_material,
 };
 
 fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
@@ -44,6 +44,15 @@ fn handoff_identifiers_and_source_turns_validate_shape() {
         TaskAdmissionReason::ParallelResearch.as_str(),
         "parallel_research"
     );
+}
+
+#[test]
+fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
+    let prompt = task_routing_system_prompt_contract_material();
+    assert!(prompt.contains("classify the requested outcome by its meaning, not by keywords"));
+    assert!(prompt.contains("MUST call request_task_planning as the only tool call"));
+    assert!(prompt.contains("Do not inspect files, run commands, edit code"));
+    assert!(prompt.contains("small single-file edit"));
 }
 
 #[test]

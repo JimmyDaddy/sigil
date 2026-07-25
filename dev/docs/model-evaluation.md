@@ -42,7 +42,9 @@ target/release/sigil \
 The hidden release-owner command requires the complete frozen corpus, creates a new output file
 without replacing an existing candidate artifact, and currently admits only the pinned official
 DeepSeek V4 Flash route. It derives prompt and tool/profile digests from production material in the
-candidate binary. The embedded CLI/runtime commit identities must agree.
+candidate binary. The routing digest binds both the model-visible semantic routing system prompt and
+the internal `request_task_planning` schema; the host does not use a prompt keyword classifier. The
+embedded CLI/runtime commit identities must agree.
 
 The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
 tool/profile contract digest, Sigil commit, and build must all come from the same candidate build

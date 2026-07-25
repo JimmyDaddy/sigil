@@ -1345,9 +1345,18 @@ impl Session {
         if let Some(context_message) = context_message {
             safe_request_messages.push(context_message);
         }
-        safe_request_messages.extend(projected_messages);
         let mut exact_overlays = overlays.to_vec();
-        for transient in transient_messages {
+        let (system_transients, non_system_transients): (Vec<_>, Vec<_>) = transient_messages
+            .iter()
+            .partition(|message| message.role == crate::MessageRole::System);
+        for transient in system_transients {
+            let (safe_transient, exact_overlay) =
+                crate::project_message_for_persistence(transient.clone())?;
+            safe_request_messages.push(safe_transient);
+            exact_overlays.push(exact_overlay);
+        }
+        safe_request_messages.extend(projected_messages);
+        for transient in non_system_transients {
             let (safe_transient, exact_overlay) =
                 crate::project_message_for_persistence(transient.clone())?;
             safe_request_messages.push(safe_transient);

@@ -236,8 +236,10 @@ request_task_planning {
 - handoff 被接受后，同一 model response 中其他 tool calls 不执行，并记录 ignored reason。
 - agent loop 返回 typed `NextAction::StartDurableTask`，不写伪 final answer。
 
-模型 routing instruction 应明确 negative examples：简单问答、单文件小改、一次只读查询不应建 task。
-可靠性通过 model eval 约束，而不是 prompt keyword classifier。
+模型 routing instruction 是位于当前 user turn 之前的 transient system message，要求模型按语义
+先分类，并在满足 admission 条件时把 `request_task_planning` 作为该回合唯一 tool call；它还应
+明确 negative examples：简单问答、单文件小改、一次只读查询不应建 task。host 不扫描 prompt
+关键词，可靠性通过 route contract 绑定该 instruction 与 tool schema，并由 model eval 约束。
 
 ### 6.2 Durable handoff records
 

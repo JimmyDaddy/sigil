@@ -32,6 +32,7 @@ use crate::{
     task_handoff::{
         ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId,
         TaskPlanningHandoffBinding, request_task_planning_tool_spec,
+        task_routing_system_prompt_contract_material,
     },
     tool::{
         PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
@@ -1261,6 +1262,17 @@ where
             return Err(anyhow!(
                 "tool registry collides with reserved internal tool {REQUEST_TASK_PLANNING_TOOL_NAME}"
             ));
+        }
+        if task_handoff_binding.is_some() && initial_frozen_provider_request.is_some() {
+            return Err(anyhow!(
+                "automatic task routing cannot use a caller-frozen initial provider request"
+            ));
+        }
+        if task_handoff_binding.is_some() {
+            transient_context.insert(
+                0,
+                ModelMessage::system(task_routing_system_prompt_contract_material()),
+            );
         }
         if task_guidance_assessment.is_some()
             && tools.spec_for(TASK_GUIDANCE_APPLY_TOOL_NAME).is_some()

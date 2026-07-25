@@ -12,7 +12,7 @@ use sigil_kernel::{
     OrchestrationEvalCaseClass, RootConfig, ToolRegistry, ToolRegistryScope, ToolSpec,
     WorkspaceTrust, changeset_only_child_contract_prompt, request_task_planning_tool_spec,
     runtime_context_v1_system_prompt_contract_material, task_plan_update_tool_spec,
-    task_planner_prompt_contract_material,
+    task_planner_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 use sigil_provider_deepseek::{
     DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT, DEFAULT_DEEPSEEK_V4_FLASH_MODEL,
@@ -101,7 +101,10 @@ pub fn build_model_eval_orchestration_route_contract(
 
     let routing_prompt_digest = digest_value(
         b"sigil-orchestration-routing-prompt-v1\0",
-        &serde_json::to_value(request_task_planning_tool_spec())?,
+        &json!({
+            "system_prompt": task_routing_system_prompt_contract_material(),
+            "tool": request_task_planning_tool_spec(),
+        }),
     )?;
     let planner_prompt_digest = digest_bytes(
         b"sigil-orchestration-planner-prompt-v1\0",
