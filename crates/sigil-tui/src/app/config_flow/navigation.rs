@@ -37,7 +37,7 @@ pub(super) fn render_config_nav_lines(config_state: Option<&ConfigState>) -> Vec
     } else if state.selected_section == ConfigSection::Mcp {
         lines.push("MCP: Enter next server".to_owned());
         lines.push("MCP: Down -> footer activate/refresh".to_owned());
-        lines.push("MCP: edit servers in sigil.toml".to_owned());
+        lines.push("MCP: manage with `sigil mcp` or sigil.toml".to_owned());
     } else if state.selected_section == ConfigSection::Agents {
         lines.push("Agents: Up/Down select".to_owned());
         lines.push("Agents: PgUp/PgDn wrap".to_owned());

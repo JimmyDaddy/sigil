@@ -53,6 +53,20 @@ pub(super) fn check_mcp_servers(
                 .collect::<Vec<_>>();
             let static_fingerprint = sigil_mcp::mcp_transport_static_fingerprint(server)
                 .unwrap_or_else(|_| "invalid".to_owned());
+            let authorization = if remote.oauth.is_some() {
+                "oauth"
+            } else if remote.bearer_token_env_var.is_some() {
+                "bearer_env"
+            } else if remote
+                .http_headers
+                .keys()
+                .chain(remote.env_http_headers.keys())
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+            {
+                "header"
+            } else {
+                "none"
+            };
             report.push_with_remediation(
                 if missing_environment.is_empty() {
                     DoctorStatus::Ok
@@ -61,10 +75,16 @@ pub(super) fn check_mcp_servers(
                 },
                 format!("mcp:{}", server.name),
                 format!(
-                    "{} required={} origin=user_root transport=streamable_http destination={} state=offline_unprobed capabilities={} headers={} missing={} static_fingerprint={} live_fingerprint=activation_only",
+                    "{} required={} origin=user_root transport=streamable_http destination={} state=offline_unprobed authorization={} oauth={} oauth_credential=activation_only capabilities={} headers={} missing={} static_fingerprint={} live_fingerprint=activation_only",
                     server.startup.as_str(),
                     server.required,
                     safe_destination,
+                    authorization,
+                    if remote.oauth.is_some() {
+                        "configured"
+                    } else {
+                        "off"
+                    },
                     if remote.client_capabilities.is_empty() {
                         "none".to_owned()
                     } else {

@@ -328,18 +328,21 @@ impl AppState {
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(config_state) = self.config_state.as_mut() {
                     if config_state.selected_section == ConfigSection::Mcp {
-                        self.last_notice = Some("edit MCP servers in sigil.toml".to_owned());
+                        self.last_notice =
+                            Some("use `sigil mcp add` or edit sigil.toml".to_owned());
                     } else {
-                        self.last_notice = Some("MCP server editing uses sigil.toml".to_owned());
+                        self.last_notice = Some("MCP server add uses `sigil mcp add`".to_owned());
                     }
                 }
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(config_state) = self.config_state.as_mut() {
                     if config_state.selected_section == ConfigSection::Mcp {
-                        self.last_notice = Some("edit MCP servers in sigil.toml".to_owned());
+                        self.last_notice =
+                            Some("use `sigil mcp remove` or edit sigil.toml".to_owned());
                     } else {
-                        self.last_notice = Some("MCP server editing uses sigil.toml".to_owned());
+                        self.last_notice =
+                            Some("MCP server removal uses `sigil mcp remove`".to_owned());
                     }
                 }
             }

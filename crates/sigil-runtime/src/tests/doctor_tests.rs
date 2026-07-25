@@ -364,6 +364,57 @@ allow_secrets = false
 }
 
 #[test]
+fn doctor_reports_remote_mcp_oauth_configuration_without_probing_credentials() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+
+[[mcp_servers]]
+name = "remote-oauth"
+transport = "streamable_http"
+url = "https://mcp.example.com/private/path"
+startup = "lazy"
+
+[mcp_servers.oauth]
+client_id = "public-client-canary"
+scopes = ["mcp:private-canary"]
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.name == "mcp:remote-oauth")
+        .expect("remote OAuth check should exist");
+
+    assert_eq!(check.status, DoctorStatus::Ok);
+    assert!(
+        check
+            .message
+            .contains("destination=https://mcp.example.com/")
+    );
+    assert!(check.message.contains("state=offline_unprobed"));
+    assert!(check.message.contains("authorization=oauth"));
+    assert!(check.message.contains("oauth=configured"));
+    assert!(check.message.contains("oauth_credential=activation_only"));
+    assert!(!check.message.contains("public-client-canary"));
+    assert!(!check.message.contains("mcp:private-canary"));
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_plugin_hook_runtime_summary_with_trust_and_effects() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();

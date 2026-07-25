@@ -735,7 +735,9 @@ fn selected_row_and_line_classifier_helpers_cover_known_variants() {
     assert_eq!(selected_row_bg(Color::Blue), palette.surface_selection);
 
     assert!(config_line_is_meta("cfg: sigil.toml"));
-    assert!(config_line_is_meta("MCP: edit servers in sigil.toml"));
+    assert!(config_line_is_meta(
+        "MCP: manage with `sigil mcp` or sigil.toml"
+    ));
     assert!(!config_line_is_meta("Model: deepseek-v4-flash"));
     assert!(config_line_looks_like_field("> Model"));
     assert!(config_line_looks_like_field(" selected row"));

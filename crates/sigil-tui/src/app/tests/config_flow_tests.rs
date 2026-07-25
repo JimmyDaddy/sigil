@@ -1477,7 +1477,7 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("- Configured"));
     assert!(detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
-    assert!(detail.contains("i Add MCP servers in ~/.sigil/sigil.toml"));
+    assert!(detail.contains("i Use `sigil mcp add`"));
     assert!(detail.contains("controls: Tab section · Down actions"));
     assert!(detail.contains("mcp: no configured server to inspect"));
     assert!(!detail.contains("servers:"));
@@ -1486,7 +1486,7 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     let nav = app.config_nav_lines().join("\n");
     assert!(nav.contains("MCP: Enter next server"));
     assert!(nav.contains("MCP: Down -> footer activate/refresh"));
-    assert!(nav.contains("MCP: edit servers in sigil.toml"));
+    assert!(nav.contains("MCP: manage with `sigil mcp` or sigil.toml"));
     assert!(!nav.contains("Up/Down field"));
     assert!(!nav.contains("Enter edit/toggle"));
 }
@@ -3652,7 +3652,7 @@ fn config_verification_auto_run_persists_to_config() -> Result<()> {
 }
 
 #[test]
-fn config_mcp_server_creation_stays_config_file_only() -> Result<()> {
+fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     {
@@ -3665,7 +3665,10 @@ fn config_mcp_server_creation_stays_config_file_only() -> Result<()> {
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
+    assert_eq!(
+        app.last_notice(),
+        Some("use `sigil mcp add` or edit sigil.toml")
+    );
     let state = app
         .config_state
         .as_ref()
@@ -3674,8 +3677,8 @@ fn config_mcp_server_creation_stays_config_file_only() -> Result<()> {
 
     let detail = app.config_detail_lines().join("\n");
     assert!(detail.contains("No MCP servers configured"));
-    assert!(detail.contains("Add MCP servers in ~/.sigil/sigil.toml"));
-    assert!(detail.contains("Transport-specific fields are edited in the config file"));
+    assert!(detail.contains("Use `sigil mcp add`"));
+    assert!(detail.contains("advanced transport fields stay in config"));
     assert!(!detail.contains("Command"));
     assert!(!detail.contains("Arguments"));
     assert!(!detail.contains("args_csv:"));
@@ -4253,14 +4256,14 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("MCP server editing uses sigil.toml")
+        Some("MCP server add uses `sigil mcp add`")
     );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("MCP server editing uses sigil.toml")
+        Some("MCP server removal uses `sigil mcp remove`")
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
@@ -4794,13 +4797,13 @@ fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert_eq!(
         app.last_notice(),
-        Some("MCP server editing uses sigil.toml")
+        Some("MCP server add uses `sigil mcp add`")
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert_eq!(
         app.last_notice(),
-        Some("MCP server editing uses sigil.toml")
+        Some("MCP server removal uses `sigil mcp remove`")
     );
     Ok(())
 }
@@ -4815,12 +4818,21 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         .expect("config state should exist")
         .set_section(ConfigSection::Mcp);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
+    assert_eq!(
+        app.last_notice(),
+        Some("use `sigil mcp remove` or edit sigil.toml")
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
+    assert_eq!(
+        app.last_notice(),
+        Some("use `sigil mcp add` or edit sigil.toml")
+    );
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
+    assert_eq!(
+        app.last_notice(),
+        Some("use `sigil mcp remove` or edit sigil.toml")
+    );
 
     {
         let state = app

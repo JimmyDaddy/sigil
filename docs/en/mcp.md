@@ -76,6 +76,8 @@ OAuth requires HTTPS and an explicit **sign in** action. Eager or headless start
 
 OAuth can contact separate HTTPS authorization endpoints, all subject to the configured Network controls. Redirects and automatic retries are disabled. A `401` marks authentication stale but does not replay the request.
 
+`sigil mcp get NAME` and offline `/doctor` report whether OAuth is configured, but do not open the credential store or probe the server. `/config` owns the live credential state (`authentication required`, ready, stale, or failed) after activation.
+
 Remote sign-out tries revocation and never deletes the local credential implicitly. If revocation fails, the modal reports an error and keeps the credential. You may then retry or choose **clear local only**; that explicit action makes no remote-revocation claim. After a successful revocation—or when the server advertises no revocation endpoint—the modal enters **remote handled, local retained** and still lets you clear or keep the local credential.
 
 ## Process Environment And Credentials

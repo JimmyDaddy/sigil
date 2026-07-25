@@ -9,7 +9,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     if config_state.draft.mcp_servers.is_empty() {
         lines.push(render_config_hint_row("No MCP servers configured"));
         lines.push(render_config_hint_row(
-            "Add MCP servers in ~/.sigil/sigil.toml or your explicit config file",
+            "Use `sigil mcp add`, or edit ~/.sigil/sigil.toml / your explicit config file",
         ));
     } else {
         lines.push(render_config_value_row(config_state, ConfigField::McpName));
@@ -28,7 +28,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push(String::new());
     lines.push("Enter next server · Down actions · footer activate/refresh".to_owned());
     lines.push(render_config_hint_row(
-        "Transport-specific fields are edited in the config file; this view never shows resolved secret values",
+        "Manage entries with `sigil mcp add/remove`; advanced transport fields stay in config, and resolved secrets never appear here",
     ));
     lines.extend(render_config_selection_details(config_state));
 }
