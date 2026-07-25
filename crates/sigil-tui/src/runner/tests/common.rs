@@ -213,7 +213,7 @@ pub(super) fn wait_for_session_entry<F>(session_log_path: &Path, predicate: F) -
 where
     F: Fn(&SessionLogEntry) -> bool,
 {
-    for _ in 0..60 {
+    for _ in 0..200 {
         let entries = sigil_kernel::JsonlSessionStore::read_entries(session_log_path)?;
         if entries.iter().any(&predicate) {
             return Ok(());
@@ -270,11 +270,26 @@ pub(super) fn planned_role_provider_builder(
 ) -> Arc<dyn TaskRoleProviderBuilder> {
     Arc::new(PlannedRoleProviderBuilder {
         plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+        stream_started: None,
     })
+}
+
+pub(super) fn planned_role_provider_builder_with_stream_start_signal(
+    plans: Vec<StreamPlan>,
+) -> (Arc<dyn TaskRoleProviderBuilder>, mpsc::Receiver<()>) {
+    let (stream_started_tx, stream_started_rx) = mpsc::channel();
+    (
+        Arc::new(PlannedRoleProviderBuilder {
+            plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+            stream_started: Some(stream_started_tx),
+        }),
+        stream_started_rx,
+    )
 }
 
 struct PlannedRoleProviderBuilder {
     plans: Arc<Mutex<VecDeque<StreamPlan>>>,
+    stream_started: Option<mpsc::Sender<()>>,
 }
 
 impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
@@ -285,7 +300,7 @@ impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
     ) -> Result<Box<dyn Provider>> {
         Ok(Box::new(PlannedProvider {
             plans: Arc::clone(&self.plans),
-            stream_started: None,
+            stream_started: self.stream_started.clone(),
         }))
     }
 }

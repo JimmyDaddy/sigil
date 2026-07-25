@@ -2,7 +2,9 @@ use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentProfileId, AgentProfileTrustEntry, AgentTrustState, ControlEntry,
     ConversationInputQueueId, JsonlSessionStore, ProviderCapabilities, ReasoningStreamSupport,
-    SecretString, Session, SessionLogEntry, ToolRegistry,
+    RunCancellationTarget, SecretString, Session, SessionLogEntry, SessionRef, TaskId,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskStepSpec, ToolRegistry,
 };
 use std::sync::Arc;
 
@@ -13,6 +15,7 @@ use super::{
             SessionTransitionKind, WorkerCommandDomain, WorkerLoopState,
             changed_task_completion_progress, changed_task_provider_route_diagnostics,
             classify_worker_command, task_completion_progress_for_active_task, transition_session,
+            validate_task_pause_request,
         },
     },
     common::{PlannedProvider, test_root_config},
@@ -86,6 +89,84 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     );
     assert!(state.agent.last_task_completion_progress.batch.is_none());
     assert!(state.processed_worker_command_ids.is_empty());
+    Ok(())
+}
+
+#[test]
+fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<()> {
+    let task_id = TaskId::new("task_1")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "pause safely".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: TaskStepId::new("step_1")?,
+                title: "Inspect".to_owned(),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: None,
+        })),
+    ];
+    let target = RunCancellationTarget::Task {
+        task_id: task_id.as_str().to_owned(),
+    };
+    let request = TaskPauseRequest::new(task_id, 2);
+    validate_task_pause_request(&request, &target, "scope_1", &entries)
+        .expect("exact active task plan should pause");
+
+    let stale = TaskPauseRequest::new(request.task_id.clone(), 1);
+    assert!(
+        validate_task_pause_request(&stale, &target, "scope_1", &entries)
+            .expect_err("stale plan must fail")
+            .contains("plan changed")
+    );
+    let wrong_target = RunCancellationTarget::Task {
+        task_id: "task_2".to_owned(),
+    };
+    assert!(
+        validate_task_pause_request(&request, &wrong_target, "scope_1", &entries)
+            .expect_err("wrong active task must fail")
+            .contains("another task")
+    );
+    let mut root_handoff_entries = entries.clone();
+    root_handoff_entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskRunCancellationScopeBound(
+            sigil_kernel::TaskRunCancellationScopeBoundEntry {
+                task_id: request.task_id.clone(),
+                run_scope_id: "scope_1".to_owned(),
+            },
+        ),
+    ));
+    validate_task_pause_request(
+        &request,
+        &RunCancellationTarget::Run,
+        "scope_1",
+        &root_handoff_entries,
+    )
+    .expect("automatic handoff task should inherit the active root cancellation scope");
+    assert!(
+        validate_task_pause_request(
+            &request,
+            &RunCancellationTarget::Run,
+            "scope_2",
+            &root_handoff_entries,
+        )
+        .expect_err("another root run scope must fail")
+        .contains("another task")
+    );
     Ok(())
 }
 
@@ -203,6 +284,12 @@ fn task_route_diagnostics_fixture(
 fn worker_commands_are_routed_to_explicit_domains() {
     let cases = [
         (WorkerCommand::CancelRun, WorkerCommandDomain::RunPlan),
+        (
+            WorkerCommand::PauseTask {
+                request: TaskPauseRequest::new(TaskId::new("task_1").expect("task id"), 1),
+            },
+            WorkerCommandDomain::RunPlan,
+        ),
         (
             WorkerCommand::StartNewSession {
                 session_log_path: "new-session.jsonl".into(),

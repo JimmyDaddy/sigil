@@ -76,6 +76,55 @@ fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
 }
 
 #[test]
+fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "pause safely".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id,
+            plan_version: 2,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new("step_1")?,
+                title: "Inspect".to_owned(),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: None,
+        })),
+    ]);
+    app.runtime.is_busy = true;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))?;
+    let Some(AppAction::PauseTask { request }) = action else {
+        panic!("Alt-P should create an exact pause action");
+    };
+    assert!(request.has_exact_identity());
+    assert_eq!(request.task_id.as_str(), "task_1");
+    assert_eq!(request.plan_version, 2);
+    assert_eq!(app.last_notice(), Some("pausing task task_1"));
+
+    app.runtime.is_busy = false;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("no active task to pause"));
+    Ok(())
+}
+
+#[test]
 fn pending_approval_blocks_agent_cycle_commands() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;

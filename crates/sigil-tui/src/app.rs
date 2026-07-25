@@ -252,6 +252,8 @@ struct AgentSidebarItem {
 struct SessionViewCache {
     entries_len: usize,
     entries_revision: u64,
+    #[cfg(test)]
+    rebuild_count: u64,
     task_projection: TaskStateProjection,
     agent_projection: AgentThreadStateProjection,
     task_sidebar_lines: Vec<String>,
@@ -408,6 +410,9 @@ pub enum AppAction {
     ContinueTask {
         task_id: Option<String>,
         guidance: Option<String>,
+    },
+    PauseTask {
+        request: sigil_kernel::TaskPauseRequest,
     },
     ApprovalDecision {
         call_id: String,
@@ -1124,6 +1129,9 @@ impl AppState {
             }
             if command == UiCommand::CheckChangedFilesDiagnostics {
                 return Ok(self.request_changed_files_diagnostics());
+            }
+            if command == UiCommand::PauseActiveTask {
+                return Ok(self.request_active_task_pause());
             }
             if command == UiCommand::CancelFocusedTerminalTask {
                 return Ok(self.request_focused_terminal_task_cancel());

@@ -753,6 +753,69 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
 }
 
 #[test]
+fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let restored_path = session_dir.join("session-task-paused.jsonl");
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut entries = restored_entries("pause-provider", "pause-model");
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "pause safely".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: Some("task paused from TUI".to_owned()),
+        },
+    )));
+    write_session_log(&restored_path, &entries)?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.composer.input = "start a durable task".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(_))
+    ));
+    app.handle_worker_message(WorkerMessage::TaskPauseRequested {
+        task_id: task_id.as_str().to_owned(),
+    })?;
+    assert_eq!(
+        app.last_notice(),
+        Some("pausing task task_1 — waiting for active work to stop")
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "task:pause" && event.detail == "task task_1 pause requested"
+    }));
+
+    app.handle_worker_message(WorkerMessage::TaskRunPaused {
+        task_id: task_id.as_str().to_owned(),
+        session_log_path: restored_path.clone(),
+        provider_name: "pause-provider".to_owned(),
+        model_name: "pause-model".to_owned(),
+        entries,
+    })?;
+
+    assert!(!app.runtime.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Idle);
+    assert_eq!(app.runtime.provider_name, "pause-provider");
+    assert_eq!(app.runtime.model_name, "pause-model");
+    assert_eq!(app.session_id, "task-paused");
+    assert_eq!(app.session_log_path, restored_path);
+    assert_eq!(
+        app.last_notice(),
+        Some("task task_1 paused; use /task continue to resume")
+    );
+    Ok(())
+}
+
+#[test]
 fn esc_interrupts_active_run() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "long task".to_owned();

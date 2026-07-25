@@ -1622,8 +1622,9 @@ pub(in crate::runner) fn reject_plan(
 pub(in crate::runner) fn append_cancelled_task_state(
     session: &mut Session,
 ) -> std::result::Result<(), String> {
-    append_terminated_task_state(
+    append_stopped_task_state(
         session,
+        None,
         TaskRunStatus::Cancelled,
         TaskStepStatus::Cancelled,
         TaskChildSessionStatus::Cancelled,
@@ -1631,12 +1632,27 @@ pub(in crate::runner) fn append_cancelled_task_state(
     )
 }
 
+pub(in crate::runner) fn append_paused_task_state(
+    session: &mut Session,
+    task_id: &str,
+) -> std::result::Result<(), String> {
+    append_stopped_task_state(
+        session,
+        Some(task_id),
+        TaskRunStatus::Paused,
+        TaskStepStatus::Interrupted,
+        TaskChildSessionStatus::Interrupted,
+        "task paused from TUI",
+    )
+}
+
 pub(in crate::runner) fn append_interrupted_task_state(
     session: &mut Session,
     reason: &str,
 ) -> std::result::Result<(), String> {
-    append_terminated_task_state(
+    append_stopped_task_state(
         session,
+        None,
         TaskRunStatus::Interrupted,
         TaskStepStatus::Interrupted,
         TaskChildSessionStatus::Interrupted,
@@ -1644,16 +1660,27 @@ pub(in crate::runner) fn append_interrupted_task_state(
     )
 }
 
-fn append_terminated_task_state(
+fn append_stopped_task_state(
     session: &mut Session,
+    exact_task_id: Option<&str>,
     task_status: TaskRunStatus,
     step_status: TaskStepStatus,
     child_status: TaskChildSessionStatus,
     reason: &str,
 ) -> std::result::Result<(), String> {
     let projection = session.task_state_projection();
-    let Some(task) = projection.latest_task() else {
-        return Ok(());
+    let task = match exact_task_id {
+        Some(task_id) => projection
+            .tasks
+            .values()
+            .find(|task| task.task_id.as_str() == task_id)
+            .ok_or_else(|| format!("active task {task_id} is no longer available"))?,
+        None => {
+            let Some(task) = projection.latest_task() else {
+                return Ok(());
+            };
+            task
+        }
     };
     if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
         return Ok(());
@@ -1691,13 +1718,13 @@ fn append_terminated_task_state(
                 summary: None,
                 reason: Some(sigil_kernel::safe_persistence_text(reason)),
             }))
-            .map_err(|error| format!("failed to append cancelled task step: {error:#}"))?;
+            .map_err(|error| format!("failed to append stopped task step: {error:#}"))?;
     }
     for mut child in child_cancellations {
         child.status = child_status;
         session
             .append_control(ControlEntry::TaskChildSession(child))
-            .map_err(|error| format!("failed to append cancelled child session: {error:#}"))?;
+            .map_err(|error| format!("failed to append stopped child session: {error:#}"))?;
     }
     session
         .append_control(ControlEntry::TaskRun(TaskRunEntry {
@@ -1707,7 +1734,7 @@ fn append_terminated_task_state(
             status: task_status,
             reason: Some(sigil_kernel::safe_persistence_text(reason)),
         }))
-        .map_err(|error| format!("failed to append cancelled task run: {error:#}"))?;
+        .map_err(|error| format!("failed to append stopped task run: {error:#}"))?;
     Ok(())
 }
 

@@ -86,8 +86,9 @@ mod task_runtime;
 mod terminal_refresh;
 
 pub(in crate::runner) use active_run::{
-    ActiveRun, RunTaskPayload, RunTaskResult, bind_task_run_cancellation_scope, cancel_active_run,
-    prepare_run_cancellation, prepare_task_run_cancellation,
+    ActiveRun, ActiveRunStopDisposition, RunTaskPayload, RunTaskResult,
+    bind_task_run_cancellation_scope, cancel_active_run, prepare_run_cancellation,
+    prepare_task_run_cancellation,
 };
 pub(in crate::runner) use advancement::{
     WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
@@ -114,7 +115,9 @@ pub(in crate::runner) use command_dispatch::{
     WorkerCommandContext, WorkerCommandDispatchControl, dispatch_worker_command,
 };
 #[cfg(test)]
-pub(in crate::runner) use command_dispatch::{WorkerCommandDomain, classify_worker_command};
+pub(in crate::runner) use command_dispatch::{
+    WorkerCommandDomain, classify_worker_command, validate_task_pause_request,
+};
 pub(in crate::runner) use compaction_runtime::{
     IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
     QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
@@ -190,7 +193,7 @@ pub(in crate::runner) use sigil_runtime::agent_supervisor::task_role_runtime::{
     RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, TaskRoleRuntime,
 };
 pub(in crate::runner) use task_runtime::{
-    append_cancelled_task_state, append_interrupted_task_state,
+    append_cancelled_task_state, append_interrupted_task_state, append_paused_task_state,
 };
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{

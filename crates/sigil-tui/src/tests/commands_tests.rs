@@ -176,7 +176,7 @@ fn command_metadata_generates_help_and_control_hints() {
             .any(|line| line == "Ctrl-Z: Restore the last draft cleared with Esc.")
     );
     assert!(help.iter().any(|line| {
-        line == "Ctrl-C: Copy selection; otherwise cancel or quit. Ctrl-L: Copy selection or latest reply."
+        line == "Ctrl-C: Copy selection; otherwise cancel/quit. Alt-P: Pause task. Ctrl-L: Copy latest reply."
     }));
     assert!(
         help.iter()

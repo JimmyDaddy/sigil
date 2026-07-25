@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7 implemented；O8a exact verification action、O8b public protocol slice implemented，O8a 其余部分、application parity、O8c-O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol slice implemented，O8b application parity、O8c-O8d deferred
 
 创建日期：2026-07-22
 
@@ -1666,7 +1666,27 @@ O8a：TUI product completion。
 - plan 更新、伪造/漂移 identity、step/check/policy/workspace snapshot 任一变化都会 fail closed；
   TUI、HTTP、Desktop IPC 和 generated contract 复用同一 binding。
 
-这只收口 verification rerun 这一类异步 action，不代表 O8a 全部完成。
+2026-07-25 已继续完成 O8a 的剩余产品面：
+
+- task、live progress 与 pending follow-up 使用同一个 renderer-owned 高度计算，viewport、绘制与
+  hit-area 不再各自估算 live band；已 dispatched 的 follow-up 只保留在 durable timeline，不继续
+  占用 pending list。窄终端、mouse、completed collapse、task/agent/integration inspect、keyboard
+  help 与 session switch 保留各自回归门禁。
+- session timeline 只在 durable view version 变化时重建 cache；250-step / 752-entry 的长 task
+  fixture 在禁止再次读取 session log 后连续渲染三帧，证明 unchanged frame 不触发 store scan
+  或完整 reducer replay。
+- `Alt-P` 生成内容绑定的 `TaskPauseRequest(request_id, task_id, plan_version)`。Worker 在停止
+  physical run 前重新核对 latest accepted plan、task running 状态与 exact cancellation scope；
+  ordinary-chat auto handoff 继承 root scope 时也会收窄为 exact task cancellation target。只有
+  quiescence 成功才追加 Task `Paused`、active step/child `Interrupted` 并返回可恢复 session；
+  `/task continue` 会从该状态继续，Ctrl-C/Esc 仍保持 Cancel 语义。planning 尚未形成 accepted
+  plan 时 Pause fail closed，不猜测目标。
+- integration review/accept、verification rerun 与 task pause 的异步 action 均绑定 request id、
+  task id 和 plan version；旧画面、迟到操作或不同 cancellation scope 不能作用到当前 task。
+  自动 handoff -> Pause -> Continue -> Completed 的 worker E2E 同时验证 durable lifecycle 与
+  产品消息恢复。
+
+至此 O8a 完成；它不改变 O8b application parity、O8c 真实模型评测或 O8d 默认切换的门槛。
 
 O8b：typed public protocol 与 application parity。
 

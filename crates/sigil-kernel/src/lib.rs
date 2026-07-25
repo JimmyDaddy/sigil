@@ -494,7 +494,7 @@ pub use task::{
     TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
     TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
-    TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
     TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
     TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
     TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepAttemptId, TaskStepEntry,

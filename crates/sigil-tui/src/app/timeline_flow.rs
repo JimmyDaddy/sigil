@@ -36,27 +36,7 @@ impl AppState {
     }
 
     fn live_status_band_rows(&self) -> u16 {
-        let progress_rows: u16 = if self.live_activity_summary().is_some() {
-            2
-        } else {
-            0
-        };
-        let task_rows = self
-            .task_strip_view()
-            .map(|view| {
-                if view.rows.is_empty() {
-                    0
-                } else {
-                    1 + view.rows.len().min(4) as u16
-                }
-            })
-            .unwrap_or(0);
-        let content_rows = progress_rows.saturating_add(task_rows);
-        if content_rows == 0 {
-            0
-        } else {
-            content_rows.saturating_add(1)
-        }
+        crate::ui::live_status_rows_for_app(self)
     }
 
     pub(super) fn max_timeline_scroll_back(&self) -> usize {

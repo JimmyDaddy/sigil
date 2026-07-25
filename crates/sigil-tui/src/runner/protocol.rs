@@ -7,8 +7,8 @@ use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
     PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskRunStatus,
-    TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskPauseRequest,
+    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
@@ -202,6 +202,9 @@ pub enum WorkerCommand {
     ContinueTask {
         task_id: Option<String>,
         guidance: Option<String>,
+    },
+    PauseTask {
+        request: TaskPauseRequest,
     },
     ApprovalDecision {
         call_id: String,
@@ -416,6 +419,16 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     RunCancellationRequested,
+    TaskPauseRequested {
+        task_id: String,
+    },
+    TaskRunPaused {
+        task_id: String,
+        session_log_path: PathBuf,
+        provider_name: String,
+        model_name: String,
+        entries: Vec<SessionLogEntry>,
+    },
     RunCancelled {
         session_log_path: PathBuf,
         provider_name: String,

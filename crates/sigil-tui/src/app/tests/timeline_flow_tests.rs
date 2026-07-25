@@ -7,6 +7,8 @@ use crate::{
     ui::LayoutSnapshot,
 };
 use ratatui::{
+    Terminal,
+    backend::TestBackend,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
@@ -40,6 +42,113 @@ fn active_disclosure_reduces_the_timeline_viewport_by_reserved_rows() -> Result<
         app.timeline_viewport_rows(),
         before.saturating_sub(usize::from(EGRESS_DISCLOSURE_HEIGHT))
     );
+    Ok(())
+}
+
+#[test]
+fn follow_up_partition_uses_the_same_status_height_for_viewport_and_rendering() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(100, 30);
+    app.runtime.is_busy = true;
+    app.composer.input = "inspect this after the current run".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::QueueConversationInput { .. })
+    ));
+    let expected = app
+        .live_panel_height()
+        .saturating_sub(crate::ui::live_status_rows_for_app(&app))
+        .max(1) as usize;
+
+    assert_eq!(app.timeline_viewport_rows(), expected);
+    assert!(app.queue_strip_rows() > 0);
+    Ok(())
+}
+
+#[test]
+fn long_task_frames_reuse_versioned_view_cache_without_store_scan_or_reducer_replay() -> Result<()>
+{
+    const STEP_COUNT: usize = 250;
+    let temp = tempfile::tempdir()?;
+    let config = sigil_kernel::RootConfig {
+        workspace: sigil_kernel::WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+    let task_id = sigil_kernel::TaskId::new("long_task")?;
+    let parent_session_ref = sigil_kernel::SessionRef::new_relative("parent.jsonl")?;
+    let steps = (0..STEP_COUNT)
+        .map(|index| {
+            Ok(sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                title: format!("Inspect module {index}"),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref,
+            objective: "Inspect a long workspace in parallel".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: steps.clone(),
+            reason: None,
+        })),
+    ];
+    for (index, step) in steps.iter().enumerate() {
+        for status in [
+            sigil_kernel::TaskStepStatus::Pending,
+            sigil_kernel::TaskStepStatus::Running,
+            if index + 1 == STEP_COUNT {
+                sigil_kernel::TaskStepStatus::Running
+            } else {
+                sigil_kernel::TaskStepStatus::Completed
+            },
+        ] {
+            entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+                sigil_kernel::TaskStepEntry {
+                    task_id: task_id.clone(),
+                    plan_version: 1,
+                    step_id: step.step_id.clone(),
+                    role: step.role,
+                    status,
+                    title: Some(step.title.clone()),
+                    summary: None,
+                    reason: None,
+                },
+            )));
+        }
+    }
+    app.sync_current_session_state(entries);
+    let cache_before = app.session_view_cache_evidence();
+    assert_eq!(cache_before.1, 2 + STEP_COUNT * 3);
+
+    let unreadable_session_path = temp.path().join("session-log-is-a-directory");
+    std::fs::create_dir(&unreadable_session_path)?;
+    app.session_log_path = unreadable_session_path;
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend)?;
+    for _ in 0..3 {
+        terminal.draw(|frame| crate::ui::render(frame, &app))?;
+    }
+
+    assert_eq!(app.session_view_cache_evidence(), cache_before);
     Ok(())
 }
 

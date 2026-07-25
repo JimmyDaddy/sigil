@@ -35,6 +35,7 @@ where
                     elicitation_handler,
                     &state.agent.supervisor,
                     &mut state.run.discarded_ids,
+                    ActiveRunStopDisposition::Cancel,
                     "run interrupted by TUI shutdown",
                 );
             }

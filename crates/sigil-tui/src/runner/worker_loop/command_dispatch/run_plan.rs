@@ -598,6 +598,59 @@ where
                     ));
                 }
             }
+            RunPlanCommand::PauseTask { request } => {
+                let Some(active_run) = state.run.active.as_ref() else {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "task pause ignored: no active run".to_owned(),
+                    ));
+                    continue;
+                };
+                let entries = match JsonlSessionStore::read_entries(&state.session.log_path) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "task pause ignored: durable task state is unavailable ({error:#})"
+                        )));
+                        continue;
+                    }
+                };
+                let active_scope_id = active_run.cancellation_owner.handle().scope_id().to_owned();
+                if let Err(error) = validate_task_pause_request(
+                    &request,
+                    &active_run.cancellation_target,
+                    &active_scope_id,
+                    &entries,
+                ) {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "task pause ignored: {error}"
+                    )));
+                    continue;
+                }
+                let mut active_run = state
+                    .run
+                    .active
+                    .take()
+                    .expect("validated active run remains owned by worker");
+                if matches!(active_run.cancellation_target, RunCancellationTarget::Run) {
+                    active_run.cancellation_target = RunCancellationTarget::Task {
+                        task_id: request.task_id.as_str().to_owned(),
+                    };
+                }
+                cancel_active_run(
+                    active_run,
+                    runtime,
+                    root_config,
+                    &state.session.log_path,
+                    &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
+                    message_tx,
+                    elicitation_handler,
+                    &state.agent.supervisor,
+                    &mut state.run.discarded_ids,
+                    ActiveRunStopDisposition::PauseTask,
+                    "task paused from TUI",
+                );
+            }
             RunPlanCommand::CancelRun => {
                 if let Some(active_run) = state.run.active.take() {
                     cancel_active_run(
@@ -611,6 +664,7 @@ where
                         elicitation_handler,
                         &state.agent.supervisor,
                         &mut state.run.discarded_ids,
+                        ActiveRunStopDisposition::Cancel,
                         "run cancelled from TUI",
                     );
                 } else {
@@ -680,4 +734,46 @@ where
         }
     }
     control
+}
+
+pub(in crate::runner) fn validate_task_pause_request(
+    request: &sigil_kernel::TaskPauseRequest,
+    cancellation_target: &RunCancellationTarget,
+    active_scope_id: &str,
+    entries: &[SessionLogEntry],
+) -> std::result::Result<(), String> {
+    if !request.has_exact_identity() {
+        return Err("request identity does not match the rendered task binding".to_owned());
+    }
+    let target_matches = match cancellation_target {
+        RunCancellationTarget::Task { task_id } => task_id == request.task_id.as_str(),
+        RunCancellationTarget::Run => entries.iter().rev().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                    if binding.task_id == request.task_id
+                        && binding.run_scope_id == active_scope_id
+            )
+        }),
+        RunCancellationTarget::AgentThread { .. } => false,
+    };
+    if !target_matches {
+        return Err("active run belongs to another task".to_owned());
+    }
+    let projection = sigil_kernel::TaskStateProjection::from_entries(entries);
+    let task = projection
+        .tasks
+        .get(&request.task_id)
+        .ok_or_else(|| "task is no longer available".to_owned())?;
+    if task.latest_plan_version != Some(request.plan_version)
+        || task
+            .superseded_plan_versions
+            .contains(&request.plan_version)
+    {
+        return Err("task plan changed since the pause action was rendered".to_owned());
+    }
+    if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
+        return Err("task is no longer running".to_owned());
+    }
+    Ok(())
 }

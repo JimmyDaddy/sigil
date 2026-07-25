@@ -6,6 +6,7 @@ pub(crate) enum UiCommand {
     CopyTranscript,
     EnterPlanMode,
     SubmitTask,
+    PauseActiveTask,
     CancelOrQuit,
     ToggleWriteMode,
     ToggleThinking,
@@ -182,6 +183,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
+        command: UiCommand::PauseActiveTask,
+        keys: &[KeyBinding { label: "Alt-P" }],
+        slash: None,
+        label: "Pause task",
+        help: "Stop the active task at a safe cancellation boundary and keep it resumable.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
         command: UiCommand::CycleAgentView,
         keys: &[KeyBinding { label: "Alt-A" }],
         slash: Some("/agent"),
@@ -293,6 +302,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::FocusVerificationCard)
         }
+        KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::PauseActiveTask)
+        }
         KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::OpenCheckpointRestore)
         }
@@ -333,6 +345,11 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::CheckChangedFilesDiagnostics)
             .expect("check changes metadata exists"),
         control_hint(UiCommand::FocusVerificationCard).expect("verification metadata exists"),
+        if is_busy {
+            control_hint(UiCommand::PauseActiveTask).expect("pause task metadata exists")
+        } else {
+            String::new()
+        },
         control_hint(UiCommand::OpenCheckpointRestore).expect("checkpoint metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
@@ -361,7 +378,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::SubmitPrompt,
     ]));
     lines.push(
-        "Ctrl-C: Copy selection; otherwise cancel or quit. Ctrl-L: Copy selection or latest reply."
+        "Ctrl-C: Copy selection; otherwise cancel/quit. Alt-P: Pause task. Ctrl-L: Copy latest reply."
             .to_owned(),
     );
     lines.extend(command_help_lines([

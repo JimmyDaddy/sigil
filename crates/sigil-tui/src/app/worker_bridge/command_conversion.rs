@@ -119,6 +119,7 @@ impl AppState {
             AppAction::ContinueTask { task_id, guidance } => {
                 WorkerCommand::ContinueTask { task_id, guidance }
             }
+            AppAction::PauseTask { request } => WorkerCommand::PauseTask { request },
             AppAction::ApprovalDecision { call_id, approved } => {
                 self.approval_worker_command(WorkerApprovalCommand::Decision { call_id, approved })
             }

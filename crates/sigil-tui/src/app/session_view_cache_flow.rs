@@ -165,6 +165,16 @@ impl AppState {
         self.session_browser.view_cache.borrow()
     }
 
+    #[cfg(test)]
+    pub(crate) fn session_view_cache_evidence(&self) -> (u64, usize, u64) {
+        let cache = self.session_view_cache();
+        (
+            cache.rebuild_count,
+            cache.entries_len,
+            cache.entries_revision,
+        )
+    }
+
     fn ensure_session_view_cache(&self) {
         let needs_refresh = {
             let cache = self.session_browser.view_cache.borrow();
@@ -239,6 +249,13 @@ impl AppState {
         SessionViewCache {
             entries_len: entries.len(),
             entries_revision: self.session_browser.current_entries_revision,
+            #[cfg(test)]
+            rebuild_count: self
+                .session_browser
+                .view_cache
+                .borrow()
+                .rebuild_count
+                .saturating_add(1),
             task_projection,
             agent_projection,
             task_sidebar_lines: super::task_sidebar::task_sidebar_lines(entries),

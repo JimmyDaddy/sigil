@@ -33,7 +33,6 @@ use super::{
         McpActivationStatus, WorkerCommand, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
-        worker_loop::append_cancelled_task_state,
         worker_loop::{
             CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
             WorkerLoopMcpHandlers, agent_result_continuation_run_result,
@@ -43,6 +42,7 @@ use super::{
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
             resolve_continue_task, run_worker_loop, session_ref_for_log_path,
         },
+        worker_loop::{append_cancelled_task_state, append_paused_task_state},
     },
     common::{PlannedProvider, StreamPlan, test_root_config},
 };
@@ -758,6 +758,96 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
                 if run.status == TaskRunStatus::Cancelled
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
+    let mut session = Session::new("deepseek", "model");
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "pause task".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: step_id.clone(),
+            title: "running step".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            mode: Some(sigil_kernel::TaskStepMode::Read),
+            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_id.clone(),
+        role: AgentRole::SubagentRead,
+        status: TaskStepStatus::Running,
+        title: Some("running step".to_owned()),
+        summary: None,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id,
+        child_task_id: TaskId::new("child_1")?,
+        child_session_ref: SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
+        role: AgentRole::SubagentRead,
+        status: TaskChildSessionStatus::Started,
+        summary_hash: None,
+    }))?;
+    let unrelated_task_id = TaskId::new("task_2")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: unrelated_task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "unrelated running task".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+
+    append_paused_task_state(&mut session, task_id.as_str()).map_err(anyhow::Error::msg)?;
+
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("paused task");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert!(task.steps.values().any(|step| {
+        step.step_id == TaskStepId::new("step_1").expect("step id")
+            && step.status == TaskStepStatus::Interrupted
+    }));
+    assert!(task.child_sessions.values().any(|child| {
+        child.child_task_id == TaskId::new("child_1").expect("child id")
+            && child.status == TaskChildSessionStatus::Interrupted
+    }));
+    let plan = task.plans.get(&1).expect("accepted plan");
+    let ready = plan
+        .graph
+        .as_ref()
+        .expect("valid task graph")
+        .ready_steps(&task.steps);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].step_id.as_str(), "step_1");
+    assert_eq!(
+        projection
+            .tasks
+            .get(&unrelated_task_id)
+            .expect("unrelated task")
+            .status,
+        TaskRunStatus::Running,
+        "pause must not use latest-task fallback after validating an exact target"
+    );
     Ok(())
 }
 

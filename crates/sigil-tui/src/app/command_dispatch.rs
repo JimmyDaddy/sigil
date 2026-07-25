@@ -3,6 +3,42 @@ use crate::commands::UiCommand;
 use sigil_kernel::{CodeIntelStartup, TerminalTaskProjection};
 
 impl AppState {
+    pub(super) fn request_active_task_pause(&mut self) -> Option<AppAction> {
+        if !self.runtime.is_busy {
+            self.last_notice = Some("no active task to pause".to_owned());
+            return None;
+        }
+        let projection =
+            sigil_kernel::TaskStateProjection::from_entries(&self.session_browser.current_entries);
+        let Some(task) = projection.latest_task() else {
+            self.last_notice = Some("the active run is not a durable task".to_owned());
+            return None;
+        };
+        if !matches!(
+            task.status,
+            sigil_kernel::TaskRunStatus::Started | sigil_kernel::TaskRunStatus::Running
+        ) {
+            self.last_notice = Some(format!(
+                "task {} is already {}",
+                task.task_id.as_str(),
+                super::task_sidebar::task_run_status_label(task.status)
+            ));
+            return None;
+        }
+        let Some(plan_version) = task.latest_plan_version else {
+            self.last_notice =
+                Some("task planning is still in progress; use Ctrl-C to cancel".to_owned());
+            return None;
+        };
+        let request = sigil_kernel::TaskPauseRequest::new(task.task_id.clone(), plan_version);
+        self.last_notice = Some(format!("pausing task {}", task.task_id.as_str()));
+        self.push_timeline(
+            super::TimelineRole::Notice,
+            format!("Pause requested for task {}.", task.task_id.as_str()),
+        );
+        Some(AppAction::PauseTask { request })
+    }
+
     pub(super) fn request_changed_files_diagnostics(&mut self) -> Option<AppAction> {
         if self.approval.pending.is_some() {
             self.last_notice =
@@ -131,6 +167,7 @@ impl AppState {
             | UiCommand::CopyTranscript
             | UiCommand::EnterPlanMode
             | UiCommand::SubmitTask
+            | UiCommand::PauseActiveTask
             | UiCommand::CancelOrQuit
             | UiCommand::ToggleWriteMode
             | UiCommand::ToggleThinking

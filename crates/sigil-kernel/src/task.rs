@@ -1128,6 +1128,43 @@ pub struct TaskRunCancellationScopeBoundEntry {
     pub run_scope_id: String,
 }
 
+/// Exact user action that pauses one accepted task-plan incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskPauseRequest {
+    pub request_id: String,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+}
+
+impl TaskPauseRequest {
+    #[must_use]
+    pub fn new(task_id: TaskId, plan_version: u32) -> Self {
+        let mut request = Self {
+            request_id: String::new(),
+            task_id,
+            plan_version,
+        };
+        request.request_id = request.expected_request_id();
+        request
+    }
+
+    #[must_use]
+    pub fn expected_request_id(&self) -> String {
+        let seed = serde_json::json!({
+            "task_id": self.task_id,
+            "plan_version": self.plan_version,
+        })
+        .to_string();
+        format!("task-pause-{}", crate::sha256_hex(seed.as_bytes()))
+    }
+
+    #[must_use]
+    pub fn has_exact_identity(&self) -> bool {
+        self.plan_version > 0 && self.request_id == self.expected_request_id()
+    }
+}
+
 /// Append-only task plan entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
     Agent, AgentRole, AgentRunInput, AgentRunPurpose, ControlEntry, ConversationInputKind,
@@ -8,10 +8,10 @@ use sigil_kernel::{
     ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
     PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
     Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
-    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPlanEntry,
-    TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPauseRequest,
+    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
     project_conversation_prompt_for_persistence,
 };
 use tempfile::tempdir;
@@ -19,8 +19,9 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, planned_role_provider_builder, spawn_test_worker,
-        spawn_test_worker_with_role_provider_builder, test_root_config,
+        PlannedProvider, StreamPlan, planned_role_provider_builder,
+        planned_role_provider_builder_with_stream_start_signal, spawn_test_worker,
+        spawn_test_worker_with_role_provider_builder, test_root_config, wait_for_session_entry,
     },
 };
 
@@ -187,6 +188,184 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
         1,
         "automatic handoff must bind the task to its inherited root cancellation scope"
     );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> Result<()> {
+    let worker_timeout = Duration::from_secs(30);
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-auto-task-pause-resume-e2e.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let handoff_args = r#"{"reason_codes":["cross_layer","long_verification"]}"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::ToolCallStart {
+            id: "handoff-call".to_owned(),
+            name: "request_task_planning".to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: "handoff-call".to_owned(),
+            delta: handoff_args.to_owned(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: "handoff-call".to_owned(),
+            name: "request_task_planning".to_owned(),
+            args_json: handoff_args.to_owned(),
+        }),
+        ProviderChunk::Done,
+    ])]);
+    let task_plan_args = r#"{
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [{
+            "step_id": "inspect_runtime",
+            "title": "Inspect runtime handoff",
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only"
+        }]
+    }"#;
+    let (role_provider_builder, role_stream_started_rx) =
+        planned_role_provider_builder_with_stream_start_signal(vec![
+            StreamPlan::Chunks(vec![
+                ProviderChunk::ToolCallStart {
+                    id: "task-plan-call".to_owned(),
+                    name: "task_plan_update".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "task-plan-call".to_owned(),
+                    delta: task_plan_args.to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "task-plan-call".to_owned(),
+                    name: "task_plan_update".to_owned(),
+                    args_json: task_plan_args.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ]),
+            StreamPlan::Pending,
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("resumed task completed".to_owned()),
+                ProviderChunk::Done,
+            ]),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("resumed task synthesis completed".to_owned()),
+                ProviderChunk::Done,
+            ]),
+        ]);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "inspect the runtime, pause safely, then resume".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::RunStarted { .. })
+        })
+        .context("waiting for root run start before automatic handoff")?;
+    let started = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunStarted { .. })
+        })
+        .context("waiting for automatic durable task start")?;
+    let WorkerMessage::TaskRunStarted { task_id, .. } = started else {
+        unreachable!("recv_until only returns TaskRunStarted");
+    };
+    let expected_task_id = TaskId::new(task_id)?;
+    role_stream_started_rx
+        .recv_timeout(worker_timeout)
+        .context("waiting for task planner provider stream to start")?;
+    role_stream_started_rx
+        .recv_timeout(worker_timeout)
+        .context("waiting for task executor provider stream to start")?;
+    wait_for_session_entry(&session_log_path, |entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.task_id == expected_task_id && step.status == TaskStepStatus::Running
+        )
+    })
+    .context("waiting for the task executor step to become durable and running")?;
+
+    worker.send(WorkerCommand::PauseTask {
+        request: TaskPauseRequest::new(expected_task_id.clone(), 1),
+    })?;
+    let requested = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskPauseRequested { .. })
+        })
+        .context("waiting for exact task pause acknowledgement")?;
+    assert!(matches!(
+        requested,
+        WorkerMessage::TaskPauseRequested { ref task_id }
+            if task_id == expected_task_id.as_str()
+    ));
+    let paused = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunPaused { .. })
+        })
+        .context("waiting for quiescent durable task pause")?;
+    let WorkerMessage::TaskRunPaused {
+        task_id: paused_task_id,
+        entries,
+        ..
+    } = paused
+    else {
+        unreachable!("recv_until only returns TaskRunPaused");
+    };
+    assert_eq!(paused_task_id, expected_task_id.as_str());
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(task))
+            if task.task_id == expected_task_id && task.status == TaskRunStatus::Paused
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskStep(step))
+            if step.task_id == expected_task_id && step.status == TaskStepStatus::Interrupted
+    )));
+
+    worker.send(WorkerCommand::ContinueTask {
+        task_id: Some(expected_task_id.as_str().to_owned()),
+        guidance: None,
+    })?;
+    let _ = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunStarted { .. })
+        })
+        .context("waiting for paused task to resume")?;
+    let finished = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunFinished { .. })
+        })
+        .map_err(|error| {
+            let entries = JsonlSessionStore::read_entries(&session_log_path).unwrap_or_default();
+            anyhow!(
+                "waiting for resumed task completion: {error:#}; durable entries: {}",
+                control_entry_debug(&entries)
+            )
+        })?;
+    assert!(matches!(
+        finished,
+        WorkerMessage::TaskRunFinished {
+            ref task_id,
+            status: TaskRunStatus::Completed,
+            ..
+        } if task_id == expected_task_id.as_str()
+    ));
+
     worker.shutdown()?;
     Ok(())
 }

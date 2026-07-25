@@ -12,10 +12,10 @@ use crate::{
     TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
     TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
     TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
-    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
-    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
     normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
     task_final_message_id, task_guidance_applied_entry, task_guidance_apply_tool_spec,
@@ -196,6 +196,22 @@ fn task_role_and_status_labels_are_stable() {
     assert!(TaskStepStatus::Interrupted.is_terminal());
     assert!(TaskStepStatus::Superseded.is_terminal());
     assert!(!TaskStepStatus::Running.is_terminal());
+}
+
+#[test]
+fn task_pause_request_binds_exact_task_and_plan_version() -> Result<()> {
+    let mut request = TaskPauseRequest::new(task_id("task_1")?, 3);
+
+    assert!(request.has_exact_identity());
+    assert!(request.request_id.starts_with("task-pause-"));
+    request.plan_version = 4;
+    assert!(!request.has_exact_identity());
+    request.request_id = request.expected_request_id();
+    assert!(request.has_exact_identity());
+    request.plan_version = 0;
+    request.request_id = request.expected_request_id();
+    assert!(!request.has_exact_identity());
+    Ok(())
 }
 
 #[test]

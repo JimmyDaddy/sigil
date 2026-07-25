@@ -390,6 +390,33 @@ impl AppState {
                 self.last_notice = Some("cancelling — waiting for active work to stop".to_owned());
                 self.push_event("run:cancel", "cancellation requested".to_owned());
             }
+            WorkerMessage::TaskPauseRequested { task_id } => {
+                self.last_notice = Some(format!(
+                    "pausing task {task_id} — waiting for active work to stop"
+                ));
+                self.push_event("task:pause", format!("task {task_id} pause requested"));
+            }
+            WorkerMessage::TaskRunPaused {
+                task_id,
+                session_log_path,
+                provider_name,
+                model_name,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.restore_session_view(
+                    session_log_path,
+                    provider_name,
+                    model_name,
+                    entries,
+                    "task paused; restored",
+                );
+                self.last_notice = Some(format!(
+                    "task {task_id} paused; use /task continue to resume"
+                ));
+                self.schedule_balance_refresh();
+            }
             WorkerMessage::RunCancelled {
                 session_log_path,
                 provider_name,

@@ -14,6 +14,12 @@ pub(in crate::runner) struct ActiveRun {
 
 const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runner) enum ActiveRunStopDisposition {
+    Cancel,
+    PauseTask,
+}
+
 pub(in crate::runner) fn prepare_run_cancellation(
     session: &Session,
 ) -> std::result::Result<
@@ -80,6 +86,7 @@ pub(in crate::runner) fn cancel_active_run(
     elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
     agent_supervisor: &sigil_runtime::AgentSupervisor,
     discarded_run_ids: &mut BTreeSet<u64>,
+    disposition: ActiveRunStopDisposition,
     reason: &str,
 ) {
     let url_capability_registrar = active_run.url_capability_registrar.clone();
@@ -93,7 +100,11 @@ pub(in crate::runner) fn cancel_active_run(
     }
     let requested_at_ms = current_unix_time_ms();
     let request_id = format!(
-        "cancel-{}",
+        "{}-{}",
+        match disposition {
+            ActiveRunStopDisposition::Cancel => "cancel",
+            ActiveRunStopDisposition::PauseTask => "pause",
+        },
         active_run.cancellation_owner.handle().scope_id()
     );
     let request = RunCancellationRequestedEntry {
@@ -114,7 +125,14 @@ pub(in crate::runner) fn cancel_active_run(
             false
         }
     };
-    let _ = message_tx.send(WorkerMessage::RunCancellationRequested);
+    let _ = match (&disposition, &active_run.cancellation_target) {
+        (ActiveRunStopDisposition::PauseTask, RunCancellationTarget::Task { task_id }) => {
+            message_tx.send(WorkerMessage::TaskPauseRequested {
+                task_id: task_id.clone(),
+            })
+        }
+        _ => message_tx.send(WorkerMessage::RunCancellationRequested),
+    };
     let activated = active_run.cancellation_owner.activate_reserved_cancel();
     debug_assert!(
         activated,
@@ -242,11 +260,23 @@ pub(in crate::runner) fn cancel_active_run(
                 *current_session = Some(session);
                 return;
             }
-            let task_state = match outcome {
-                RunCancellationTerminalOutcome::Cancelled => {
-                    append_cancelled_task_state(&mut session)
-                }
-                RunCancellationTerminalOutcome::Interrupted => {
+            let task_state = match (outcome, disposition, &active_run.cancellation_target) {
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::PauseTask,
+                    RunCancellationTarget::Task { task_id },
+                ) => append_paused_task_state(&mut session, task_id),
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::PauseTask,
+                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                ) => Err("pause disposition is missing its exact task target".to_owned()),
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::Cancel,
+                    _,
+                ) => append_cancelled_task_state(&mut session),
+                (RunCancellationTerminalOutcome::Interrupted, _, _) => {
                     append_interrupted_task_state(&mut session, &terminal_reason)
                 }
             };
@@ -257,8 +287,17 @@ pub(in crate::runner) fn cancel_active_run(
             }
             let entries = session.entries().to_vec();
             *current_session = Some(session);
-            let message = match outcome {
-                RunCancellationTerminalOutcome::Cancelled => WorkerMessage::RunCancelled {
+            let message = match (outcome, disposition) {
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::PauseTask,
+                ) => WorkerMessage::TaskRunPaused {
+                    task_id: match active_run.cancellation_target {
+                        RunCancellationTarget::Task { task_id } => task_id,
+                        RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. } => {
+                            unreachable!("pause disposition requires a task cancellation target")
+                        }
+                    },
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
                         .as_ref()
@@ -270,7 +309,21 @@ pub(in crate::runner) fn cancel_active_run(
                         .unwrap_or_else(|| root_config.agent.model.clone()),
                     entries,
                 },
-                RunCancellationTerminalOutcome::Interrupted => WorkerMessage::RunInterrupted {
+                (RunCancellationTerminalOutcome::Cancelled, ActiveRunStopDisposition::Cancel) => {
+                    WorkerMessage::RunCancelled {
+                        session_log_path: current_session_log_path.to_path_buf(),
+                        provider_name: current_session
+                            .as_ref()
+                            .map(|session| session.provider_name().to_owned())
+                            .unwrap_or_else(|| root_config.agent.provider.clone()),
+                        model_name: current_session
+                            .as_ref()
+                            .map(|session| session.model_name().to_owned())
+                            .unwrap_or_else(|| root_config.agent.model.clone()),
+                        entries,
+                    }
+                }
+                (RunCancellationTerminalOutcome::Interrupted, _) => WorkerMessage::RunInterrupted {
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
                         .as_ref()

@@ -39,6 +39,9 @@ mod session;
 mod verification_checkpoint;
 
 #[cfg(test)]
+pub(in crate::runner) use run_plan::validate_task_pause_request;
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum WorkerCommandDomain {
     RunPlan,
@@ -101,6 +104,9 @@ pub(in crate::runner) enum RunPlanCommand {
         args_json: String,
     },
     ApprovalCommand(WorkerCommandEnvelope<WorkerApprovalCommand>),
+    PauseTask {
+        request: sigil_kernel::TaskPauseRequest,
+    },
     CancelRun,
     ApprovePlan {
         plan_text: String,
@@ -530,6 +536,9 @@ pub(in crate::runner) fn classify_worker_command(
         }
         WorkerCommand::ContinueTask { task_id, guidance } => {
             ClassifiedWorkerCommand::AgentTask(AgentTaskCommand::ContinueTask { task_id, guidance })
+        }
+        WorkerCommand::PauseTask { request } => {
+            ClassifiedWorkerCommand::RunPlan(RunPlanCommand::PauseTask { request })
         }
         WorkerCommand::BackgroundActiveAgent => {
             ClassifiedWorkerCommand::AgentTask(AgentTaskCommand::BackgroundActiveAgent)
