@@ -37,6 +37,14 @@ use crate::{
     unsupported_mcp_runtime_event_handler,
 };
 
+mod task_control;
+
+pub use task_control::{
+    ApplicationTaskContinuationExecution, ApplicationTaskContinuationOutput,
+    ApplicationTaskContinuationRequest, PreparedApplicationTaskContinuation,
+    prepare_application_task_continuation,
+};
+
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default number of user-visible messages returned by one transcript page.
 pub const DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE: usize = 50;
@@ -652,6 +660,7 @@ fn rollback_queued_capabilities(
 pub struct ApplicationRunControl {
     owner: RunCancellationOwner,
     recorder: RunCancellationRecorder,
+    cancellation_target: RunCancellationTarget,
     conversation_lifecycle: ConversationRunLifecycleRecorder,
     conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
@@ -718,7 +727,7 @@ impl ApplicationRunControl {
         let request = RunCancellationRequestedEntry {
             request_id: format!("cancel-{}", self.owner.handle().scope_id()),
             run_scope_id: self.owner.handle().scope_id().to_owned(),
-            target: RunCancellationTarget::Run,
+            target: self.cancellation_target.clone(),
             reason: safe_persistence_text(&reason),
             requested_at_ms,
             quiescence_deadline_ms: requested_at_ms
@@ -1257,6 +1266,44 @@ where
     application_task_terminal_output(session, &action.task_id, status, output)
 }
 
+struct ApplicationTaskFinalAnswer {
+    message_id: String,
+    text: String,
+}
+
+fn application_task_final_answer(
+    session: &Session,
+    task_id: &TaskId,
+) -> Result<ApplicationTaskFinalAnswer> {
+    let committed = session
+        .task_state_projection()
+        .tasks
+        .get(task_id)
+        .and_then(|task| task.final_answer.clone())
+        .ok_or_else(|| anyhow!("completed application task has no committed final answer"))?;
+    let message = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Assistant(message) if message.id == committed.message_id => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("completed application task final message is missing"))?;
+    if message.assistant_kind != Some(AssistantMessageKind::FinalAnswer) {
+        bail!("completed application task message is not a final answer");
+    }
+    let text = safe_persistence_text(message.content.as_deref().unwrap_or_default());
+    if text.trim().is_empty() {
+        bail!("completed application task final answer is empty");
+    }
+    Ok(ApplicationTaskFinalAnswer {
+        message_id: committed.message_id,
+        text,
+    })
+}
+
 fn application_task_terminal_output(
     session: &Session,
     task_id: &TaskId,
@@ -1265,33 +1312,9 @@ fn application_task_terminal_output(
 ) -> Result<AgentRunOutput> {
     match status {
         TaskRunStatus::Completed => {
-            let committed = session
-                .task_state_projection()
-                .tasks
-                .get(task_id)
-                .and_then(|task| task.final_answer.clone())
-                .ok_or_else(|| {
-                    anyhow!("completed application task has no committed final answer")
-                })?;
-            let message = session
-                .entries()
-                .iter()
-                .find_map(|entry| match entry {
-                    SessionLogEntry::Assistant(message) if message.id == committed.message_id => {
-                        Some(message)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| anyhow!("completed application task final message is missing"))?;
-            if message.assistant_kind != Some(AssistantMessageKind::FinalAnswer) {
-                bail!("completed application task message is not a final answer");
-            }
-            output.result.final_text =
-                safe_persistence_text(message.content.as_deref().unwrap_or_default());
-            if output.result.final_text.trim().is_empty() {
-                bail!("completed application task final answer is empty");
-            }
-            output.result.final_message_id = Some(committed.message_id);
+            let answer = application_task_final_answer(session, task_id)?;
+            output.result.final_text = answer.text;
+            output.result.final_message_id = Some(answer.message_id);
             output.disposition = AgentRunDisposition::FinalAnswer;
             output.outcome.terminal_reason = AgentRunTerminalReason::FinalAnswer;
         }
@@ -1389,6 +1412,91 @@ fn application_agent_status_label(status: Option<AgentThreadStatus>) -> &'static
         Some(AgentThreadStatus::Unavailable) => "unavailable",
         Some(AgentThreadStatus::Unknown) | None => "unknown",
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assemble_application_tool_surface(
+    root_config: &RootConfig,
+    provider_capabilities: &sigil_kernel::ProviderCapabilities,
+    workspace_root: &Path,
+    mutation_recorder: MutationEventRecorder,
+    workspace_trust: WorkspaceTrust,
+    options: &AgentRunOptions,
+    session: &Session,
+    services: &ApplicationRunServices,
+    redactor: &sigil_kernel::SecretRedactor,
+    skill_descriptor: Option<&sigil_kernel::SkillDescriptor>,
+    tool_scope: Option<&ToolRegistryScope>,
+) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
+    let surface =
+        build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
+            root_config,
+            provider_capabilities,
+            workspace_root.to_path_buf(),
+            mutation_recorder,
+            workspace_trust,
+            sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                options.permission_context.network_policy,
+                false,
+            ),
+        )
+        .await?;
+    let crate::RuntimeToolSurface {
+        mut registry,
+        context_resolver,
+    } = surface;
+    let elicitation_handler = unsupported_mcp_elicitation_handler();
+    let runtime_event_handler = unsupported_mcp_runtime_event_handler();
+    attach_remote_mcp_activation_presenter(
+        &mut registry,
+        root_config,
+        provider_capabilities,
+        workspace_root.to_path_buf(),
+        Arc::clone(&elicitation_handler),
+        runtime_event_handler,
+        Arc::clone(&services.disclosure_presenter),
+    );
+    let eager_remote_servers = root_config
+        .mcp_servers
+        .iter()
+        .filter(|server| {
+            server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
+        })
+        .map(|server| (server.name.clone(), server.required))
+        .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    for (server_name, required) in eager_remote_servers {
+        let activation = activate_eager_remote_mcp_server(
+            &mut registry,
+            root_config,
+            &server_name,
+            provider_capabilities.tool_name_max_chars,
+            workspace_root.to_path_buf(),
+            session.egress_audit_recorder()?,
+            Arc::clone(&services.disclosure_presenter),
+            Arc::clone(&elicitation_handler),
+        )
+        .await;
+        if let Err(error) = activation {
+            if required {
+                return Err(error);
+            }
+            warnings.push(optional_eager_mcp_warning(redactor, &server_name, &error));
+        }
+    }
+    if let Some(skill_descriptor) = skill_descriptor {
+        registry = crate::build_skill_tool_registry(&registry, skill_descriptor).into_registry();
+    }
+    if let Some(scope) = tool_scope {
+        registry = constrain_application_tool_registry(registry, scope)?;
+    }
+    Ok((
+        crate::RuntimeToolSurface {
+            registry,
+            context_resolver,
+        },
+        warnings,
+    ))
 }
 
 /// Prepares the configured provider, durable session, tools, run options, and cancellation scope.
@@ -1498,20 +1606,21 @@ async fn prepare_application_run_internal(
         agent_invocation,
         task_agent_registry,
     } = prepared;
-    let surface =
-        build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
-            &root_config,
-            &provider.capabilities(),
-            workspace_root.clone(),
-            mutation_recorder,
-            workspace_trust,
-            sigil_kernel::ExtensionProcessNetworkAdmission::new(
-                options.permission_context.network_policy,
-                false,
-            ),
-        )
-        .await
-        .map_err(ApplicationRunPrepareError::execution)?;
+    let (surface, warnings) = assemble_application_tool_surface(
+        &root_config,
+        &provider.capabilities(),
+        &workspace_root,
+        mutation_recorder,
+        workspace_trust,
+        &options,
+        &session,
+        services,
+        &redactor,
+        skill_descriptor.as_ref(),
+        tool_scope.as_ref(),
+    )
+    .await
+    .map_err(ApplicationRunPrepareError::execution)?;
     let context_prompt = queued_first_request
         .as_ref()
         .map_or(prompt.as_str(), |(exact_prompt, _)| {
@@ -1523,55 +1632,7 @@ async fn prepare_application_run_internal(
         .await
         .unwrap_or_default();
     input = input.with_runtime_context(runtime_context.clone());
-    let mut registry = surface.registry;
-    let elicitation_handler = unsupported_mcp_elicitation_handler();
-    let runtime_event_handler = unsupported_mcp_runtime_event_handler();
-    attach_remote_mcp_activation_presenter(
-        &mut registry,
-        &root_config,
-        &provider.capabilities(),
-        workspace_root.clone(),
-        Arc::clone(&elicitation_handler),
-        runtime_event_handler,
-        Arc::clone(&services.disclosure_presenter),
-    );
-    let eager_remote_servers = root_config
-        .mcp_servers
-        .iter()
-        .filter(|server| {
-            server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
-        })
-        .map(|server| (server.name.clone(), server.required))
-        .collect::<Vec<_>>();
-    let mut warnings = Vec::new();
-    for (server_name, required) in eager_remote_servers {
-        let activation = activate_eager_remote_mcp_server(
-            &mut registry,
-            &root_config,
-            &server_name,
-            provider.capabilities().tool_name_max_chars,
-            workspace_root.clone(),
-            session
-                .egress_audit_recorder()
-                .map_err(ApplicationRunPrepareError::execution)?,
-            Arc::clone(&services.disclosure_presenter),
-            Arc::clone(&elicitation_handler),
-        )
-        .await;
-        if let Err(error) = activation {
-            if required {
-                return Err(ApplicationRunPrepareError::execution(error));
-            }
-            warnings.push(optional_eager_mcp_warning(&redactor, &server_name, &error));
-        }
-    }
-    if let Some(skill_descriptor) = skill_descriptor.as_ref() {
-        registry = crate::build_skill_tool_registry(&registry, skill_descriptor).into_registry();
-    }
-    if let Some(scope) = tool_scope {
-        registry = constrain_application_tool_registry(registry, &scope)
-            .map_err(ApplicationRunPrepareError::execution)?;
-    }
+    let registry = surface.registry;
     let parent_session_ref = SessionRef::new_relative(
         session_path
             .file_name()
@@ -1708,6 +1769,7 @@ async fn prepare_application_run_internal(
         control: ApplicationRunControl {
             owner: cancellation_owner,
             recorder: cancellation_recorder,
+            cancellation_target: RunCancellationTarget::Run,
             conversation_lifecycle,
             conversation_start,
             events,

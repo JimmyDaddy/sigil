@@ -18,12 +18,13 @@ use sigil_kernel::{
     DisclosurePresentationReceipt, EgressDisclosurePresenter, InteractionMode, JsonlSessionStore,
     ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider, ProviderCapabilities,
     ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort, ReasoningStreamSupport,
-    RootConfig, RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session,
-    SessionLogEntry, SessionRef, StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId,
-    TaskId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
-    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    RootConfig, RunCancellationOwner, RunCancellationTarget, RunCancellationTerminalOutcome,
+    RunEvent, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval,
+    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -32,19 +33,20 @@ use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunExecutionKind, ApplicationRunInteraction, ApplicationRunPrepareError,
     ApplicationRunPrepareErrorClass, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, ApplicationTaskExecutionRuntime,
-    ApplicationTranscriptRole, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
-    PublicApplicationEventBridge, admit_application_agent_binding,
-    admit_application_model_selection, admit_application_reasoning_effort,
-    admit_application_skill_binding, application_run_context_view, application_run_input,
-    application_session_frontier_view, application_session_transcript_page,
-    application_terminal_projection, application_verification_view,
-    attach_application_request_context, bind_application_session,
+    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
+    ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime, ApplicationTranscriptRole,
+    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
+    admit_application_agent_binding, admit_application_model_selection,
+    admit_application_reasoning_effort, admit_application_skill_binding,
+    application_run_context_view, application_run_input, application_session_frontier_view,
+    application_session_transcript_page, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_existing_application_session,
     constrain_application_tool_registry, continue_application_task_handoff,
     default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
-    prepare_application_run_blocking, record_application_preparation_cancellation,
-    rerun_application_verification, validate_execution_contract,
+    prepare_application_run_blocking, prepare_application_task_continuation,
+    record_application_preparation_cancellation, rerun_application_verification,
+    validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -1675,6 +1677,191 @@ model = "application-task-model"
 }
 
 #[tokio::test]
+async fn application_task_continuation_reopens_exact_task_and_returns_synthesis() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+enabled = true
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let task_id = TaskId::new("task-application-continuation")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "continue the application task".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: Some("application restart".to_owned()),
+    }))?;
+    let session_scope_id = session.session_scope_id().to_owned();
+    drop(session);
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: session_path.clone(),
+            expected_session_scope_id: session_scope_id.clone(),
+            run_id: "run-application-task-continuation".to_owned(),
+            task_id: task_id.clone(),
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    assert_eq!(prepared.task_id(), &task_id);
+    let (execution, control) = prepared.into_parts();
+    assert_eq!(
+        control.cancellation_target,
+        RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned()
+        }
+    );
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = execution
+        .execute(&mut events, &mut approval_handler)
+        .await?;
+
+    assert_eq!(output.session_id, session_scope_id);
+    assert_eq!(output.task_id, task_id);
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    assert_eq!(
+        output.terminal_status,
+        ApplicationRunTerminalStatus::Succeeded
+    );
+    assert_eq!(
+        output.final_text.as_deref(),
+        Some("application durable task completed")
+    );
+    assert!(matches!(
+        events.0.first().map(|event| &event.event),
+        Some(PublicRunEventKind::RunStarted { .. })
+    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| matches!(event.event, PublicRunEventKind::TaskPlanUpdated { .. }))
+    );
+    assert!(matches!(
+        events.0.last().map(|event| &event.event),
+        Some(PublicRunEventKind::RunFinished { final_text })
+            if final_text == "application durable task completed"
+    ));
+    assert!(control.handle().is_naturally_finalized());
+    let lifecycle = application_conversation_lifecycle(&session_path)?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Succeeded
+    ));
+    let reopened = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    assert!(
+        reopened
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, SessionLogEntry::User(_))),
+        "Task continuation must not synthesize a user conversation prompt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_task_continuation_rejects_stale_scope_without_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+enabled = true
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let task_id = TaskId::new("task-stale-application-continuation")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "reject stale continuation".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    drop(session);
+    let before = std::fs::read(&session_path)?;
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+
+    let error = match prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: session_path.clone(),
+            expected_session_scope_id: "stale-session-scope".to_owned(),
+            run_id: "run-stale-task-continuation".to_owned(),
+            task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await
+    {
+        Ok(_) => panic!("stale session scope must reject Task continuation"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.class(), ApplicationRunPrepareErrorClass::Execution);
+    assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_control_persists_request_then_terminal_after_quiescence() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store_path = temp.path().join("session.jsonl");
@@ -1687,6 +1874,7 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
     let control = ApplicationRunControl {
         owner,
         recorder,
+        cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
@@ -1749,6 +1937,7 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
     let control = ApplicationRunControl {
         owner,
         recorder,
+        cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
@@ -1809,6 +1998,7 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
     let control = ApplicationRunControl {
         owner,
         recorder,
+        cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
         events: ApplicationRunEventSequence::new(
