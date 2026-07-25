@@ -652,6 +652,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
                 reasoning_effort_binding: None,
                 skill_binding: None,
                 agent_binding: None,
+                task_continuation: None,
             },
         )
         .await

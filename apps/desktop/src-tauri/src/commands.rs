@@ -18,8 +18,8 @@ use sigil_desktop::{
     DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
     DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
     DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
-    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopTaskContinuationRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
+    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -47,8 +47,10 @@ use crate::{
         DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
         DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
         DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
-        DesktopSupportSaveSummary, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
+        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
+        DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -791,10 +793,72 @@ pub(crate) async fn desktop_start_run(
                         snapshot_id: binding.snapshot_id,
                     }
                 }),
+                task_continuation: None,
             },
         )
         .await
         .map_err(project_client_error)?;
+    let response = DesktopRunSummary::from(receipt.run.clone());
+    if let Some(owner) = receipt
+        .foreground_owner
+        .filter(|owner| owner.run_id == receipt.run.id)
+    {
+        state
+            .run_streams
+            .start(
+                app,
+                client,
+                workspace_id,
+                input.session_id,
+                session.durable_session_scope_id,
+                owner.owner_revision,
+                receipt.run,
+            )
+            .await;
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_continue_task(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    input: DesktopTaskContinuationInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_task_continuation(&input)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let session = client
+        .session(&input.session_id)
+        .await
+        .map_err(project_client_error)?;
+    let receipt = client
+        .start_run(
+            &input.session_id,
+            DesktopRunStartRequest {
+                prompt: String::new(),
+                permission_mode: input.permission_mode,
+                model_name: None,
+                model_selection_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: Some(DesktopTaskContinuationRequest {
+                    task_id: input.task_id,
+                    guidance: input.guidance,
+                }),
+            },
+        )
+        .await
+        .map_err(project_task_control_client_error)?;
     let response = DesktopRunSummary::from(receipt.run.clone());
     if let Some(owner) = receipt
         .foreground_owner
@@ -1006,6 +1070,49 @@ pub(crate) async fn desktop_rerun_verification(
         .await
         .map(|receipt| receipt.verification.into())
         .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_task_integration_review(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopTaskIntegrationReviewSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .task_integration_review(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_task_control_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_accept_task_integration(
+    workspace_id: String,
+    input: DesktopTaskIntegrationAcceptInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopTaskIntegrationAcceptanceSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_task_integration_acceptance(&input)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .accept_task_integration(&input.session_id, input.request.into())
+        .await
+        .map(|receipt| receipt.acceptance.into())
+        .map_err(project_task_control_client_error)
 }
 
 #[tauri::command]
@@ -1536,6 +1643,26 @@ fn validate_prompt(value: &str) -> Result<(), DesktopCommandError> {
     Ok(())
 }
 
+fn validate_task_continuation(
+    input: &DesktopTaskContinuationInput,
+) -> Result<(), DesktopCommandError> {
+    if input.task_id.trim().is_empty()
+        || input.task_id.len() > 512
+        || input.task_id.chars().any(char::is_control)
+        || input.guidance.as_deref().is_some_and(|guidance| {
+            guidance.trim().is_empty()
+                || guidance.len() > 256 * 1024
+                || guidance.chars().any(|character| character == '\0')
+        })
+    {
+        return Err(DesktopCommandError::new(
+            "task_continuation_invalid",
+            "The selected Task or continuation guidance is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_queue_generation(value: &str) -> Result<(), DesktopCommandError> {
     if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
         return Err(DesktopCommandError::new(
@@ -1661,6 +1788,29 @@ fn validate_verification_rerun(
                 "The verification recommendation is invalid or stale.",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_task_integration_acceptance(
+    input: &DesktopTaskIntegrationAcceptInput,
+) -> Result<(), DesktopCommandError> {
+    if input.request.plan_version == 0
+        || [
+            input.request.request_id.as_str(),
+            input.request.task_id.as_str(),
+            input.request.plan_id.as_str(),
+            input.request.preview_digest.as_str(),
+        ]
+        .into_iter()
+        .any(|value| {
+            value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+        })
+    {
+        return Err(DesktopCommandError::new(
+            "task_integration_request_invalid",
+            "The Task integration review is invalid or stale.",
+        ));
     }
     Ok(())
 }
@@ -1814,6 +1964,36 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
             DesktopRecoveryAction::ShowDetails,
         ]),
     }
+}
+
+fn project_task_control_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        status,
+        code: Some(code),
+    } = &error
+    {
+        let projected = match code.as_str() {
+            "task_integration_review_not_found" => DesktopCommandError::new(
+                "task_integration_review_not_found",
+                "This Task does not have an integration review ready yet.",
+            ),
+            "invalid_task_integration_review" | "invalid_task_continuation" => {
+                DesktopCommandError::new(
+                    "task_control_invalid",
+                    "The selected Task action is invalid or stale.",
+                )
+                .with_recovery_actions([DesktopRecoveryAction::RetryCurrent])
+            }
+            _ if *status == 409 => DesktopCommandError::new(
+                "task_control_conflict",
+                "The Task changed or another foreground operation is active.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            _ => return project_client_error(error),
+        };
+        return projected;
+    }
+    project_client_error(error)
 }
 
 fn project_client_error(error: DesktopClientError) -> DesktopCommandError {

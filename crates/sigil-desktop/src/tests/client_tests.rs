@@ -490,6 +490,103 @@ fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
 }
 
 #[test]
+fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
+    let request = crate::DesktopRunStartRequest {
+        prompt: String::new(),
+        permission_mode: crate::DesktopPermissionMode::Manual,
+        model_name: None,
+        model_selection_binding: None,
+        reasoning_effort: None,
+        reasoning_effort_binding: None,
+        skill_binding: None,
+        agent_binding: None,
+        task_continuation: Some(crate::DesktopTaskContinuationRequest {
+            task_id: "task_1".to_owned(),
+            guidance: Some("Prefer the smaller compatibility fix.".to_owned()),
+        }),
+    };
+
+    assert_eq!(
+        serde_json::to_value(request).expect("Task continuation should encode"),
+        serde_json::json!({
+            "prompt": "",
+            "permission_mode": "manual",
+            "task_continuation": {
+                "task_id": "task_1",
+                "guidance": "Prefer the smaller compatibility fix."
+            }
+        })
+    );
+}
+
+#[test]
+fn task_integration_review_validates_exact_diff_and_private_ref_free_projection() {
+    let aggregate_diff = "diff --git a/src/lib.rs b/src/lib.rs\n+safe\n";
+    let preview_digest = format!("sha256:{}", "b".repeat(64));
+    let review: crate::DesktopTaskIntegrationReviewView =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "request": {
+                "request_id": format!("integration-review-{}", "a".repeat(64)),
+                "task_id": "task_1",
+                "plan_id": "integration_plan_1",
+                "plan_version": 2,
+                "preview_digest": preview_digest
+            },
+            "aggregate_diff": aggregate_diff,
+            "aggregate_diff_digest": sha256_prefixed(aggregate_diff.as_bytes()),
+            "preview_digest": preview_digest,
+            "policy_digest": format!("sha256:{}", "c".repeat(64)),
+            "target_kind": "workspace_apply",
+            "lanes": [{
+                "lane_id": "lane_1",
+                "candidate_kind": "managed_ref",
+                "proposal_count": 2,
+                "verification_receipt_count": 1
+            }],
+            "child_verification_receipt_count": 2,
+            "lane_verification_receipt_count": 1,
+            "conflict_reasons": ["path_overlap"],
+            "verification_invalidation_count": 1,
+            "parent_verification_pending": true
+        }))
+        .expect("integration review should decode");
+
+    validate_task_integration_review_view(&review).expect("exact review should validate");
+    let debug = format!("{review:?}");
+    assert!(!debug.contains("refs/sigil"));
+    assert!(!debug.contains("worktree_path"));
+    assert!(!debug.contains("artifact_ref"));
+
+    let mut substituted = review;
+    substituted.aggregate_diff.push_str("+substituted\n");
+    assert!(validate_task_integration_review_view(&substituted).is_err());
+}
+
+#[test]
+fn task_integration_acceptance_command_preserves_exact_request_identity() {
+    let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        "127.0.0.1:3210".parse().expect("address should parse"),
+        bearer,
+    );
+    let request = crate::DesktopTaskIntegrationReviewRequest {
+        request_id: format!("integration-review-{}", "a".repeat(64)),
+        task_id: "task_1".to_owned(),
+        plan_id: "integration_plan_1".to_owned(),
+        plan_version: 2,
+        preview_digest: format!("sha256:{}", "b".repeat(64)),
+    };
+
+    let command = client.command("http-session-1", None, request.clone());
+    assert_eq!(command.session_id, "http-session-1");
+    assert_eq!(command.expected_stream_sequence, None);
+    assert_eq!(command.payload, request);
+    assert!(command.command_id.starts_with("desktop-command-"));
+}
+
+#[test]
 fn support_report_decodes_only_the_path_free_contract() {
     let report: crate::DesktopSupportDoctorReport = serde_json::from_value(serde_json::json!({
         "generated_at_unix_ms": 123,

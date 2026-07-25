@@ -1,6 +1,7 @@
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
+use ring::digest::{SHA256, digest};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
@@ -25,7 +26,9 @@ use crate::{
         DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
         DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
         DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
-        DesktopSupportBundleExport, DesktopSupportDoctorReport, DesktopTranscriptQuery,
+        DesktopSupportBundleExport, DesktopSupportDoctorReport,
+        DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationReviewRequest,
+        DesktopTaskIntegrationReviewView, DesktopTranscriptQuery,
         DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
         DesktopVerificationView,
     },
@@ -34,6 +37,11 @@ use crate::{
 };
 
 const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TASK_INTEGRATION_DIFF_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TASK_INTEGRATION_REVIEW_RESPONSE_BYTES: usize =
+    MAX_TASK_INTEGRATION_DIFF_BYTES * 6 + 1024 * 1024;
+const MAX_TASK_INTEGRATION_ROWS: usize = 512;
+const DESKTOP_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION: u16 = 1;
 const MAX_SSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RUN_EVENT_NAME: &str = "run_event";
@@ -610,6 +618,53 @@ impl DesktopHttpClient {
         .await
     }
 
+    /// Projects the exact current Task integration review without private worktree state.
+    pub async fn task_integration_review(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopTaskIntegrationReviewView, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let review = self
+            .get_json_with_limit(
+                self.route(["sessions", session_id, "task-integration", "review"])?,
+                StatusCode::OK,
+                MAX_TASK_INTEGRATION_REVIEW_RESPONSE_BYTES,
+            )
+            .await?;
+        validate_task_integration_review_view(&review)?;
+        Ok(review)
+    }
+
+    /// Accepts one exact stale-safe Task integration review.
+    pub async fn accept_task_integration(
+        &self,
+        session_id: &str,
+        payload: DesktopTaskIntegrationReviewRequest,
+    ) -> Result<DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_task_integration_review_request(&payload)?;
+        let command = self.command(session_id, None, payload.clone());
+        let expected_command_id = command.command_id.clone();
+        let expected_client_id = command.client_id.clone();
+        let receipt: DesktopTaskIntegrationAcceptanceCommandReceipt = self
+            .post_json(
+                self.route(["sessions", session_id, "task-integration", "accept"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != expected_command_id
+            || receipt.client_id != expected_client_id
+            || receipt.session_id != session_id
+            || receipt.acceptance.request != payload
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_task_integration_review_request(&receipt.acceptance.request)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        Ok(receipt)
+    }
+
     /// Reruns one exact stale-safe verification recommendation.
     pub async fn rerun_verification(
         &self,
@@ -666,6 +721,19 @@ impl DesktopHttpClient {
         self.send_json(self.client.get(url), status).await
     }
 
+    async fn get_json_with_limit<T>(
+        &self,
+        url: Url,
+        status: StatusCode,
+        max_response_bytes: usize,
+    ) -> Result<T, DesktopClientError>
+    where
+        T: DeserializeOwned,
+    {
+        self.send_json_with_limit(self.client.get(url), status, max_response_bytes)
+            .await
+    }
+
     async fn post_json<T, B>(
         &self,
         url: Url,
@@ -688,6 +756,19 @@ impl DesktopHttpClient {
     where
         T: DeserializeOwned,
     {
+        self.send_json_with_limit(request, expected_status, MAX_JSON_RESPONSE_BYTES)
+            .await
+    }
+
+    async fn send_json_with_limit<T>(
+        &self,
+        request: RequestBuilder,
+        expected_status: StatusCode,
+        max_response_bytes: usize,
+    ) -> Result<T, DesktopClientError>
+    where
+        T: DeserializeOwned,
+    {
         let mut response = request
             .bearer_auth(self.bearer.expose())
             .timeout(REQUEST_TIMEOUT)
@@ -697,7 +778,7 @@ impl DesktopHttpClient {
         let status = response.status();
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_JSON_RESPONSE_BYTES as u64)
+            .is_some_and(|length| length > max_response_bytes as u64)
         {
             return Err(DesktopClientError::ResponseTooLarge);
         }
@@ -707,7 +788,7 @@ impl DesktopHttpClient {
             .await
             .map_err(|_| DesktopClientError::RequestFailed)?
         {
-            if body.len().saturating_add(chunk.len()) > MAX_JSON_RESPONSE_BYTES {
+            if body.len().saturating_add(chunk.len()) > max_response_bytes {
                 return Err(DesktopClientError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);
@@ -982,6 +1063,91 @@ fn validate_recovery_token(value: &str) -> Result<(), DesktopClientError> {
     } else {
         Ok(())
     }
+}
+
+fn validate_task_integration_review_request(
+    request: &DesktopTaskIntegrationReviewRequest,
+) -> Result<(), DesktopClientError> {
+    if request.plan_version == 0 {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    for value in [
+        request.request_id.as_str(),
+        request.task_id.as_str(),
+        request.plan_id.as_str(),
+        request.preview_digest.as_str(),
+    ] {
+        if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+    }
+    Ok(())
+}
+
+fn validate_task_integration_review_view(
+    review: &DesktopTaskIntegrationReviewView,
+) -> Result<(), DesktopClientError> {
+    use std::collections::BTreeSet;
+
+    validate_task_integration_review_request(&review.request)
+        .map_err(|_| DesktopClientError::InvalidResponse)?;
+    let lane_verification_receipt_count = review
+        .lanes
+        .iter()
+        .try_fold(0_usize, |total, lane| {
+            total.checked_add(lane.verification_receipt_count)
+        })
+        .ok_or(DesktopClientError::InvalidResponse)?;
+    if review.schema_version != DESKTOP_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION
+        || review.aggregate_diff.is_empty()
+        || review.aggregate_diff.len() > MAX_TASK_INTEGRATION_DIFF_BYTES
+        || review.preview_digest != review.request.preview_digest
+        || review.aggregate_diff_digest != sha256_prefixed(review.aggregate_diff.as_bytes())
+        || !review.parent_verification_pending
+        || review.lanes.len() > MAX_TASK_INTEGRATION_ROWS
+        || review.conflict_reasons.len() > MAX_TASK_INTEGRATION_ROWS
+        || review.lane_verification_receipt_count != lane_verification_receipt_count
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    for value in [
+        review.aggregate_diff_digest.as_str(),
+        review.preview_digest.as_str(),
+        review.policy_digest.as_str(),
+    ] {
+        if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    let mut lane_ids = BTreeSet::new();
+    for lane in &review.lanes {
+        if lane.lane_id.trim().is_empty()
+            || lane.lane_id.len() > 512
+            || lane.lane_id.chars().any(char::is_control)
+            || !lane_ids.insert(lane.lane_id.as_str())
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
+    if review.conflict_reasons.iter().any(|reason| {
+        reason.trim().is_empty() || reason.len() > 512 || reason.chars().any(char::is_control)
+    }) {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let value = digest(&SHA256, bytes);
+    let mut output = String::with_capacity("sha256:".len() + value.as_ref().len() * 2);
+    output.push_str("sha256:");
+    for byte in value.as_ref() {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn validate_conversation_queue_command(

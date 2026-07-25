@@ -25,18 +25,21 @@ use sigil_desktop::{
     DesktopConversationRecoveryCommandAction as NativeConversationRecoveryCommandAction,
     DesktopConversationRecoveryCommandActionKind as NativeConversationRecoveryCommandActionKind,
     DesktopConversationRecoveryCommandReceipt as NativeConversationRecoveryCommandReceipt,
-    DesktopConversationRecoveryView as NativeConversationRecoveryView, DesktopModelSelectionPolicy,
-    DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
-    DesktopRunStatus, DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
+    DesktopConversationRecoveryView as NativeConversationRecoveryView,
+    DesktopIntegrationLaneCandidateKind, DesktopIntegrationPromotionStatus,
+    DesktopIntegrationPromotionTargetKind, DesktopModelSelectionPolicy, DesktopPermissionMode,
+    DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
+    DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
     DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanStatus,
     DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
     DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
     DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
     DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
-    DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
-    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationRerunRequest,
-    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
-    DesktopWorkspaceSummary,
+    DesktopTaskIntegrationAcceptanceView, DesktopTaskIntegrationReviewRequest,
+    DesktopTaskIntegrationReviewView, DesktopTimelineEvent, DesktopTranscriptAssistantKind,
+    DesktopTranscriptRole, DesktopVerificationAction, DesktopVerificationCheckStatus,
+    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
+    DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::{
@@ -985,6 +988,15 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) agent_binding: Option<DesktopAgentBindingInput>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTaskContinuationInput {
+    pub(crate) session_id: String,
+    pub(crate) task_id: String,
+    pub(crate) guidance: Option<String>,
+    pub(crate) permission_mode: DesktopPermissionMode,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopSkillBindingInput {
@@ -1296,6 +1308,64 @@ pub(crate) struct DesktopVerificationEvidenceSummary {
     pub(crate) output_artifact_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTaskIntegrationReviewBinding {
+    pub(crate) request_id: String,
+    pub(crate) task_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) plan_version: u32,
+    pub(crate) preview_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTaskIntegrationAcceptInput {
+    pub(crate) session_id: String,
+    pub(crate) request: DesktopTaskIntegrationReviewBinding,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTaskIntegrationLaneSummary {
+    pub(crate) lane_id: String,
+    pub(crate) candidate_kind: &'static str,
+    pub(crate) proposal_count: usize,
+    pub(crate) verification_receipt_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTaskIntegrationReviewSummary {
+    pub(crate) schema_version: u16,
+    pub(crate) request: DesktopTaskIntegrationReviewBinding,
+    pub(crate) aggregate_diff: String,
+    pub(crate) aggregate_diff_digest: String,
+    pub(crate) preview_digest: String,
+    pub(crate) policy_digest: String,
+    pub(crate) target_kind: &'static str,
+    pub(crate) lanes: Vec<DesktopTaskIntegrationLaneSummary>,
+    pub(crate) child_verification_receipt_count: usize,
+    pub(crate) lane_verification_receipt_count: usize,
+    pub(crate) conflict_reasons: Vec<String>,
+    pub(crate) verification_invalidation_count: usize,
+    pub(crate) parent_verification_pending: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTaskIntegrationAcceptanceSummary {
+    pub(crate) request: DesktopTaskIntegrationReviewBinding,
+    pub(crate) promotion_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_verdict: Option<&'static str>,
+    pub(crate) can_continue: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) promotion_cleanup_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_cleanup_error: Option<String>,
 }
 
 impl From<DesktopSessionCatalogState> for DesktopCatalogState {
@@ -2323,6 +2393,97 @@ impl From<DesktopVerificationView> for DesktopVerificationSummary {
                 failure_summary: value.evidence.failure_summary,
             },
         }
+    }
+}
+
+impl From<DesktopTaskIntegrationReviewBinding> for DesktopTaskIntegrationReviewRequest {
+    fn from(value: DesktopTaskIntegrationReviewBinding) -> Self {
+        Self {
+            request_id: value.request_id,
+            task_id: value.task_id,
+            plan_id: value.plan_id,
+            plan_version: value.plan_version,
+            preview_digest: value.preview_digest,
+        }
+    }
+}
+
+impl From<DesktopTaskIntegrationReviewRequest> for DesktopTaskIntegrationReviewBinding {
+    fn from(value: DesktopTaskIntegrationReviewRequest) -> Self {
+        Self {
+            request_id: value.request_id,
+            task_id: value.task_id,
+            plan_id: value.plan_id,
+            plan_version: value.plan_version,
+            preview_digest: value.preview_digest,
+        }
+    }
+}
+
+impl From<DesktopTaskIntegrationReviewView> for DesktopTaskIntegrationReviewSummary {
+    fn from(value: DesktopTaskIntegrationReviewView) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            request: value.request.into(),
+            aggregate_diff: value.aggregate_diff,
+            aggregate_diff_digest: value.aggregate_diff_digest,
+            preview_digest: value.preview_digest,
+            policy_digest: value.policy_digest,
+            target_kind: integration_target_kind_label(value.target_kind),
+            lanes: value
+                .lanes
+                .into_iter()
+                .map(|lane| DesktopTaskIntegrationLaneSummary {
+                    lane_id: lane.lane_id,
+                    candidate_kind: integration_lane_kind_label(lane.candidate_kind),
+                    proposal_count: lane.proposal_count,
+                    verification_receipt_count: lane.verification_receipt_count,
+                })
+                .collect(),
+            child_verification_receipt_count: value.child_verification_receipt_count,
+            lane_verification_receipt_count: value.lane_verification_receipt_count,
+            conflict_reasons: value.conflict_reasons,
+            verification_invalidation_count: value.verification_invalidation_count,
+            parent_verification_pending: value.parent_verification_pending,
+        }
+    }
+}
+
+impl From<DesktopTaskIntegrationAcceptanceView> for DesktopTaskIntegrationAcceptanceSummary {
+    fn from(value: DesktopTaskIntegrationAcceptanceView) -> Self {
+        Self {
+            request: value.request.into(),
+            promotion_status: integration_promotion_status_label(value.promotion_status),
+            parent_verdict: value.parent_verdict.map(verification_verdict_label),
+            can_continue: value.can_continue,
+            promotion_cleanup_error: value.promotion_cleanup_error,
+            parent_cleanup_error: value.parent_cleanup_error,
+        }
+    }
+}
+
+fn integration_target_kind_label(value: DesktopIntegrationPromotionTargetKind) -> &'static str {
+    match value {
+        DesktopIntegrationPromotionTargetKind::WorkspaceApply => "workspace_apply",
+        DesktopIntegrationPromotionTargetKind::GitRefAdvance => "git_ref_advance",
+    }
+}
+
+fn integration_lane_kind_label(value: DesktopIntegrationLaneCandidateKind) -> &'static str {
+    match value {
+        DesktopIntegrationLaneCandidateKind::ManagedRef => "managed_ref",
+        DesktopIntegrationLaneCandidateKind::SnapshotWorkspace => "snapshot_workspace",
+    }
+}
+
+fn integration_promotion_status_label(value: DesktopIntegrationPromotionStatus) -> &'static str {
+    match value {
+        DesktopIntegrationPromotionStatus::Prepared => "prepared",
+        DesktopIntegrationPromotionStatus::Promoted => "promoted",
+        DesktopIntegrationPromotionStatus::Conflict => "conflict",
+        DesktopIntegrationPromotionStatus::Stale => "stale",
+        DesktopIntegrationPromotionStatus::Failed => "failed",
+        DesktopIntegrationPromotionStatus::Cancelled => "cancelled",
     }
 }
 

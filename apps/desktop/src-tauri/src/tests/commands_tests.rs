@@ -629,6 +629,106 @@ fn verification_rerun_requires_one_bounded_exact_binding() {
 }
 
 #[test]
+fn task_continuation_requires_exact_task_and_optional_nonempty_guidance() {
+    let valid = crate::ipc::DesktopTaskContinuationInput {
+        session_id: "http-session-1".to_owned(),
+        task_id: "task_1".to_owned(),
+        guidance: Some("Keep the public API compatible.".to_owned()),
+        permission_mode: sigil_desktop::DesktopPermissionMode::Manual,
+    };
+    assert!(validate_task_continuation(&valid).is_ok());
+
+    let empty_guidance = crate::ipc::DesktopTaskContinuationInput {
+        guidance: Some("   ".to_owned()),
+        ..valid
+    };
+    assert_eq!(
+        validate_task_continuation(&empty_guidance)
+            .expect_err("empty guidance must fail")
+            .code,
+        "task_continuation_invalid"
+    );
+
+    let unknown_field =
+        serde_json::from_value::<crate::ipc::DesktopTaskContinuationInput>(serde_json::json!({
+            "sessionId": "http-session-1",
+            "taskId": "task_1",
+            "permissionMode": "manual",
+            "prompt": "must not become a chat turn"
+        }));
+    assert!(unknown_field.is_err());
+}
+
+#[test]
+fn task_integration_acceptance_echoes_one_bounded_exact_binding() {
+    let valid = crate::ipc::DesktopTaskIntegrationAcceptInput {
+        session_id: "http-session-1".to_owned(),
+        request: crate::ipc::DesktopTaskIntegrationReviewBinding {
+            request_id: format!("integration-review-{}", "a".repeat(64)),
+            task_id: "task_1".to_owned(),
+            plan_id: "integration_plan_1".to_owned(),
+            plan_version: 3,
+            preview_digest: format!("sha256:{}", "b".repeat(64)),
+        },
+    };
+    assert!(validate_task_integration_acceptance(&valid).is_ok());
+
+    let mut invalid = valid;
+    invalid.request.plan_version = 0;
+    assert_eq!(
+        validate_task_integration_acceptance(&invalid)
+            .expect_err("zero plan version must fail")
+            .code,
+        "task_integration_request_invalid"
+    );
+
+    invalid.request.plan_version = 3;
+    invalid.request.preview_digest.clear();
+    assert!(validate_task_integration_acceptance(&invalid).is_err());
+}
+
+#[test]
+fn task_integration_ipc_projection_is_camel_case_and_private_ref_free() {
+    let review = sigil_desktop::DesktopTaskIntegrationReviewView {
+        schema_version: 1,
+        request: sigil_desktop::DesktopTaskIntegrationReviewRequest {
+            request_id: "integration-review-request".to_owned(),
+            task_id: "task_1".to_owned(),
+            plan_id: "plan_1".to_owned(),
+            plan_version: 1,
+            preview_digest: "sha256:preview".to_owned(),
+        },
+        aggregate_diff: "diff --git a/src/lib.rs b/src/lib.rs\n".to_owned(),
+        aggregate_diff_digest: "sha256:diff".to_owned(),
+        preview_digest: "sha256:preview".to_owned(),
+        policy_digest: "sha256:policy".to_owned(),
+        target_kind: sigil_desktop::DesktopIntegrationPromotionTargetKind::WorkspaceApply,
+        lanes: vec![sigil_desktop::DesktopTaskIntegrationLaneView {
+            lane_id: "lane_1".to_owned(),
+            candidate_kind: sigil_desktop::DesktopIntegrationLaneCandidateKind::SnapshotWorkspace,
+            proposal_count: 1,
+            verification_receipt_count: 2,
+        }],
+        child_verification_receipt_count: 1,
+        lane_verification_receipt_count: 2,
+        conflict_reasons: vec!["path_overlap".to_owned()],
+        verification_invalidation_count: 1,
+        parent_verification_pending: true,
+    };
+    let projected = serde_json::to_value(crate::ipc::DesktopTaskIntegrationReviewSummary::from(
+        review,
+    ))
+    .expect("integration review should project");
+    assert_eq!(projected["request"]["taskId"], "task_1");
+    assert_eq!(projected["targetKind"], "workspace_apply");
+    assert_eq!(projected["lanes"][0]["candidateKind"], "snapshot_workspace");
+    let encoded = projected.to_string();
+    assert!(!encoded.contains("worktree"));
+    assert!(!encoded.contains("managed_ref"));
+    assert!(!encoded.contains("artifact_ref"));
+}
+
+#[test]
 fn support_bundle_validation_and_private_write_are_bounded() {
     assert!(validate_support_bundle("sigil-support-123.json", "{\"schema_version\":1}").is_ok());
     assert!(validate_support_bundle("../support.json", "{}").is_err());

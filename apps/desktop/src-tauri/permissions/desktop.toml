@@ -49,6 +49,11 @@ description = "Allows the main local window to start, reattach, or cooperatively
 commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run"]
 
 [[permission]]
+identifier = "allow-desktop-task-control"
+description = "Allows the main local window to continue one exact durable Task and review or accept one stale-safe integration preview."
+commands.allow = ["desktop_continue_task", "desktop_task_integration_review", "desktop_accept_task_integration"]
+
+[[permission]]
 identifier = "allow-desktop-conversation-queue"
 description = "Allows the main local window to inspect and mutate one bounded durable follow-up queue through generation-guarded commands."
 commands.allow = ["desktop_conversation_queue", "desktop_command_conversation_queue"]

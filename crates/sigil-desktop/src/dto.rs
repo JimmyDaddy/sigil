@@ -1004,6 +1004,17 @@ pub struct DesktopRunStartRequest {
     pub skill_binding: Option<DesktopApplicationSkillBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_binding: Option<DesktopApplicationAgentBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_continuation: Option<DesktopTaskContinuationRequest>,
+}
+
+/// Exact durable Task continuation requested instead of a new conversation turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskContinuationRequest {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
 }
 
 /// Request payload for cooperative cancellation.
@@ -1692,6 +1703,102 @@ pub struct DesktopVerificationRerunCommandReceipt {
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub verification: DesktopVerificationView,
+    pub replayed: bool,
+}
+
+/// Exact stale-safe identity for one current Task integration review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskIntegrationReviewRequest {
+    pub request_id: String,
+    pub task_id: String,
+    pub plan_id: String,
+    pub plan_version: u32,
+    pub preview_digest: String,
+}
+
+/// Renderer-safe final promotion target kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopIntegrationPromotionTargetKind {
+    WorkspaceApply,
+    GitRefAdvance,
+}
+
+/// Renderer-safe physical integration lane candidate kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopIntegrationLaneCandidateKind {
+    ManagedRef,
+    SnapshotWorkspace,
+}
+
+/// Bounded, private-ref-free provenance for one reviewed integration lane.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskIntegrationLaneView {
+    pub lane_id: String,
+    pub candidate_kind: DesktopIntegrationLaneCandidateKind,
+    pub proposal_count: usize,
+    pub verification_receipt_count: usize,
+}
+
+/// Exact current Task integration review returned by the local server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskIntegrationReviewView {
+    pub schema_version: u16,
+    pub request: DesktopTaskIntegrationReviewRequest,
+    pub aggregate_diff: String,
+    pub aggregate_diff_digest: String,
+    pub preview_digest: String,
+    pub policy_digest: String,
+    pub target_kind: DesktopIntegrationPromotionTargetKind,
+    pub lanes: Vec<DesktopTaskIntegrationLaneView>,
+    pub child_verification_receipt_count: usize,
+    pub lane_verification_receipt_count: usize,
+    pub conflict_reasons: Vec<String>,
+    pub verification_invalidation_count: usize,
+    pub parent_verification_pending: bool,
+}
+
+/// Terminal status of one exact final Task promotion attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopIntegrationPromotionStatus {
+    Prepared,
+    Promoted,
+    Conflict,
+    Stale,
+    Failed,
+    Cancelled,
+}
+
+/// Terminal, renderer-safe result of accepting one exact Task integration review.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskIntegrationAcceptanceView {
+    pub request: DesktopTaskIntegrationReviewRequest,
+    pub promotion_status: DesktopIntegrationPromotionStatus,
+    #[serde(default)]
+    pub parent_verdict: Option<DesktopVerificationVerdict>,
+    pub can_continue: bool,
+    #[serde(default)]
+    pub promotion_cleanup_error: Option<String>,
+    #[serde(default)]
+    pub parent_cleanup_error: Option<String>,
+}
+
+/// Receipt from accepting one exact Task integration review.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskIntegrationAcceptanceCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub acceptance: DesktopTaskIntegrationAcceptanceView,
     pub replayed: bool,
 }
 
