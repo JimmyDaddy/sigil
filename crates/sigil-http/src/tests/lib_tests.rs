@@ -58,8 +58,9 @@ use super::{
     HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
     HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
     HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpTaskContinuationRequest, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -898,6 +899,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
             reasoning_effort_binding: None,
             skill_binding: None,
             agent_binding: None,
+            task_continuation: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -921,6 +923,62 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
     assert_eq!(retry_receipt["run"]["id"], "http-run-1");
     assert_eq!(retry_receipt["replayed"], true);
     assert_eq!(driver.starts().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_routes_typed_task_continuation_through_run_start() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "desktop"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let command = HttpCommandEnvelope::new(
+        "command-task-continue-1",
+        "desktop-client",
+        session_id,
+        HttpRunStartRequest {
+            prompt: String::new(),
+            permission_mode: Some(HttpPermissionMode::Manual),
+            model_name: None,
+            model_selection_binding: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+            task_continuation: Some(HttpTaskContinuationRequest {
+                task_id: "task-42".to_owned(),
+                guidance: Some("continue from the durable checkpoint".to_owned()),
+            }),
+        },
+    );
+    let (status, receipt) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/runs"),
+            Some("secret-token"),
+            &serde_json::to_string(&command).expect("Task command should serialize"),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, 201);
+    assert_eq!(receipt["run"]["status"], "running");
+    assert_eq!(driver.starts().len(), 1);
+    assert_eq!(
+        driver.starts()[0]
+            .task_continuation
+            .as_ref()
+            .map(|task| task.task_id.as_str()),
+        Some("task-42")
+    );
     let _ = shutdown.send(());
 }
 
@@ -1557,6 +1615,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
             reasoning_effort_binding: None,
             skill_binding: None,
             agent_binding: None,
+            task_continuation: None,
         },
     );
     let command_body = serde_json::to_string(&command).expect("command should serialize");
@@ -1645,6 +1704,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
             reasoning_effort_binding: None,
             skill_binding: None,
             agent_binding: None,
+            task_continuation: None,
         },
     );
     let start_body = serde_json::to_string(&start_command).expect("start command should serialize");
@@ -2314,6 +2374,15 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert_eq!(
         document["components"]["schemas"]["RunStartCommand"]["allOf"][1]["properties"]["payload"]["$ref"],
         "#/components/schemas/RunStartRequest"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["RunStartRequest"]["properties"]["task_continuation"]["oneOf"]
+            [0]["$ref"],
+        "#/components/schemas/TaskContinuationRequest"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["TaskContinuationRequest"]["required"],
+        json!(["task_id"])
     );
     assert_eq!(
         document["components"]["schemas"]["ApprovalDecisionCommand"]["allOf"][1]["properties"]["payload"]
@@ -4475,6 +4544,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
                 reasoning_effort_binding: None,
                 skill_binding: None,
                 agent_binding: None,
+                task_continuation: None,
             }
         ),
         Err(HttpRegistryError::MissingPermissionMode)
@@ -4526,6 +4596,67 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     assert_eq!(
         starts[0].reasoning_effort_binding.as_deref(),
         Some("effort-binding")
+    );
+}
+
+#[test]
+fn task_continuation_uses_the_foreground_run_control_plane() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let request = HttpRunStartRequest {
+        prompt: String::new(),
+        permission_mode: Some(HttpPermissionMode::Manual),
+        model_name: None,
+        model_selection_binding: None,
+        reasoning_effort: None,
+        reasoning_effort_binding: None,
+        skill_binding: None,
+        agent_binding: None,
+        task_continuation: Some(HttpTaskContinuationRequest {
+            task_id: "task-42".to_owned(),
+            guidance: Some("preserve the public protocol".to_owned()),
+        }),
+    };
+
+    let run = registry
+        .start_run(&session.id, request)
+        .expect("Task continuation should acquire foreground ownership");
+
+    assert_eq!(run.status, HttpRunStatus::Running);
+    assert_eq!(run.prompt_preview, "preserve the public protocol");
+    assert_eq!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain available")
+            .foreground_run_id
+            .as_deref(),
+        Some(run.id.as_str())
+    );
+    let starts = driver.starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(
+        starts[0].task_continuation,
+        Some(HttpTaskContinuationRequest {
+            task_id: "task-42".to_owned(),
+            guidance: Some("preserve the public protocol".to_owned()),
+        })
+    );
+    assert_eq!(starts[0].prompt, "preserve the public protocol");
+}
+
+#[test]
+fn task_continuation_rejects_ambiguous_conversation_fields() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let mut request = run_start("new conversation prompt", HttpPermissionMode::Manual);
+    request.task_continuation = Some(HttpTaskContinuationRequest {
+        task_id: "task-42".to_owned(),
+        guidance: None,
+    });
+
+    assert_eq!(
+        registry.start_run(&session.id, request),
+        Err(HttpRegistryError::InvalidTaskContinuation)
     );
 }
 
@@ -5341,6 +5472,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
         reasoning_effort_binding: None,
         skill_binding: None,
         agent_binding: None,
+        task_continuation: None,
     };
     assert_eq!(
         serde_json::to_value(&start).expect("start request should serialize"),
@@ -5455,6 +5587,7 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
         reasoning_effort_binding: None,
         skill_binding: None,
         agent_binding: None,
+        task_continuation: None,
     }
 }
 

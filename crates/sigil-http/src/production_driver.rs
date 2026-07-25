@@ -34,13 +34,15 @@ use sigil_runtime::application_recovery::{
     preview_application_checkpoint_restore, restore_application_checkpoint,
 };
 use sigil_runtime::application_run::{
-    ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunInteraction,
-    ApplicationRunOutput, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, ApplicationTranscriptRole, PreparedApplicationRun,
-    application_agent_activity_view, application_run_context_view,
-    application_session_frontier_view, application_session_transcript_page,
-    application_verification_view, bind_application_session_with_model,
-    bind_existing_application_session, prepare_application_run,
+    ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunExecution,
+    ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
+    ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
+    ApplicationTaskContinuationRequest, ApplicationTranscriptRole, PreparedApplicationRun,
+    PreparedApplicationTaskContinuation, application_agent_activity_view,
+    application_run_context_view, application_session_frontier_view,
+    application_session_transcript_page, application_verification_view,
+    bind_application_session_with_model, bind_existing_application_session,
+    prepare_application_run, prepare_application_task_continuation,
     record_application_preparation_cancellation, rerun_application_verification,
 };
 use sigil_runtime::conversation_display::{
@@ -132,6 +134,14 @@ trait HttpApplicationRunPreparer: Send + Sync {
         request: ApplicationQueuedRunRequest,
         services: ApplicationRunServices,
     ) -> Result<PreparedApplicationRun>;
+
+    async fn prepare_task(
+        &self,
+        _request: ApplicationTaskContinuationRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationTaskContinuation> {
+        Err(anyhow!("application Task continuation is unavailable"))
+    }
 }
 
 struct HttpSharedApplicationRunPreparer;
@@ -156,6 +166,80 @@ impl HttpApplicationRunPreparer for HttpSharedApplicationRunPreparer {
         prepare_application_queued_run(request, &services)
             .await
             .map_err(anyhow::Error::new)
+    }
+
+    async fn prepare_task(
+        &self,
+        request: ApplicationTaskContinuationRequest,
+        services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationTaskContinuation> {
+        prepare_application_task_continuation(request, &services)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+}
+
+enum HttpPreparedApplicationRun {
+    Conversation(Box<PreparedApplicationRun>),
+    Task(Box<PreparedApplicationTaskContinuation>),
+}
+
+impl HttpPreparedApplicationRun {
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Conversation(prepared) => prepared.session_id(),
+            Self::Task(prepared) => prepared.session_id(),
+        }
+    }
+
+    fn session_log_path(&self) -> &Path {
+        match self {
+            Self::Conversation(prepared) => prepared.session_log_path(),
+            Self::Task(prepared) => prepared.session_log_path(),
+        }
+    }
+
+    fn into_parts(self) -> (HttpApplicationRunExecution, ApplicationRunControl) {
+        match self {
+            Self::Conversation(prepared) => {
+                let (execution, control) = (*prepared).into_parts();
+                (
+                    HttpApplicationRunExecution::Conversation(Box::new(execution)),
+                    control,
+                )
+            }
+            Self::Task(prepared) => {
+                let (execution, control) = (*prepared).into_parts();
+                (
+                    HttpApplicationRunExecution::Task(Box::new(execution)),
+                    control,
+                )
+            }
+        }
+    }
+}
+
+enum HttpApplicationRunExecution {
+    Conversation(Box<ApplicationRunExecution>),
+    Task(Box<ApplicationTaskContinuationExecution>),
+}
+
+impl HttpApplicationRunExecution {
+    async fn execute_on_owned_blocking(
+        self,
+        event_handler: HttpProductionEventHandler,
+        approval_handler: HttpProductionApprovalHandler,
+    ) -> Result<ApplicationRunTerminalStatus> {
+        match self {
+            Self::Conversation(execution) => (*execution)
+                .execute_on_owned_blocking(event_handler, approval_handler)
+                .await
+                .map(|output| output.terminal_status),
+            Self::Task(execution) => (*execution)
+                .execute_on_owned_blocking(event_handler, approval_handler)
+                .await
+                .map(|output| output.terminal_status),
+        }
     }
 }
 
@@ -558,6 +642,7 @@ impl HttpProductionRunDriver {
             reasoning_effort_binding,
             skill_binding: None,
             agent_binding: None,
+            task_continuation: None,
         };
         Ok((
             standard_start,
@@ -2322,19 +2407,56 @@ impl HttpRunSupervisor {
                 prompt_hash: queued.promotion.prompt_hash.clone(),
                 exact_prompt_key: queued.exact_prompt_key.clone(),
             });
-        let mut preparation = match self.queued.take() {
-            Some(queued) => preparer.prepare_queued(
-                ApplicationQueuedRunRequest {
-                    run: request,
-                    durable_queue: queued.durable_queue,
-                    promotion: queued.promotion,
-                    prompt_material: queued.prompt_material,
-                    capability_registrations: queued.capability_registrations,
-                },
-                services,
-            ),
-            None => preparer.prepare(request, services),
-        };
+        let task_continuation = self.start.task_continuation.clone();
+        let expected_session_scope_id = self.start.session.durable_session_scope_id.clone();
+        let queued = self.queued.take();
+        let mut preparation = Box::pin(async move {
+            match (queued, task_continuation) {
+                (Some(_), Some(_)) => Err(anyhow!("queued runs cannot continue an existing Task")),
+                (Some(queued), None) => preparer
+                    .prepare_queued(
+                        ApplicationQueuedRunRequest {
+                            run: request,
+                            durable_queue: queued.durable_queue,
+                            promotion: queued.promotion,
+                            prompt_material: queued.prompt_material,
+                            capability_registrations: queued.capability_registrations,
+                        },
+                        services,
+                    )
+                    .await
+                    .map(Box::new)
+                    .map(HttpPreparedApplicationRun::Conversation),
+                (None, Some(task)) => {
+                    let task_id = sigil_kernel::TaskId::new(task.task_id)?;
+                    preparer
+                        .prepare_task(
+                            ApplicationTaskContinuationRequest {
+                                config_path: request.config_path,
+                                launch_cwd: request.launch_cwd,
+                                session_path: request.session_path.ok_or_else(|| {
+                                    anyhow!("Task continuation session path is unavailable")
+                                })?,
+                                expected_session_scope_id,
+                                run_id: request.run_id,
+                                task_id,
+                                guidance: task.guidance,
+                                interaction: request.interaction,
+                                permission_mode: request.permission_mode,
+                            },
+                            services,
+                        )
+                        .await
+                        .map(Box::new)
+                        .map(HttpPreparedApplicationRun::Task)
+                }
+                (None, None) => preparer
+                    .prepare(request, services)
+                    .await
+                    .map(Box::new)
+                    .map(HttpPreparedApplicationRun::Conversation),
+            }
+        });
         let preparation_outcome = tokio::select! {
             biased;
             result = &mut preparation => Ok(result),
@@ -2775,7 +2897,7 @@ impl HttpRunSupervisor {
         &self,
         registry: &Arc<HttpSessionRunRegistry>,
         cancellation: HttpProductionCancellationCommand,
-        prepared: PreparedApplicationRun,
+        prepared: HttpPreparedApplicationRun,
         deadline: Instant,
     ) -> Result<(), HttpRunDriverError> {
         let acknowledgement = cancellation.acknowledgement;
@@ -3461,7 +3583,7 @@ fn record_natural_terminal_if_delivered(
     control: &ApplicationRunControl,
     registry: &HttpSessionRunRegistry,
     run_id: &str,
-    result: &Result<ApplicationRunOutput>,
+    result: &Result<ApplicationRunTerminalStatus>,
 ) -> Result<bool, HttpRunDriverError> {
     if !control
         .terminal_was_delivered()
@@ -3476,10 +3598,10 @@ fn record_natural_terminal_if_delivered(
 }
 
 fn http_terminal_from_application_result(
-    result: &Result<ApplicationRunOutput>,
+    result: &Result<ApplicationRunTerminalStatus>,
 ) -> HttpRunTerminalOutcome {
     match result {
-        Ok(output) => match output.terminal_status {
+        Ok(terminal_status) => match terminal_status {
             ApplicationRunTerminalStatus::Succeeded => HttpRunTerminalOutcome::Finished,
             ApplicationRunTerminalStatus::Interrupted => HttpRunTerminalOutcome::Interrupted,
             ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Failed,

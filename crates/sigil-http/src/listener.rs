@@ -1602,6 +1602,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ConversationRecoveryConflict => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
+        | HttpRegistryError::InvalidTaskContinuation
         | HttpRegistryError::InvalidSessionOpenRequest
         | HttpRegistryError::ConversationDisplayCursorInvalid
         | HttpRegistryError::ConversationQueueInvalidCommand

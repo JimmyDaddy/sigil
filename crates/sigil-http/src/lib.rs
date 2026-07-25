@@ -75,9 +75,9 @@ pub use dto::{
     HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
     HttpSessionSnapshot, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
     HttpSupportBundleExport, HttpSupportCheck, HttpSupportDoctorReport, HttpSupportEnvironment,
-    HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTaskContinuationRequest,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

@@ -1727,6 +1727,11 @@ api_key = "test-secret-key"
     )
     .await?;
     assert_eq!(prepared.task_id(), &task_id);
+    assert_eq!(prepared.session_id(), session_scope_id);
+    assert_eq!(
+        prepared.session_log_path(),
+        std::fs::canonicalize(&session_path)?.as_path()
+    );
     let (execution, control) = prepared.into_parts();
     assert_eq!(
         control.cancellation_target,

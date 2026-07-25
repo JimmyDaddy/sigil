@@ -12,7 +12,8 @@ use crate::dto::{
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort,
     HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -34,6 +35,8 @@ pub struct HttpRunDriverStart {
     pub skill_binding: Option<HttpApplicationSkillBinding>,
     /// Exact supervised-agent binding selected from the current run context.
     pub agent_binding: Option<HttpApplicationAgentBinding>,
+    /// Exact durable Task continuation replacing a new conversation turn.
+    pub task_continuation: Option<HttpTaskContinuationRequest>,
 }
 
 /// Cancel context delivered to the HTTP run driver.

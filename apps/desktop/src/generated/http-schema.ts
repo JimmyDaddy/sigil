@@ -2338,6 +2338,7 @@ export interface components {
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             reasoning_effort_binding?: string | null;
             skill_binding?: components["schemas"]["ApplicationSkillBinding"] | null;
+            task_continuation?: components["schemas"]["TaskContinuationRequest"] | null;
         };
         RunStartedEvent: {
             prompt: string;
@@ -2628,6 +2629,10 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_batch_changed";
+        };
+        TaskContinuationRequest: {
+            guidance?: string | null;
+            task_id: string;
         };
         TaskPhaseChangedEvent: {
             phase: components["schemas"]["PublicTaskPhase"];

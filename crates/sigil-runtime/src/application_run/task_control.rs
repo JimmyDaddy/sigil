@@ -47,6 +47,18 @@ impl PreparedApplicationTaskContinuation {
     pub fn run_id(&self) -> &str {
         &self.execution.run_id
     }
+
+    /// Returns the durable session scope.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.execution.session_id
+    }
+
+    /// Returns the exact durable V2 session path.
+    #[must_use]
+    pub fn session_log_path(&self) -> &Path {
+        &self.execution.session_log_path
+    }
 }
 
 /// Application-owned execution of one exact durable Task continuation.

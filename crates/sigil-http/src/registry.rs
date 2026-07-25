@@ -73,6 +73,9 @@ pub enum HttpRegistryError {
     /// The run did not include an explicit permission mode.
     #[error("http run start requires an explicit permission mode")]
     MissingPermissionMode,
+    /// The Task continuation payload is empty, ambiguous, or combined with conversation fields.
+    #[error("http Task continuation request is invalid")]
+    InvalidTaskContinuation,
     /// The runtime driver could not establish a durable binding for the adapter session.
     #[error("http driver rejected durable binding for session {session_id}: {message}")]
     SessionBindingRejected { session_id: String, message: String },
@@ -1263,8 +1266,28 @@ impl HttpSessionRunRegistry {
         session_id: &str,
         request: HttpRunStartRequest,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
-        if request.prompt.trim().is_empty() {
-            return Err(HttpRegistryError::EmptyPrompt);
+        match request.task_continuation.as_ref() {
+            Some(task) => {
+                if task.task_id.trim().is_empty()
+                    || task
+                        .guidance
+                        .as_deref()
+                        .is_some_and(|guidance| guidance.trim().is_empty())
+                    || !request.prompt.trim().is_empty()
+                    || request.model_name.is_some()
+                    || request.model_selection_binding.is_some()
+                    || request.reasoning_effort.is_some()
+                    || request.reasoning_effort_binding.is_some()
+                    || request.skill_binding.is_some()
+                    || request.agent_binding.is_some()
+                {
+                    return Err(HttpRegistryError::InvalidTaskContinuation);
+                }
+            }
+            None if request.prompt.trim().is_empty() => {
+                return Err(HttpRegistryError::EmptyPrompt);
+            }
+            None => {}
         }
         let permission_mode = request
             .permission_mode
@@ -1275,7 +1298,13 @@ impl HttpSessionRunRegistry {
         let reasoning_effort_binding = request.reasoning_effort_binding;
         let skill_binding = request.skill_binding;
         let agent_binding = request.agent_binding;
-        let prompt = request.prompt;
+        let task_continuation = request.task_continuation;
+        let prompt = task_continuation.as_ref().map_or(request.prompt, |task| {
+            task.guidance.as_deref().map_or_else(
+                || format!("Continue task {}", task.task_id.trim()),
+                safe_persistence_text,
+            )
+        });
         let release_barrier = self.driver.requires_run_release_barrier();
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
@@ -1345,6 +1374,7 @@ impl HttpSessionRunRegistry {
             reasoning_effort_binding,
             skill_binding,
             agent_binding,
+            task_continuation,
         };
         match catch_unwind(AssertUnwindSafe(|| self.driver.start_run(start))) {
             Ok(Ok(())) => {}

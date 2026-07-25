@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -26,6 +26,7 @@ use crate::{
     HttpConversationQueuePromptMaterial, HttpDurableEgressDisclosureJournal,
     HttpDurableProtocolJournal, HttpForegroundRunOwner, HttpPermissionMode, HttpRunStartRequest,
     HttpRunStatus, HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
+    HttpTaskContinuationRequest,
 };
 
 fn call() -> ToolCall {
@@ -49,7 +50,7 @@ fn spec(access: ToolAccess, network_effect: Option<NetworkEffect>) -> ToolSpec {
 }
 
 #[test]
-fn task_guidance_kind_stays_private_until_http_protocol_supports_it() {
+fn task_guidance_queue_kind_stays_private_because_continuation_is_a_typed_run_command() {
     assert_eq!(
         kernel_queue_kind_to_http(sigil_kernel::ConversationInputKind::TaskGuidance),
         HttpConversationQueueItemKind::Unknown
@@ -64,6 +65,11 @@ struct ControlledPreparation {
 #[derive(Default)]
 struct FailingQueuedPreparation {
     queued_calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct FailingTaskPreparation {
+    requests: Mutex<Vec<ApplicationTaskContinuationRequest>>,
 }
 
 fn production_queue_driver(
@@ -119,6 +125,104 @@ async fn production_driver_attaches_the_shared_application_task_executor() {
     let driver = production_queue_driver(&temp, "task-executor");
 
     assert!(driver.services.task_executor_attached());
+}
+
+#[tokio::test]
+async fn production_supervisor_routes_typed_task_continuation_to_shared_preparer() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+enabled = true
+"#,
+    )
+    .expect("Task continuation config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-task.json"), 16)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures-task.json"), 16)
+            .expect("disclosure journal should initialize"),
+    );
+    let preparer = Arc::new(FailingTaskPreparation::default());
+    let driver = Arc::new(
+        HttpProductionRunDriver::new_with_preparer(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+            preparer.clone(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-task.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+
+    let run = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: String::new(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                model_name: None,
+                model_selection_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: Some(HttpTaskContinuationRequest {
+                    task_id: "task-http-continuation".to_owned(),
+                    guidance: Some("finish the HTTP control surface".to_owned()),
+                }),
+            },
+        )
+        .expect("typed Task continuation should start");
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = registry
+                .get_run(&run.id)
+                .expect("run should remain visible");
+            if snapshot.status.is_terminal() {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Task preparation failure should reach a terminal");
+
+    assert_eq!(terminal.status, HttpRunStatus::Failed);
+    let requests = preparer
+        .requests
+        .lock()
+        .expect("Task request recorder should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].task_id.as_str(), "task-http-continuation");
+    assert_eq!(
+        requests[0].guidance.as_deref(),
+        Some("finish the HTTP control surface")
+    );
+    assert_eq!(
+        requests[0].expected_session_scope_id,
+        session.durable_session_scope_id
+    );
 }
 
 fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpSessionSnapshot {
@@ -246,6 +350,37 @@ impl HttpApplicationRunPreparer for FailingQueuedPreparation {
     ) -> Result<PreparedApplicationRun> {
         self.queued_calls.fetch_add(1, Ordering::SeqCst);
         Err(anyhow!("controlled queued preparation failure"))
+    }
+}
+
+#[async_trait]
+impl HttpApplicationRunPreparer for FailingTaskPreparation {
+    async fn prepare(
+        &self,
+        _request: ApplicationRunRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun> {
+        Err(anyhow!("ordinary preparation is not expected in this test"))
+    }
+
+    async fn prepare_queued(
+        &self,
+        _request: ApplicationQueuedRunRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun> {
+        Err(anyhow!("queued preparation is not expected in this test"))
+    }
+
+    async fn prepare_task(
+        &self,
+        request: ApplicationTaskContinuationRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationTaskContinuation> {
+        self.requests
+            .lock()
+            .expect("Task request recorder should not be poisoned")
+            .push(request);
+        Err(anyhow!("controlled Task continuation preparation failure"))
     }
 }
 
@@ -2106,6 +2241,7 @@ model = "deepseek-v4-flash"
                 reasoning_effort_binding: None,
                 skill_binding: None,
                 agent_binding: None,
+                task_continuation: None,
             },
         )
         .expect("run should start");
@@ -2305,6 +2441,7 @@ model = "deepseek-v4-flash"
                 reasoning_effort_binding: None,
                 skill_binding: None,
                 agent_binding: None,
+                task_continuation: None,
             },
         )
         .expect("owned production supervisor should accept the run");

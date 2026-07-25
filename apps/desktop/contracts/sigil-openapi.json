@@ -3601,6 +3601,16 @@
                 "type": "null"
               }
             ]
+          },
+          "task_continuation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskContinuationRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -4752,6 +4762,26 @@
           "active",
           "completed",
           "failed"
+        ],
+        "type": "object"
+      },
+      "TaskContinuationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "guidance": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
         ],
         "type": "object"
       },

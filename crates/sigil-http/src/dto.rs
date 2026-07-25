@@ -1143,6 +1143,20 @@ pub struct HttpRunStartRequest {
     /// Exact catalog binding for one user-invoked supervised agent profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_binding: Option<HttpApplicationAgentBinding>,
+    /// Exact durable Task continuation requested instead of a new conversation turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_continuation: Option<HttpTaskContinuationRequest>,
+}
+
+/// Exact durable Task continuation admitted through the foreground run control plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpTaskContinuationRequest {
+    /// Exact durable Task id selected from application projection truth.
+    pub task_id: String,
+    /// Optional user guidance applied at the Task continuation safe point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
 }
 
 /// Request body for cancelling one run.

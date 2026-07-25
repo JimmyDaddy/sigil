@@ -1934,7 +1934,17 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] },
-                        "agent_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationAgentBinding" }, { "type": "null" }] }
+                        "agent_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationAgentBinding" }, { "type": "null" }] },
+                        "task_continuation": { "oneOf": [{ "$ref": "#/components/schemas/TaskContinuationRequest" }, { "type": "null" }] }
+                    }
+                },
+                "TaskContinuationRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_id"],
+                    "properties": {
+                        "task_id": { "type": "string", "minLength": 1 },
+                        "guidance": { "type": ["string", "null"], "minLength": 1 }
                     }
                 },
                 "PermissionMode": {
