@@ -18,6 +18,8 @@ import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { useLocale, type Translate } from "./i18n";
 import { Message } from "./Message";
+import { TaskControlPanel } from "./TaskControlPanel";
+import { TaskIntegrationInspector } from "./TaskIntegrationInspector";
 import { ToolCard } from "./ToolCard";
 import type {
   AgentActivitySummary,
@@ -41,6 +43,8 @@ import type {
   SkillBinding,
   SkillCatalogEntry,
   TimelineEvent,
+  TaskIntegrationAcceptance,
+  TaskIntegrationReview,
   VerificationSummary,
 } from "./types";
 import type { ConversationDisplayPage as BridgeConversationDisplayPage } from "./types";
@@ -59,9 +63,14 @@ import {
   liveEventReducer,
   selectDeltaBuffers,
   selectLatestPendingApproval,
+  selectTaskEvents,
   semanticLiveItemFromTimelineEvent,
   terminalSignalFromTimelineEvent,
 } from "./features/conversation/liveEventReducer";
+import {
+  projectCurrentTask,
+  type TaskProductProjection,
+} from "./features/conversation/taskProjection";
 import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { LoadingState, useNotifications } from "./ui/feedback";
@@ -144,6 +153,14 @@ export function ConversationPanel({
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
+  const [taskControlBusy, setTaskControlBusy] = useState(false);
+  const [taskIntegrationReview, setTaskIntegrationReview] = useState<TaskIntegrationReview>();
+  const [taskIntegrationAcceptance, setTaskIntegrationAcceptance] =
+    useState<TaskIntegrationAcceptance>();
+  const [taskIntegrationLoading, setTaskIntegrationLoading] = useState(false);
+  const [taskIntegrationBusy, setTaskIntegrationBusy] = useState(false);
+  const [taskIntegrationOpen, setTaskIntegrationOpen] = useState(false);
+  const [taskIntegrationReload, setTaskIntegrationReload] = useState(0);
   const [displayBusy, setDisplayBusy] = useState(false);
   const [displayError, setDisplayError] = useState(false);
   const [displayReload, setDisplayReload] = useState(0);
@@ -185,6 +202,7 @@ export function ConversationPanel({
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
+  const taskIntegrationTriggerRef = useRef<HTMLButtonElement>(null);
   const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
   const recoveryTriggerRef = useRef<HTMLButtonElement>(null);
@@ -330,6 +348,13 @@ export function ConversationPanel({
     setPendingPrompt(undefined);
     setStreamStatus(undefined);
     setVerification(undefined);
+    setTaskControlBusy(false);
+    setTaskIntegrationReview(undefined);
+    setTaskIntegrationAcceptance(undefined);
+    setTaskIntegrationLoading(false);
+    setTaskIntegrationBusy(false);
+    setTaskIntegrationOpen(false);
+    setTaskIntegrationReload(0);
     setDisplayError(false);
     setAttachmentGap(false);
     setContinuityMessage(undefined);
@@ -526,6 +551,29 @@ export function ConversationPanel({
   }, [bridge, session.id, workspaceId]);
 
   useEffect(() => {
+    let disposed = false;
+    setTaskIntegrationLoading(true);
+    void bridge.taskIntegrationReview(workspaceId, session.id)
+      .then((review) => {
+        if (disposed) return;
+        setTaskIntegrationReview(review);
+        setTaskIntegrationAcceptance(undefined);
+      })
+      .catch(() => {
+        if (disposed) return;
+        setTaskIntegrationReview(undefined);
+        setTaskIntegrationAcceptance(undefined);
+        setTaskIntegrationOpen(false);
+      })
+      .finally(() => {
+        if (!disposed) setTaskIntegrationLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, session.id, taskIntegrationReload, workspaceId]);
+
+  useEffect(() => {
     if (!continuityState.transcriptLoaded || continuityState.contractError !== undefined) return;
     let disposed = false;
     let liveConnectionFailed = false;
@@ -590,6 +638,13 @@ export function ConversationPanel({
       if (event.kind === "control" && event.itemId?.startsWith("agent_")) {
         setAgentActivityReload((value) => value + 1);
       }
+      if (
+        event.kind === "integration_lane_changed"
+        || event.kind === "task_run_finished"
+        || (event.kind === "task_phase_changed" && event.task?.phase === "integration")
+      ) {
+        setTaskIntegrationReload((value) => value + 1);
+      }
 
       const terminal = terminalSignalFromTimelineEvent(event);
       if (terminal !== undefined) {
@@ -645,6 +700,7 @@ export function ConversationPanel({
           setRunAnnouncement(status.message ?? t("runFinishedAnnouncement"));
           setRunContextReload((value) => value + 1);
           setAgentActivityReload((value) => value + 1);
+          setTaskIntegrationReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
@@ -858,6 +914,17 @@ export function ConversationPanel({
     () => selectLatestPendingApproval(liveEventState),
     [liveEventState],
   );
+  const eventTask = useMemo(
+    () => projectCurrentTask(selectTaskEvents(liveEventState)),
+    [liveEventState],
+  );
+  const taskProjection = useMemo<TaskProductProjection | undefined>(() => {
+    if (
+      taskIntegrationReview === undefined
+      || eventTask?.taskId === taskIntegrationReview.request.taskId
+    ) return eventTask;
+    return integrationReviewTaskProjection(taskIntegrationReview);
+  }, [eventTask, taskIntegrationReview]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
   const submissionBlocked = continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
@@ -1131,6 +1198,78 @@ export function ConversationPanel({
     }
   };
 
+  const continueTask = async (taskId: string, guidance?: string): Promise<boolean> => {
+    if (
+      active
+      || submissionBlocked
+      || taskControlBusy
+      || pendingApproval?.approval !== undefined
+    ) return false;
+    setTaskControlBusy(true);
+    startRunPendingRef.current = true;
+    try {
+      const started = await bridge.continueTask(
+        workspaceId,
+        session.id,
+        taskId,
+        permissionMode,
+        guidance,
+      );
+      activeRunIdRef.current = started.id;
+      setRun(started);
+      setPermissionMode(started.permissionMode);
+      setReasoningEffort(started.reasoningEffort);
+      setTaskIntegrationReview(undefined);
+      setTaskIntegrationAcceptance(undefined);
+      setTaskIntegrationOpen(false);
+      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
+      setContinuityMessage(undefined);
+      setContinuityReload((value) => value + 1);
+      return true;
+    } catch {
+      onNotice(t("taskContinueFailed"), true);
+      setTaskIntegrationReload((value) => value + 1);
+      return false;
+    } finally {
+      startRunPendingRef.current = false;
+      setTaskControlBusy(false);
+    }
+  };
+
+  const acceptTaskIntegration = async () => {
+    if (
+      taskIntegrationReview === undefined
+      || taskIntegrationBusy
+      || taskControlBusy
+      || active
+      || submissionBlocked
+      || pendingApproval?.approval !== undefined
+    ) return;
+    const review = taskIntegrationReview;
+    setTaskIntegrationBusy(true);
+    try {
+      const acceptance = await bridge.acceptTaskIntegration(
+        workspaceId,
+        session.id,
+        review.request,
+      );
+      setTaskIntegrationAcceptance(acceptance);
+      if (
+        acceptance.canContinue
+        && acceptance.promotionStatus === "promoted"
+        && acceptance.parentVerdict === "passed"
+      ) {
+        notify({ message: t("taskIntegrationAccepted"), tone: "success" });
+        await continueTask(review.request.taskId);
+      }
+    } catch {
+      onNotice(t("taskIntegrationChanged"), true);
+      setTaskIntegrationReload((value) => value + 1);
+    } finally {
+      setTaskIntegrationBusy(false);
+    }
+  };
+
   const decideApproval = async (decision: ApprovalAction) => {
     if (pendingApproval?.approval === undefined || continuityState.lifecycle !== "live" || controlBusy) return;
     setControlBusy(true);
@@ -1401,6 +1540,21 @@ export function ConversationPanel({
         </Button>
       ) : null}
 
+      {taskProjection === undefined ? null : (
+        <TaskControlPanel
+          key={taskProjection.taskId}
+          task={taskProjection}
+          runActive={active}
+          disabled={submissionBlocked || pendingApproval?.approval !== undefined}
+          busy={taskControlBusy || taskIntegrationBusy}
+          reviewReady={taskIntegrationReview !== undefined}
+          reviewBusy={taskIntegrationLoading}
+          reviewButtonRef={taskIntegrationTriggerRef}
+          onContinue={(guidance) => void continueTask(taskProjection.taskId, guidance)}
+          onReviewIntegration={() => setTaskIntegrationOpen(true)}
+        />
+      )}
+
       {runContextError ? (
         <ErrorCard
           title={t("runContextUnavailable")}
@@ -1627,6 +1781,25 @@ export function ConversationPanel({
           onOpenChange={setInspectorOpen}
         >
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active || submissionBlocked} onRerun={() => void rerunVerification()} />
+        </Drawer>
+      ) : null}
+      {taskIntegrationReview !== undefined ? (
+        <Drawer
+          id="task-integration-inspector"
+          open={taskIntegrationOpen}
+          title={t("taskIntegrationReview")}
+          description={t("taskIntegrationReviewDetail")}
+          returnFocusRef={taskIntegrationTriggerRef}
+          onOpenChange={setTaskIntegrationOpen}
+        >
+          <TaskIntegrationInspector
+            review={taskIntegrationReview}
+            acceptance={taskIntegrationAcceptance}
+            busy={taskIntegrationBusy || taskControlBusy}
+            runActive={active || submissionBlocked || pendingApproval?.approval !== undefined}
+            onAccept={() => void acceptTaskIntegration()}
+            onRefresh={() => setTaskIntegrationReload((value) => value + 1)}
+          />
         </Drawer>
       ) : null}
       <Drawer
@@ -1870,6 +2043,27 @@ function continuityRecoveryActionsFromError(error: unknown): ContinuityRecoveryA
 function errorMessage(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
   return typeof error.message === "string" ? error.message : undefined;
+}
+
+function integrationReviewTaskProjection(
+  review: TaskIntegrationReview,
+): TaskProductProjection {
+  return {
+    taskId: review.request.taskId,
+    phase: "integration",
+    status: "awaiting_review",
+    planVersion: review.request.planVersion,
+    steps: [],
+    activeChildren: 0,
+    completedChildren: 0,
+    failedChildren: 0,
+    lanes: review.lanes.map((lane) => ({
+      laneId: lane.laneId,
+      status: "ready",
+      conflicts: [],
+    })),
+    canContinue: false,
+  };
 }
 
 function isTerminal(status: RunSummary["status"]): boolean {

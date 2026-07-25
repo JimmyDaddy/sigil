@@ -52,6 +52,9 @@ import type {
   TranscriptRequest,
   VerificationRerunBinding,
   VerificationSummary,
+  TaskIntegrationAcceptance,
+  TaskIntegrationReview,
+  TaskIntegrationReviewBinding,
   SupportDoctorReport,
   SupportSaveSummary,
 } from "./types";
@@ -129,6 +132,13 @@ export interface DesktopBridge {
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
   ): Promise<RunSummary>;
+  continueTask(
+    workspaceId: string,
+    sessionId: string,
+    taskId: string,
+    permissionMode: PermissionMode,
+    guidance?: string,
+  ): Promise<RunSummary>;
   attachRun(workspaceId: string, input: RunAttachInput): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
   resolveApproval(
@@ -144,6 +154,15 @@ export interface DesktopBridge {
     sessionId: string,
     request: VerificationRerunBinding,
   ): Promise<VerificationSummary>;
+  taskIntegrationReview(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<TaskIntegrationReview>;
+  acceptTaskIntegration(
+    workspaceId: string,
+    sessionId: string,
+    request: TaskIntegrationReviewBinding,
+  ): Promise<TaskIntegrationAcceptance>;
   subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
   subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
@@ -260,6 +279,11 @@ export const desktopBridge: DesktopBridge = {
         agentBinding,
       },
     }),
+  continueTask: (workspaceId, sessionId, taskId, permissionMode, guidance) =>
+    invoke<RunSummary>("desktop_continue_task", {
+      workspaceId,
+      input: { sessionId, taskId, permissionMode, guidance },
+    }),
   attachRun: (workspaceId, input) =>
     invoke<RunAttachment>("desktop_attach_run", {
       workspaceId,
@@ -288,6 +312,16 @@ export const desktopBridge: DesktopBridge = {
     invoke<VerificationSummary>("desktop_verification", { workspaceId, sessionId }),
   rerunVerification: (workspaceId, sessionId, request) =>
     invoke<VerificationSummary>("desktop_rerun_verification", {
+      workspaceId,
+      input: { sessionId, request },
+    }),
+  taskIntegrationReview: (workspaceId, sessionId) =>
+    invoke<TaskIntegrationReview>("desktop_task_integration_review", {
+      workspaceId,
+      sessionId,
+    }),
+  acceptTaskIntegration: (workspaceId, sessionId, request) =>
+    invoke<TaskIntegrationAcceptance>("desktop_accept_task_integration", {
       workspaceId,
       input: { sessionId, request },
     }),

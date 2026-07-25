@@ -40,6 +40,55 @@
 .agent-activity-strip small { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
 .agent-activity-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--sg-domain-color-on-success); animation: conversation-activity-pulse 1.4s ease-in-out infinite; }
 
+.task-control-panel { display: grid; max-height: min(32vh, 300px); flex: 0 1 auto; gap: 9px; padding: 11px 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
+.task-control-panel > header, .task-integration-summary > header, .task-integration-diff > header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.task-control-panel h3, .task-integration-summary h3, .task-integration-diff h4, .task-integration-lanes h4 { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 13px; }
+.task-control-eyebrow { color: var(--sg-sys-color-primary); font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.task-status { flex: 0 0 auto; padding: 3px 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-high); font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.task-status-completed, .task-status-promoted, .task-status-passed { color: var(--sg-domain-color-on-success); background: var(--sg-domain-color-success); }
+.task-status-failed, .task-status-conflict, .task-status-stale, .task-status-cancelled, .task-status-interrupted { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
+.task-status-paused, .task-status-awaiting-review, .task-status-prepared { color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); }
+.task-control-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px 9px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
+.task-control-meta code { max-width: 280px; overflow: hidden; color: var(--sg-sys-color-on-surface-variant); text-overflow: ellipsis; white-space: nowrap; }
+.task-step-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 5px 10px; margin: 0; padding: 0; list-style: none; }
+.task-step-list li { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; }
+.task-step-list li > span:last-child { display: grid; min-width: 0; gap: 1px; }
+.task-step-list strong, .task-step-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-step-list strong { font-size: 11px; }
+.task-step-list small { color: var(--sg-sys-color-on-surface-subtle); font-size: 9px; }
+.task-step-dot { width: 8px; height: 8px; border: 2px solid var(--sg-sys-color-outline); border-radius: 50%; }
+.task-step-running { border-color: var(--sg-sys-color-primary); background: var(--sg-sys-color-primary); }
+.task-step-completed, .task-step-succeeded, .task-step-passed { border-color: var(--sg-domain-color-on-success); background: var(--sg-domain-color-on-success); }
+.task-step-failed, .task-step-cancelled, .task-step-interrupted { border-color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-on-danger); }
+.task-lane-summary { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
+.task-lane-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-control-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.task-control-actions > span { margin-right: auto; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
+.task-guidance { display: grid; justify-items: end; gap: 6px; padding-top: 8px; border-top: 1px solid var(--sg-sys-color-outline); }
+.task-guidance .sg-field { width: 100%; }
+.task-guidance .sg-field-control { min-height: 64px; resize: vertical; }
+
+.task-integration-inspector { display: grid; gap: 14px; }
+.task-integration-summary { display: grid; gap: 9px; }
+.task-integration-summary p { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; line-height: 1.5; }
+.task-integration-summary dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0; }
+.task-integration-summary dl div { min-width: 0; padding: 8px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); }
+.task-integration-summary dt, .task-integration-bindings dt { color: var(--sg-sys-color-on-surface-subtle); font-size: 9px; text-transform: uppercase; }
+.task-integration-summary dd, .task-integration-bindings dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
+.task-integration-conflicts, .task-integration-cleanup { padding: 9px 10px; border-left: 3px solid var(--sg-domain-color-on-warning); color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 11px; }
+.task-integration-conflicts ul { margin: 5px 0 0; padding-left: 18px; }
+.task-integration-lanes { display: grid; gap: 7px; }
+.task-integration-lanes article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 8px 9px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); }
+.task-integration-lanes article > span { color: var(--sg-sys-color-on-surface-variant); font-size: 10px; }
+.task-integration-lanes article > small { grid-column: 1 / -1; color: var(--sg-sys-color-on-surface-subtle); font-size: 9px; }
+.task-integration-diff { display: grid; gap: 7px; min-width: 0; }
+.task-integration-diff header code { max-width: 55%; overflow: hidden; color: var(--sg-sys-color-on-surface-subtle); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.task-integration-diff pre { max-height: 44vh; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); font-size: 11px; line-height: 1.5; white-space: pre; }
+.task-integration-bindings summary { color: var(--sg-sys-color-on-surface-variant); cursor: pointer; font-size: 11px; font-weight: 700; }
+.task-integration-bindings dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 9px; margin: 9px 0 0; }
+.task-integration-cleanup { display: grid; gap: 4px; border-left-color: var(--sg-domain-color-on-danger); color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
+.task-integration-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 .timeline { --timeline-card-width: min(100%, 820px); display: grid; width: 100%; min-width: 0; grid-auto-rows: max-content; align-content: start; align-items: start; gap: 11px; min-height: 180px; max-height: 420px; padding: var(--sg-sys-space-3) clamp(4px, 2vw, 24px); overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable; background: transparent; overscroll-behavior: contain; }
 .timeline > * { min-width: 0; max-width: 100%; }
 .transcript-pagination { display: flex; min-height: 25px; align-items: center; justify-content: center; gap: 7px; padding: 2px 0 5px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; opacity: .72; }
@@ -416,8 +465,11 @@
   .tool-output-section, .tool-details { margin-left: 0; }
   .composer-toolbar { align-items: flex-end; }
   .composer-options { flex-wrap: nowrap; }
-  .approval-dock dl, .verification-card dl { grid-template-columns: 1fr; }
-  .approval-dock > header, .verification-card > header { display: grid; }
+  .approval-dock dl, .verification-card dl, .task-integration-summary dl { grid-template-columns: 1fr; }
+  .approval-dock > header, .verification-card > header, .task-control-panel > header { display: grid; }
+  .task-control-actions { align-items: stretch; flex-direction: column; }
+  .task-control-actions > span { margin: 0; }
+  .task-control-actions button, .task-integration-actions button { width: 100%; }
   .approval-actions { align-items: stretch; flex-direction: column-reverse; }
   .approval-actions button { width: 100%; }
   .evidence-row { grid-template-columns: 54px minmax(0, 1fr); }

@@ -16,9 +16,11 @@ import type {
   ConversationContinuity,
   ConversationQueueCommandInput,
   DesktopBootstrap,
+  PermissionMode,
   RunContext,
   RunStreamStatus,
   SessionSummary,
+  TaskIntegrationReview,
   TimelineEvent,
   WorkspaceSummary,
 } from "./types";
@@ -97,6 +99,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
   const {
     bootstrap,
     startRun,
+    continueTask,
     continuity,
     attachRun,
     ...remainingOverrides
@@ -281,6 +284,22 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       };
       return started;
     },
+    continueTask: async (...args) => {
+      const started = continueTask === undefined
+        ? {
+            id: "run-task-continue",
+            sessionId: args[1],
+            status: "running" as const,
+            permissionMode: args[3],
+            streamSequence: 0,
+          }
+        : await continueTask(...args);
+      simulatedOwner = {
+        runId: started.id,
+        ownerRevision: `sha256:${"2".repeat(64)}`,
+      };
+      return started;
+    },
     attachRun: attachRun ?? (async (_workspaceId, input) => ({
       run: {
         id: input.runId,
@@ -310,6 +329,12 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     },
     rerunVerification: async () => {
       throw new Error("no verification projection");
+    },
+    taskIntegrationReview: async () => {
+      throw { code: "task_integration_review_not_found" };
+    },
+    acceptTaskIntegration: async () => {
+      throw new Error("no integration review");
     },
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
@@ -3620,6 +3645,237 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Run recommended check" }));
     expect(await screen.findByText("passed")).toBeTruthy();
     expect(rerunSnapshot).toBe("snapshot-1");
+  });
+
+  it("projects typed Task progress and continues the exact Task with optional guidance", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const continueTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      _taskId: string,
+      permissionMode: PermissionMode,
+    ) => ({
+      id: "run-task-continue",
+      sessionId,
+      status: "running" as const,
+      permissionMode,
+      streamSequence: 0,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      continueTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    const base = {
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-task-1",
+      replayable: true,
+    };
+    act(() => {
+      eventListener?.({
+        ...base,
+        sequence: 1,
+        runSequence: "1",
+        kind: "task_run_started",
+        status: "running",
+        task: { taskId: "task-1", objective: "Implement durable Task controls" },
+      });
+      eventListener?.({
+        ...base,
+        sequence: 2,
+        runSequence: "2",
+        kind: "task_plan_updated",
+        status: "approved",
+        task: {
+          taskId: "task-1",
+          planVersion: 2,
+          steps: [{
+            stepId: "step-1",
+            title: "Inspect the bridge",
+            role: "explorer",
+            dependsOn: [],
+            mode: "read_only",
+            isolation: "shared",
+          }],
+        },
+      });
+      eventListener?.({
+        ...base,
+        sequence: 3,
+        runSequence: "3",
+        kind: "task_step_changed",
+        status: "completed",
+        task: { taskId: "task-1", planVersion: 2, stepId: "step-1" },
+      });
+      eventListener?.({
+        ...base,
+        sequence: 4,
+        runSequence: "4",
+        kind: "task_run_finished",
+        status: "interrupted",
+        task: { taskId: "task-1" },
+      });
+    });
+
+    expect(await screen.findByText("Implement durable Task controls")).toBeTruthy();
+    expect(screen.getByText("Inspect the bridge")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add guidance" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Guidance for this Task" }),
+      "Keep the public API compatible.",
+    );
+    await user.click(screen.getByRole("button", { name: "Continue with guidance" }));
+    await waitFor(() => expect(continueTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "task-1",
+      "manual",
+      "Keep the public API compatible.",
+    ));
+  });
+
+  it("accepts the exact integration review and continues only after parent verification", async () => {
+    const user = userEvent.setup();
+    const review: TaskIntegrationReview = {
+      schemaVersion: 1,
+      request: {
+        requestId: `integration-review-${"a".repeat(64)}`,
+        taskId: "task-integration",
+        planId: "integration-plan-1",
+        planVersion: 4,
+        previewDigest: `sha256:${"b".repeat(64)}`,
+      },
+      aggregateDiff: "diff --git a/src/lib.rs b/src/lib.rs\n+safe integration\n",
+      aggregateDiffDigest: `sha256:${"c".repeat(64)}`,
+      previewDigest: `sha256:${"b".repeat(64)}`,
+      policyDigest: `sha256:${"d".repeat(64)}`,
+      targetKind: "workspace_apply",
+      lanes: [{
+        laneId: "lane-1",
+        candidateKind: "managed_ref",
+        proposalCount: 2,
+        verificationReceiptCount: 1,
+      }],
+      childVerificationReceiptCount: 2,
+      laneVerificationReceiptCount: 1,
+      conflictReasons: ["path_overlap"],
+      verificationInvalidationCount: 1,
+      parentVerificationPending: true,
+    };
+    const acceptTaskIntegration = vi.fn(async () => ({
+      request: review.request,
+      promotionStatus: "promoted" as const,
+      parentVerdict: "passed" as const,
+      canContinue: true,
+    }));
+    const continueTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      _taskId: string,
+      permissionMode: PermissionMode,
+    ) => ({
+      id: "run-after-integration",
+      sessionId,
+      status: "running" as const,
+      permissionMode,
+      streamSequence: 0,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      taskIntegrationReview: async () => review,
+      acceptTaskIntegration,
+      continueTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.click(await screen.findByRole("button", { name: "Review integration" }));
+    expect(await screen.findByRole("dialog", { name: "Task integration review" })).toBeTruthy();
+    expect(screen.getByText(/\+safe integration/)).toBeTruthy();
+    expect(screen.getByText("lane-1")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Accept and continue" }));
+
+    await waitFor(() => expect(acceptTaskIntegration).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      review.request,
+    ));
+    await waitFor(() => expect(continueTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "task-integration",
+      "manual",
+      undefined,
+    ));
+  });
+
+  it("does not continue an integration whose acceptance contradicts parent verification", async () => {
+    const user = userEvent.setup();
+    const review: TaskIntegrationReview = {
+      schemaVersion: 1,
+      request: {
+        requestId: `integration-review-${"e".repeat(64)}`,
+        taskId: "task-unverified",
+        planId: "integration-plan-2",
+        planVersion: 2,
+        previewDigest: `sha256:${"f".repeat(64)}`,
+      },
+      aggregateDiff: "diff --git a/src/lib.rs b/src/lib.rs\n+unverified integration\n",
+      aggregateDiffDigest: `sha256:${"1".repeat(64)}`,
+      previewDigest: `sha256:${"f".repeat(64)}`,
+      policyDigest: `sha256:${"2".repeat(64)}`,
+      targetKind: "workspace_apply",
+      lanes: [],
+      childVerificationReceiptCount: 1,
+      laneVerificationReceiptCount: 0,
+      conflictReasons: [],
+      verificationInvalidationCount: 0,
+      parentVerificationPending: true,
+    };
+    const continueTask = vi.fn();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      taskIntegrationReview: async () => review,
+      acceptTaskIntegration: async () => ({
+        request: review.request,
+        promotionStatus: "promoted",
+        parentVerdict: "failed",
+        canContinue: true,
+      }),
+      continueTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.click(await screen.findByRole("button", { name: "Review integration" }));
+    await user.click(await screen.findByRole("button", { name: "Accept and continue" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh review" })).toBeTruthy());
+    expect(continueTask).not.toHaveBeenCalled();
   });
 
   it("renders dismiss-only errors as compact accessible icon actions", async () => {

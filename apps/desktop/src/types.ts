@@ -860,6 +860,46 @@ export interface VerificationSummary {
   evidence: VerificationEvidence;
 }
 
+export interface TaskIntegrationReviewBinding {
+  requestId: string;
+  taskId: string;
+  planId: string;
+  planVersion: number;
+  previewDigest: string;
+}
+
+export interface TaskIntegrationLane {
+  laneId: string;
+  candidateKind: "managed_ref" | "snapshot_workspace";
+  proposalCount: number;
+  verificationReceiptCount: number;
+}
+
+export interface TaskIntegrationReview {
+  schemaVersion: number;
+  request: TaskIntegrationReviewBinding;
+  aggregateDiff: string;
+  aggregateDiffDigest: string;
+  previewDigest: string;
+  policyDigest: string;
+  targetKind: "workspace_apply" | "git_ref_advance";
+  lanes: TaskIntegrationLane[];
+  childVerificationReceiptCount: number;
+  laneVerificationReceiptCount: number;
+  conflictReasons: string[];
+  verificationInvalidationCount: number;
+  parentVerificationPending: boolean;
+}
+
+export interface TaskIntegrationAcceptance {
+  request: TaskIntegrationReviewBinding;
+  promotionStatus: "prepared" | "promoted" | "conflict" | "stale" | "failed" | "cancelled";
+  parentVerdict?: VerificationSummary["verdict"];
+  canContinue: boolean;
+  promotionCleanupError?: string;
+  parentCleanupError?: string;
+}
+
 export type TimelineEventKind =
   | "run_started"
   | "task_run_started"

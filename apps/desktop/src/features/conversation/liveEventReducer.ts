@@ -49,6 +49,10 @@ export interface LiveEventState {
   approvalLifecycles: ReadonlyMap<string, ApprovalLifecycle>;
   /** Latest typed task event for each exact task/entity slot. */
   taskEvents: ReadonlyMap<string, TimelineEvent>;
+  /** Latest root Task selected by a durable task-start event. */
+  latestTaskId?: string;
+  /** Run currently allowed to advance the selected durable Task. */
+  latestTaskRunId?: string;
   terminalSignals: ReadonlyMap<string, LiveTerminalSignal>;
 }
 
@@ -134,7 +138,13 @@ export function selectTerminalSignals(state: LiveEventState): LiveTerminalSignal
 }
 
 export function selectTaskEvents(state: LiveEventState): TimelineEvent[] {
-  return [...state.taskEvents.values()].sort(compareTimelineEvents);
+  return [...state.taskEvents.values()]
+    .filter((event) => (
+      state.latestTaskId === undefined
+      || event.task?.taskId === undefined
+      || event.task.taskId === state.latestTaskId
+    ))
+    .sort(compareTimelineEvents);
 }
 
 export function semanticLiveItemFromTimelineEvent(
@@ -303,14 +313,45 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
 function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEventState {
   const key = taskEventKey(event);
   if (key === undefined) return state;
-  const existing = state.taskEvents.get(key);
+  const taskId = event.task?.taskId;
   if (
-    existing !== undefined
+    event.kind !== "task_run_started"
+    && taskId !== undefined
+    && state.latestTaskId !== undefined
+    && (
+      taskId !== state.latestTaskId
+      || (
+        state.latestTaskRunId !== undefined
+        && event.runId !== state.latestTaskRunId
+      )
+    )
+  ) return state;
+  const startsNewTask = event.kind === "task_run_started"
+    && taskId !== undefined
+    && taskId !== state.latestTaskId;
+  const taskEvents = startsNewTask ? new Map<string, TimelineEvent>() : new Map(state.taskEvents);
+  if (event.kind === "task_run_started" && taskId !== undefined) {
+    taskEvents.delete(`${taskId}:task_run_finished:task`);
+    taskEvents.delete(`${taskId}:task_phase_changed:task`);
+  }
+  const existing = taskEvents.get(key);
+  if (
+    !startsNewTask
+    && existing !== undefined
+    && existing.runId === event.runId
     && compareRunSequence(event.runSequence, existing.runSequence) <= 0
   ) return state;
-  const taskEvents = new Map(state.taskEvents);
   taskEvents.set(key, event);
-  return { ...state, taskEvents };
+  return {
+    ...state,
+    taskEvents,
+    latestTaskId: event.kind === "task_run_started" && taskId !== undefined
+      ? taskId
+      : state.latestTaskId ?? taskId,
+    latestTaskRunId: event.kind === "task_run_started" && taskId !== undefined
+      ? event.runId
+      : state.latestTaskRunId,
+  };
 }
 
 function taskEventKey(event: TimelineEvent): string | undefined {
@@ -325,7 +366,7 @@ function taskEventKey(event: TimelineEvent): string | undefined {
     ?? task.batchId
     ?? task.handoffId
     ?? "task";
-  return `${event.runId}:${taskIdentity}:${event.kind}:${entityIdentity}`;
+  return `${taskIdentity}:${event.kind}:${entityIdentity}`;
 }
 
 function receiveSemanticItem(
@@ -517,7 +558,6 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     state.approvalLifecycles,
     (lifecycle) => lifecycle.runId !== runId,
   );
-  const taskEvents = filterMap(state.taskEvents, (event) => event.runId !== runId);
   const terminalSignals = new Map(state.terminalSignals);
   terminalSignals.delete(runId);
   if (
@@ -525,7 +565,6 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     && deltaBuffers.size === state.deltaBuffers.size
     && controlEvents.size === state.controlEvents.size
     && approvalLifecycles.size === state.approvalLifecycles.size
-    && taskEvents.size === state.taskEvents.size
     && terminalSignals.size === state.terminalSignals.size
   ) return state;
   return {
@@ -534,7 +573,6 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     deltaBuffers,
     controlEvents,
     approvalLifecycles,
-    taskEvents,
     terminalSignals,
   };
 }

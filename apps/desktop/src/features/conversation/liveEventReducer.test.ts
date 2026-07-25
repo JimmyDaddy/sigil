@@ -17,7 +17,7 @@ import {
 const SESSION_ID = "session-1";
 
 describe("live event reducer", () => {
-  it("keeps typed task slots monotonic and removes them with their run", () => {
+  it("keeps typed task slots monotonic after canonical run settlement", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
       kind: "task_step_changed",
@@ -72,7 +72,56 @@ describe("live event reducer", () => {
       sessionId: SESSION_ID,
       runId: "run-1",
     });
-    expect(selectTaskEvents(state)).toEqual([]);
+    expect(selectTaskEvents(state)).toMatchObject([
+      {
+        kind: "task_step_changed",
+        status: "completed",
+        task: { taskId: "task-1", stepId: "step-1" },
+      },
+    ]);
+  });
+
+  it("replaces terminal Task state when the same durable Task continues in a new run", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_run_started",
+      runId: "run-1",
+      runSequence: "1",
+      task: { taskId: "task-1", objective: "Finish the task" },
+    }));
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_run_finished",
+      runId: "run-1",
+      runSequence: "8",
+      status: "interrupted",
+      task: { taskId: "task-1" },
+    }));
+    state = liveEventReducer(state, {
+      type: "run_discarded",
+      sessionId: SESSION_ID,
+      runId: "run-1",
+    });
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_run_started",
+      runId: "run-2",
+      runSequence: "1",
+      task: { taskId: "task-1", objective: "Finish the task" },
+    }));
+
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished")).toBe(false);
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_run_started")).toMatchObject({
+      runId: "run-2",
+      task: { taskId: "task-1" },
+    });
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "task_run_finished",
+      runId: "run-1",
+      runSequence: "9",
+      status: "interrupted",
+      task: { taskId: "task-1" },
+    }));
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished")).toBe(false);
   });
 
   it("orders semantic items by exact decimal run sequence and ignores legacy numeric sequence", () => {
