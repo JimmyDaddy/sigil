@@ -1716,10 +1716,15 @@ O8b：typed public protocol 与 application parity。
   持有的 `sigil serve` child 复用该路径。显式 `routing_policy=auto` 的 uninterrupted run 可以
   进入 planner/executor/synthesis，不再产生无人执行的 Started task。
 
-这不代表 O8b application parity 完成：HTTP/Desktop 尚未提供与 TUI 等价的 Task
-pause/continue、task-targeted guidance、integration review/accept 与 restart control。显式
-`auto` 在需要这些动作时会停在 blocked/paused terminal，因此这是必须收口的 interim gap；
-兼容默认值继续为 manual，本 slice 也不授权 O8d 默认切换。
+这不代表 O8b application parity 完成：shared application control 已经复用 TUI 的 exact
+`TaskPauseRequest` 校验、root cancellation scope 与单一有序 Task stop writer batch。Pause 在请求前和
+quiescence 后分别校验 task/plan/scope；只有 execution join、child/effect permit 与 cleanup
+全部确认后才追加 `Paused`，否则追加 `Interrupted`。Application cancel 也只关闭当前 scope
+真实绑定的 Task，普通 chat cancel 不再猜测 latest Task。HTTP/Desktop 尚未把这一 pause
+authority 接入 typed route/supervisor，也仍缺 task-targeted guidance、integration
+review/accept 与 restart control。显式 `auto` 在需要这些动作时仍会停在 blocked/paused
+terminal，因此这是必须收口的 interim gap；兼容默认值继续为 manual，本 slice 也不授权 O8d
+默认切换。
 
 O8c：deterministic、real-model 与 chaos acceptance。
 

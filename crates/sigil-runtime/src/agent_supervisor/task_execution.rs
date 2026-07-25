@@ -5,13 +5,14 @@ use sigil_kernel::{
     AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DiscoveredCheck, EventHandler, EvidenceScope, RootConfig, RunCancellationHandle,
-    RunCancellationOwner, RunCancellationRecorder, RunEvent, RunTaskGuard,
-    SandboxProfileRequirement, SequentialTaskRequest, Session, SessionRef,
-    TaskGuidancePromotedEntry, TaskId, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
-    TaskRunStatus, ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry,
-    WorkspaceTrustRequirement, discover_candidate_checks_with_user_config, safe_persistence_text,
-    stable_workspace_id,
+    RunCancellationOwner, RunCancellationRecorder, RunCancellationTarget, RunEvent, RunTaskGuard,
+    SandboxProfileRequirement, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskPauseRequest,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus,
+    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
+    discover_candidate_checks_with_user_config, safe_persistence_text, stable_workspace_id,
 };
+use thiserror::Error;
 
 use super::{
     AgentSupervisor,
@@ -63,6 +64,95 @@ pub struct PreparedTaskRunCancellation {
     pub task_guard: RunTaskGuard,
 }
 
+/// Durable terminal state written after an active Task run has stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStopDisposition {
+    /// The Task remains explicitly resumable.
+    Paused,
+    /// The user cancelled the Task after cleanup was confirmed.
+    Cancelled,
+    /// Cleanup, execution ownership, or the requested binding could not be confirmed.
+    Interrupted,
+}
+
+impl TaskStopDisposition {
+    fn task_status(self) -> TaskRunStatus {
+        match self {
+            Self::Paused => TaskRunStatus::Paused,
+            Self::Cancelled => TaskRunStatus::Cancelled,
+            Self::Interrupted => TaskRunStatus::Interrupted,
+        }
+    }
+
+    fn step_status(self) -> TaskStepStatus {
+        match self {
+            Self::Cancelled => TaskStepStatus::Cancelled,
+            Self::Paused | Self::Interrupted => TaskStepStatus::Interrupted,
+        }
+    }
+
+    fn child_status(self) -> TaskChildSessionStatus {
+        match self {
+            Self::Cancelled => TaskChildSessionStatus::Cancelled,
+            Self::Paused | Self::Interrupted => TaskChildSessionStatus::Interrupted,
+        }
+    }
+}
+
+/// Exact durable Task state transition appended after run quiescence.
+#[derive(Debug, Clone)]
+pub struct AppendedTaskStopState {
+    task_id: TaskId,
+    status: TaskRunStatus,
+    controls: Vec<ControlEntry>,
+}
+
+impl AppendedTaskStopState {
+    /// Returns the exact Task whose terminal control state was appended.
+    #[must_use]
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    /// Returns the Task status written by this transition.
+    #[must_use]
+    pub fn status(&self) -> TaskRunStatus {
+        self.status
+    }
+
+    /// Returns the ordered controls written by this transition.
+    #[must_use]
+    pub fn controls(&self) -> &[ControlEntry] {
+        &self.controls
+    }
+}
+
+/// Stable validation failures for an exact Task pause action.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPauseValidationError {
+    #[error("request identity does not match the rendered task binding")]
+    InvalidRequestIdentity,
+    #[error("active run belongs to another task")]
+    TargetMismatch,
+    #[error("task is no longer available")]
+    TaskUnavailable,
+    #[error("task plan changed since the pause action was rendered")]
+    PlanChanged,
+    #[error("task is no longer running")]
+    TaskNotRunning,
+}
+
+/// Stable failures while writing a quiesced Task stop transition.
+#[derive(Debug, Error)]
+pub enum TaskStopStateError {
+    #[error("active task {task_id} is no longer available")]
+    TaskUnavailable { task_id: String },
+    #[error("task {task_id} is no longer running")]
+    TaskNotRunning { task_id: String },
+    #[error("failed to append stopped task state")]
+    Persistence(#[source] anyhow::Error),
+}
+
 /// Creates a root cancellation scope and durably binds it to one exact Task.
 ///
 /// The binding is appended before this function returns, so adapters cannot dispatch Task work
@@ -105,6 +195,185 @@ pub fn bind_task_run_cancellation_scope(
             run_scope_id: handle.scope_id().to_owned(),
         },
     ))
+}
+
+/// Validates that one rendered pause action still owns the active Task cancellation scope.
+///
+/// # Errors
+///
+/// Returns a stable validation error when the request identity, active scope, Task, plan version,
+/// or running status changed since the action was rendered.
+pub fn validate_task_pause_request(
+    request: &TaskPauseRequest,
+    cancellation_target: &RunCancellationTarget,
+    active_scope_id: &str,
+    entries: &[SessionLogEntry],
+) -> std::result::Result<(), TaskPauseValidationError> {
+    if !request.has_exact_identity() {
+        return Err(TaskPauseValidationError::InvalidRequestIdentity);
+    }
+    let scope_matches = entries.iter().rev().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                if binding.task_id == request.task_id
+                    && binding.run_scope_id == active_scope_id
+        )
+    });
+    let target_matches = match cancellation_target {
+        RunCancellationTarget::Task { task_id } => {
+            task_id == request.task_id.as_str() && scope_matches
+        }
+        RunCancellationTarget::Run => scope_matches,
+        RunCancellationTarget::AgentThread { .. } => false,
+    };
+    if !target_matches {
+        return Err(TaskPauseValidationError::TargetMismatch);
+    }
+    let projection = sigil_kernel::TaskStateProjection::from_entries(entries);
+    let task = projection
+        .tasks
+        .get(&request.task_id)
+        .ok_or(TaskPauseValidationError::TaskUnavailable)?;
+    if task.latest_plan_version != Some(request.plan_version)
+        || task
+            .superseded_plan_versions
+            .contains(&request.plan_version)
+    {
+        return Err(TaskPauseValidationError::PlanChanged);
+    }
+    if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
+        return Err(TaskPauseValidationError::TaskNotRunning);
+    }
+    Ok(())
+}
+
+/// Resolves the exact Task bound to one active cancellation scope.
+///
+/// A run-scoped cancellation only owns a Task when the durable log contains a matching
+/// `TaskRunCancellationScopeBound` entry. This prevents an ordinary chat cancellation from
+/// changing an unrelated older Task.
+#[must_use]
+pub(crate) fn task_id_for_cancellation_scope(
+    entries: &[SessionLogEntry],
+    cancellation_target: &RunCancellationTarget,
+    active_scope_id: &str,
+) -> Option<TaskId> {
+    match cancellation_target {
+        RunCancellationTarget::Task { task_id } => {
+            entries.iter().rev().find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                    if binding.run_scope_id == active_scope_id
+                        && binding.task_id.as_str() == task_id =>
+                {
+                    Some(binding.task_id.clone())
+                }
+                _ => None,
+            })
+        }
+        RunCancellationTarget::Run => entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                if binding.run_scope_id == active_scope_id =>
+            {
+                Some(binding.task_id.clone())
+            }
+            _ => None,
+        }),
+        RunCancellationTarget::AgentThread { .. } => None,
+    }
+}
+
+/// Appends one ordered Task stop transition after the caller has proven run quiescence.
+///
+/// Active steps and child sessions are closed before the Task terminal control, all within one
+/// ordered session-writer batch. Passing `None` selects the latest Task for TUI compatibility;
+/// application adapters should pass an exact Task id derived from the active cancellation scope.
+///
+/// # Errors
+///
+/// Returns a stable error when the exact Task is absent or no longer running, or when the complete
+/// append-only transition cannot be persisted.
+pub fn append_task_stop_state(
+    session: &mut Session,
+    exact_task_id: Option<&TaskId>,
+    disposition: TaskStopDisposition,
+    reason: &str,
+) -> std::result::Result<Option<AppendedTaskStopState>, TaskStopStateError> {
+    let projection = session.task_state_projection();
+    let task =
+        match exact_task_id {
+            Some(task_id) => projection.tasks.get(task_id).ok_or_else(|| {
+                TaskStopStateError::TaskUnavailable {
+                    task_id: task_id.as_str().to_owned(),
+                }
+            })?,
+            None => {
+                let Some(task) = projection.latest_task() else {
+                    return Ok(None);
+                };
+                task
+            }
+        };
+    if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
+        if exact_task_id.is_none() {
+            return Ok(None);
+        }
+        return Err(TaskStopStateError::TaskNotRunning {
+            task_id: task.task_id.as_str().to_owned(),
+        });
+    }
+    let task_id = task.task_id.clone();
+    let parent_session_ref = task.parent_session_ref.clone();
+    let objective = task.objective.clone();
+    let active_steps = task
+        .active_steps
+        .iter()
+        .filter_map(|key| task.steps.get(key))
+        .filter(|step| !step.status.is_terminal())
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_children = task
+        .child_sessions
+        .values()
+        .filter(|child| child.status == TaskChildSessionStatus::Started)
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = task;
+
+    let safe_reason = safe_persistence_text(reason);
+    let mut controls = Vec::with_capacity(active_steps.len() + active_children.len() + 1);
+    for step in active_steps {
+        controls.push(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: step.plan_version,
+            step_id: step.step_id,
+            role: step.role,
+            status: disposition.step_status(),
+            title: step.title.as_deref().map(safe_persistence_text),
+            summary: None,
+            reason: Some(safe_reason.clone()),
+        }));
+    }
+    for mut child in active_children {
+        child.status = disposition.child_status();
+        controls.push(ControlEntry::TaskChildSession(child));
+    }
+    let status = disposition.task_status();
+    controls.push(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref,
+        objective: safe_persistence_text(&objective),
+        status,
+        reason: Some(safe_reason),
+    }));
+    session
+        .append_controls(controls.clone())
+        .map_err(TaskStopStateError::Persistence)?;
+    Ok(Some(AppendedTaskStopState {
+        task_id,
+        status,
+        controls,
+    }))
 }
 
 /// Resolves one exact durable Task continuation without creating execution authority.

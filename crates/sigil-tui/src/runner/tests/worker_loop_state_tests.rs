@@ -119,6 +119,12 @@ fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<
             }],
             reason: None,
         })),
+        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(
+            sigil_kernel::TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: "scope_1".to_owned(),
+            },
+        )),
     ];
     let target = RunCancellationTarget::Task {
         task_id: task_id.as_str().to_owned(),
@@ -141,31 +147,12 @@ fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<
             .expect_err("wrong active task must fail")
             .contains("another task")
     );
-    let mut root_handoff_entries = entries.clone();
-    root_handoff_entries.push(SessionLogEntry::Control(
-        ControlEntry::TaskRunCancellationScopeBound(
-            sigil_kernel::TaskRunCancellationScopeBoundEntry {
-                task_id: request.task_id.clone(),
-                run_scope_id: "scope_1".to_owned(),
-            },
-        ),
-    ));
-    validate_task_pause_request(
-        &request,
-        &RunCancellationTarget::Run,
-        "scope_1",
-        &root_handoff_entries,
-    )
-    .expect("automatic handoff task should inherit the active root cancellation scope");
+    validate_task_pause_request(&request, &RunCancellationTarget::Run, "scope_1", &entries)
+        .expect("automatic handoff task should inherit the active root cancellation scope");
     assert!(
-        validate_task_pause_request(
-            &request,
-            &RunCancellationTarget::Run,
-            "scope_2",
-            &root_handoff_entries,
-        )
-        .expect_err("another root run scope must fail")
-        .contains("another task")
+        validate_task_pause_request(&request, &RunCancellationTarget::Run, "scope_2", &entries,)
+            .expect_err("another root run scope must fail")
+            .contains("another task")
     );
     Ok(())
 }

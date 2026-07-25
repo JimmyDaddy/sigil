@@ -742,38 +742,11 @@ pub(in crate::runner) fn validate_task_pause_request(
     active_scope_id: &str,
     entries: &[SessionLogEntry],
 ) -> std::result::Result<(), String> {
-    if !request.has_exact_identity() {
-        return Err("request identity does not match the rendered task binding".to_owned());
-    }
-    let target_matches = match cancellation_target {
-        RunCancellationTarget::Task { task_id } => task_id == request.task_id.as_str(),
-        RunCancellationTarget::Run => entries.iter().rev().any(|entry| {
-            matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
-                    if binding.task_id == request.task_id
-                        && binding.run_scope_id == active_scope_id
-            )
-        }),
-        RunCancellationTarget::AgentThread { .. } => false,
-    };
-    if !target_matches {
-        return Err("active run belongs to another task".to_owned());
-    }
-    let projection = sigil_kernel::TaskStateProjection::from_entries(entries);
-    let task = projection
-        .tasks
-        .get(&request.task_id)
-        .ok_or_else(|| "task is no longer available".to_owned())?;
-    if task.latest_plan_version != Some(request.plan_version)
-        || task
-            .superseded_plan_versions
-            .contains(&request.plan_version)
-    {
-        return Err("task plan changed since the pause action was rendered".to_owned());
-    }
-    if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
-        return Err("task is no longer running".to_owned());
-    }
-    Ok(())
+    sigil_runtime::agent_supervisor::task_execution::validate_task_pause_request(
+        request,
+        cancellation_target,
+        active_scope_id,
+        entries,
+    )
+    .map_err(|error| error.to_string())
 }

@@ -66,6 +66,40 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     )
 }
 
+#[test]
+fn append_controls_persists_one_ordered_control_batch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store.clone());
+    let task_id = TaskId::new("task-control-batch")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: "batch controls".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id,
+            parent_session_ref,
+            objective: "batch controls".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: Some("paused".to_owned()),
+        }),
+    ])?;
+
+    assert_eq!(session.entries().len(), 2);
+    assert_eq!(
+        JsonlSessionStore::read_event_records(store.path())?.len(),
+        2
+    );
+    assert!(session.append_controls(Vec::new()).is_err());
+    Ok(())
+}
+
 fn request_memory_text(request: &crate::CompletionRequest) -> String {
     request
         .messages

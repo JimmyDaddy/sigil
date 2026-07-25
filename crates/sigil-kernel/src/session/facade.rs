@@ -191,6 +191,30 @@ impl Session {
         self.append(SessionLogEntry::Control(control))
     }
 
+    /// Appends one ordered control-state transition as a single writer batch.
+    ///
+    /// The in-memory projection is updated only after the complete durable batch succeeds. This
+    /// keeps multi-entry state transitions from becoming partially visible to the active process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `controls` is empty or the durable writer cannot append the complete
+    /// batch.
+    pub fn append_controls(&mut self, controls: Vec<ControlEntry>) -> Result<()> {
+        if controls.is_empty() {
+            bail!("control append batch must not be empty");
+        }
+        let entries = controls
+            .into_iter()
+            .map(SessionLogEntry::Control)
+            .collect::<Vec<_>>();
+        if let Some(store) = &self.store {
+            store.append_session_entry_events(&entries)?;
+        }
+        self.entries.extend(entries);
+        Ok(())
+    }
+
     /// Appends a control entry and returns its durable envelope when this session is store-backed.
     pub(crate) fn append_control_with_event(
         &mut self,

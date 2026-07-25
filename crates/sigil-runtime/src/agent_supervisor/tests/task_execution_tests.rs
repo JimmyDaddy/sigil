@@ -1,10 +1,15 @@
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    ControlEntry, RunCancellationOwner, Session, SessionLogEntry, SessionRef, TaskId, TaskRunEntry,
-    TaskRunStatus,
+    AgentRole, ControlEntry, RunCancellationOwner, RunCancellationTarget, Session, SessionLogEntry,
+    SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepStatus,
 };
 
-use super::{finalize_task_root, prepare_task_run_cancellation, resolve_task_continuation};
+use super::{
+    TaskPauseValidationError, TaskStopDisposition, append_task_stop_state, finalize_task_root,
+    prepare_task_run_cancellation, resolve_task_continuation, validate_task_pause_request,
+};
 
 #[test]
 fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Result<()> {
@@ -67,6 +72,117 @@ fn shared_task_cancellation_scope_is_bound_before_dispatch() -> Result<()> {
     );
     let _durable_recorder = prepared.recorder;
     drop(prepared.task_guard);
+    Ok(())
+}
+
+#[test]
+fn shared_task_pause_validation_binds_exact_plan_and_active_scope() -> Result<()> {
+    let task_id = TaskId::new("task-pause")?;
+    let scope_id = "scope-active";
+    let mut session = Session::new("provider", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "pause exact task".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        }),
+        ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+            task_id: task_id.clone(),
+            run_scope_id: scope_id.to_owned(),
+        }),
+    ])?;
+    let request = TaskPauseRequest::new(task_id.clone(), 2);
+
+    validate_task_pause_request(
+        &request,
+        &RunCancellationTarget::Run,
+        scope_id,
+        session.entries(),
+    )?;
+    let stale = TaskPauseRequest::new(task_id, 1);
+    assert_eq!(
+        validate_task_pause_request(
+            &stale,
+            &RunCancellationTarget::Run,
+            scope_id,
+            session.entries(),
+        ),
+        Err(TaskPauseValidationError::PlanChanged)
+    );
+    Ok(())
+}
+
+#[test]
+fn shared_task_stop_transition_closes_steps_before_task_in_one_writer_batch() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(directory.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store);
+    let task_id = TaskId::new("task-stop")?;
+    let step_id = TaskStepId::new("step-1")?;
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "stop exact task".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("active step".to_owned()),
+            summary: None,
+            reason: None,
+        }),
+    ])?;
+
+    let appended = append_task_stop_state(
+        &mut session,
+        Some(&task_id),
+        TaskStopDisposition::Paused,
+        "pause after quiescence",
+    )?
+    .expect("exact running task should append a stop transition");
+
+    assert_eq!(appended.task_id(), &task_id);
+    assert_eq!(appended.status(), TaskRunStatus::Paused);
+    assert!(matches!(
+        appended.controls(),
+        [
+            ControlEntry::TaskStep(TaskStepEntry {
+                step_id: stopped_step,
+                status: TaskStepStatus::Interrupted,
+                ..
+            }),
+            ControlEntry::TaskRun(TaskRunEntry {
+                status: TaskRunStatus::Paused,
+                ..
+            }),
+        ] if stopped_step == &step_id
+    ));
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("paused task");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        task.steps
+            .values()
+            .find(|step| step.step_id == step_id)
+            .expect("stopped step")
+            .status,
+        TaskStepStatus::Interrupted
+    );
     Ok(())
 }
 

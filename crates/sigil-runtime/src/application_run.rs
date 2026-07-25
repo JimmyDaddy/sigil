@@ -20,10 +20,10 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
-    Session, SessionLogEntry, SessionRef, TaskId, TaskRunStatus, TaskVerificationRerunRequest,
-    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
-    resolve_workspace_root, safe_persistence_text, verification_product_view,
-    workspace_trust_from_entries,
+    Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskRunStatus,
+    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -716,6 +716,79 @@ impl ApplicationRunControl {
         unblock_approval: impl FnOnce(),
     ) -> std::result::Result<ApplicationCancellationTicket, ApplicationCancellationRequestError>
     {
+        self.request_stop(
+            format!("cancel-{}", self.owner.handle().scope_id()),
+            reason,
+            timeout,
+            unblock_approval,
+        )
+    }
+
+    /// Validates and durably requests a pause for one exact accepted Task plan.
+    ///
+    /// Validation reads the active session while this control retains its foreground lease. A
+    /// stale request does not reserve cancellation or stop the run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without a ticket when the rendered Task binding is stale. When
+    /// cancellation was activated but its durable request append failed, the error retains a
+    /// ticket that the adapter must pass to [`Self::finalize_task_pause`].
+    pub fn request_task_pause(
+        &self,
+        request: TaskPauseRequest,
+        timeout: Option<Duration>,
+        unblock_approval: impl FnOnce(),
+    ) -> std::result::Result<ApplicationTaskPauseTicket, ApplicationTaskPauseRequestError> {
+        let entries =
+            application_bound_session_entries(&self._session_lease.path, &self.events.session_id)
+                .map_err(ApplicationTaskPauseRequestError::without_ticket)?;
+        crate::agent_supervisor::task_execution::validate_task_pause_request(
+            &request,
+            &self.cancellation_target,
+            self.owner.handle().scope_id(),
+            &entries,
+        )
+        .map_err(|error| {
+            ApplicationTaskPauseRequestError::without_ticket(
+                anyhow!(error).context("application Task pause binding is stale"),
+            )
+        })?;
+        let cancellation_request_id =
+            format!("{}-{}", request.request_id, self.owner.handle().scope_id());
+        match self.request_stop(
+            cancellation_request_id,
+            "task pause requested",
+            timeout,
+            unblock_approval,
+        ) {
+            Ok(cancellation) => Ok(ApplicationTaskPauseTicket {
+                request,
+                cancellation,
+            }),
+            Err(error) => {
+                let (source, ticket) = error.into_parts();
+                Err(ApplicationTaskPauseRequestError {
+                    source,
+                    ticket: ticket.map(|cancellation| {
+                        Box::new(ApplicationTaskPauseTicket {
+                            request,
+                            cancellation,
+                        })
+                    }),
+                })
+            }
+        }
+    }
+
+    fn request_stop(
+        &self,
+        request_id: String,
+        reason: impl Into<String>,
+        timeout: Option<Duration>,
+        unblock_approval: impl FnOnce(),
+    ) -> std::result::Result<ApplicationCancellationTicket, ApplicationCancellationRequestError>
+    {
         if !self.owner.reserve_cancel() {
             return Err(ApplicationCancellationRequestError::without_ticket(
                 anyhow!("application run already reached a terminal cancellation phase"),
@@ -732,7 +805,7 @@ impl ApplicationRunControl {
         let requested_at_ms = current_unix_time_ms();
         let reason = reason.into();
         let request = RunCancellationRequestedEntry {
-            request_id: format!("cancel-{}", self.owner.handle().scope_id()),
+            request_id,
             run_scope_id: self.owner.handle().scope_id().to_owned(),
             target: self.cancellation_target.clone(),
             reason: safe_persistence_text(&reason),
@@ -798,7 +871,11 @@ impl ApplicationRunControl {
                 .owner
                 .wait_for_quiescence(ticket.remaining_timeout())
                 .await;
-            if conversation_start.is_ok() {
+            let task_stop = self.append_related_task_stop_state(
+                crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
+                "application Task cancellation request could not be durably audited",
+            );
+            let conversation_terminal = if conversation_start.is_ok() {
                 append_application_conversation_terminal(
                     &self.conversation_lifecycle,
                     self.conversation_start.run_id(),
@@ -806,7 +883,12 @@ impl ApplicationRunControl {
                     None,
                     Some("cancellation request could not be durably audited"),
                     &sigil_kernel::SecretRedactor::empty(),
-                )?;
+                )
+            } else {
+                Ok(())
+            };
+            if let Ok(Some(task_stop)) = task_stop.as_ref() {
+                self.emit_task_stop_state(handler, task_stop)?;
             }
             self.events.emit(
                 handler,
@@ -815,9 +897,210 @@ impl ApplicationRunControl {
                         .to_owned(),
                 },
             )?;
+            task_stop?;
+            conversation_terminal?;
             conversation_start?;
             bail!("application cancellation request was not durably recorded");
         }
+        let outcome = self
+            .finalize_recorded_cancellation(ticket, execution_joined, conversation_start)
+            .await?;
+        let task_stop = self.append_related_task_stop_state(
+            match outcome {
+                RunCancellationTerminalOutcome::Cancelled => {
+                    crate::agent_supervisor::task_execution::TaskStopDisposition::Cancelled
+                }
+                RunCancellationTerminalOutcome::Interrupted => {
+                    crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted
+                }
+            },
+            match outcome {
+                RunCancellationTerminalOutcome::Cancelled => {
+                    "application Task cancellation quiescence confirmed"
+                }
+                RunCancellationTerminalOutcome::Interrupted => {
+                    "application Task cancellation cleanup could not be confirmed"
+                }
+            },
+        )?;
+        let (conversation_status, conversation_summary) = match outcome {
+            RunCancellationTerminalOutcome::Cancelled => (
+                ConversationRunTerminalStatusV1::Cancelled,
+                "cancellation quiescence confirmed",
+            ),
+            RunCancellationTerminalOutcome::Interrupted => (
+                ConversationRunTerminalStatusV1::Interrupted,
+                "cancellation cleanup could not be confirmed",
+            ),
+        };
+        append_application_conversation_terminal(
+            &self.conversation_lifecycle,
+            self.conversation_start.run_id(),
+            conversation_status,
+            None,
+            Some(conversation_summary),
+            &sigil_kernel::SecretRedactor::empty(),
+        )?;
+        if let Some(task_stop) = task_stop.as_ref() {
+            self.emit_task_stop_state(handler, task_stop)?;
+        }
+        let terminal = match outcome {
+            RunCancellationTerminalOutcome::Cancelled => PublicRunEventKind::RunCancelled,
+            RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunFailed {
+                error: "run interrupted before cancellation cleanup could be confirmed".to_owned(),
+            },
+        };
+        self.events.emit(handler, terminal)?;
+        Ok(outcome)
+    }
+
+    /// Finalizes one exact Task pause after the owned execution reaches its stop boundary.
+    ///
+    /// The pause binding is revalidated after quiescence. If its Task plan changed while
+    /// cancellation propagated, the Task is recorded as interrupted rather than paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cancellation request or Task terminal transition cannot be
+    /// durably recorded, or when the public terminal event cannot be delivered.
+    pub async fn finalize_task_pause<H>(
+        &self,
+        ticket: ApplicationTaskPauseTicket,
+        execution_joined: bool,
+        handler: &mut H,
+    ) -> Result<ApplicationTaskPauseOutcome>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let ApplicationTaskPauseTicket {
+            request,
+            cancellation,
+        } = ticket;
+        let conversation_start = if cancellation.conversation_start_recorded {
+            Ok(())
+        } else {
+            self.conversation_lifecycle
+                .append_started(&self.conversation_start)
+                .map(|_| ())
+                .context("failed to recover application conversation run start")
+        };
+        if !cancellation.request_recorded {
+            let _ = self
+                .owner
+                .wait_for_quiescence(cancellation.remaining_timeout())
+                .await;
+            let task_stop = self.load_control_session().and_then(|mut session| {
+                crate::agent_supervisor::task_execution::append_task_stop_state(
+                    &mut session,
+                    Some(&request.task_id),
+                    crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
+                    "application Task pause request could not be durably audited",
+                )
+                .map_err(Into::into)
+            });
+            let conversation_terminal = if conversation_start.is_ok() {
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    self.conversation_start.run_id(),
+                    ConversationRunTerminalStatusV1::Interrupted,
+                    None,
+                    Some("Task pause request could not be durably audited"),
+                    &sigil_kernel::SecretRedactor::empty(),
+                )
+            } else {
+                Ok(())
+            };
+            if let Ok(Some(task_stop)) = task_stop.as_ref() {
+                self.emit_task_stop_state(handler, task_stop)?;
+            }
+            self.events.emit(
+                handler,
+                PublicRunEventKind::RunFailed {
+                    error: "Task interrupted because its pause request could not be audited"
+                        .to_owned(),
+                },
+            )?;
+            task_stop?;
+            conversation_terminal?;
+            conversation_start?;
+            bail!("application Task pause request was not durably recorded");
+        }
+        let cancellation_outcome = self
+            .finalize_recorded_cancellation(cancellation, execution_joined, conversation_start)
+            .await?;
+        let mut session = self.load_control_session()?;
+        let (disposition, reason) = match cancellation_outcome {
+            RunCancellationTerminalOutcome::Cancelled => {
+                match crate::agent_supervisor::task_execution::validate_task_pause_request(
+                    &request,
+                    &self.cancellation_target,
+                    self.owner.handle().scope_id(),
+                    session.entries(),
+                ) {
+                    Ok(()) => (
+                        crate::agent_supervisor::task_execution::TaskStopDisposition::Paused,
+                        "application Task paused after quiescence".to_owned(),
+                    ),
+                    Err(error) => (
+                        crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
+                        format!(
+                            "Task pause binding became stale after cancellation: {}",
+                            safe_persistence_text(&error.to_string())
+                        ),
+                    ),
+                }
+            }
+            RunCancellationTerminalOutcome::Interrupted => (
+                crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
+                "application Task pause cleanup could not be confirmed".to_owned(),
+            ),
+        };
+        let task_stop = crate::agent_supervisor::task_execution::append_task_stop_state(
+            &mut session,
+            Some(&request.task_id),
+            disposition,
+            &reason,
+        )?
+        .context("exact application Task was not available during pause finalization")?;
+        let task_status = task_stop.status();
+        let (conversation_status, terminal_summary, terminal) = match task_status {
+            TaskRunStatus::Paused => (
+                ConversationRunTerminalStatusV1::Blocked,
+                "Task paused",
+                PublicRunEventKind::RunCancelled,
+            ),
+            TaskRunStatus::Interrupted => (
+                ConversationRunTerminalStatusV1::Interrupted,
+                "Task pause could not be confirmed",
+                PublicRunEventKind::RunFailed {
+                    error: "Task interrupted before pause cleanup could be confirmed".to_owned(),
+                },
+            ),
+            _ => bail!("application Task pause wrote an invalid terminal status"),
+        };
+        append_application_conversation_terminal(
+            &self.conversation_lifecycle,
+            self.conversation_start.run_id(),
+            conversation_status,
+            None,
+            Some(terminal_summary),
+            &sigil_kernel::SecretRedactor::empty(),
+        )?;
+        self.emit_task_stop_state(handler, &task_stop)?;
+        self.events.emit(handler, terminal)?;
+        Ok(ApplicationTaskPauseOutcome {
+            task_id: request.task_id,
+            task_status,
+            cancellation_outcome,
+        })
+    }
+
+    async fn finalize_recorded_cancellation(
+        &self,
+        ticket: ApplicationCancellationTicket,
+        execution_joined: bool,
+        conversation_start: Result<()>,
+    ) -> Result<RunCancellationTerminalOutcome> {
         let quiescence = self
             .owner
             .wait_for_quiescence(ticket.remaining_timeout())
@@ -865,32 +1148,75 @@ impl ApplicationRunControl {
             })
             .context("failed to persist application cancellation terminal")?;
         conversation_start?;
-        let (conversation_status, conversation_summary) = match outcome {
-            RunCancellationTerminalOutcome::Cancelled => (
-                ConversationRunTerminalStatusV1::Cancelled,
-                "cancellation quiescence confirmed",
-            ),
-            RunCancellationTerminalOutcome::Interrupted => (
-                ConversationRunTerminalStatusV1::Interrupted,
-                "cancellation cleanup could not be confirmed",
-            ),
-        };
-        append_application_conversation_terminal(
-            &self.conversation_lifecycle,
-            self.conversation_start.run_id(),
-            conversation_status,
-            None,
-            Some(conversation_summary),
-            &sigil_kernel::SecretRedactor::empty(),
-        )?;
-        let terminal = match outcome {
-            RunCancellationTerminalOutcome::Cancelled => PublicRunEventKind::RunCancelled,
-            RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunFailed {
-                error: "run interrupted before cancellation cleanup could be confirmed".to_owned(),
-            },
-        };
-        self.events.emit(handler, terminal)?;
         Ok(outcome)
+    }
+
+    fn append_related_task_stop_state(
+        &self,
+        disposition: crate::agent_supervisor::task_execution::TaskStopDisposition,
+        reason: &str,
+    ) -> Result<Option<crate::agent_supervisor::task_execution::AppendedTaskStopState>> {
+        if matches!(
+            self.cancellation_target,
+            RunCancellationTarget::AgentThread { .. }
+        ) {
+            return Ok(None);
+        }
+        let mut session = self.load_control_session()?;
+        let task_id = crate::agent_supervisor::task_execution::task_id_for_cancellation_scope(
+            session.entries(),
+            &self.cancellation_target,
+            self.owner.handle().scope_id(),
+        );
+        let Some(task_id) = task_id else {
+            return Ok(None);
+        };
+        crate::agent_supervisor::task_execution::append_task_stop_state(
+            &mut session,
+            Some(&task_id),
+            disposition,
+            reason,
+        )
+        .map_err(Into::into)
+    }
+
+    fn load_control_session(&self) -> Result<Session> {
+        let entries =
+            application_bound_session_entries(&self._session_lease.path, &self.events.session_id)?;
+        let (provider_name, model_name) = application_session_identity(&entries)
+            .context("application control session has no durable provider/model identity")?;
+        let session = Session::load_from_store(
+            provider_name,
+            model_name,
+            JsonlSessionStore::new(&self._session_lease.path)?,
+        )?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application control session identity changed");
+        }
+        Ok(session)
+    }
+
+    fn emit_task_stop_state<H>(
+        &self,
+        handler: &mut H,
+        task_stop: &crate::agent_supervisor::task_execution::AppendedTaskStopState,
+    ) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let mut projector = PublicTaskEventProjector::default();
+        for control in task_stop.controls() {
+            for event in projector.project_control(control) {
+                self.events.emit(handler, event)?;
+            }
+        }
+        self.events.emit(
+            handler,
+            PublicRunEventKind::TaskRunFinished {
+                task_id: task_stop.task_id().as_str().to_owned(),
+                status: application_task_run_status_label(task_stop.status()).to_owned(),
+            },
+        )
     }
 }
 
@@ -908,6 +1234,72 @@ impl ApplicationCancellationTicket {
     #[must_use]
     pub fn remaining_timeout(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+/// Exact Task pause request retained until cancellation cleanup reaches a terminal observation.
+#[derive(Debug)]
+pub struct ApplicationTaskPauseTicket {
+    request: TaskPauseRequest,
+    cancellation: ApplicationCancellationTicket,
+}
+
+impl ApplicationTaskPauseTicket {
+    /// Returns the exact rendered Task pause binding.
+    #[must_use]
+    pub fn request(&self) -> &TaskPauseRequest {
+        &self.request
+    }
+
+    /// Returns the time remaining before the pause request's bounded cleanup deadline.
+    #[must_use]
+    pub fn remaining_timeout(&self) -> Duration {
+        self.cancellation.remaining_timeout()
+    }
+}
+
+/// Durable result of one application-owned Task pause finalization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationTaskPauseOutcome {
+    /// Exact Task selected by the rendered pause action.
+    pub task_id: TaskId,
+    /// Durable Task status after cleanup and final binding validation.
+    pub task_status: TaskRunStatus,
+    /// Physical run cancellation observation used to authorize the Task terminal state.
+    pub cancellation_outcome: RunCancellationTerminalOutcome,
+}
+
+/// Pause activation failure that may still carry a ticket requiring cleanup finalization.
+#[derive(Debug)]
+pub struct ApplicationTaskPauseRequestError {
+    source: anyhow::Error,
+    ticket: Option<Box<ApplicationTaskPauseTicket>>,
+}
+
+impl ApplicationTaskPauseRequestError {
+    fn without_ticket(source: anyhow::Error) -> Self {
+        Self {
+            source,
+            ticket: None,
+        }
+    }
+
+    /// Returns a ticket when cancellation was activated despite an audit append failure.
+    #[must_use]
+    pub fn into_ticket(self) -> Option<ApplicationTaskPauseTicket> {
+        self.ticket.map(|ticket| *ticket)
+    }
+}
+
+impl fmt::Display for ApplicationTaskPauseRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.source)
+    }
+}
+
+impl std::error::Error for ApplicationTaskPauseRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
     }
 }
 
@@ -937,6 +1329,10 @@ impl ApplicationCancellationRequestError {
     #[must_use]
     pub fn into_ticket(self) -> Option<ApplicationCancellationTicket> {
         self.ticket.map(|ticket| *ticket)
+    }
+
+    fn into_parts(self) -> (anyhow::Error, Option<ApplicationCancellationTicket>) {
+        (self.source, self.ticket.map(|ticket| *ticket))
     }
 }
 
@@ -2989,6 +3385,18 @@ fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
             | PublicRunEventKind::RunFailed { .. }
             | PublicRunEventKind::RunCancelled
     )
+}
+
+fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
+    match status {
+        TaskRunStatus::Started => "started",
+        TaskRunStatus::Running => "running",
+        TaskRunStatus::Paused => "paused",
+        TaskRunStatus::Completed => "completed",
+        TaskRunStatus::Failed => "failed",
+        TaskRunStatus::Cancelled => "cancelled",
+        TaskRunStatus::Interrupted => "interrupted",
+    }
 }
 
 struct PublicApplicationEventBridge<'a, H> {

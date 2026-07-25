@@ -18,23 +18,26 @@ use sigil_kernel::{
     DisclosurePresentationReceipt, EgressDisclosurePresenter, IntegrationPlanId, InteractionMode,
     JsonlSessionStore, ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider,
     ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry, SessionRef,
-    StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
-    TaskIntegrationReviewRequest, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
-    TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
+    SessionRef, StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess,
+    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 
 use super::{
-    ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
-    ApplicationRunExecutionKind, ApplicationRunInteraction, ApplicationRunPrepareError,
-    ApplicationRunPrepareErrorClass, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
-    ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime, ApplicationTranscriptRole,
+    ApplicationCancellationTicket, ApplicationRunControl, ApplicationRunEventHandler,
+    ApplicationRunEventSequence, ApplicationRunExecutionKind, ApplicationRunInteraction,
+    ApplicationRunPrepareError, ApplicationRunPrepareErrorClass, ApplicationRunRequest,
+    ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
+    ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime,
+    ApplicationTaskPauseTicket, ApplicationTranscriptRole,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
     accept_application_task_integration_review, admit_application_agent_binding,
     admit_application_model_selection, admit_application_reasoning_effort,
@@ -57,6 +60,49 @@ fn application_conversation_lifecycle(
         .iter()
         .filter_map(|record| conversation_run_lifecycle_record_from_stream(record).transpose())
         .collect()
+}
+
+fn append_running_application_task(
+    session: &mut Session,
+    task_id: &TaskId,
+    scope_id: Option<&str>,
+    plan_version: u32,
+) -> Result<()> {
+    let mut controls = vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+            objective: "control an application Task".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        }),
+        ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version,
+            step_id: TaskStepId::new("step-active")?,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("active application step".to_owned()),
+            summary: None,
+            reason: None,
+        }),
+    ];
+    if let Some(scope_id) = scope_id {
+        controls.push(ControlEntry::TaskRunCancellationScopeBound(
+            TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: scope_id.to_owned(),
+            },
+        ));
+    }
+    session.append_controls(controls)
 }
 
 #[test]
@@ -1953,6 +1999,315 @@ api_key = "test-secret-key"
 }
 
 #[tokio::test]
+async fn application_task_pause_writes_paused_only_after_quiescence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-application-pause")?;
+    append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned(),
+        },
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-task-pause", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-task-pause".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+    let pause_request = TaskPauseRequest::new(task_id.clone(), 1);
+    let pause_action_id = pause_request.request_id.clone();
+    let ticket = control.request_task_pause(pause_request, None, || {})?;
+    assert_ne!(ticket.cancellation.request.request_id, pause_action_id);
+    assert!(
+        ticket
+            .cancellation
+            .request
+            .request_id
+            .starts_with(&pause_action_id)
+    );
+    assert!(
+        ticket
+            .cancellation
+            .request
+            .request_id
+            .ends_with(handle.scope_id())
+    );
+    assert!(control.handle().is_cancel_requested());
+    drop(root_task_guard);
+
+    let outcome = control
+        .finalize_task_pause(ticket, true, &mut events)
+        .await?;
+
+    assert_eq!(outcome.task_id, task_id);
+    assert_eq!(outcome.task_status, TaskRunStatus::Paused);
+    assert_eq!(
+        outcome.cancellation_outcome,
+        RunCancellationTerminalOutcome::Cancelled
+    );
+    assert!(events.0.iter().any(|event| {
+        matches!(
+            &event.event,
+            PublicRunEventKind::TaskRunFinished { task_id, status }
+                if task_id == "task-application-pause" && status == "paused"
+        )
+    }));
+    assert!(matches!(
+        events.0.last().map(|event| &event.event),
+        Some(PublicRunEventKind::RunCancelled)
+    ));
+    let reopened =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
+    let task = reopened
+        .task_state_projection()
+        .tasks
+        .get(&outcome.task_id)
+        .cloned()
+        .expect("paused Task projection");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert!(
+        task.active_steps.is_empty(),
+        "paused Task must close active steps"
+    );
+    let lifecycle = application_conversation_lifecycle(&store_path)?;
+    assert!(matches!(
+        lifecycle.as_slice(),
+        [
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Blocked
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_application_task_pause_does_not_activate_cancellation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let _root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-application-stale-pause")?;
+    append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 2,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: Some("replanned before pause".to_owned()),
+    }))?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned(),
+        },
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-task-stale-pause", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-task-stale-pause".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+
+    let error = control
+        .request_task_pause(TaskPauseRequest::new(task_id, 1), None, || {})
+        .expect_err("stale rendered pause action must fail closed");
+
+    assert!(error.to_string().contains("binding is stale"));
+    assert!(error.into_ticket().is_none());
+    assert!(
+        !control.handle().is_cancel_requested(),
+        "stale pause must not reserve or activate cancellation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unaudited_application_task_pause_records_interrupted_before_failing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-application-unaudited-pause")?;
+    append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
+    let pause_request = TaskPauseRequest::new(task_id.clone(), 1);
+    let cancellation_request = RunCancellationRequestedEntry {
+        request_id: pause_request.request_id.clone(),
+        run_scope_id: handle.scope_id().to_owned(),
+        target: RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned(),
+        },
+        reason: "pause audit append failed".to_owned(),
+        requested_at_ms: 1,
+        quiescence_deadline_ms: 2,
+    };
+    assert!(owner.reserve_cancel());
+    assert!(owner.activate_reserved_cancel());
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: cancellation_request.target.clone(),
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-task-unaudited-pause", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-task-unaudited-pause".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    let ticket = ApplicationTaskPauseTicket {
+        request: pause_request,
+        cancellation: ApplicationCancellationTicket {
+            request: cancellation_request,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+            request_recorded: false,
+            conversation_start_recorded: false,
+        },
+    };
+    drop(root_task_guard);
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+
+    assert!(
+        control
+            .finalize_task_pause(ticket, true, &mut events)
+            .await
+            .is_err()
+    );
+
+    assert!(events.0.iter().any(|event| {
+        matches!(
+            &event.event,
+            PublicRunEventKind::TaskRunFinished { task_id, status }
+                if task_id == "task-application-unaudited-pause" && status == "interrupted"
+        )
+    }));
+    assert!(matches!(
+        events.0.last().map(|event| &event.event),
+        Some(PublicRunEventKind::RunFailed { .. })
+    ));
+    let reopened =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
+    assert_eq!(
+        reopened
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .expect("unaudited paused Task")
+            .status,
+        TaskRunStatus::Interrupted
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_task_pause_records_interrupted_when_execution_did_not_join() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-application-pause-interrupted")?;
+    append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned(),
+        },
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-task-pause-interrupted", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-task-pause-interrupted".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    let ticket = control.request_task_pause(
+        TaskPauseRequest::new(task_id.clone(), 1),
+        Some(std::time::Duration::from_millis(10)),
+        || {},
+    )?;
+    drop(root_task_guard);
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+
+    let outcome = control
+        .finalize_task_pause(ticket, false, &mut events)
+        .await?;
+
+    assert_eq!(outcome.task_status, TaskRunStatus::Interrupted);
+    assert_eq!(
+        outcome.cancellation_outcome,
+        RunCancellationTerminalOutcome::Interrupted
+    );
+    assert!(matches!(
+        events.0.last().map(|event| &event.event),
+        Some(PublicRunEventKind::RunFailed { .. })
+    ));
+    let reopened =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
+    assert_eq!(
+        reopened
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .expect("interrupted Task")
+            .status,
+        TaskRunStatus::Interrupted
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_control_persists_request_then_terminal_after_quiescence() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store_path = temp.path().join("session.jsonl");
@@ -2012,6 +2367,132 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
             ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
         ] if finalized.status() == ConversationRunTerminalStatusV1::Cancelled
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_control_closes_only_the_task_bound_to_its_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-application-cancel")?;
+    append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: RunCancellationTarget::Run,
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-task-cancel", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-task-cancel".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    let ticket = control.request_cancellation("cancel exact application Task", None, || {})?;
+    drop(root_task_guard);
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+
+    let outcome = control
+        .finalize_cancellation(ticket, true, &mut events)
+        .await?;
+
+    assert_eq!(outcome, RunCancellationTerminalOutcome::Cancelled);
+    assert!(events.0.iter().any(|event| {
+        matches!(
+            &event.event,
+            PublicRunEventKind::TaskRunFinished { task_id, status }
+                if task_id == "task-application-cancel" && status == "cancelled"
+        )
+    }));
+    let reopened =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
+    assert_eq!(
+        reopened
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .expect("cancelled Task")
+            .status,
+        TaskRunStatus::Cancelled
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_control_does_not_guess_an_unbound_latest_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let task_id = TaskId::new("task-unrelated-to-chat-cancel")?;
+    append_running_application_task(&mut session, &task_id, None, 1)?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        cancellation_target: RunCancellationTarget::Run,
+        conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
+        conversation_start: ConversationRunStartedEntryV1::new("run-chat-cancel", 1)?,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-chat-cancel".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    let ticket = control.request_cancellation("cancel ordinary chat", None, || {})?;
+    drop(root_task_guard);
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+
+    let outcome = control
+        .finalize_cancellation(ticket, true, &mut events)
+        .await?;
+
+    assert_eq!(outcome, RunCancellationTerminalOutcome::Cancelled);
+    assert!(
+        events
+            .0
+            .iter()
+            .all(|event| !matches!(event.event, PublicRunEventKind::TaskRunFinished { .. })),
+        "ordinary chat cancellation must not synthesize a Task terminal"
+    );
+    let reopened =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
+    assert_eq!(
+        reopened
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .expect("unrelated Task remains visible")
+            .status,
+        TaskRunStatus::Running
+    );
     Ok(())
 }
 
