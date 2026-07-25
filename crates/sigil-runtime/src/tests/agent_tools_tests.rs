@@ -7583,8 +7583,13 @@ fn root_config() -> RootConfig {
 
 fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
     let workspace_root = if workspace_root == std::env::temp_dir() {
-        let isolated =
-            std::env::temp_dir().join(format!("sigil-agent-tools-tests-{}", std::process::id()));
+        let current_thread = std::thread::current();
+        let test_name = current_thread.name().unwrap_or("unnamed-test");
+        let test_name_digest = sha2::Sha256::digest(test_name.as_bytes());
+        let isolated = std::env::temp_dir().join(format!(
+            "sigil-agent-tools-tests-{}-{test_name_digest:x}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&isolated);
         let _ = fs::write(isolated.join("README.md"), "test workspace\n");
         isolated
