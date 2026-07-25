@@ -11,8 +11,9 @@ use std::{
 use serde_json::{Value, json};
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
-    EgressNetworkRoute, EvidenceScope, JsonlSessionStore, ModelMessage, PreEgressDisclosure,
-    PublicRunEvent, PublicRunEventKind, Session, TaskId, TaskStepId, TaskVerificationRerunRequest,
+    EgressNetworkRoute, EvidenceScope, IntegrationPlanId, IntegrationPromotionStatus,
+    JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent, PublicRunEventKind,
+    Session, TaskId, TaskIntegrationReviewRequest, TaskStepId, TaskVerificationRerunRequest,
     ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent, VerificationProductAction,
     VerificationProductEvidence, VerificationProductView, VerificationRecommendationKind,
     VerificationVerdict,
@@ -47,20 +48,21 @@ use super::{
     HttpConversationRecoveryDriverCommand, HttpConversationRecoveryDriverError,
     HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
     HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
-    HttpForegroundRunOwner, HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer,
-    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent,
-    HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
-    HttpProtocolReplayError, HttpProtocolVersionError, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTaskContinuationRequest, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
+    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
+    HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
+    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
+    HttpSessionCreateRequest, HttpSessionOpenBindingError, HttpSessionOpenRequest,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError,
+    HttpSseEvent, HttpSupportContext, HttpTaskContinuationRequest,
+    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 #[tokio::test]
@@ -1041,6 +1043,60 @@ async fn local_server_projects_and_idempotently_reruns_exact_verification() {
 }
 
 #[tokio::test]
+async fn local_server_projects_and_idempotently_accepts_exact_task_integration() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "integration"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let request = task_integration_review_request();
+    driver.set_task_integration_review(task_integration_review_test_view(&request));
+    driver.set_task_integration_acceptance(task_integration_acceptance_test_view(&request));
+
+    let review_path = format!("/sessions/{session_id}/task-integration/review");
+    let (status, review) =
+        http_raw_request(address, http_get(&review_path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(review["request"]["request_id"], request.request_id);
+    assert_eq!(review["target_kind"], "workspace_apply");
+    assert_eq!(review["lanes"][0]["candidate_kind"], "managed_ref");
+    assert!(review.get("private_ref").is_none());
+    assert!(review.get("workspace_path").is_none());
+
+    let command = HttpCommandEnvelope::new(
+        "integration-command-1",
+        "desktop-client",
+        session_id,
+        request.clone(),
+    );
+    let body = serde_json::to_string(&command).expect("integration command should serialize");
+    let accept = http_post(
+        &format!("/sessions/{session_id}/task-integration/accept"),
+        Some("secret-token"),
+        &body,
+    );
+    let (status, receipt) = http_raw_request(address, accept.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["acceptance"]["promotion_status"], "promoted");
+    assert_eq!(receipt["acceptance"]["parent_verdict"], "not_applicable");
+    assert_eq!(receipt["acceptance"]["can_continue"], true);
+    assert_eq!(receipt["replayed"], false);
+
+    let (status, replay) = http_raw_request(address, accept).await;
+    assert_eq!(status, 200);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(driver.task_integration_accepts(), vec![request]);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
     let (address, shutdown, driver) = spawn_test_http_server().await;
     let (status, session) = http_raw_request(
@@ -1394,6 +1450,39 @@ fn verification_rerun_never_overlaps_a_foreground_agent_run() {
         })
     );
     assert!(driver.verification_reruns().is_empty());
+}
+
+#[test]
+fn task_integration_review_and_accept_never_overlap_a_foreground_agent_run() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let request = task_integration_review_request();
+    driver.set_task_integration_review(task_integration_review_test_view(&request));
+    driver.set_task_integration_acceptance(task_integration_acceptance_test_view(&request));
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground run should start");
+
+    assert_eq!(
+        registry.task_integration_review(&session.id),
+        Err(HttpRegistryError::SessionForegroundRunActive {
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+        })
+    );
+    let command =
+        HttpCommandEnvelope::new("integration-busy-1", "desktop-client", &session.id, request);
+    assert_eq!(
+        registry.accept_task_integration_command(&session.id, command),
+        Err(HttpRegistryError::SessionForegroundRunActive {
+            session_id: session.id,
+            run_id: run.id,
+        })
+    );
+    assert!(driver.task_integration_accepts().is_empty());
 }
 
 #[test]
@@ -2311,6 +2400,35 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         "boolean"
     );
     assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["task_integration"]["type"],
+        "boolean"
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/task-integration/review"]["get"]["responses"]
+            ["200"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/task-integration/accept"]["post"]["responses"]
+            ["409"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["TaskIntegrationReviewView"]["properties"]["lanes"]["items"]
+            ["$ref"],
+        "#/components/schemas/TaskIntegrationLaneView"
+    );
+    assert!(
+        document["components"]["schemas"]["TaskIntegrationReviewView"]["properties"]
+            .get("private_ref")
+            .is_none()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["TaskIntegrationAcceptanceCommand"]["allOf"][1]["properties"]
+            ["payload"]["$ref"],
+        "#/components/schemas/TaskIntegrationReviewRequest"
+    );
+    assert_eq!(
         document["components"]["schemas"]["AgentActivityView"]["properties"]["items"]["maxItems"],
         100
     );
@@ -2320,6 +2438,7 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     for path in [
         "/sessions/{session_id}/runs",
         "/sessions/{session_id}/verification/rerun",
+        "/sessions/{session_id}/task-integration/accept",
         "/runs/{run_id}/cancel",
         "/runs/{run_id}/approvals/{call_id}",
     ] {
@@ -6005,6 +6124,9 @@ struct RecordingRunDriver {
     approval_observer: Mutex<Option<ApprovalObserver>>,
     verification_view: Mutex<Option<HttpVerificationView>>,
     verification_reruns: Mutex<Vec<HttpVerificationRerunRequest>>,
+    task_integration_review: Mutex<Option<HttpTaskIntegrationReviewView>>,
+    task_integration_acceptance: Mutex<Option<HttpTaskIntegrationAcceptanceView>>,
+    task_integration_accepts: Mutex<Vec<TaskIntegrationReviewRequest>>,
     transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
     transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
     conversation_display_page: Mutex<Option<HttpConversationDisplayPage>>,
@@ -6076,6 +6198,18 @@ impl RecordingRunDriver {
 
     fn verification_reruns(&self) -> Vec<HttpVerificationRerunRequest> {
         lock(&self.verification_reruns).clone()
+    }
+
+    fn set_task_integration_review(&self, view: HttpTaskIntegrationReviewView) {
+        *lock(&self.task_integration_review) = Some(view);
+    }
+
+    fn set_task_integration_acceptance(&self, view: HttpTaskIntegrationAcceptanceView) {
+        *lock(&self.task_integration_acceptance) = Some(view);
+    }
+
+    fn task_integration_accepts(&self) -> Vec<TaskIntegrationReviewRequest> {
+        lock(&self.task_integration_accepts).clone()
     }
 
     fn set_transcript_page(&self, page: HttpSessionTranscriptPage) {
@@ -6281,6 +6415,24 @@ impl HttpRunDriver for RecordingRunDriver {
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test verification view is missing"))
     }
+
+    fn task_integration_review(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<Option<HttpTaskIntegrationReviewView>, HttpRunDriverError> {
+        Ok(lock(&self.task_integration_review).clone())
+    }
+
+    fn accept_task_integration(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        request: &TaskIntegrationReviewRequest,
+    ) -> Result<HttpTaskIntegrationAcceptanceView, HttpRunDriverError> {
+        lock(&self.task_integration_accepts).push(request.clone());
+        lock(&self.task_integration_acceptance)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("test integration acceptance is missing"))
+    }
 }
 
 fn verification_rerun_request() -> TaskVerificationRerunRequest {
@@ -6320,6 +6472,54 @@ fn verification_test_view(
         ),
         action: Some(VerificationProductAction::Rerun(request.clone())),
         evidence: VerificationProductEvidence::default(),
+    }
+}
+
+fn task_integration_review_request() -> TaskIntegrationReviewRequest {
+    TaskIntegrationReviewRequest {
+        request_id: "integration-review-request".to_owned(),
+        task_id: TaskId::new("task_1").expect("task id"),
+        plan_id: IntegrationPlanId::new("plan_1").expect("plan id"),
+        plan_version: 1,
+        preview_digest: "sha256:preview".to_owned(),
+    }
+}
+
+fn task_integration_review_test_view(
+    request: &TaskIntegrationReviewRequest,
+) -> HttpTaskIntegrationReviewView {
+    HttpTaskIntegrationReviewView {
+        schema_version: 1,
+        request: request.clone(),
+        aggregate_diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n".to_owned(),
+        aggregate_diff_digest: "sha256:aggregate".to_owned(),
+        preview_digest: request.preview_digest.clone(),
+        policy_digest: "sha256:policy".to_owned(),
+        target_kind: HttpIntegrationPromotionTargetKind::WorkspaceApply,
+        lanes: vec![HttpTaskIntegrationLaneView {
+            lane_id: "lane-1".to_owned(),
+            candidate_kind: HttpIntegrationLaneCandidateKind::ManagedRef,
+            proposal_count: 1,
+            verification_receipt_count: 1,
+        }],
+        child_verification_receipt_count: 1,
+        lane_verification_receipt_count: 1,
+        conflict_reasons: Vec::new(),
+        verification_invalidation_count: 1,
+        parent_verification_pending: true,
+    }
+}
+
+fn task_integration_acceptance_test_view(
+    request: &TaskIntegrationReviewRequest,
+) -> HttpTaskIntegrationAcceptanceView {
+    HttpTaskIntegrationAcceptanceView {
+        request: request.clone(),
+        promotion_status: IntegrationPromotionStatus::Promoted,
+        parent_verdict: Some(VerificationVerdict::NotApplicable),
+        can_continue: true,
+        promotion_cleanup_error: None,
+        parent_cleanup_error: None,
     }
 }
 

@@ -1325,6 +1325,103 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/task-integration/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept one exact current Task integration review
+         * @description Revalidates the stale-safe review identity, performs the content-bound promotion, and runs authoritative parent verification under durable session mutation exclusion.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TaskIntegrationAcceptanceCommand"];
+                };
+            };
+            responses: {
+                /** @description Durable Task integration acceptance receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskIntegrationAcceptanceCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/task-integration/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one exact current Task integration review
+         * @description Returns the digest-verified aggregate diff and bounded lane provenance without private refs, worktree paths, object ids, artifact refs, or promotion authority.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current exact Task integration review */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskIntegrationReviewView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/transcript": {
         parameters: {
             query?: never;
@@ -2144,6 +2241,8 @@ export interface components {
             /** @constant */
             status: "ok";
         };
+        /** @enum {string} */
+        IntegrationLaneCandidateKind: "managed_ref" | "snapshot_workspace";
         IntegrationLaneChangedEvent: {
             conflicts: string[];
             lane_id: string;
@@ -2155,6 +2254,10 @@ export interface components {
             /** @constant */
             type: "integration_lane_changed";
         };
+        /** @enum {string} */
+        IntegrationPromotionStatus: "prepared" | "promoted" | "conflict" | "stale" | "failed" | "cancelled";
+        /** @enum {string} */
+        IntegrationPromotionTargetKind: "workspace_apply" | "git_ref_advance";
         NoticeEvent: {
             message: string;
             /** @constant */
@@ -2360,6 +2463,7 @@ export interface components {
             run_context: boolean;
             session_catalog: boolean;
             support_diagnostics: boolean;
+            task_integration: boolean;
             verification: boolean;
         };
         ServerInfo: {
@@ -2370,7 +2474,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 7;
+            schema_version: 8;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -2633,6 +2737,56 @@ export interface components {
         TaskContinuationRequest: {
             guidance?: string | null;
             task_id: string;
+        };
+        TaskIntegrationAcceptanceCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["TaskIntegrationReviewRequest"];
+        };
+        TaskIntegrationAcceptanceCommandReceipt: {
+            acceptance: components["schemas"]["TaskIntegrationAcceptanceView"];
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            replayed: boolean;
+            session_id: string;
+        };
+        TaskIntegrationAcceptanceView: {
+            can_continue: boolean;
+            parent_cleanup_error?: string | null;
+            parent_verdict?: components["schemas"]["VerificationVerdict"] | null;
+            promotion_cleanup_error?: string | null;
+            promotion_status: components["schemas"]["IntegrationPromotionStatus"];
+            request: components["schemas"]["TaskIntegrationReviewRequest"];
+        };
+        TaskIntegrationLaneView: {
+            candidate_kind: components["schemas"]["IntegrationLaneCandidateKind"];
+            lane_id: string;
+            proposal_count: number;
+            verification_receipt_count: number;
+        };
+        TaskIntegrationReviewRequest: {
+            plan_id: string;
+            /** Format: uint32 */
+            plan_version: number;
+            preview_digest: string;
+            request_id: string;
+            task_id: string;
+        };
+        TaskIntegrationReviewView: {
+            aggregate_diff: string;
+            aggregate_diff_digest: string;
+            child_verification_receipt_count: number;
+            conflict_reasons: string[];
+            lane_verification_receipt_count: number;
+            lanes: components["schemas"]["TaskIntegrationLaneView"][];
+            /** @constant */
+            parent_verification_pending: true;
+            policy_digest: string;
+            preview_digest: string;
+            request: components["schemas"]["TaskIntegrationReviewRequest"];
+            /** @constant */
+            schema_version: 1;
+            target_kind: components["schemas"]["IntegrationPromotionTargetKind"];
+            verification_invalidation_count: number;
         };
         TaskPhaseChangedEvent: {
             phase: components["schemas"]["PublicTaskPhase"];

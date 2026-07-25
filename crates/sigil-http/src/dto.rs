@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
-    TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
+    TaskIntegrationReviewRequest, TaskVerificationRerunRequest, ToolApprovalUserDecision,
+    VerificationProductView,
 };
 use sigil_runtime::application_compaction::{
     ApplicationCompactionAdmission, ApplicationCompactionReview,
 };
 use sigil_runtime::application_recovery::{
     ApplicationCheckpointRestoreReview, ApplicationConversationRecoveryView,
+};
+use sigil_runtime::application_run::{
+    ApplicationIntegrationLaneCandidateKind, ApplicationIntegrationPromotionTargetKind,
+    ApplicationTaskIntegrationAcceptanceView, ApplicationTaskIntegrationReviewView,
 };
 use sigil_runtime::conversation_display::{
     ConversationDisplayApprovalDecisionV1, ConversationDisplayAssistantPhaseV1,
@@ -26,7 +31,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 7;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 8;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +63,8 @@ pub struct HttpServerCapabilities {
     pub cancellation: bool,
     /// Durable task verification can be inspected and one exact recommended check rerun.
     pub verification: bool,
+    /// Durable Task integration can be reviewed and one exact preview accepted.
+    pub task_integration: bool,
     /// Bound sessions expose typed model, permission-mode, and context-usage facts.
     pub run_context: bool,
     /// Bound sessions expose a safe, bounded child-agent lifecycle and handoff projection.
@@ -82,6 +89,7 @@ impl HttpServerCapabilities {
             approval: true,
             cancellation: true,
             verification: true,
+            task_integration: true,
             run_context: true,
             agent_activity: true,
             conversation_recovery: true,
@@ -2321,6 +2329,149 @@ pub struct HttpVerificationRerunCommandReceipt {
 }
 
 impl HttpVerificationRerunCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Exact stale-safe integration review identity shared with durable Task projection truth.
+pub type HttpTaskIntegrationReviewRequest = TaskIntegrationReviewRequest;
+
+/// Renderer-safe final promotion target kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpIntegrationPromotionTargetKind {
+    WorkspaceApply,
+    GitRefAdvance,
+}
+
+impl From<ApplicationIntegrationPromotionTargetKind> for HttpIntegrationPromotionTargetKind {
+    fn from(value: ApplicationIntegrationPromotionTargetKind) -> Self {
+        match value {
+            ApplicationIntegrationPromotionTargetKind::WorkspaceApply => Self::WorkspaceApply,
+            ApplicationIntegrationPromotionTargetKind::GitRefAdvance => Self::GitRefAdvance,
+        }
+    }
+}
+
+/// Renderer-safe physical integration lane candidate kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpIntegrationLaneCandidateKind {
+    ManagedRef,
+    SnapshotWorkspace,
+}
+
+impl From<ApplicationIntegrationLaneCandidateKind> for HttpIntegrationLaneCandidateKind {
+    fn from(value: ApplicationIntegrationLaneCandidateKind) -> Self {
+        match value {
+            ApplicationIntegrationLaneCandidateKind::ManagedRef => Self::ManagedRef,
+            ApplicationIntegrationLaneCandidateKind::SnapshotWorkspace => Self::SnapshotWorkspace,
+        }
+    }
+}
+
+/// Bounded, private-ref-free provenance for one reviewed integration lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpTaskIntegrationLaneView {
+    pub lane_id: String,
+    pub candidate_kind: HttpIntegrationLaneCandidateKind,
+    pub proposal_count: usize,
+    pub verification_receipt_count: usize,
+}
+
+/// Exact current integration review returned to an authenticated application client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpTaskIntegrationReviewView {
+    pub schema_version: u16,
+    pub request: HttpTaskIntegrationReviewRequest,
+    pub aggregate_diff: String,
+    pub aggregate_diff_digest: String,
+    pub preview_digest: String,
+    pub policy_digest: String,
+    pub target_kind: HttpIntegrationPromotionTargetKind,
+    pub lanes: Vec<HttpTaskIntegrationLaneView>,
+    pub child_verification_receipt_count: usize,
+    pub lane_verification_receipt_count: usize,
+    pub conflict_reasons: Vec<String>,
+    pub verification_invalidation_count: usize,
+    pub parent_verification_pending: bool,
+}
+
+impl From<ApplicationTaskIntegrationReviewView> for HttpTaskIntegrationReviewView {
+    fn from(value: ApplicationTaskIntegrationReviewView) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            request: value.request,
+            aggregate_diff: value.aggregate_diff,
+            aggregate_diff_digest: value.aggregate_diff_digest,
+            preview_digest: value.preview_digest,
+            policy_digest: value.policy_digest,
+            target_kind: value.target_kind.into(),
+            lanes: value
+                .lanes
+                .into_iter()
+                .map(|lane| HttpTaskIntegrationLaneView {
+                    lane_id: lane.lane_id,
+                    candidate_kind: lane.candidate_kind.into(),
+                    proposal_count: lane.proposal_count,
+                    verification_receipt_count: lane.verification_receipt_count,
+                })
+                .collect(),
+            child_verification_receipt_count: value.child_verification_receipt_count,
+            lane_verification_receipt_count: value.lane_verification_receipt_count,
+            conflict_reasons: value.conflict_reasons,
+            verification_invalidation_count: value.verification_invalidation_count,
+            parent_verification_pending: value.parent_verification_pending,
+        }
+    }
+}
+
+/// Terminal, renderer-safe result of accepting one exact integration review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpTaskIntegrationAcceptanceView {
+    pub request: HttpTaskIntegrationReviewRequest,
+    pub promotion_status: sigil_kernel::IntegrationPromotionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_verdict: Option<sigil_kernel::VerificationVerdict>,
+    pub can_continue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_cleanup_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_cleanup_error: Option<String>,
+}
+
+impl From<ApplicationTaskIntegrationAcceptanceView> for HttpTaskIntegrationAcceptanceView {
+    fn from(value: ApplicationTaskIntegrationAcceptanceView) -> Self {
+        Self {
+            request: value.request,
+            promotion_status: value.promotion_status,
+            parent_verdict: value.parent_verdict,
+            can_continue: value.can_continue,
+            promotion_cleanup_error: value.promotion_cleanup_error,
+            parent_cleanup_error: value.parent_cleanup_error,
+        }
+    }
+}
+
+/// Receipt for an idempotent exact integration acceptance command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpTaskIntegrationAcceptanceCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub acceptance: HttpTaskIntegrationAcceptanceView,
+    pub replayed: bool,
+}
+
+impl HttpTaskIntegrationAcceptanceCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

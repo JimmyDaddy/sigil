@@ -34,7 +34,7 @@ use crate::{
         HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
         HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
         HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpVerificationRerunRequest,
+        HttpTaskIntegrationReviewRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -811,6 +811,46 @@ fn route_http_request(
             );
         };
         return match registry.command_conversation_recovery(session_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/task-integration/review"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.task_integration_review(session_id) {
+            Ok(Some(view)) => json_response(200, json!(view)),
+            Ok(None) => http_error_response(
+                404,
+                "task_integration_review_not_found",
+                "session has no current Task integration review",
+            ),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/task-integration/accept"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpTaskIntegrationReviewRequest>>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "bad_request",
+                "invalid Task integration acceptance command body",
+            );
+        };
+        return match registry.accept_task_integration_command(session_id, command) {
             Ok(receipt) => json_response(200, json!(receipt)),
             Err(error) => registry_error_response(error),
         };
@@ -1603,6 +1643,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidTaskContinuation
+        | HttpRegistryError::InvalidTaskIntegrationReview
         | HttpRegistryError::InvalidSessionOpenRequest
         | HttpRegistryError::ConversationDisplayCursorInvalid
         | HttpRegistryError::ConversationQueueInvalidCommand
@@ -1647,6 +1688,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationRecoveryStaleBinding => "recovery_binding_stale",
         HttpRegistryError::ConversationRecoveryConflict => "recovery_conflict",
         HttpRegistryError::ConversationRecoveryUnavailable => "conversation_recovery_unavailable",
+        HttpRegistryError::InvalidTaskIntegrationReview => "invalid_task_integration_review",
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())

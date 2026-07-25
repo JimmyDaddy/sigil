@@ -38,9 +38,10 @@ use sigil_runtime::application_run::{
     ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
     ApplicationTaskContinuationRequest, ApplicationTranscriptRole, PreparedApplicationRun,
-    PreparedApplicationTaskContinuation, application_agent_activity_view,
-    application_run_context_view, application_session_frontier_view,
-    application_session_transcript_page, application_verification_view,
+    PreparedApplicationTaskContinuation, accept_application_task_integration_review,
+    application_agent_activity_view, application_run_context_view,
+    application_session_frontier_view, application_session_transcript_page,
+    application_task_integration_review_view, application_verification_view,
     bind_application_session_with_model, bind_existing_application_session,
     prepare_application_run, prepare_application_task_continuation,
     record_application_preparation_cancellation, rerun_application_verification,
@@ -72,7 +73,8 @@ use crate::{
     HttpQueuedRunDriverStart, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
     HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
     HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTranscriptAssistantKind,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
     HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
@@ -1733,6 +1735,40 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 request,
             ))
             .map_err(|error| HttpRunDriverError::new(format!("verification rerun failed: {error}")))
+    }
+
+    fn task_integration_review(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<Option<HttpTaskIntegrationReviewView>, HttpRunDriverError> {
+        application_task_integration_review_view(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map(|review| review.map(Into::into))
+        .map_err(|error| {
+            HttpRunDriverError::new(format!("Task integration review failed: {error}"))
+        })
+    }
+
+    fn accept_task_integration(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpTaskIntegrationReviewRequest,
+    ) -> Result<HttpTaskIntegrationAcceptanceView, HttpRunDriverError> {
+        self.runtime
+            .block_on(accept_application_task_integration_review(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &self.services,
+                request,
+            ))
+            .map(Into::into)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("Task integration acceptance failed: {error}"))
+            })
     }
 
     fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {

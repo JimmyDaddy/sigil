@@ -42,8 +42,9 @@ use crate::{
         HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
         HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
         HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
-        HttpSessionTranscriptPage, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceCommandReceipt,
+        HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -55,6 +56,7 @@ const MAX_SESSION_OPEN_LABEL_BYTES: usize = 160;
 const MAX_CONVERSATION_QUEUE_ID_BYTES: usize = 512;
 const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_CONVERSATION_RECOVERY_ID_BYTES: usize = 512;
+const MAX_TASK_INTEGRATION_ID_BYTES: usize = 512;
 const QUEUE_INTERRUPT_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
 
@@ -76,6 +78,9 @@ pub enum HttpRegistryError {
     /// The Task continuation payload is empty, ambiguous, or combined with conversation fields.
     #[error("http Task continuation request is invalid")]
     InvalidTaskContinuation,
+    /// The integration review identity is empty or exceeds the bounded command contract.
+    #[error("http Task integration review request is invalid")]
+    InvalidTaskIntegrationReview,
     /// The runtime driver could not establish a durable binding for the adapter session.
     #[error("http driver rejected durable binding for session {session_id}: {message}")]
     SessionBindingRejected { session_id: String, message: String },
@@ -1763,6 +1768,97 @@ impl HttpSessionRunRegistry {
         result
     }
 
+    /// Projects one exact current Task integration review under durable mutation exclusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown or busy sessions, invalid durable artifacts, or unavailable
+    /// application integration support.
+    pub fn task_integration_review(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<HttpTaskIntegrationReviewView>, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.task_integration_review(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "Task integration review",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "Task integration review",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        });
+        guard.finish(false);
+        result
+    }
+
+    /// Accepts one exact Task integration review from an idempotent command envelope.
+    ///
+    /// The durable-session mutation guard excludes runs, queue mutations, recovery, verification,
+    /// and duplicate integration acceptance while promotion and parent checks are in flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for protocol/key conflicts, active foreground work, stale review
+    /// identity, promotion or parent-check failure, or unavailable application integration.
+    pub fn accept_task_integration_command(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpTaskIntegrationReviewRequest>,
+    ) -> Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        validate_task_integration_review_request(&command.payload)?;
+        let request = HttpReservedCommand::integration(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_integration(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| {
+            let session = self.get_session(session_id)?;
+            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+            let acceptance = catch_unwind(AssertUnwindSafe(|| {
+                self.driver
+                    .accept_task_integration(&session, &command.payload)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "Task integration acceptance",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "Task integration acceptance",
+                run_id: session_id.to_owned(),
+                message: error.message,
+            });
+            guard.finish(false);
+            Ok(HttpTaskIntegrationAcceptanceCommandReceipt {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                session_id: command.session_id.clone(),
+                correlation_id: command.correlation_id.clone(),
+                acceptance: acceptance?,
+                replayed: false,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::Integration(Box::new(result.clone())))?;
+        result
+    }
+
     /// Requests cancellation for a running HTTP adapter run.
     ///
     /// # Errors
@@ -2348,6 +2444,7 @@ enum HttpCommandKind {
     Cancel,
     Approval,
     Verification,
+    Integration,
     Queue,
     Recovery,
 }
@@ -2359,6 +2456,7 @@ impl HttpCommandKind {
             Self::Cancel => b"cancel",
             Self::Approval => b"approval",
             Self::Verification => b"verification",
+            Self::Integration => b"integration",
             Self::Queue => b"queue",
             Self::Recovery => b"recovery",
         }
@@ -2370,6 +2468,7 @@ impl HttpCommandKind {
             Self::Cancel => "cancel",
             Self::Approval => "approval",
             Self::Verification => "verification",
+            Self::Integration => "integration",
             Self::Queue => "queue",
             Self::Recovery => "recovery",
         }
@@ -2410,6 +2509,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpVerificationRerunRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Verification, &[path_session_id], command)
+    }
+
+    fn integration(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpTaskIntegrationReviewRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::Integration, &[path_session_id], command)
     }
 
     fn queue(
@@ -2476,6 +2582,7 @@ enum HttpCommandCompletion {
     Cancel(Result<HttpRunCancelCommandReceipt, HttpRegistryError>),
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
+    Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
     Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
     Recovery(Box<Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError>>),
     Aborted,
@@ -2522,6 +2629,25 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Verification(Box::new(receipt))
             }
+            Self::Integration(result) if result.is_ok() => {
+                let mut receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful integration completion should contain a receipt")
+                    .clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                receipt.acceptance.promotion_cleanup_error = receipt
+                    .acceptance
+                    .promotion_cleanup_error
+                    .map(|value| safe_persistence_text(&value));
+                receipt.acceptance.parent_cleanup_error = receipt
+                    .acceptance
+                    .parent_cleanup_error
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Integration(Box::new(receipt))
+            }
             Self::Queue(result) if result.is_ok() => {
                 let mut receipt = result
                     .as_ref()
@@ -2549,6 +2675,7 @@ impl HttpCommandCompletion {
             | Self::Cancel(Err(_))
             | Self::Approval(Err(_))
             | Self::Verification(_)
+            | Self::Integration(_)
             | Self::Queue(_)
             | Self::Recovery(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
@@ -2562,6 +2689,9 @@ impl HttpCommandCompletion {
             HttpStoredCommandCompletion::Approval(receipt) => Self::Approval(Ok(receipt)),
             HttpStoredCommandCompletion::Verification(receipt) => {
                 Self::Verification(Box::new(Ok(*receipt)))
+            }
+            HttpStoredCommandCompletion::Integration(receipt) => {
+                Self::Integration(Box::new(Ok(*receipt)))
             }
             HttpStoredCommandCompletion::Queue(receipt) => Self::Queue(Box::new(Ok(*receipt))),
             HttpStoredCommandCompletion::Recovery(receipt) => {
@@ -2755,6 +2885,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -2769,6 +2900,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -2783,6 +2915,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -2799,6 +2932,24 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_integration(
+        &self,
+    ) -> Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::Integration(result) => {
+                (*result).map(HttpTaskIntegrationAcceptanceCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -2814,6 +2965,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
@@ -2830,6 +2982,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
@@ -3419,6 +3572,26 @@ fn validate_conversation_recovery_command(
     valid
         .then_some(())
         .ok_or(HttpRegistryError::ConversationRecoveryInvalidCommand)
+}
+
+fn validate_task_integration_review_request(
+    request: &HttpTaskIntegrationReviewRequest,
+) -> Result<(), HttpRegistryError> {
+    let valid = [
+        request.request_id.as_str(),
+        request.task_id.as_str(),
+        request.plan_id.as_str(),
+        request.preview_digest.as_str(),
+    ]
+    .into_iter()
+    .all(|value| {
+        !value.trim().is_empty()
+            && value.len() <= MAX_TASK_INTEGRATION_ID_BYTES
+            && safe_persistence_text(value) == value
+    }) && request.plan_version > 0;
+    valid
+        .then_some(())
+        .ok_or(HttpRegistryError::InvalidTaskIntegrationReview)
 }
 
 fn is_bounded_recovery_token(value: &str) -> bool {

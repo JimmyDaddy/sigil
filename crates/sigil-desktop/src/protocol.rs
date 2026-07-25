@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-const SERVER_INFO_SCHEMA_VERSION: u16 = 7;
+const SERVER_INFO_SCHEMA_VERSION: u16 = 8;
 const HTTP_PROTOCOL_VERSION: u16 = 2;
 
 /// Authentication mode required by the desktop runtime bridge.
@@ -37,6 +37,8 @@ pub struct DesktopServerCapabilities {
     pub cancellation: bool,
     /// Task verification recommendation and exact rerun are available.
     pub verification: bool,
+    /// Exact Task integration review and acceptance are available.
+    pub task_integration: bool,
     /// Typed model, permission-mode, and context usage facts are available.
     pub run_context: bool,
     /// Safe bounded child-agent lifecycle and result handoff are available.
@@ -57,6 +59,7 @@ impl DesktopServerCapabilities {
             && self.approval
             && self.cancellation
             && self.verification
+            && self.task_integration
             && self.run_context
             && self.agent_activity
             && self.support_diagnostics

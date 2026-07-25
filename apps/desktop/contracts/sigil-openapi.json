@@ -2693,6 +2693,13 @@
         ],
         "type": "object"
       },
+      "IntegrationLaneCandidateKind": {
+        "enum": [
+          "managed_ref",
+          "snapshot_workspace"
+        ],
+        "type": "string"
+      },
       "IntegrationLaneChangedEvent": {
         "additionalProperties": false,
         "properties": {
@@ -2737,6 +2744,24 @@
           "conflicts"
         ],
         "type": "object"
+      },
+      "IntegrationPromotionStatus": {
+        "enum": [
+          "prepared",
+          "promoted",
+          "conflict",
+          "stale",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "IntegrationPromotionTargetKind": {
+        "enum": [
+          "workspace_apply",
+          "git_ref_advance"
+        ],
+        "type": "string"
       },
       "NoticeEvent": {
         "additionalProperties": false,
@@ -3689,6 +3714,9 @@
           "support_diagnostics": {
             "type": "boolean"
           },
+          "task_integration": {
+            "type": "boolean"
+          },
           "verification": {
             "type": "boolean"
           }
@@ -3704,6 +3732,7 @@
           "approval",
           "cancellation",
           "verification",
+          "task_integration",
           "run_context",
           "agent_activity",
           "support_diagnostics"
@@ -3730,7 +3759,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 7,
+            "const": 8,
             "type": "integer"
           },
           "server_version": {
@@ -4782,6 +4811,236 @@
         },
         "required": [
           "task_id"
+        ],
+        "type": "object"
+      },
+      "TaskIntegrationAcceptanceCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/TaskIntegrationReviewRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TaskIntegrationAcceptanceCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "$ref": "#/components/schemas/TaskIntegrationAcceptanceView"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "acceptance",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "TaskIntegrationAcceptanceView": {
+        "additionalProperties": false,
+        "properties": {
+          "can_continue": {
+            "type": "boolean"
+          },
+          "parent_cleanup_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_verdict": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VerificationVerdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "promotion_cleanup_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "promotion_status": {
+            "$ref": "#/components/schemas/IntegrationPromotionStatus"
+          },
+          "request": {
+            "$ref": "#/components/schemas/TaskIntegrationReviewRequest"
+          }
+        },
+        "required": [
+          "request",
+          "promotion_status",
+          "can_continue"
+        ],
+        "type": "object"
+      },
+      "TaskIntegrationLaneView": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_kind": {
+            "$ref": "#/components/schemas/IntegrationLaneCandidateKind"
+          },
+          "lane_id": {
+            "type": "string"
+          },
+          "proposal_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verification_receipt_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lane_id",
+          "candidate_kind",
+          "proposal_count",
+          "verification_receipt_count"
+        ],
+        "type": "object"
+      },
+      "TaskIntegrationReviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "plan_version": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preview_digest": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "task_id",
+          "plan_id",
+          "plan_version",
+          "preview_digest"
+        ],
+        "type": "object"
+      },
+      "TaskIntegrationReviewView": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate_diff": {
+            "maxLength": 4194304,
+            "type": "string"
+          },
+          "aggregate_diff_digest": {
+            "type": "string"
+          },
+          "child_verification_receipt_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "conflict_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "lane_verification_receipt_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/TaskIntegrationLaneView"
+            },
+            "type": "array"
+          },
+          "parent_verification_pending": {
+            "const": true,
+            "type": "boolean"
+          },
+          "policy_digest": {
+            "type": "string"
+          },
+          "preview_digest": {
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/TaskIntegrationReviewRequest"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "target_kind": {
+            "$ref": "#/components/schemas/IntegrationPromotionTargetKind"
+          },
+          "verification_invalidation_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request",
+          "aggregate_diff",
+          "aggregate_diff_digest",
+          "preview_digest",
+          "policy_digest",
+          "target_kind",
+          "lanes",
+          "child_verification_receipt_count",
+          "lane_verification_receipt_count",
+          "conflict_reasons",
+          "verification_invalidation_count",
+          "parent_verification_pending"
         ],
         "type": "object"
       },
@@ -6623,6 +6882,95 @@
           }
         },
         "summary": "Start a run in a session"
+      }
+    },
+    "/sessions/{session_id}/task-integration/accept": {
+      "post": {
+        "description": "Revalidates the stale-safe review identity, performs the content-bound promotion, and runs authoritative parent verification under durable session mutation exclusion.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskIntegrationAcceptanceCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskIntegrationAcceptanceCommandReceipt"
+                }
+              }
+            },
+            "description": "Durable Task integration acceptance receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Accept one exact current Task integration review"
+      }
+    },
+    "/sessions/{session_id}/task-integration/review": {
+      "get": {
+        "description": "Returns the digest-verified aggregate diff and bounded lane provenance without private refs, worktree paths, object ids, artifact refs, or promotion authority.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskIntegrationReviewView"
+                }
+              }
+            },
+            "description": "Current exact Task integration review"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read one exact current Task integration review"
       }
     },
     "/sessions/{session_id}/transcript": {

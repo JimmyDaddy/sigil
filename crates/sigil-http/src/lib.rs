@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 mod auth;
 mod command_store;
@@ -61,11 +61,12 @@ pub use dto::{
     HttpConversationQueueView, HttpConversationRecoveryCommandAction,
     HttpConversationRecoveryCommandActionKind, HttpConversationRecoveryCommandReceipt,
     HttpConversationRecoveryView, HttpConversationTerminalFrontier, HttpDurableSessionFrontier,
-    HttpForegroundRunOwner, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
-    HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView,
-    HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
-    HttpRunTerminalOutcome, HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo,
-    HttpSessionBinding, HttpSessionCatalogBatchAction, HttpSessionCatalogBatchExecuteRequest,
+    HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
+    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
+    HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot,
+    HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+    HttpServerAuthentication, HttpServerCapabilities, HttpServerInfo, HttpSessionBinding,
+    HttpSessionCatalogBatchAction, HttpSessionCatalogBatchExecuteRequest,
     HttpSessionCatalogBatchItem, HttpSessionCatalogBatchOutcome, HttpSessionCatalogBatchPlan,
     HttpSessionCatalogBatchPlanItem, HttpSessionCatalogBatchPlanRequest,
     HttpSessionCatalogBatchPlanStatus, HttpSessionCatalogBatchReceipt,
@@ -76,6 +77,8 @@ pub use dto::{
     HttpSessionSnapshot, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
     HttpSupportBundleExport, HttpSupportCheck, HttpSupportDoctorReport, HttpSupportEnvironment,
     HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTaskContinuationRequest,
+    HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
     HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
     HttpVerificationRerunRequest, HttpVerificationView,
 };

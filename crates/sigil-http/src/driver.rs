@@ -12,7 +12,8 @@ use crate::dto::{
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort,
     HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpVerificationRerunRequest,
+    HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpVerificationRerunRequest,
     HttpVerificationView,
 };
 
@@ -391,6 +392,37 @@ pub trait HttpRunDriver: Send + Sync {
         _request: &HttpVerificationRerunRequest,
     ) -> Result<HttpVerificationView, HttpRunDriverError> {
         Err(HttpRunDriverError::new("verification rerun is unavailable"))
+    }
+
+    /// Projects the current exact Task integration review without exposing private lane state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable binding or immutable aggregate artifact cannot be
+    /// verified.
+    fn task_integration_review(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpTaskIntegrationReviewView>, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "Task integration review is unavailable",
+        ))
+    }
+
+    /// Accepts one exact current Task integration review under the shared foreground lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is stale, another operation owns the session, promotion
+    /// fails, or authoritative parent verification cannot be recorded.
+    fn accept_task_integration(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpTaskIntegrationReviewRequest,
+    ) -> Result<HttpTaskIntegrationAcceptanceView, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "Task integration acceptance is unavailable",
+        ))
     }
 
     /// Waits until every driver-owned run supervisor has completed cleanup.

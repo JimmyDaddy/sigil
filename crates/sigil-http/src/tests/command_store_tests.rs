@@ -5,11 +5,15 @@ use crate::{
     HttpConversationQueuePromptMaterial, HttpConversationQueueView,
     HttpConversationRecoveryCommandActionKind, HttpConversationRecoveryCommandReceipt,
     HttpConversationRecoveryView, HttpPermissionMode, HttpRunSnapshot, HttpRunStartCommandReceipt,
-    HttpRunStatus,
+    HttpRunStatus, HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
     command_store::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpDurableCommandStore, HttpStoredCommandClaim,
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
     },
+};
+use sigil_kernel::{
+    IntegrationPlanId, IntegrationPromotionStatus, TaskId, TaskIntegrationReviewRequest,
+    VerificationVerdict,
 };
 
 fn identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
@@ -33,6 +37,12 @@ fn queue_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdent
 fn recovery_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
     let mut identity = identity(command_id, fingerprint);
     identity.kind = "recovery".to_owned();
+    identity
+}
+
+fn integration_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
+    let mut identity = identity(command_id, fingerprint);
+    identity.kind = "integration".to_owned();
     identity
 }
 
@@ -112,6 +122,31 @@ fn recovery_receipt(command_id: &str) -> HttpConversationRecoveryCommandReceipt 
             through_stream_sequence: 9,
         },
         correlation_id: Some("correlation-1".to_owned()),
+        replayed: false,
+    }
+}
+
+fn integration_receipt(command_id: &str) -> HttpTaskIntegrationAcceptanceCommandReceipt {
+    let request = TaskIntegrationReviewRequest {
+        request_id: "integration-review-request".to_owned(),
+        task_id: TaskId::new("task-1").expect("task id"),
+        plan_id: IntegrationPlanId::new("plan-1").expect("plan id"),
+        plan_version: 1,
+        preview_digest: "sha256:preview".to_owned(),
+    };
+    HttpTaskIntegrationAcceptanceCommandReceipt {
+        command_id: command_id.to_owned(),
+        client_id: "client-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        correlation_id: Some("correlation-1".to_owned()),
+        acceptance: HttpTaskIntegrationAcceptanceView {
+            request,
+            promotion_status: IntegrationPromotionStatus::Promoted,
+            parent_verdict: Some(VerificationVerdict::NotApplicable),
+            can_continue: true,
+            promotion_cleanup_error: None,
+            parent_cleanup_error: None,
+        },
         replayed: false,
     }
 }
@@ -245,6 +280,38 @@ fn durable_command_store_round_trips_recovery_completion() {
     ));
     assert!(matches!(
         store.reserve(recovery_identity("recovery-command-1", 'a')),
+        Ok(HttpStoredCommandClaim::Conflict)
+    ));
+}
+
+#[test]
+fn durable_command_store_round_trips_task_integration_completion() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let stored = integration_identity("integration-command-1", '9');
+    let expected = integration_receipt("integration-command-1");
+    {
+        let store = HttpDurableCommandStore::open(&path, 8).expect("store should open");
+        assert!(matches!(
+            store.reserve(stored.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(
+                &stored,
+                HttpStoredCommandCompletion::Integration(Box::new(expected.clone())),
+            )
+            .expect("integration completion should persist");
+    }
+
+    let store = HttpDurableCommandStore::open(&path, 8).expect("store should reopen");
+    assert!(matches!(
+        store.reserve(stored),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::Integration(Box::new(expected))
+    ));
+    assert!(matches!(
+        store.reserve(integration_identity("integration-command-1", '8')),
         Ok(HttpStoredCommandClaim::Conflict)
     ));
 }

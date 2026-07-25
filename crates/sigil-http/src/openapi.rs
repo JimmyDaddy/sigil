@@ -642,6 +642,47 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/task-integration/review": {
+                "get": {
+                    "summary": "Read one exact current Task integration review",
+                    "description": "Returns the digest-verified aggregate diff and bounded lane provenance without private refs, worktree paths, object ids, artifact refs, or promotion authority.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Current exact Task integration review",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskIntegrationReviewView" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/task-integration/accept": {
+                "post": {
+                    "summary": "Accept one exact current Task integration review",
+                    "description": "Revalidates the stale-safe review identity, performs the content-bound promotion, and runs authoritative parent verification under durable session mutation exclusion.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskIntegrationAcceptanceCommand" } } }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Durable Task integration acceptance receipt",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskIntegrationAcceptanceCommandReceipt" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}": {
                 "get": {
                     "summary": "Get a run snapshot",
@@ -823,7 +864,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "run_context", "agent_activity", "support_diagnostics"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "verification", "task_integration", "run_context", "agent_activity", "support_diagnostics"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -835,6 +876,7 @@ pub fn http_openapi_document() -> Value {
                         "approval": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
                         "verification": { "type": "boolean" },
+                        "task_integration": { "type": "boolean" },
                         "run_context": { "type": "boolean" },
                         "agent_activity": { "type": "boolean" },
                         "support_diagnostics": { "type": "boolean" }
@@ -2252,6 +2294,102 @@ pub fn http_openapi_document() -> Value {
                         "session_id": { "type": "string" },
                         "correlation_id": { "type": ["string", "null"] },
                         "verification": { "$ref": "#/components/schemas/VerificationView" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
+                "TaskIntegrationReviewRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["request_id", "task_id", "plan_id", "plan_version", "preview_digest"],
+                    "properties": {
+                        "request_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "task_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "plan_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 },
+                        "preview_digest": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "IntegrationPromotionTargetKind": {
+                    "type": "string",
+                    "enum": ["workspace_apply", "git_ref_advance"]
+                },
+                "IntegrationLaneCandidateKind": {
+                    "type": "string",
+                    "enum": ["managed_ref", "snapshot_workspace"]
+                },
+                "TaskIntegrationLaneView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["lane_id", "candidate_kind", "proposal_count", "verification_receipt_count"],
+                    "properties": {
+                        "lane_id": { "type": "string" },
+                        "candidate_kind": { "$ref": "#/components/schemas/IntegrationLaneCandidateKind" },
+                        "proposal_count": { "type": "integer", "minimum": 0 },
+                        "verification_receipt_count": { "type": "integer", "minimum": 0 }
+                    }
+                },
+                "TaskIntegrationReviewView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "request", "aggregate_diff", "aggregate_diff_digest", "preview_digest", "policy_digest", "target_kind", "lanes", "child_verification_receipt_count", "lane_verification_receipt_count", "conflict_reasons", "verification_invalidation_count", "parent_verification_pending"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "request": { "$ref": "#/components/schemas/TaskIntegrationReviewRequest" },
+                        "aggregate_diff": { "type": "string", "maxLength": 4194304 },
+                        "aggregate_diff_digest": { "type": "string" },
+                        "preview_digest": { "type": "string" },
+                        "policy_digest": { "type": "string" },
+                        "target_kind": { "$ref": "#/components/schemas/IntegrationPromotionTargetKind" },
+                        "lanes": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/TaskIntegrationLaneView" }
+                        },
+                        "child_verification_receipt_count": { "type": "integer", "minimum": 0 },
+                        "lane_verification_receipt_count": { "type": "integer", "minimum": 0 },
+                        "conflict_reasons": { "type": "array", "items": { "type": "string" } },
+                        "verification_invalidation_count": { "type": "integer", "minimum": 0 },
+                        "parent_verification_pending": { "type": "boolean", "const": true }
+                    }
+                },
+                "TaskIntegrationAcceptanceCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/TaskIntegrationReviewRequest" }
+                            }
+                        }
+                    ]
+                },
+                "IntegrationPromotionStatus": {
+                    "type": "string",
+                    "enum": ["prepared", "promoted", "conflict", "stale", "failed", "cancelled"]
+                },
+                "TaskIntegrationAcceptanceView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["request", "promotion_status", "can_continue"],
+                    "properties": {
+                        "request": { "$ref": "#/components/schemas/TaskIntegrationReviewRequest" },
+                        "promotion_status": { "$ref": "#/components/schemas/IntegrationPromotionStatus" },
+                        "parent_verdict": { "oneOf": [{ "$ref": "#/components/schemas/VerificationVerdict" }, { "type": "null" }] },
+                        "can_continue": { "type": "boolean" },
+                        "promotion_cleanup_error": { "type": ["string", "null"] },
+                        "parent_cleanup_error": { "type": ["string", "null"] }
+                    }
+                },
+                "TaskIntegrationAcceptanceCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "acceptance", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "acceptance": { "$ref": "#/components/schemas/TaskIntegrationAcceptanceView" },
                         "replayed": { "type": "boolean" }
                     }
                 },
