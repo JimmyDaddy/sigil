@@ -520,6 +520,24 @@ fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
 }
 
 #[test]
+fn task_pause_request_identity_matches_the_shared_content_binding() {
+    let request = desktop_task_pause_request("task_1", 3);
+
+    assert_eq!(
+        request.request_id,
+        "task-pause-a5c1fc2df6690659ad1d6fc69c101c629f3728d78a9204b8b38cbd3900e19943"
+    );
+    assert_eq!(
+        serde_json::to_value(request).expect("Task pause should encode"),
+        serde_json::json!({
+            "request_id": "task-pause-a5c1fc2df6690659ad1d6fc69c101c629f3728d78a9204b8b38cbd3900e19943",
+            "task_id": "task_1",
+            "plan_version": 3
+        })
+    );
+}
+
+#[test]
 fn task_integration_review_validates_exact_diff_and_private_ref_free_projection() {
     let aggregate_diff = "diff --git a/src/lib.rs b/src/lib.rs\n+safe\n";
     let preview_digest = format!("sha256:{}", "b".repeat(64));

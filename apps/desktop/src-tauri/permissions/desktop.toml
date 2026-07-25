@@ -50,8 +50,8 @@ commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run
 
 [[permission]]
 identifier = "allow-desktop-task-control"
-description = "Allows the main local window to continue one exact durable Task and review or accept one stale-safe integration preview."
-commands.allow = ["desktop_continue_task", "desktop_task_integration_review", "desktop_accept_task_integration"]
+description = "Allows the main local window to pause or continue one exact durable Task and review or accept one stale-safe integration preview."
+commands.allow = ["desktop_continue_task", "desktop_pause_task", "desktop_task_integration_review", "desktop_accept_task_integration"]
 
 [[permission]]
 identifier = "allow-desktop-conversation-queue"

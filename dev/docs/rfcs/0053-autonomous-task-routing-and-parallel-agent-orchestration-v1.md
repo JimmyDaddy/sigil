@@ -1730,10 +1730,17 @@ task/plan identity，driver 只有在 shared application control 完成 durable 
 `Interrupted`；driver 拒绝且尚未激活 stop 时才恢复之前的 active status。OpenAPI snapshot 与
 generated TypeScript contract 已同步形成 drift gate。
 
-Desktop renderer 尚未消费这一 capability 和 route，也仍缺 task-targeted guidance、integration
-review/accept 与 restart control。显式 `auto` 在需要这些动作时仍会停在 blocked/paused
-terminal，因此这是必须收口的 interim gap；兼容默认值继续为 manual，本 slice 也不授权 O8d
-默认切换。
+Desktop native handshake 已同步到 schema v9，并将 `task_pause` 纳入启动所需 capability；typed
+client 在 native trust boundary 根据 task id 与 plan version 生成相同的内容绑定 request id，
+核对 receipt 的 command/client/session/run/task/plan/stream binding 后才向 renderer 返回。Tauri
+只暴露 allowlist `desktop_pause_task`，Task card 只有在 active Task 已形成 accepted plan 时才显示
+“Pause Task”；它不会复用普通 Stop/Cancel，pending approval 也不会遮蔽 Pause，因为 shared
+application control 会负责解除该 wait。`paused` / `pause_requested` 已进入 native 与 renderer
+run status，Task 的 `TaskRunFinished(paused)` 仍是可继续性的 durable product truth。
+
+O8b 仍缺 task-targeted guidance、integration review/accept 与 restart control 的完整
+application parity。显式 `auto` 在需要这些动作时仍会停在 blocked/paused terminal，因此这是
+必须收口的 interim gap；兼容默认值继续为 manual，本 slice 也不授权 O8d 默认切换。
 
 O8c：deterministic、real-model 与 chaos acceptance。
 

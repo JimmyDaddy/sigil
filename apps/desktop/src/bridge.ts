@@ -55,6 +55,7 @@ import type {
   TaskIntegrationAcceptance,
   TaskIntegrationReview,
   TaskIntegrationReviewBinding,
+  TaskPauseBinding,
   SupportDoctorReport,
   SupportSaveSummary,
 } from "./types";
@@ -141,6 +142,12 @@ export interface DesktopBridge {
   ): Promise<RunSummary>;
   attachRun(workspaceId: string, input: RunAttachInput): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
+  pauseTask(
+    workspaceId: string,
+    sessionId: string,
+    runId: string,
+    request: TaskPauseBinding,
+  ): Promise<RunSummary>;
   resolveApproval(
     workspaceId: string,
     sessionId: string,
@@ -293,6 +300,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<RunSummary>("desktop_cancel_run", {
       workspaceId,
       input: { sessionId, runId },
+    }),
+  pauseTask: (workspaceId, sessionId, runId, request) =>
+    invoke<RunSummary>("desktop_pause_task", {
+      workspaceId,
+      input: { sessionId, runId, taskId: request.taskId, planVersion: request.planVersion },
     }),
   resolveApproval: (workspaceId, sessionId, runId, approval, decision) =>
     invoke<ApprovalDecisionSummary>("desktop_resolve_approval", {

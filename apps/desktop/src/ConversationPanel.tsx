@@ -1198,6 +1198,28 @@ export function ConversationPanel({
     }
   };
 
+  const pauseTask = async (taskId: string, planVersion: number) => {
+    if (
+      run === undefined
+      || !active
+      || submissionBlocked
+      || controlBusy
+      || taskControlBusy
+      || taskIntegrationBusy
+    ) return;
+    setTaskControlBusy(true);
+    try {
+      setRun(await bridge.pauseTask(workspaceId, session.id, run.id, {
+        taskId,
+        planVersion,
+      }));
+    } catch {
+      onNotice(t("taskPauseFailed"), true);
+    } finally {
+      setTaskControlBusy(false);
+    }
+  };
+
   const continueTask = async (taskId: string, guidance?: string): Promise<boolean> => {
     if (
       active
@@ -1549,7 +1571,14 @@ export function ConversationPanel({
           busy={taskControlBusy || taskIntegrationBusy}
           reviewReady={taskIntegrationReview !== undefined}
           reviewBusy={taskIntegrationLoading}
+          pauseDisabled={submissionBlocked || controlBusy || taskIntegrationBusy}
+          pauseBusy={taskControlBusy}
           reviewButtonRef={taskIntegrationTriggerRef}
+          onPause={() => {
+            if (taskProjection.planVersion !== undefined) {
+              void pauseTask(taskProjection.taskId, taskProjection.planVersion);
+            }
+          }}
           onContinue={(guidance) => void continueTask(taskProjection.taskId, guidance)}
           onReviewIntegration={() => setTaskIntegrationOpen(true)}
         />
@@ -1959,6 +1988,8 @@ function terminalObservationFromRun(
       return { runId: run.id, status: "failed" };
     case "cancelled":
       return { runId: run.id, status: "cancelled" };
+    case "paused":
+      return { runId: run.id, status: "cancelled" };
     case "interrupted":
       return { runId: run.id, status: "interrupted" };
     default:
@@ -2067,7 +2098,7 @@ function integrationReviewTaskProjection(
 }
 
 function isTerminal(status: RunSummary["status"]): boolean {
-  return ["finished", "failed", "cancelled", "interrupted"].includes(status);
+  return ["finished", "failed", "cancelled", "paused", "interrupted"].includes(status);
 }
 
 function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | undefined {

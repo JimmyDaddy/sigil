@@ -319,6 +319,13 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       permissionMode: "manual",
       streamSequence: 1,
     }),
+    pauseTask: async (_workspaceId, sessionId, runId) => ({
+      id: runId,
+      sessionId,
+      status: "paused",
+      permissionMode: "manual",
+      streamSequence: 2,
+    }),
     resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => ({
       runId,
       callId: approval.callId,
@@ -3746,6 +3753,102 @@ describe("desktop workspace and history shell", () => {
       "manual",
       "Keep the public API compatible.",
     ));
+  });
+
+  it("pauses the exact active Task plan without using ordinary run cancellation", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const pauseTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      runId: string,
+    ) => ({
+      id: runId,
+      sessionId,
+      status: "paused" as const,
+      permissionMode: "manual" as const,
+      streamSequence: 4,
+    }));
+    const cancelRun = vi.fn();
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      pauseTask,
+      cancelRun,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(await readyComposer(), "Implement the active Task safely");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 1,
+        runSequence: "1",
+        replayable: true,
+        kind: "task_run_started",
+        status: "running",
+        task: { taskId: "task-pause-1", objective: "Pause without losing the plan" },
+      });
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 2,
+        runSequence: "2",
+        replayable: true,
+        kind: "task_plan_updated",
+        status: "approved",
+        task: {
+          taskId: "task-pause-1",
+          planVersion: 7,
+          steps: [],
+        },
+      });
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 3,
+        runSequence: "3",
+        replayable: true,
+        kind: "approval_requested",
+        itemId: "call-task-pause",
+        toolName: "write_file",
+        approval: {
+          callId: "call-task-pause",
+          toolName: "write_file",
+          approvalRequestId: "approval-task-pause",
+          toolCallHash: "hash-task-pause",
+          policyVersion: "policy-task-pause",
+          expiresAtMs: 4_102_444_800_000,
+          snapshotRequired: true,
+        },
+      });
+    });
+
+    const pause = await screen.findByRole("button", { name: "Pause Task" });
+    expect(pause.hasAttribute("disabled")).toBe(false);
+    await user.click(pause);
+    await waitFor(() => expect(pauseTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "run-1",
+      { taskId: "task-pause-1", planVersion: 7 },
+    ));
+    expect(cancelRun).not.toHaveBeenCalled();
   });
 
   it("accepts the exact integration review and continues only after parent verification", async () => {

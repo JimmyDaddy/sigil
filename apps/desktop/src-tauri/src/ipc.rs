@@ -1203,6 +1203,15 @@ pub(crate) struct DesktopRunCancelInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTaskPauseInput {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) task_id: String,
+    pub(crate) plan_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopApprovalDecisionInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -2089,10 +2098,12 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
                 DesktopRunStatus::Running => "running",
                 DesktopRunStatus::WaitingForApproval => "waiting_for_approval",
                 DesktopRunStatus::CancelRequested => "cancel_requested",
+                DesktopRunStatus::PauseRequested => "pause_requested",
                 DesktopRunStatus::ExecutionUncertain => "execution_uncertain",
                 DesktopRunStatus::Finished => "finished",
                 DesktopRunStatus::Failed => "failed",
                 DesktopRunStatus::Cancelled => "cancelled",
+                DesktopRunStatus::Paused => "paused",
                 DesktopRunStatus::Interrupted => "interrupted",
             },
             permission_mode: permission_mode_label(value.permission_mode),

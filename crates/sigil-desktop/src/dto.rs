@@ -1025,6 +1025,15 @@ pub struct DesktopRunCancelRequest {
     pub reason: Option<String>,
 }
 
+/// Exact durable Task pause payload constructed by the native client boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskPauseRequest {
+    pub request_id: String,
+    pub task_id: String,
+    pub plan_version: u32,
+}
+
 /// Public run lifecycle returned by the HTTP adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1033,10 +1042,12 @@ pub enum DesktopRunStatus {
     Running,
     WaitingForApproval,
     CancelRequested,
+    PauseRequested,
     ExecutionUncertain,
     Finished,
     Failed,
     Cancelled,
+    Paused,
     Interrupted,
 }
 
@@ -1046,7 +1057,7 @@ impl DesktopRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Finished | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Finished | Self::Failed | Self::Cancelled | Self::Paused | Self::Interrupted
         )
     }
 }
@@ -1512,6 +1523,23 @@ pub struct DesktopRunCancelCommandReceipt {
     pub expected_stream_sequence: Option<u64>,
     #[serde(default)]
     pub correlation_id: Option<String>,
+    pub run: DesktopRunSnapshot,
+    pub replayed: bool,
+}
+
+/// Receipt from pausing one exact durable Task.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskPauseCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub expected_stream_sequence: Option<u64>,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub task_id: String,
+    pub plan_version: u32,
     pub run: DesktopRunSnapshot,
     pub replayed: bool,
 }

@@ -61,6 +61,7 @@ struct RunProjection {
     stream_state: DesktopRunStreamState,
     stream_message: Option<&'static str>,
     run_status: DesktopRunStatus,
+    task_pause_observed: bool,
 }
 
 pub(crate) struct DesktopRunProjectionSnapshot {
@@ -265,6 +266,7 @@ impl RunProjection {
             },
             stream_message: None,
             run_status,
+            task_pause_observed: run_status == DesktopRunStatus::Paused,
         }
     }
 
@@ -303,6 +305,11 @@ impl RunProjection {
                     self.pending_approvals.remove(item_id);
                 }
             }
+            DesktopTimelineEventKind::TaskRunFinished
+                if event.status.as_deref() == Some("paused") =>
+            {
+                self.task_pause_observed = true;
+            }
             DesktopTimelineEventKind::RunFinished => {
                 self.run_status = DesktopRunStatus::Finished;
             }
@@ -310,7 +317,12 @@ impl RunProjection {
                 self.run_status = DesktopRunStatus::Failed;
             }
             DesktopTimelineEventKind::RunCancelled => {
-                self.run_status = DesktopRunStatus::Cancelled;
+                self.run_status =
+                    if self.task_pause_observed || event.status.as_deref() == Some("paused") {
+                        DesktopRunStatus::Paused
+                    } else {
+                        DesktopRunStatus::Cancelled
+                    };
             }
             _ => {}
         }
@@ -655,6 +667,7 @@ fn terminal_timeline_projection(
         DesktopRunStatus::Failed => Some((DesktopTimelineEventKind::RunFailed, "failed")),
         DesktopRunStatus::Interrupted => Some((DesktopTimelineEventKind::RunFailed, "interrupted")),
         DesktopRunStatus::Cancelled => Some((DesktopTimelineEventKind::RunCancelled, "cancelled")),
+        DesktopRunStatus::Paused => Some((DesktopTimelineEventKind::RunCancelled, "paused")),
         _ => None,
     }
 }

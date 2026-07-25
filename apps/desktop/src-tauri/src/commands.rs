@@ -49,8 +49,8 @@ use crate::{
         DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
         DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
         DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
-        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopTaskPauseInput, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -955,6 +955,55 @@ pub(crate) async fn desktop_cancel_run(
             DesktopRunCancelRequest {
                 reason: Some("Desktop user requested cancellation".to_owned()),
             },
+        )
+        .await
+        .map(|receipt| receipt.run.into())
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_pause_task(
+    workspace_id: String,
+    input: DesktopTaskPauseInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRunSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    for value in [
+        input.session_id.as_str(),
+        input.run_id.as_str(),
+        input.task_id.as_str(),
+    ] {
+        validate_session_id(value)?;
+    }
+    if input.plan_version == 0 {
+        return Err(DesktopCommandError::new(
+            "invalid_task_pause",
+            "The Task pause binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let snapshot = client
+        .run(&input.run_id)
+        .await
+        .map_err(project_client_error)?;
+    if snapshot.session_id != input.session_id {
+        return Err(DesktopCommandError::new(
+            "run_session_mismatch",
+            "The run does not belong to this conversation.",
+        ));
+    }
+    client
+        .pause_task(
+            &input.session_id,
+            &input.run_id,
+            snapshot.stream_sequence,
+            &input.task_id,
+            input.plan_version,
         )
         .await
         .map(|receipt| receipt.run.into())

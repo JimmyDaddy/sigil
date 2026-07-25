@@ -40,8 +40,9 @@
 .agent-activity-strip small { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
 .agent-activity-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--sg-domain-color-on-success); animation: conversation-activity-pulse 1.4s ease-in-out infinite; }
 
-.task-control-panel { display: grid; max-height: min(32vh, 300px); flex: 0 1 auto; gap: 9px; padding: 11px 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
+.task-control-panel { display: grid; min-height: 68px; max-height: min(32vh, 300px); flex: 0 1 auto; gap: 9px; padding: 11px 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
 .task-control-panel > header, .task-integration-summary > header, .task-integration-diff > header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.task-control-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .task-control-panel h3, .task-integration-summary h3, .task-integration-diff h4, .task-integration-lanes h4 { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 13px; }
 .task-control-eyebrow { color: var(--sg-sys-color-primary); font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .task-status { flex: 0 0 auto; padding: 3px 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-high); font-size: 9px; font-weight: 750; text-transform: uppercase; }
@@ -466,7 +467,9 @@
   .composer-toolbar { align-items: flex-end; }
   .composer-options { flex-wrap: nowrap; }
   .approval-dock dl, .verification-card dl, .task-integration-summary dl { grid-template-columns: 1fr; }
-  .approval-dock > header, .verification-card > header, .task-control-panel > header { display: grid; }
+  .approval-dock > header, .verification-card > header { display: grid; }
+  .task-control-panel > header { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .task-control-header-actions { justify-content: space-between; }
   .task-control-actions { align-items: stretch; flex-direction: column; }
   .task-control-actions > span { margin: 0; }
   .task-control-actions button, .task-integration-actions button { width: 100%; }

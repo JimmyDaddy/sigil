@@ -578,6 +578,13 @@ export function createCatalogWorkbenchBridge(
       permissionMode: "manual",
       streamSequence: 4,
     }),
+    pauseTask: async (_workspaceId, sessionId, runId) => ({
+      id: runId,
+      sessionId,
+      status: "paused",
+      permissionMode: "manual",
+      streamSequence: 5,
+    }),
     resolveApproval: async (_workspaceId, _sessionId, runId, request, approve) => ({
       runId,
       callId: request.callId,

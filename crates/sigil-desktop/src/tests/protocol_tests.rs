@@ -4,7 +4,7 @@ use super::*;
 
 fn valid_server_info() -> DesktopServerInfo {
     serde_json::from_value(serde_json::json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -21,6 +21,7 @@ fn valid_server_info() -> DesktopServerInfo {
             "live_events": true,
             "approval": true,
             "cancellation": true,
+            "task_pause": true,
             "verification": true,
             "task_integration": true,
             "run_context": true,
@@ -49,9 +50,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
     ));
 
     let mut missing_capability = valid;
-    missing_capability
-        .capabilities
-        .canonical_conversation_display = false;
+    missing_capability.capabilities.task_pause = false;
     assert!(matches!(
         missing_capability.validate(),
         Err("required desktop capability is unavailable")
@@ -61,7 +60,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
 #[test]
 fn exact_server_info_rejects_unknown_fields() {
     let result = serde_json::from_value::<DesktopServerInfo>(serde_json::json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -78,6 +77,7 @@ fn exact_server_info_rejects_unknown_fields() {
             "live_events": true,
             "approval": true,
             "cancellation": true,
+            "task_pause": true,
             "verification": true,
             "task_integration": true,
             "run_context": true,

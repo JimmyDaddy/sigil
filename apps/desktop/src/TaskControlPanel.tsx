@@ -2,7 +2,7 @@ import { useState, type RefObject } from "react";
 
 import { useLocale } from "./i18n";
 import type { TaskProductProjection } from "./features/conversation/taskProjection";
-import { Button, TextArea } from "./ui/primitives";
+import { Button, TextArea, Tooltip } from "./ui/primitives";
 
 interface TaskControlPanelProps {
   task: TaskProductProjection;
@@ -11,7 +11,10 @@ interface TaskControlPanelProps {
   busy: boolean;
   reviewReady: boolean;
   reviewBusy: boolean;
+  pauseDisabled: boolean;
+  pauseBusy: boolean;
   reviewButtonRef?: RefObject<HTMLButtonElement | null>;
+  onPause: () => void;
   onContinue: (guidance?: string) => void;
   onReviewIntegration: () => void;
 }
@@ -23,7 +26,10 @@ export function TaskControlPanel({
   busy,
   reviewReady,
   reviewBusy,
+  pauseDisabled,
+  pauseBusy,
   reviewButtonRef,
+  onPause,
   onContinue,
   onReviewIntegration,
 }: TaskControlPanelProps) {
@@ -33,6 +39,9 @@ export function TaskControlPanel({
   const childTotal = task.activeChildren + task.completedChildren + task.failedChildren;
   const actionDisabled = disabled || busy || runActive;
   const canContinue = task.canContinue && !reviewReady && !runActive;
+  const canPause = runActive
+    && task.planVersion !== undefined
+    && ["started", "running"].includes(task.status.toLowerCase());
 
   return (
     <section className="task-control-panel sg-bounded-content" aria-labelledby="task-control-title">
@@ -41,9 +50,23 @@ export function TaskControlPanel({
           <span className="task-control-eyebrow">{t("task")}</span>
           <h3 id="task-control-title">{task.objective ?? t("taskInProgress")}</h3>
         </div>
-        <span className={`task-status task-status-${statusClass(task.status)}`}>
-          {formatMachineLabel(task.status)}
-        </span>
+        <div className="task-control-header-actions">
+          <span className={`task-status task-status-${statusClass(task.status)}`}>
+            {formatMachineLabel(task.status)}
+          </span>
+          {canPause ? (
+            <Tooltip label={t("pauseTaskDetail")}>
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={pauseDisabled || pauseBusy}
+                onClick={onPause}
+              >
+                {pauseBusy ? t("pausingTask") : t("pauseTask")}
+              </Button>
+            </Tooltip>
+          ) : null}
+        </div>
       </header>
 
       <div className="task-control-meta">

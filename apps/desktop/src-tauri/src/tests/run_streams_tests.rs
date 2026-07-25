@@ -57,6 +57,22 @@ fn terminal_snapshot_projection_preserves_interrupted_status() {
         terminal_timeline_projection(DesktopRunStatus::Running),
         None
     );
+    assert_eq!(
+        terminal_timeline_projection(DesktopRunStatus::Paused),
+        Some((DesktopTimelineEventKind::RunCancelled, "paused"))
+    );
+}
+
+#[test]
+fn paused_terminal_event_preserves_the_run_status() {
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    let mut task_terminal = timeline(1, DesktopTimelineEventKind::TaskRunFinished);
+    task_terminal.status = Some("paused".to_owned());
+    projection.push(task_terminal);
+
+    projection.push(timeline(2, DesktopTimelineEventKind::RunCancelled));
+
+    assert_eq!(projection.run_status, DesktopRunStatus::Paused);
 }
 
 #[test]

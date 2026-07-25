@@ -646,10 +646,12 @@ export type RunStatus =
   | "running"
   | "waiting_for_approval"
   | "cancel_requested"
+  | "pause_requested"
   | "execution_uncertain"
   | "finished"
   | "failed"
   | "cancelled"
+  | "paused"
   | "interrupted";
 
 export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
@@ -796,6 +798,11 @@ export interface RunSummary {
   permissionMode: PermissionMode;
   reasoningEffort?: ReasoningEffort;
   streamSequence: number;
+}
+
+export interface TaskPauseBinding {
+  taskId: string;
+  planVersion: number;
 }
 
 export interface RunAttachment {

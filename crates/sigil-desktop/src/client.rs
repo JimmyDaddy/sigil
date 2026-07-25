@@ -28,9 +28,9 @@ use crate::{
         DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
         DesktopSupportBundleExport, DesktopSupportDoctorReport,
         DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationReviewRequest,
-        DesktopTaskIntegrationReviewView, DesktopTranscriptQuery,
-        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
-        DesktopVerificationView,
+        DesktopTaskIntegrationReviewView, DesktopTaskPauseCommandReceipt, DesktopTaskPauseRequest,
+        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
+        DesktopVerificationRerunRequest, DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -562,6 +562,46 @@ impl DesktopHttpClient {
             StatusCode::OK,
         )
         .await
+    }
+
+    /// Pauses one exact durable Task through the run's foreground control owner.
+    pub async fn pause_task(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        expected_stream_sequence: u64,
+        task_id: &str,
+        plan_version: u32,
+    ) -> Result<DesktopTaskPauseCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(run_id)?;
+        validate_stream_identity(task_id)?;
+        if plan_version == 0 {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let payload = desktop_task_pause_request(task_id, plan_version);
+        let command = self.command(session_id, Some(expected_stream_sequence), payload);
+        let command_id = command.command_id.clone();
+        let client_id = command.client_id.clone();
+        let receipt: DesktopTaskPauseCommandReceipt = self
+            .post_json(
+                self.route(["runs", run_id, "task-pause"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != command_id
+            || receipt.client_id != client_id
+            || receipt.session_id != session_id
+            || receipt.expected_stream_sequence != Some(expected_stream_sequence)
+            || receipt.task_id != task_id
+            || receipt.plan_version != plan_version
+            || receipt.run.id != run_id
+            || receipt.run.session_id != session_id
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// Resolves one pending approval using the exact durable guard material.
@@ -1138,11 +1178,27 @@ fn validate_task_integration_review_view(
 }
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+fn desktop_task_pause_request(task_id: &str, plan_version: u32) -> DesktopTaskPauseRequest {
+    let seed = serde_json::json!({
+        "task_id": task_id,
+        "plan_version": plan_version,
+    })
+    .to_string();
+    DesktopTaskPauseRequest {
+        request_id: format!("task-pause-{}", sha256_hex(seed.as_bytes())),
+        task_id: task_id.to_owned(),
+        plan_version,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
     let value = digest(&SHA256, bytes);
-    let mut output = String::with_capacity("sha256:".len() + value.as_ref().len() * 2);
-    output.push_str("sha256:");
+    let mut output = String::with_capacity(value.as_ref().len() * 2);
     for byte in value.as_ref() {
         output.push(char::from(HEX[usize::from(byte >> 4)]));
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
