@@ -26,7 +26,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 8;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 10;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +68,10 @@ pub struct HttpServerCapabilities {
     pub support_diagnostics: bool,
     /// Secret-free provider connection inventory is available to the native owner.
     pub provider_connections: bool,
+    /// Authenticated provider catalog and atomic setup writes are available to the native owner.
+    pub provider_setup: bool,
+    /// Stale-guarded, configuration-wide legacy provider migration is available.
+    pub provider_migration: bool,
 }
 
 impl HttpServerCapabilities {
@@ -89,6 +93,8 @@ impl HttpServerCapabilities {
             conversation_recovery: true,
             support_diagnostics: true,
             provider_connections: true,
+            provider_setup: true,
+            provider_migration: true,
         }
     }
 }
@@ -297,6 +303,15 @@ pub struct HttpProviderConnectionEntry {
     pub issue: Option<HttpProviderConnectionIssue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderLegacyMigrationPreview {
+    pub revision: String,
+    pub connection_count: u64,
+    pub inline_credential_count: u64,
+    pub environment_reference_count: u64,
+}
+
 /// Full secret-free inventory shared by Doctor, TUI runtime ownership, and Desktop native code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -306,6 +321,138 @@ pub struct HttpProviderConnectionInventory {
     pub default_model: Option<HttpProviderModelRef>,
     pub connections: Vec<HttpProviderConnectionEntry>,
     pub issues: Vec<HttpProviderConnectionIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_migration: Option<HttpProviderLegacyMigrationPreview>,
+}
+
+/// Provider templates available to first-run and settings connection wizards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderSetupTemplate {
+    DeepSeek,
+    OpenAi,
+    Anthropic,
+    Gemini,
+    OpenAiCompatible,
+}
+
+/// Authentication source selected by a provider connection wizard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderSetupCredentialSource {
+    Environment,
+    SecureStore,
+    None,
+}
+
+/// Wire protocol choice exposed only for an OpenAI-compatible custom endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderSetupProtocol {
+    Responses,
+    ChatCompletions,
+}
+
+/// Secret-bearing request admitted only by the authenticated native desktop owner.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Serialize`.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderSetupCatalogRequest {
+    pub template: HttpProviderSetupTemplate,
+    #[serde(default)]
+    pub protocol: Option<HttpProviderSetupProtocol>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub credential_source: HttpProviderSetupCredentialSource,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// Secret-free model row returned by the setup catalog boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderSetupModel {
+    pub model_id: String,
+    pub display_name: String,
+    pub availability: String,
+    pub recommended: bool,
+    pub provenance: String,
+}
+
+/// Exact connection-scoped catalog view used by a first-run or settings wizard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderSetupCatalog {
+    pub connection_id: String,
+    pub provider_label: String,
+    pub state: String,
+    pub models: Vec<HttpProviderSetupModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_model: Option<String>,
+    pub manual_entry_allowed: bool,
+}
+
+/// Secret-bearing atomic setup request. The model always belongs to the generated connection.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Serialize`.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderSetupSaveRequest {
+    pub template: HttpProviderSetupTemplate,
+    #[serde(default)]
+    pub protocol: Option<HttpProviderSetupProtocol>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub credential_source: HttpProviderSetupCredentialSource,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub model_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Secret-free result after atomically publishing one connection and saved default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderSetupSaveResult {
+    pub default_model: HttpProviderModelRef,
+    pub inventory: HttpProviderConnectionInventory,
+    pub save_warning: bool,
+}
+
+/// Stale-guarded confirmation body for a configuration-wide legacy provider migration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderLegacyMigrationRequest {
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderLegacyMigrationOutcome {
+    Published,
+    PublishedWithWarning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProviderLegacyMigrationWarning {
+    FilesystemDurabilityUncertain,
+    PublicationVisibilityReconciled,
+}
+
+/// Secret-free result after atomically publishing a legacy configuration as V2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderLegacyMigrationResult {
+    pub default_model: HttpProviderModelRef,
+    pub inventory: HttpProviderConnectionInventory,
+    pub migrated_connection_count: u64,
+    pub moved_inline_credential_count: u64,
+    pub preserved_environment_reference_count: u64,
+    pub outcome: HttpProviderLegacyMigrationOutcome,
+    pub warnings: Vec<HttpProviderLegacyMigrationWarning>,
 }
 
 /// Immutable, secret-free metadata published after the local listener is ready.

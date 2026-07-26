@@ -407,7 +407,7 @@ impl SetupState {
     }
 
     pub(crate) fn existing_config_repair_required(&self) -> bool {
-        self.startup_error.is_some() && self.config_path.exists()
+        self.startup_error.is_some()
     }
 
     #[cfg(test)]

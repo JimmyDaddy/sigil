@@ -28,7 +28,7 @@
 
 ## 最小配置路径
 
-进入仓库并运行 `sigil`。快速设置会处理工作区、模型服务、具体模型与认证，保存时也会显式信任启动目录。Provider 是快速设置和 `/config` 的第一项，按 Enter 即可在支持的模型服务之间切换。最小的手写配置如下：
+进入仓库并运行 `sigil`。快速设置会处理工作区、模型服务、具体模型与认证，保存时也会显式信任启动目录。Provider 是快速设置的第一个决定；在 `/config` 中，对 **Connection** 按 Enter 会打开明确的已保存连接/Provider 模板选择器，`A` 会开始新增 Provider。最小的手写配置如下：
 
 ```toml
 [workspace]
@@ -43,6 +43,11 @@ theme = "sigil_dark"
 ```
 
 然后从所选模型服务的页面加入对应配置区块。可以直接复制的起点位于 [`docs/examples/config`](../examples/config)。
+
+如果已有合法的旧版 `[providers]` 文件，不要手工重写。TUI 中打开 `/config`，检查
+**Legacy migration** 行后按 Enter；Desktop 中在打开项目或设置页的迁移卡片选择**安全迁移**。
+Sigil 不加载模型目录，并保留已保存的 provider/model route。内联 key 会移入
+`[storage].credential_store`，环境变量引用仍保持引用，当前会话 route 不会改变。
 
 ## 工作区
 

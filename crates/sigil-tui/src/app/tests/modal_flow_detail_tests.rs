@@ -30,6 +30,7 @@ fn disconnected_setup_catalog_worker_leaves_loading_with_a_repairable_error() {
         ),
         draft_revision: 0,
         connection_fingerprint: Some("fingerprint".to_owned()),
+        cacheable_catalog_view: true,
     });
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     drop(sender);

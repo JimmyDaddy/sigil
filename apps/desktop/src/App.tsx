@@ -9,6 +9,11 @@ import { type HistoryState } from "./HistoryPanel";
 import { SessionRail } from "./features/sessions/SessionRail";
 import { ConversationLibrary } from "./features/sessions/ConversationLibrary";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import {
+  LegacyProviderMigration,
+  type ProviderMigrationRecoveryBlock,
+} from "./features/settings/LegacyProviderMigration";
+import { ProviderSetup } from "./features/settings/ProviderSetup";
 import { SupportPage } from "./features/support/SupportPage";
 import { DESKTOP_ROUTE_MAP, useDesktopRouter } from "./features/navigation/useDesktopRouter";
 import { WorkspaceSwitcher } from "./features/workspaces/WorkspaceSwitcher";
@@ -18,13 +23,18 @@ import {
   readReopenLastWorkspace,
   writeLastSession,
 } from "./preferences";
-import { modelOptionIsSelectable } from "./types";
+import {
+  modelOptionIsSelectable,
+  providerInventoryIsUsable,
+  providerInventoryNeedsLegacyMigration,
+} from "./types";
 import type {
   CatalogEntry,
   CatalogPage,
   CatalogRequest,
   CatalogSourceState,
   DesktopBootstrap,
+  ProviderConnectionInventory,
   ProviderModelRef,
   RecentWorkspaceSummary,
   RunContext,
@@ -115,6 +125,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [selectedSession, setSelectedSession] = useState<SessionSummary>();
   const [selectedDurableSessionId, setSelectedDurableSessionId] = useState<string>();
   const [workspaceRunContext, setWorkspaceRunContext] = useState<RunContext>();
+  const [providerInventory, setProviderInventory] = useState<ProviderConnectionInventory>();
+  const [providerInventoryState, setProviderInventoryState] =
+    useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [deferredLegacyMigrationWorkspaceId, setDeferredLegacyMigrationWorkspaceId] =
+    useState<string>();
+  const [providerMigrationRecovery, setProviderMigrationRecovery] =
+    useState<Partial<Record<string, ProviderMigrationRecoveryBlock>>>({});
   const [defaultModel, setDefaultModel] = useState<ProviderModelRef>();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
@@ -136,6 +153,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
   const sessionRenameInputRef = useRef<HTMLInputElement>(null);
   const sessionSelectionEpoch = useRef(0);
+  const activeWorkspaceIdRef = useRef(activeWorkspaceId);
+  activeWorkspaceIdRef.current = activeWorkspaceId;
 
   const dismissWorkspaceClose = useCallback(() => {
     if (pendingWorkspaceClose !== undefined) {
@@ -153,6 +172,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
     [activeWorkspaceId, workspaces],
   );
+  const activeProviderMigrationRecovery = activeWorkspace === undefined
+    ? undefined
+    : providerMigrationRecovery[activeWorkspace.id]
+      ?? providerMigrationRecoveryFromInventory(providerInventory);
 
   useEffect(() => {
     if (activeWorkspace === undefined && DESKTOP_ROUTE_MAP[desktopView].requiresWorkspace) {
@@ -322,6 +345,37 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
     void loadHistory(activeWorkspaceId);
   }, [activeWorkspaceId, loadHistory]);
+
+  const loadProviderInventory = useCallback(async (workspaceId: string) => {
+    setProviderInventoryState("loading");
+    try {
+      const inventory = await bridge.providerConnections(workspaceId);
+      if (workspaceId !== activeWorkspaceIdRef.current) return;
+      setProviderInventory(inventory);
+      setProviderInventoryState("ready");
+      const recovery = providerMigrationRecoveryFromInventory(inventory);
+      if (recovery !== undefined) {
+        setProviderMigrationRecovery((current) => ({
+          ...current,
+          [workspaceId]: recovery,
+        }));
+      }
+    } catch {
+      if (workspaceId !== activeWorkspaceIdRef.current) return;
+      setProviderInventory(undefined);
+      setProviderInventoryState("error");
+    }
+  }, [bridge]);
+
+  useEffect(() => {
+    setProviderInventory(undefined);
+    setDeferredLegacyMigrationWorkspaceId(undefined);
+    if (activeWorkspaceId === undefined) {
+      setProviderInventoryState("idle");
+      return;
+    }
+    void loadProviderInventory(activeWorkspaceId);
+  }, [activeWorkspaceId, loadProviderInventory]);
 
   useEffect(() => {
     const selectionEpoch = ++sessionSelectionEpoch.current;
@@ -507,6 +561,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const closedMessage = t("workspaceClosed");
       setMessage(closedMessage);
       setPendingWorkspaceClose(undefined);
+      window.requestAnimationFrame(() => workspaceSwitcherRef.current?.focus());
     } catch (error) {
       if (
         ["workspace_active_runs", "workspace_run_state_unavailable"].includes(
@@ -525,6 +580,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       }
       setLoadState("error");
       setMessage(t("workspaceCloseFailed"));
+      window.requestAnimationFrame(() => workspaceSwitcherRef.current?.focus());
     }
   };
 
@@ -532,6 +588,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
+    if (!providerInventoryIsUsable(providerInventory)) {
+      navigate("conversation");
+      return undefined;
+    }
     const selectionEpoch = ++sessionSelectionEpoch.current;
     const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
@@ -885,7 +945,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 aria-label={t("newConversation")}
                 type="button"
                 icon={<Icon name="add" />}
-                disabled={sessionActionState === "working" || conversationNavigation !== undefined}
+                disabled={
+                  sessionActionState === "working"
+                  || conversationNavigation !== undefined
+                  || !providerInventoryIsUsable(providerInventory)
+                }
                 onClick={() => { navigate("conversation"); void createSession(); }}
               />
             </Tooltip>
@@ -948,8 +1012,44 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         >
           {desktopView === "settings" ? (
             <SettingsPage
+              key={activeWorkspace?.id ?? "no-workspace"}
+              bridge={bridge}
               supportAvailable={activeWorkspace !== undefined}
               workspaceId={activeWorkspace?.id}
+              isWorkspaceActive={() =>
+                activeWorkspace !== undefined
+                && activeWorkspace.id === activeWorkspaceIdRef.current}
+              providerInventory={providerInventory}
+              providerMigrationRecovery={activeProviderMigrationRecovery}
+              onProviderInventoryChange={(inventory) => {
+                if (activeWorkspace?.id !== activeWorkspaceIdRef.current) return false;
+                setProviderInventory(inventory);
+                setProviderInventoryState("ready");
+                return true;
+              }}
+              onProviderMigrationRecoveryBlocked={(block) => {
+                if (
+                  activeWorkspace === undefined
+                  || activeWorkspace.id !== activeWorkspaceIdRef.current
+                ) return false;
+                setProviderMigrationRecovery((current) => ({
+                  ...current,
+                  [activeWorkspace.id]: block,
+                }));
+                return true;
+              }}
+              onProviderMigrationRecoveryResolved={() => {
+                if (
+                  activeWorkspace === undefined
+                  || activeWorkspace.id !== activeWorkspaceIdRef.current
+                ) return false;
+                setProviderMigrationRecovery((current) => {
+                  const next = { ...current };
+                  delete next[activeWorkspace.id];
+                  return next;
+                });
+                return true;
+              }}
               modelContext={workspaceRunContext}
               defaultModel={defaultModel}
               onDefaultModelChange={setDefaultModel}
@@ -982,6 +1082,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 <>
                   <h1>{t("openWorkspaceTitle")}</h1>
                   <p>{t("openWorkspaceDetail")}</p>
+                  <ol className="first-run-steps" aria-label={t("firstRunStepsLabel")}>
+                    <li><span>1</span>{t("firstRunStepWorkspace")}</li>
+                    <li><span>2</span>{t("firstRunStepProvider")}</li>
+                    <li><span>3</span>{t("firstRunStepConversation")}</li>
+                  </ol>
                   <Button type="button" variant="primary" onClick={() => void pickWorkspace()}>{t("openWorkspace")}</Button>
                 </>
               ) : (
@@ -1018,7 +1123,124 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 </>
               )}
             </div>
-          ) : selectedSession === undefined ? (
+          ) : providerInventoryState === "loading" ? (
+            <LoadingState label={t("loadingProviderConnections")} />
+          ) : providerInventoryState === "error" ? (
+            <div className="conversation-empty" role="alert">
+              <p className="eyebrow">{activeWorkspace.displayName}</p>
+              <h1>{t("providerConnectionsUnavailable")}</h1>
+              <p>{t("providerConnectionsUnavailableDetail")}</p>
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => void loadProviderInventory(activeWorkspace.id)}
+              >
+                {t("retry")}
+              </Button>
+            </div>
+          ) : providerInventory !== undefined
+            && (
+              activeProviderMigrationRecovery !== undefined
+              || (
+                providerInventoryNeedsLegacyMigration(providerInventory)
+                && deferredLegacyMigrationWorkspaceId !== activeWorkspace.id
+              )
+            ) ? (
+              <LegacyProviderMigration
+                key={activeWorkspace.id}
+                bridge={bridge}
+                workspaceId={activeWorkspace.id}
+                inventory={providerInventory}
+                mode="onboarding"
+                recoveryBlock={activeProviderMigrationRecovery}
+                onRecoveryBlocked={(block) => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderMigrationRecovery((current) => ({
+                    ...current,
+                    [activeWorkspace.id]: block,
+                  }));
+                }}
+                onRecoveryResolved={() => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderMigrationRecovery((current) => {
+                    const next = { ...current };
+                    delete next[activeWorkspace.id];
+                    return next;
+                  });
+                }}
+                onContinue={() => setDeferredLegacyMigrationWorkspaceId(activeWorkspace.id)}
+                onInventoryReloaded={(inventory) => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderInventory(inventory);
+                  setProviderInventoryState("ready");
+                }}
+                onOpenDiagnostics={() => navigate("support")}
+                onMigrated={(result) => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderInventory(result.inventory);
+                  setProviderInventoryState("ready");
+                  setDefaultModel(result.defaultModel);
+                  setDeferredLegacyMigrationWorkspaceId(undefined);
+                  setProviderMigrationRecovery((current) => {
+                    const next = { ...current };
+                    delete next[activeWorkspace.id];
+                    return next;
+                  });
+                  notify({
+                    tone: result.outcome === "published_with_warning" ? "warning" : "success",
+                    message: result.outcome === "published_with_warning"
+                      ? t("legacyMigrationSucceededWithWarning")
+                      : t("legacyMigrationSucceeded"),
+                  });
+                }}
+              />
+            ) : providerInventory !== undefined
+            && providerInventory.configMode !== "v2"
+            && !providerInventoryIsUsable(providerInventory) ? (
+              <div className="conversation-empty" role="alert">
+                <p className="eyebrow">{activeWorkspace.displayName}</p>
+                <h1>
+                  {providerInventory.configMode === "unsupported_future"
+                    ? t("providerConfigFutureTitle")
+                    : t("providerConfigMixedTitle")}
+                </h1>
+                <p>
+                  {providerInventory.configMode === "unsupported_future"
+                    ? t("providerConfigFutureDetail")
+                    : t("providerConfigMixedDetail")}
+                </p>
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={() => navigate("settings")}
+                >
+                  {t("openSettings")}
+                </Button>
+              </div>
+            ) : providerInventory !== undefined
+            && !providerInventoryIsUsable(providerInventory) ? (
+              <ProviderSetup
+                key={activeWorkspace.id}
+                bridge={bridge}
+                workspaceId={activeWorkspace.id}
+                inventory={providerInventory}
+                mode="onboarding"
+                onRecoveryBlocked={(block) => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderMigrationRecovery((current) => ({
+                    ...current,
+                    [activeWorkspace.id]: block,
+                  }));
+                }}
+                onSaved={(inventory) => {
+                  if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  setProviderInventory(inventory);
+                  setProviderInventoryState("ready");
+                  setDefaultModel(inventory.defaultModel);
+                  notify({ tone: "success", message: t("providerSetupSaved") });
+                }}
+              />
+            ) : selectedSession === undefined ? (
             <div className="conversation-empty">
               <p className="eyebrow">{activeWorkspace.displayName}</p>
               <h1>{t("selectConversation")}</h1>
@@ -1312,6 +1534,18 @@ function persistNavigationWidth(width: number) {
 
 function clampNavigationWidth(width: number): number {
   return Math.min(MAX_NAVIGATION_WIDTH, Math.max(MIN_NAVIGATION_WIDTH, Math.round(width)));
+}
+
+function providerMigrationRecoveryFromInventory(
+  inventory: ProviderConnectionInventory | undefined,
+): ProviderMigrationRecoveryBlock | undefined {
+  const code = inventory?.issues.find((issue) =>
+    issue.code === "provider_migration_reconcile_required"
+    || issue.code === "provider_migration_rollback_incomplete"
+    || issue.code === "provider_migration_recovery_unavailable"
+    || issue.code === "provider_migration_blocked"
+  )?.code;
+  return code as ProviderMigrationRecoveryBlock | undefined;
 }
 
 function errorCode(error: unknown): string | undefined {

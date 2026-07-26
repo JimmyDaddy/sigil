@@ -11,6 +11,7 @@ mod migration;
 mod persistence;
 mod recent;
 mod route;
+mod setup;
 
 #[cfg(test)]
 pub(crate) use catalog::seed_unauthenticated_catalog_cache_for_test;
@@ -45,14 +46,20 @@ pub use keyring_store::SystemProviderCredentialStore;
 pub use migration::{load_provider_connections, materialize_v2_root_config};
 pub use persistence::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, ConnectionSaveError,
-    ConnectionSaveOutcome, ProviderConfigPublisher, RootConfigPublisher, save_connection_config,
-    save_connection_config_with_base,
+    ConnectionSaveOutcome, LegacyConnectionMigrationError, LegacyConnectionMigrationOutcome,
+    LegacyConnectionMigrationPreview, LegacyConnectionMigrationPublishStatus,
+    LegacyConnectionMigrationTransactionError, LegacyMigrationRecoveryError,
+    LegacyMigrationRecoveryState, ProviderConfigPublisher, RootConfigPublisher,
+    legacy_connection_migration_preview, legacy_migration_recovery_state,
+    migrate_legacy_provider_config, recheck_legacy_migration_recovery_native,
+    save_connection_config, save_connection_config_with_base,
 };
 pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
 pub use route::{
     ResolvedRouteError, ensure_route_is_current, resolve_default_model_route, resolve_model_route,
     runtime_provider_name, validate_persisted_model_route,
 };
+pub use setup::default_setup_root_config;
 
 #[cfg(test)]
 #[path = "../tests/provider_connections_tests.rs"]

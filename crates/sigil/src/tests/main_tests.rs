@@ -29,10 +29,10 @@ use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
     RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
-    cli_application_run_request, drain_provider_stream, render_cli_doctor_report,
-    render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_json,
-    render_serve_startup_plan, render_version, run_machine_command_with_cancellation,
-    run_machine_command_with_writer,
+    cli_application_run_request, drain_provider_stream, load_serve_root_config,
+    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
+    render_serve_startup_json, render_serve_startup_plan, render_version,
+    run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
 fn boxed_chunk_stream(
@@ -76,6 +76,45 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
         paths.session_catalog_db.parent(),
         Some(paths.projections_root.as_path())
     );
+    Ok(())
+}
+
+#[test]
+fn serve_root_config_uses_setup_shell_only_for_an_absent_config() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("missing-sigil.toml");
+
+    let config = load_serve_root_config(&config_path)?;
+
+    assert_eq!(config.workspace.root, ".");
+    assert!(config.agent.provider.is_empty());
+    assert!(config.agent.connection.is_none());
+    assert!(config.agent.model.is_empty());
+    assert!(config.providers.is_empty());
+    assert!(config.connections.is_empty());
+    assert!(!config_path.exists());
+    Ok(())
+}
+
+#[test]
+fn serve_root_config_loads_valid_config_and_rejects_malformed_existing_config() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+
+    let config = load_serve_root_config(&config_path)?;
+    assert_eq!(config.agent.provider, "deepseek");
+    assert_eq!(config.agent.model, "deepseek-v4-flash");
+
+    fs::write(&config_path, "[agent\nprovider = \"deepseek\"")?;
+    assert!(load_serve_root_config(&config_path).is_err());
     Ok(())
 }
 

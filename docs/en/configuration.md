@@ -28,7 +28,7 @@ Quick Setup writes the user config. A workspace `sigil.toml` is not loaded autom
 
 ## Minimal Path
 
-Open the repository and run `sigil`. Quick Setup handles the workspace, provider, model, and authentication; saving also explicitly trusts the launch directory. Provider is the first field in Quick Setup and `/config`, and Enter switches between supported services. A minimal hand-written base is:
+Open the repository and run `sigil`. Quick Setup handles the workspace, provider, model, and authentication; saving also explicitly trusts the launch directory. Provider is the first Quick Setup decision. In `/config`, Enter on **Connection** opens the explicit saved-connection/provider-template chooser, while `A` starts adding a provider. A minimal hand-written base is:
 
 ```toml
 [workspace]
@@ -43,6 +43,12 @@ theme = "sigil_dark"
 ```
 
 Add one provider block from the chosen provider page. Copyable starting points are under [`docs/examples/config`](../examples/config).
+
+For a valid legacy `[providers]` file, do not rewrite the file by hand. In TUI, open `/config`,
+review the **Legacy migration** row, and press Enter; in Desktop, choose **Migrate securely** on
+the project-opening or Settings migration card. Sigil preserves the saved provider/model route
+without catalog loading. Inline keys move to `[storage].credential_store`; environment references
+remain environment references. The current session route is not changed.
 
 ## Workspace
 

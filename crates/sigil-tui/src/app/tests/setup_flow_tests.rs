@@ -38,7 +38,7 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
     );
     let lines = app.setup_lines().join("\n");
     assert!(lines.contains("> DeepSeek"));
-    assert!(lines.contains("Enter choose"));
+    assert!(lines.contains("Enter continue"));
 
     let _ = app
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -128,6 +128,30 @@ fn setup_never_overwrites_an_existing_malformed_config() -> Result<()> {
         std::fs::read_to_string(&config_path)?,
         "this = [is malformed"
     );
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("remains unchanged"))
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut app = AppState::from_setup(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("provider migration recovery is pending".to_owned()),
+    );
+    let state = app.setup_state.as_mut().expect("setup state should exist");
+    state.api_key = SecretString::new("staged-only");
+    state.admit_current_model_for_test();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(!config_path.exists());
     assert!(
         app.last_notice()
             .is_some_and(|notice| notice.contains("remains unchanged"))

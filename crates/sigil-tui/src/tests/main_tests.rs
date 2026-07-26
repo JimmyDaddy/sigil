@@ -1264,6 +1264,32 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 }
 
 #[test]
+fn build_initial_app_keeps_setup_fail_closed_when_recovery_exists_without_config() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        temp.path()
+            .join("sigil.toml.provider-migration-recovery-v1"),
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )?;
+
+    let (app, worker) = build_initial_app(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(anyhow!("config is missing")),
+        |_root_config, _app| Err(anyhow!("spawner should not run")),
+    )?;
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider migration recovery is pending"))
+    );
+    Ok(())
+}
+
+#[test]
 fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root_config = test_config_for_workspace(temp.path());

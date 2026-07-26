@@ -470,7 +470,10 @@ fn connection_cycle_keeps_each_unsaved_draft_and_materializes_the_whole_set() ->
 fn add_connection_uses_a_provider_owned_default_without_inheriting_active_model() {
     let mut state = ConfigState::from_root_config(&test_root_config());
     state.draft.provider_model = "do-not-inherit".to_owned();
-    state.draft.add_connection().expect("connection should add");
+    state
+        .draft
+        .add_connection_for_provider(OPENAI_COMPAT_PROVIDER_KEY)
+        .expect("connection should add");
 
     assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
     assert_eq!(state.draft.provider_model, "gpt-4.1");

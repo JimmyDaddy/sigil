@@ -1,6 +1,6 @@
 # RFC-0056 Provider Connections, Credential Storage and Model Catalog V1
 
-状态：accepted / implementation complete (R56.1-R56.7 complete)
+状态：accepted / implementation complete (R56.1-R56.9 complete)
 
 创建日期：2026-07-24
 
@@ -91,7 +91,8 @@ V1 采用以下方案：
     active run、provider continuation 和已有 durable session 不做原地 route mutation。
 11. V1 的“Recommended”在选择时解析为一个确定 model ID。V1 不引入跨 provider 动态 `Auto`
     router，避免不可审计的隐式 route 漂移。
-12. 本 RFC 先冻结 contract，不实现产品代码，也不创建 repo-local execution plan。
+12. 本 RFC 初始评审先冻结 contract；R56.1-R56.7 完成后，R56.8 继续收敛连接管理、
+    模型目录复用和 Desktop 首启/设置表面。
 
 ## 3. Goals and non-goals
 
@@ -117,7 +118,8 @@ V1 采用以下方案：
 - 不允许 active run 中途更换 model、endpoint、protocol 或 credential。
 - 不让 desktop renderer、TUI view 或 `sigil-kernel` 直接访问 credential store、HTTP 或
   provider-private config。
-- 不在本 RFC 顺带重做完整 Desktop Settings、MCP credential 或 task role routing。
+- R56.1-R56.7 不顺带重做完整 Desktop Settings；R56.8 仅实现 Provider Connection 的
+  首启与设置表面，不扩张 MCP credential 或 task role routing。
 
 ## 4. Research basis
 
@@ -416,6 +418,19 @@ Advanced detail 才允许编辑 endpoint、protocol 和 provider-specific fields
 - 新 connection 使用 provider-owned default model，不继承 root active model；
 - 未保存的各 connection draft 都保留；
 - F2/F3 save materialize 整个 connection set，不只 materialize 当前 row。
+
+connection 切换与新增统一通过一个显式选择器完成：
+
+- Enter on `Connection` 打开已保存 connection 与 `Add <Provider>` 两组；
+- `A` 和 `Ctrl-N` 只把焦点定位到新增组，不创建草稿；
+- 只有用户选择具体 Provider template 后才创建未保存 connection；
+- Up/Down 是普通 macOS 键盘的主导航；PageUp/PageDown 只可作为不展示的兼容别名；
+- 切换已保存 connection 不产生 dirty state，新增具体 Provider 才产生 dirty state。
+
+模型目录成功后按 `connection_id + semantic fingerprint` 保留最多 64 份进程内 view。十分钟内
+重新进入 picker 直接复用，不显示 loading；更旧 view 先按 unverified/stale 展示并后台刷新。
+使用进程 staged credential 的目录不得跨编辑复用；secret account isolation 仍由 runtime
+catalog key 保证。
 
 删除 connection 是独立 destructive action：
 
@@ -1100,10 +1115,17 @@ CLI/Doctor：
 
 Desktop：
 
-- 后续 Settings 通过 typed Tauri/HTTP command 消费相同 inventory/catalog DTO；
+- Settings 通过 typed Tauri/HTTP command 消费相同 inventory/catalog DTO；
 - renderer 不持有 bearer、credential ID、config path 或 generic HTTP；
 - native secret input 通过 one-shot command 进入 Rust owner；
-- 本 RFC 的 TUI slice 不以 Desktop implementation 为完成条件，但 runtime contract 不得 TUI-private。
+- 缺少用户配置时 `sigil serve` 以 provider-neutral setup root 启动，先提供 inventory/catalog/save
+  边界；损坏的已有配置仍 fail closed；
+- Desktop 打开项目后先加载 secret-free inventory；没有可用 saved default 时阻止新建会话，
+  进入 `Provider -> Authentication -> Model -> Save` 三步向导；
+- 设置页不依赖已有会话即可查看 connection/readiness/credential source 并添加 connection；
+- renderer 的模型 view 使用十分钟进程内 cache，过期结果先展示后后台刷新，API key 只以
+  SHA-256 fingerprint 参与 cache identity，cache 不保存 key；
+- R56.6 只要求 Desktop-ready contract，R56.8 完成 renderer、native command 和首次启动表面。
 
 ## 12. Security and privacy
 
@@ -1241,7 +1263,47 @@ UI-facing error 使用 stable code + bounded message：
 - full workspace/docs/security gates；
 - final architecture and RFC progress sync。
 
-用户已于 2026-07-24 排期实施，并于 2026-07-25 完成 R56.1-R56.7。实施结果以
+### R56.8 Connection-management UX and Desktop first run
+
+- TUI Provider `Connection` 显式选择器与 `A`/`Ctrl-N` add-provider flow；
+- 移除 Provider 主路径对 PageUp/PageDown 的依赖并同步帮助与状态测试；
+- exact connection/fingerprint 模型目录 view 十分钟复用与 stale-while-revalidate；
+- 缺少配置时 setup-capable `sigil serve`、authenticated HTTP catalog/save API 与 OpenAPI；
+- Desktop native/Tauri typed owner、首启三步向导、设置页 connection inventory/add flow；
+- Desktop first-run 首页三步说明、新建会话 admission 与 EN/ZH 文档；
+- secret-bearing request 无 `Debug`/response serialization，错误不回显 secret；
+- TUI/HTTP/Desktop/process/contract tests 和 touched-crate gates。
+
+### R56.9 Explicit legacy migration in Desktop and TUI
+
+旧版 V1 配置不能继续只显示为一张 `migration required` 卡片。迁移必须是一个
+configuration-wide、本地完成且不依赖 provider 网络的显式操作：
+
+- runtime 从同一份已加载 V1 config 生成迁移 plan，保留全部合法 connection projection、
+  endpoint/options、exact default model 和 role route；
+- legacy inline key 只在 runtime 内存中变成 credential update，并通过既有 COW/CAS transaction
+  写入 configured credential store；environment-only credential 继续保留环境变量引用；
+- HTTP migration request 不接收 API key，response/error/Debug 不返回 key 或 credential ID；
+- Desktop legacy mode 显示迁移说明、review/confirm、progress、failure/retry 和 success refresh；
+  V2 发布前不再提供会被 migration gate 拒绝的 Add connection 主路径；
+- TUI Provider 第一行在合法 legacy 状态显示 `Legacy migration` / `Enter migrate`；Enter
+  直接以用户刚刚复核的精确文件版本原子迁移全部 connection。直接输入 replacement key，以及
+  在目标环境变量已存在时用 `Shift-E` 改用 environment reference，仍是可见替代方案；
+- runtime 在每次 credential store write 前先在 config 同目录发布有界、typed、无 secret、
+  owner-only recovery record，保证 marker 失败时不会调用 credential store；record 只保存
+  native reconcile/cleanup 所需的 opaque credential ID 与原始 credential storage mode，不进入
+  renderer、HTTP response、日志或诊断。recheck 持 config update lock 后必须再次匹配 exact
+  config bytes 与 exact recovery record，不能删除另一轮迁移的新 guard；`auto` 在 system store
+  不可用时保持阻断。确认发布或完整回滚后删除；不确定时 Desktop/TUI/进程重启从 record 重建阻断。
+  显式 recheck 会保留 healthy V2 实际引用的 ID、删除未引用 ID；rollback 后 exact unchanged
+  valid V1 可在 cleanup 后恢复 migration-ready，publication reconcile 仍要求 healthy V2；
+- TUI 在 config missing/malformed 且 recovery pending/unavailable 时，初始化保存路径保持
+  fail-closed，不得用新 setup 覆盖尚未核对的旧状态；
+- Desktop 的 migration/reload/recheck 异步结果必须绑定发起时的 workspace；切换项目后到达的
+  旧结果不能更新新 workspace 的 inventory、default model 或 recovery state；
+- Desktop 与 TUI 都不得要求 PageUp/PageDown、手工编辑 credential ID 或重新请求模型目录。
+
+用户已于 2026-07-24 排期实施，并于 2026-07-26 完成 R56.1-R56.9。实施结果以
 `.repo-local-dev/rfcs/0056-provider-connections-credentials-model-catalog/r56-execution-plan.md`
 和 `.repo-local-dev/rfcs/STATUS.md` 为准。
 
@@ -1348,6 +1410,33 @@ V1 完成必须同时满足：
 17. TUI、CLI/Doctor 和 runtime 对同一 config 得到相同 connection/default route。
 18. EN/ZH 用户文档解释 connection、credential source、model selection、migration 和 troubleshooting，
     不要求用户理解 crate 或 wire protocol。
+19. Provider 设置不要求 PageUp/PageDown；Enter 打开显式 connection/provider 选择器，新增前不产生
+    随机或推测的 Provider 草稿。
+20. 成功加载模型后离开并返回 picker，十分钟内不再进入 blocking loading；stale view 可见且后台刷新。
+21. 新电脑没有配置文件时 Desktop workspace server 能启动，renderer 在新建会话前完成显式
+    Provider/credential/model 设置。
+22. Desktop Settings 不依赖已有会话即可查看连接并添加 Provider；renderer 不接触 bearer、
+    credential ID、配置路径或 generic HTTP。
+23. Desktop/TUI setup 的 API key 不进入 config、catalog cache、Debug、错误、OpenAPI response、
+    session、support 或前端持久化偏好。
+24. Desktop legacy mode 提供可发现的迁移、确认、失败重试和成功刷新；迁移成功前不引导用户进入
+    必然被 legacy gate 拒绝的 Add connection。
+25. TUI Provider 第一行通过普通 Enter 主动作原子迁移全部 legacy connection；如果文件在打开
+    `/config` 后变化则拒绝迁移。typed replacement 和已验证存在的 environment reference
+    替代方案保持可见。
+26. Legacy migration 保留所有合法 connection projection、endpoint/options、default model 和
+    role route，且不调用 provider catalog 或要求网络可用。
+27. Legacy inline key 不经过 Desktop renderer、Tauri command input、HTTP request/response、
+    TUI display/notices 或 `Debug`，只从 runtime-loaded config 进入 configured credential store。
+28. Migration reconciliation/rollback recovery 使用 credential-write-ahead、有界、typed、
+    无 secret、owner-only record，并绑定原始 credential storage mode；marker 发布失败时
+    credential store 不得被调用。普通 reload 不解除；显式 credential-aware recheck 在 config
+    update lock 内同时匹配 exact config 和 exact record，保留 V2 已引用 ID、从原始后端清理
+    未引用 ID，或在 rollback 后 exact valid V1 上完成 cleanup；publication reconcile 必须确认
+    healthy V2。Desktop/TUI/进程重启和 config missing/malformed setup 都不能在阻断状态执行
+    盲目重试或覆盖。
+29. Desktop provider migration、reload 和 recheck 的完成结果绑定发起 workspace；用户切换项目后
+    才到达的结果不能污染当前项目的 inventory、default model、通知或 recovery state。
 
 ## 17. Alternatives considered
 
@@ -1429,10 +1518,12 @@ Session    = frozen resolved model route
 
 模型目录、推荐、最近使用、默认值、认证、缓存和错误都必须服从这个身份关系。
 
-本 RFC 已完成实施。R56.1-R56.7 已交付 provider/model 隔离、V2 compound identity、
+本 RFC 已完成实施。R56.1-R56.9 已交付 provider/model 隔离、V2 compound identity、
 credential reference 与 keyring/file/environment storage、五类 provider-native catalog、
 provider-first TUI、durable session route、CLI/Doctor/Desktop contract，以及三平台
-credential/PTY/workspace/security conformance。
+credential/PTY/workspace/security conformance；同时补齐显式 connection 管理、模型目录 view
+复用、setup-capable Desktop server、Desktop 首启向导与设置页，以及 configuration-wide
+legacy migration、write-ahead recovery/recheck 与 Desktop/TUI fail-closed 恢复路径。
 
 这里的“密钥不进入配置”不是“任何持久介质都不保存密钥”：`sigil.toml`、workspace、
 session、cache、log 和 support artifact 永远不承载 secret；`auto` 优先系统 credential

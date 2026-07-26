@@ -1497,7 +1497,174 @@ export interface paths {
             };
         };
         put?: never;
-        post?: never;
+        /**
+         * Validate and atomically save one provider connection
+         * @description Validates the exact provider/model route, stores a supplied credential through the configured secure credential backend, and publishes the connection plus saved default as one recoverable operation.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderSetupSaveRequest"];
+                };
+            };
+            responses: {
+                /** @description Saved provider connection and refreshed secret-free inventory */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderSetupSaveResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                422: components["responses"]["BadRequest"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/provider-connections/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Load an exact connection-scoped provider model catalog
+         * @description Uses the selected template, endpoint, authentication source, and process-staged credential without publishing configuration. Catalog cache entries are reused when valid.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderSetupCatalogRequest"];
+                };
+            };
+            responses: {
+                /** @description Connection-scoped model catalog */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderSetupCatalog"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                422: components["responses"]["BadRequest"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/provider-connections/migrate-legacy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Atomically migrate all valid legacy provider connections
+         * @description Moves inline legacy credentials directly from the server-loaded config into the configured credential store, preserves environment references and routes, and does not contact a provider catalog.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderLegacyMigrationRequest"];
+                };
+            };
+            responses: {
+                /** @description Published V2 configuration and secret-free migration summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderLegacyMigrationResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                409: components["responses"]["BadRequest"];
+                422: components["responses"]["BadRequest"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/provider-connections/recheck-migration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Explicitly recheck durable provider migration recovery
+         * @description Clears a persisted migration recovery block only when the current config and credential-aware inventory are a complete healthy V2 state. Otherwise the returned inventory retains the recovery issue.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Rechecked secret-free provider inventory */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderConnectionInventory"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -2168,6 +2335,7 @@ export interface components {
             connections: components["schemas"]["ProviderConnectionEntry"][];
             default_model?: components["schemas"]["ProviderModelRef"] | null;
             issues: components["schemas"]["ProviderConnectionIssue"][];
+            legacy_migration?: components["schemas"]["ProviderLegacyMigrationPreview"] | null;
         };
         ProviderConnectionIssue: {
             code: string;
@@ -2177,10 +2345,84 @@ export interface components {
         ProviderConnectionReadiness: "ready" | "needs_credential" | "credential_unavailable" | "needs_model" | "unverified" | "invalid";
         /** @enum {string} */
         ProviderCredentialSource: "environment" | "system_keyring" | "stored" | "none" | "legacy_plaintext";
+        /** @enum {string} */
+        ProviderLegacyMigrationOutcome: "published" | "published_with_warning";
+        ProviderLegacyMigrationPreview: {
+            /** Format: uint64 */
+            connection_count: number;
+            /** Format: uint64 */
+            environment_reference_count: number;
+            /** Format: uint64 */
+            inline_credential_count: number;
+            revision: string;
+        };
+        ProviderLegacyMigrationRequest: {
+            expected_revision: string;
+        };
+        ProviderLegacyMigrationResult: {
+            default_model: components["schemas"]["ProviderModelRef"];
+            inventory: components["schemas"]["ProviderConnectionInventory"];
+            /** Format: uint64 */
+            migrated_connection_count: number;
+            /** Format: uint64 */
+            moved_inline_credential_count: number;
+            outcome: components["schemas"]["ProviderLegacyMigrationOutcome"];
+            /** Format: uint64 */
+            preserved_environment_reference_count: number;
+            warnings: components["schemas"]["ProviderLegacyMigrationWarning"][];
+        };
+        /** @enum {string} */
+        ProviderLegacyMigrationWarning: "filesystem_durability_uncertain" | "publication_visibility_reconciled";
         ProviderModelRef: {
             connection_id: string;
             model_id: string;
         };
+        ProviderSetupCatalog: {
+            connection_id: string;
+            manual_entry_allowed: boolean;
+            models: components["schemas"]["ProviderSetupModel"][];
+            provider_label: string;
+            state: string;
+            suggested_model?: string | null;
+        };
+        ProviderSetupCatalogRequest: {
+            /** Format: password */
+            api_key?: string | null;
+            credential_source: components["schemas"]["ProviderSetupCredentialSource"];
+            endpoint?: string | null;
+            protocol?: components["schemas"]["ProviderSetupProtocol"] | null;
+            template: components["schemas"]["ProviderSetupTemplate"];
+        };
+        /** @enum {string} */
+        ProviderSetupCredentialSource: "environment" | "secure_store" | "none";
+        ProviderSetupModel: {
+            /** @enum {string} */
+            availability: "available" | "unverified" | "configured_unavailable";
+            display_name: string;
+            model_id: string;
+            /** @enum {string} */
+            provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
+            recommended: boolean;
+        };
+        /** @enum {string} */
+        ProviderSetupProtocol: "responses" | "chat_completions";
+        ProviderSetupSaveRequest: {
+            /** Format: password */
+            api_key?: string | null;
+            credential_source: components["schemas"]["ProviderSetupCredentialSource"];
+            endpoint?: string | null;
+            label?: string | null;
+            model_id: string;
+            protocol?: components["schemas"]["ProviderSetupProtocol"] | null;
+            template: components["schemas"]["ProviderSetupTemplate"];
+        };
+        ProviderSetupSaveResult: {
+            default_model: components["schemas"]["ProviderModelRef"];
+            inventory: components["schemas"]["ProviderConnectionInventory"];
+            save_warning: boolean;
+        };
+        /** @enum {string} */
+        ProviderSetupTemplate: "deep_seek" | "open_ai" | "anthropic" | "gemini" | "open_ai_compatible";
         /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
@@ -2268,6 +2510,8 @@ export interface components {
             durable_session_reopen: boolean;
             live_events: boolean;
             provider_connections: boolean;
+            provider_migration: boolean;
+            provider_setup: boolean;
             run_context: boolean;
             session_catalog: boolean;
             support_diagnostics: boolean;
@@ -2281,7 +2525,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 8;
+            schema_version: 10;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

@@ -23,11 +23,16 @@ pub struct ConfiguredProviderCredentialStore {
 impl ConfiguredProviderCredentialStore {
     #[must_use]
     pub fn from_root_config(root_config: &RootConfig) -> Self {
+        Self::from_storage_mode(root_config.storage.credential_store)
+    }
+
+    #[must_use]
+    pub(crate) fn from_storage_mode(mode: CredentialStorageMode) -> Self {
         let file = FileProviderCredentialStore::default_path()
             .ok()
             .map(|path| Arc::new(FileProviderCredentialStore::new(path)) as Arc<_>);
         Self {
-            mode: root_config.storage.credential_store,
+            mode,
             keyring: Arc::new(SystemProviderCredentialStore),
             file,
         }
@@ -121,7 +126,10 @@ impl ProviderCredentialStore for ConfiguredProviderCredentialStore {
                     None => Ok(keyring_deleted),
                 },
                 Err(error) if error_is_unavailable(&error) => {
-                    self.file()?.delete(credential_id).await
+                    if let Some(file) = self.file.as_deref() {
+                        let _ = file.delete(credential_id).await;
+                    }
+                    Err(error)
                 }
                 Err(error) => Err(error),
             },

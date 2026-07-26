@@ -22,11 +22,11 @@ fn apply_connection_catalog(
             .context("connection-scoped picker should carry a connection id")?,
         _ => bail!("expected model picker"),
     };
-    let draft_revision = app
-        .runtime
-        .active_model_picker_refresh
-        .as_ref()
-        .map_or(0, |pending| pending.draft_revision);
+    let pending = app.runtime.active_model_picker_refresh.as_ref();
+    let draft_revision = pending.map_or(0, |pending| pending.draft_revision);
+    let connection_fingerprint = pending
+        .and_then(|pending| pending.connection_fingerprint.clone())
+        .unwrap_or_else(|| "test-fingerprint".to_owned());
     let entries = models
         .iter()
         .map(|model| {
@@ -44,7 +44,7 @@ fn apply_connection_catalog(
             request_id: 1,
             connection_id,
             draft_revision,
-            connection_fingerprint: "test-fingerprint".to_owned(),
+            connection_fingerprint,
             state,
             entries,
             retry_after_secs: None,
@@ -148,6 +148,212 @@ fn model_picker_waits_for_exact_connection_catalog_before_selection() -> Result<
     assert!(lines.contains("catalog: loading remote provider models"));
     assert!(lines.contains("configured: custom-model"));
     assert!(!lines.contains("> deepseek-v4-flash"));
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_reuses_a_fresh_view_after_leaving_the_menu() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash", "deepseek-v4-pro"])?;
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert!(app.runtime.pending_worker_commands.is_empty());
+    assert_eq!(
+        app.last_notice(),
+        Some("reused cached models for deepseek-default")
+    );
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("deepseek-v4-flash"));
+    assert!(lines.contains("deepseek-v4-pro"));
+    assert!(lines.contains("catalog: exact connection cache · fresh"));
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_refreshes_a_stale_view_without_blocking_its_display() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash", "deepseek-v4-pro"])?;
+    for view in app.runtime.connection_model_catalog_views.values_mut() {
+        view.cached_at = std::time::Instant::now() - std::time::Duration::from_secs(601);
+    }
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+
+    assert!(app.runtime.active_model_picker_refresh.is_some());
+    assert!(matches!(
+        app.runtime.pending_worker_commands.last(),
+        Some(WorkerCommand::RefreshConnectionModels { .. })
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("showing cached models; refreshing in the background")
+    );
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("catalog: exact connection cache · stale reference"));
+    assert!(lines.contains("deepseek-v4-flash"));
+    assert!(!lines.contains("M manual model id"));
+    Ok(())
+}
+
+#[test]
+fn runtime_config_update_invalidates_connection_model_views() -> Result<()> {
+    let config = test_config();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash"])?;
+    assert!(!app.runtime.connection_model_catalog_views.is_empty());
+
+    app.apply_runtime_config_snapshot(&config);
+
+    assert!(app.runtime.connection_model_catalog_views.is_empty());
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    assert!(app.runtime.active_model_picker_refresh.is_some());
+    assert!(matches!(
+        app.runtime.pending_worker_commands.last(),
+        Some(WorkerCommand::RefreshConnectionModels { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn environment_only_legacy_migration_preserves_compatible_model_view() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let source = r#"
+[agent]
+provider = "anthropic"
+model = "claude-private"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#;
+    std::fs::write(&config_path, source)?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    app.open_model_picker(ModelPickerTarget::Provider, "claude-private");
+    apply_available_connection_models(&mut app, &["claude-private", "claude-alt"])?;
+    assert_eq!(app.runtime.connection_model_catalog_views.len(), 1);
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_config_panel();
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::ConfigSaved { .. })));
+    assert_eq!(app.runtime.connection_model_catalog_views.len(), 1);
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "claude-private");
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert!(
+        !app.runtime
+            .pending_worker_commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::RefreshConnectionModels { .. }))
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("reused cached models for anthropic-default")
+    );
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_reuses_a_fresh_empty_catalog() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    let connection_id = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .and_then(|pending| pending.connection_id.clone())
+        .context("pending refresh should have a connection")?;
+    let fingerprint = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .and_then(|pending| pending.connection_fingerprint.clone())
+        .context("pending refresh should have a fingerprint")?;
+    assert!(app.apply_connection_model_catalog(
+        sigil_runtime::provider_connections::ModelCatalogResult {
+            request_id: 1,
+            connection_id,
+            draft_revision: 0,
+            connection_fingerprint: fingerprint,
+            state: sigil_runtime::provider_connections::ModelCatalogState::Empty,
+            entries: Vec::new(),
+            retry_after_secs: None,
+            manual_entry_allowed: true,
+        }
+    ));
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert!(app.runtime.pending_worker_commands.is_empty());
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("catalog: provider returned no models"));
+    assert!(lines.contains("M manual model id"));
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_reuses_unsupported_catalog_without_losing_its_meaning() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    let connection_id = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .and_then(|pending| pending.connection_id.clone())
+        .context("pending refresh should have a connection")?;
+    let fingerprint = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .and_then(|pending| pending.connection_fingerprint.clone())
+        .context("pending refresh should have a fingerprint")?;
+    assert!(app.apply_connection_model_catalog(
+        sigil_runtime::provider_connections::ModelCatalogResult {
+            request_id: 1,
+            connection_id,
+            draft_revision: 0,
+            connection_fingerprint: fingerprint,
+            state: sigil_runtime::provider_connections::ModelCatalogState::Unsupported,
+            entries: Vec::new(),
+            retry_after_secs: None,
+            manual_entry_allowed: true,
+        }
+    ));
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+
+    assert!(app.runtime.active_model_picker_refresh.is_none());
+    assert!(app.runtime.pending_worker_commands.is_empty());
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("catalog: remote discovery unsupported"));
+    assert!(lines.contains("M manual model id"));
     Ok(())
 }
 

@@ -41,7 +41,7 @@ fn test_config() -> RootConfig {
         "sigil-tui-shell-test-storage-{}-{storage_id}",
         std::process::id()
     ));
-    RootConfig {
+    let base = RootConfig {
         config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
@@ -83,7 +83,24 @@ fn test_config() -> RootConfig {
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
-    }
+    };
+    let connection_id =
+        sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id");
+    let (connection, model_id) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::DeepSeek,
+        sigil_runtime::provider_connections::ProviderProtocol::DeepSeek,
+        connection_id.clone(),
+        "DeepSeek",
+    )
+    .expect("test provider connection");
+    let default_model =
+        sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
+    sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )
+    .expect("test V2 config")
 }
 
 fn open_config_panel_for_test(app: &mut AppState) -> anyhow::Result<()> {
@@ -1277,15 +1294,20 @@ fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
 
 #[test]
 fn render_openai_responses_model_picker_has_no_deepseek_fallback() -> anyhow::Result<()> {
-    let mut config = test_config();
-    config.agent.provider = "openai_responses".to_owned();
-    config.agent.model = "deepseek-v4-flash".to_owned();
-    config.providers = BTreeMap::from([(
-        "openai_responses".to_owned(),
-        json!({
-            "base_url": "https://api.openai.com/v1"
-        }),
-    )]);
+    let base = test_config();
+    let connection_id = sigil_kernel::ConnectionId::new("openai-default")?;
+    let (connection, _) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::OpenAi,
+        sigil_runtime::provider_connections::ProviderProtocol::OpenAiResponses,
+        connection_id.clone(),
+        "OpenAI",
+    )?;
+    let default_model = sigil_kernel::ModelRef::new(connection_id.clone(), "deepseek-v4-flash")?;
+    let config = sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     open_config_panel_for_test(&mut app)?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;

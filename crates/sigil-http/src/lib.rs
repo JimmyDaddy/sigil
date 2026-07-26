@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 mod auth;
 mod command_store;
@@ -64,10 +64,15 @@ pub use dto::{
     HttpForegroundRunOwner, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
     HttpProviderConfigMode, HttpProviderConnectionEntry, HttpProviderConnectionInventory,
     HttpProviderConnectionIssue, HttpProviderConnectionReadiness, HttpProviderCredentialSource,
-    HttpProviderModelRef, HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerAuthentication, HttpServerCapabilities,
-    HttpServerInfo, HttpSessionBinding, HttpSessionCatalogBatchAction,
+    HttpProviderLegacyMigrationOutcome, HttpProviderLegacyMigrationPreview,
+    HttpProviderLegacyMigrationRequest, HttpProviderLegacyMigrationResult,
+    HttpProviderLegacyMigrationWarning, HttpProviderModelRef, HttpProviderSetupCatalog,
+    HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource, HttpProviderSetupModel,
+    HttpProviderSetupProtocol, HttpProviderSetupSaveRequest, HttpProviderSetupSaveResult,
+    HttpProviderSetupTemplate, HttpReasoningEffort, HttpRunCancelCommandReceipt,
+    HttpRunCancelRequest, HttpRunContextView, HttpRunSnapshot, HttpRunStartCommandReceipt,
+    HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerAuthentication,
+    HttpServerCapabilities, HttpServerInfo, HttpSessionBinding, HttpSessionCatalogBatchAction,
     HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchItem,
     HttpSessionCatalogBatchOutcome, HttpSessionCatalogBatchPlan, HttpSessionCatalogBatchPlanItem,
     HttpSessionCatalogBatchPlanRequest, HttpSessionCatalogBatchPlanStatus,

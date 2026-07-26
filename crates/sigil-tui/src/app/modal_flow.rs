@@ -13,15 +13,28 @@ use sigil_runtime::{
     },
     provider_model_status_config, provider_model_status_config_from_fields,
 };
+use std::time::{Duration, Instant};
 
 use super::{
     AppState, PaneFocus, TimelineRole,
     formatting::{ProviderModelIdentity, build_model_picker_options, non_empty_or},
 };
 use crate::commands::{keyboard_help_lines, metadata_slash_commands, metadata_slash_help_lines};
-use crate::config_panel::{ConfigField, config_field_accepts_char};
+use crate::config_panel::{
+    ConfigField, ConnectionPickerChoice, ConnectionPickerChoiceKind, config_field_accepts_char,
+};
 use crate::runner::WorkerCommand;
 use crate::slash::SLASH_COMMANDS;
+
+const MODEL_CATALOG_VIEW_FRESH_TTL: Duration = Duration::from_secs(10 * 60);
+const MODEL_CATALOG_VIEW_LIMIT: usize = 64;
+
+fn connection_model_catalog_view_key(
+    connection_id: &sigil_kernel::ConnectionId,
+    fingerprint: &str,
+) -> String {
+    format!("{}\0{fingerprint}", connection_id.as_str())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelPickerTarget {
@@ -57,6 +70,12 @@ pub(super) struct ModelPickerState {
     pub(super) catalog_entries: Vec<ConnectionModelCatalogEntry>,
     pub(super) manual_entry_allowed: bool,
     pub(super) options: Vec<ProviderModelIdentity>,
+    pub(super) selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ConnectionPickerState {
+    pub(super) options: Vec<ConnectionPickerChoice>,
     pub(super) selected: usize,
 }
 
@@ -140,6 +159,7 @@ pub(super) struct PendingModelPickerRefresh {
     pub(super) connection_id: Option<sigil_kernel::ConnectionId>,
     pub(super) draft_revision: u64,
     pub(super) connection_fingerprint: Option<String>,
+    pub(super) cacheable_catalog_view: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +300,7 @@ impl Drop for McpElicitationModalState {
 
 #[derive(Debug)]
 pub(super) enum ModalState {
+    ConnectionPicker(ConnectionPickerState),
     ModelPicker(ModelPickerState),
     SecretInput(SecretInputState),
     TextInput(TextInputState),
@@ -297,6 +318,7 @@ pub(super) enum ModalState {
 pub(super) enum ModalOutcome {
     None,
     Dismissed(String),
+    ConnectionChoiceSelected(ConnectionPickerChoiceKind),
     ModelSelected {
         target: ModelPickerTarget,
         connection_id: Option<sigil_kernel::ConnectionId>,
@@ -326,6 +348,7 @@ pub(super) enum ModalOutcome {
 impl AppState {
     pub fn modal_title(&self) -> Option<&'static str> {
         match self.modal_state.as_ref()? {
+            ModalState::ConnectionPicker(_) => Some("Connections"),
             ModalState::ModelPicker(state) => Some(state.target.title()),
             ModalState::SecretInput(state) => Some(state.target.title()),
             ModalState::TextInput(state) => Some(state.target.title()),
@@ -342,6 +365,28 @@ impl AppState {
 
     pub fn modal_lines(&self) -> Vec<String> {
         match self.modal_state.as_ref() {
+            Some(ModalState::ConnectionPicker(state)) => {
+                let mut lines = vec![
+                    "Choose a saved connection or add one from an explicit provider template."
+                        .to_owned(),
+                    "Up/Down choose  Enter select  Esc cancel".to_owned(),
+                    String::new(),
+                    "[configured]".to_owned(),
+                ];
+                let mut add_heading_rendered = false;
+                for (index, option) in state.options.iter().enumerate() {
+                    if matches!(option.kind, ConnectionPickerChoiceKind::AddProvider(_))
+                        && !add_heading_rendered
+                    {
+                        lines.push(String::new());
+                        lines.push("[add provider]".to_owned());
+                        add_heading_rendered = true;
+                    }
+                    let marker = if index == state.selected { ">" } else { " " };
+                    lines.push(format!("{marker} {}  [{}]", option.label, option.detail));
+                }
+                lines
+            }
             Some(ModalState::ModelPicker(state)) => {
                 let actions = if state.manual_entry_allowed {
                     "Up/Down choose  Enter apply  M manual model id  Esc cancel"
@@ -528,13 +573,49 @@ impl AppState {
                         .saturating_sub(2),
                 )
             }),
-            ModalState::ModelPicker(_) => None,
+            ModalState::ConnectionPicker(_) | ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::Feedback(_) => None,
             ModalState::KeyboardHelp => None,
         }
+    }
+
+    pub(super) fn open_connection_picker(&mut self, prefer_add: bool) {
+        let Some(config_state) = self.config_state.as_ref() else {
+            self.last_notice = Some("provider settings are unavailable".to_owned());
+            return;
+        };
+        let options = config_state.draft.connection_picker_choices();
+        let selected = if prefer_add {
+            options
+                .iter()
+                .position(|option| {
+                    matches!(option.kind, ConnectionPickerChoiceKind::AddProvider(_))
+                })
+                .unwrap_or_default()
+        } else {
+            options
+                .iter()
+                .position(|option| {
+                    matches!(
+                        &option.kind,
+                        ConnectionPickerChoiceKind::Existing(connection_id)
+                            if connection_id == &config_state.draft.selected_connection_id
+                    )
+                })
+                .unwrap_or_default()
+        };
+        self.modal_state = Some(ModalState::ConnectionPicker(ConnectionPickerState {
+            options,
+            selected,
+        }));
+        self.last_notice = Some(if prefer_add {
+            "choose a provider to add".to_owned()
+        } else {
+            "choose or add a connection".to_owned()
+        });
     }
 
     pub(super) fn open_model_picker(&mut self, target: ModelPickerTarget, current: &str) {
@@ -650,11 +731,62 @@ impl AppState {
         let loaded = load_provider_connections(&root_config);
         let connection = loaded.connections.get(&connection_id)?;
         let fingerprint = connection_semantic_fingerprint(&connection.config);
+        let view_key = connection_model_catalog_view_key(&connection_id, &fingerprint);
+        let cached_view = prepared_credential
+            .is_none()
+            .then(|| {
+                self.runtime
+                    .connection_model_catalog_views
+                    .get(&view_key)
+                    .cloned()
+            })
+            .flatten();
         if let Some(ModalState::ModelPicker(picker)) = self.modal_state.as_mut() {
             picker.connection_id = Some(connection_id.clone());
             for option in &mut picker.options {
                 option.connection_id = Some(connection_id.clone());
             }
+        }
+        if let Some(mut cached_view) = cached_view
+            && cached_view.cached_at.elapsed() <= MODEL_CATALOG_VIEW_FRESH_TTL
+        {
+            cached_view.result.draft_revision = draft_revision;
+            cached_view.result.connection_fingerprint = fingerprint;
+            if matches!(
+                cached_view.result.state,
+                ConnectionModelCatalogState::Remote | ConnectionModelCatalogState::CacheFresh
+            ) {
+                cached_view.result.state = ConnectionModelCatalogState::CacheFresh;
+            }
+            self.render_connection_model_catalog(&cached_view.result);
+            return Some(format!(
+                "reused cached models for {}",
+                cached_view.result.connection_id
+            ));
+        }
+
+        let mut refresh_over_stale_view = false;
+        if let Some(mut cached_view) = prepared_credential
+            .is_none()
+            .then(|| {
+                self.runtime
+                    .connection_model_catalog_views
+                    .get(&view_key)
+                    .cloned()
+            })
+            .flatten()
+        {
+            cached_view.result.draft_revision = draft_revision;
+            cached_view.result.connection_fingerprint = fingerprint.clone();
+            cached_view.result.state = ConnectionModelCatalogState::CacheStale;
+            cached_view.result.manual_entry_allowed = false;
+            for entry in &mut cached_view.result.entries {
+                entry.availability =
+                    sigil_runtime::provider_connections::ModelAvailability::Unverified;
+            }
+            self.render_connection_model_catalog(&cached_view.result);
+            refresh_over_stale_view = true;
+        } else if let Some(ModalState::ModelPicker(picker)) = self.modal_state.as_mut() {
             picker.catalog_state = ModelCatalogState::Loading;
             picker.manual_entry_allowed = false;
         }
@@ -668,13 +800,14 @@ impl AppState {
             connection_id: Some(connection_id.clone()),
             draft_revision,
             connection_fingerprint: Some(fingerprint.clone()),
+            cacheable_catalog_view: prepared_credential.is_none(),
         });
         let request = ConnectionModelCatalogRequest {
             request_id,
             connection_id,
             draft_revision,
             connection_fingerprint: fingerprint,
-            explicit_refresh: true,
+            explicit_refresh: refresh_over_stale_view,
         };
         if target == ModelPickerTarget::Setup {
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -716,13 +849,67 @@ impl AppState {
                 prepared_credential,
             });
         }
-        Some("loading models for the exact connection".to_owned())
+        Some(if refresh_over_stale_view {
+            "showing cached models; refreshing in the background".to_owned()
+        } else {
+            "loading models for the exact connection".to_owned()
+        })
     }
 
+    #[cfg(test)]
     pub(super) fn apply_connection_model_catalog(
         &mut self,
         result: ConnectionModelCatalogResult,
     ) -> bool {
+        self.apply_connection_model_catalog_with_cache_policy(result, true)
+    }
+
+    pub(in crate::app) fn apply_connection_model_catalog_with_cache_policy(
+        &mut self,
+        result: ConnectionModelCatalogResult,
+        cacheable: bool,
+    ) -> bool {
+        if cacheable
+            && matches!(
+                result.state,
+                ConnectionModelCatalogState::Remote
+                    | ConnectionModelCatalogState::CacheFresh
+                    | ConnectionModelCatalogState::Empty
+                    | ConnectionModelCatalogState::Unsupported
+            )
+        {
+            let key = connection_model_catalog_view_key(
+                &result.connection_id,
+                &result.connection_fingerprint,
+            );
+            if self.runtime.connection_model_catalog_views.len() >= MODEL_CATALOG_VIEW_LIMIT
+                && !self
+                    .runtime
+                    .connection_model_catalog_views
+                    .contains_key(&key)
+                && let Some(oldest_key) = self
+                    .runtime
+                    .connection_model_catalog_views
+                    .iter()
+                    .min_by_key(|(_, view)| view.cached_at)
+                    .map(|(key, _)| key.clone())
+            {
+                self.runtime
+                    .connection_model_catalog_views
+                    .remove(&oldest_key);
+            }
+            self.runtime.connection_model_catalog_views.insert(
+                key,
+                super::state::CachedConnectionModelCatalogView {
+                    cached_at: Instant::now(),
+                    result: result.clone(),
+                },
+            );
+        }
+        self.render_connection_model_catalog(&result)
+    }
+
+    fn render_connection_model_catalog(&mut self, result: &ConnectionModelCatalogResult) -> bool {
         let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut() else {
             return false;
         };
@@ -883,6 +1070,7 @@ impl AppState {
             connection_id: None,
             draft_revision: 0,
             connection_fingerprint: None,
+            cacheable_catalog_view: false,
         });
         self.enqueue_worker_command(WorkerCommand::RefreshProviderModels {
             request_id,
@@ -1114,6 +1302,43 @@ impl AppState {
         };
 
         match modal_state {
+            ModalState::ConnectionPicker(state) => match key.code {
+                KeyCode::Esc => {
+                    self.modal_state = None;
+                    ModalOutcome::Dismissed("closed connection picker".to_owned())
+                }
+                KeyCode::Up => {
+                    if state.selected == 0 {
+                        state.selected = state.options.len().saturating_sub(1);
+                    } else {
+                        state.selected -= 1;
+                    }
+                    self.last_notice = state
+                        .options
+                        .get(state.selected)
+                        .map(|option| option.label.clone());
+                    ModalOutcome::None
+                }
+                KeyCode::Down => {
+                    if !state.options.is_empty() {
+                        state.selected = (state.selected + 1) % state.options.len();
+                    }
+                    self.last_notice = state
+                        .options
+                        .get(state.selected)
+                        .map(|option| option.label.clone());
+                    ModalOutcome::None
+                }
+                KeyCode::Enter => {
+                    let Some(choice) = state.options.get(state.selected).cloned() else {
+                        self.last_notice = Some("no connection option is available".to_owned());
+                        return ModalOutcome::None;
+                    };
+                    self.modal_state = None;
+                    ModalOutcome::ConnectionChoiceSelected(choice.kind)
+                }
+                _ => ModalOutcome::None,
+            },
             ModalState::ModelPicker(state) => {
                 match key.code {
                     KeyCode::Esc => {
@@ -1338,7 +1563,8 @@ impl AppState {
                 }
                 ModalOutcome::None
             }
-            ModalState::ModelPicker(_)
+            ModalState::ConnectionPicker(_)
+            | ModalState::ModelPicker(_)
             | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
             | ModalState::V2CompactionPreview(_)
@@ -1364,6 +1590,14 @@ impl AppState {
         };
 
         match modal_state {
+            ModalState::ConnectionPicker(state) => {
+                let Some(choice) = state.options.get(state.selected).cloned() else {
+                    self.last_notice = Some("no connection option is available".to_owned());
+                    return ModalOutcome::None;
+                };
+                self.modal_state = None;
+                ModalOutcome::ConnectionChoiceSelected(choice.kind)
+            }
             ModalState::ModelPicker(state) => {
                 let Some(identity) = state.options.get(state.selected).cloned() else {
                     self.last_notice = Some(if state.manual_entry_allowed {
@@ -1440,6 +1674,10 @@ impl AppState {
             ModalOutcome::None => {}
             ModalOutcome::Dismissed(message) => {
                 self.last_notice = Some(message);
+            }
+            ModalOutcome::ConnectionChoiceSelected(_) => {
+                self.last_notice =
+                    Some("connection selection is only available in provider settings".to_owned());
             }
             ModalOutcome::ModelSelected {
                 target,

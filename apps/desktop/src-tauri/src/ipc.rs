@@ -26,17 +26,23 @@ use sigil_desktop::{
     DesktopConversationRecoveryCommandActionKind as NativeConversationRecoveryCommandActionKind,
     DesktopConversationRecoveryCommandReceipt as NativeConversationRecoveryCommandReceipt,
     DesktopConversationRecoveryView as NativeConversationRecoveryView, DesktopModelSelectionPolicy,
-    DesktopPermissionMode, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
-    DesktopRunStatus, DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
-    DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanStatus,
-    DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
-    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
-    DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
-    DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
-    DesktopTimelineEvent, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
-    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationRerunRequest,
-    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
-    DesktopWorkspaceSummary,
+    DesktopPermissionMode, DesktopProviderConnectionInventory, DesktopProviderConnectionReadiness,
+    DesktopProviderCredentialSource, DesktopProviderLegacyMigrationOutcome,
+    DesktopProviderLegacyMigrationPreview, DesktopProviderLegacyMigrationResult,
+    DesktopProviderLegacyMigrationWarning, DesktopProviderSetupCatalog,
+    DesktopProviderSetupCatalogRequest, DesktopProviderSetupCredentialSource,
+    DesktopProviderSetupProtocol, DesktopProviderSetupSaveRequest, DesktopProviderSetupSaveResult,
+    DesktopProviderSetupTemplate, DesktopReasoningEffort, DesktopRunContextView,
+    DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogBatchAction,
+    DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
+    DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
+    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
+    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopSupportCheck, DesktopSupportDoctorReport, DesktopSupportEnvironment,
+    DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary, DesktopTimelineEvent,
+    DesktopTranscriptAssistantKind, DesktopTranscriptRole, DesktopVerificationAction,
+    DesktopVerificationCheckStatus, DesktopVerificationRerunRequest, DesktopVerificationScope,
+    DesktopVerificationVerdict, DesktopVerificationView, DesktopWorkspaceSummary,
 };
 
 use crate::{
@@ -169,6 +175,360 @@ impl From<DesktopSupportPrivacy> for DesktopSupportPrivacySummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopProviderSetupTemplateInput {
+    DeepSeek,
+    OpenAi,
+    Anthropic,
+    Gemini,
+    OpenAiCompatible,
+}
+
+impl From<DesktopProviderSetupTemplateInput> for DesktopProviderSetupTemplate {
+    fn from(value: DesktopProviderSetupTemplateInput) -> Self {
+        match value {
+            DesktopProviderSetupTemplateInput::DeepSeek => Self::DeepSeek,
+            DesktopProviderSetupTemplateInput::OpenAi => Self::OpenAi,
+            DesktopProviderSetupTemplateInput::Anthropic => Self::Anthropic,
+            DesktopProviderSetupTemplateInput::Gemini => Self::Gemini,
+            DesktopProviderSetupTemplateInput::OpenAiCompatible => Self::OpenAiCompatible,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopProviderSetupCredentialSourceInput {
+    Environment,
+    SecureStore,
+    None,
+}
+
+impl From<DesktopProviderSetupCredentialSourceInput> for DesktopProviderSetupCredentialSource {
+    fn from(value: DesktopProviderSetupCredentialSourceInput) -> Self {
+        match value {
+            DesktopProviderSetupCredentialSourceInput::Environment => Self::Environment,
+            DesktopProviderSetupCredentialSourceInput::SecureStore => Self::SecureStore,
+            DesktopProviderSetupCredentialSourceInput::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopProviderSetupProtocolInput {
+    Responses,
+    ChatCompletions,
+}
+
+impl From<DesktopProviderSetupProtocolInput> for DesktopProviderSetupProtocol {
+    fn from(value: DesktopProviderSetupProtocolInput) -> Self {
+        match value {
+            DesktopProviderSetupProtocolInput::Responses => Self::Responses,
+            DesktopProviderSetupProtocolInput::ChatCompletions => Self::ChatCompletions,
+        }
+    }
+}
+
+/// Secret-bearing renderer input. It intentionally has no `Debug`, `Clone`, or serialization.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopProviderSetupCatalogInput {
+    template: DesktopProviderSetupTemplateInput,
+    protocol: Option<DesktopProviderSetupProtocolInput>,
+    endpoint: Option<String>,
+    credential_source: DesktopProviderSetupCredentialSourceInput,
+    api_key: Option<String>,
+}
+
+impl DesktopProviderSetupCatalogInput {
+    pub(crate) fn into_native(self) -> DesktopProviderSetupCatalogRequest {
+        DesktopProviderSetupCatalogRequest {
+            template: self.template.into(),
+            protocol: self.protocol.map(Into::into),
+            endpoint: self.endpoint,
+            credential_source: self.credential_source.into(),
+            api_key: self.api_key,
+        }
+    }
+}
+
+/// Secret-bearing renderer input. It intentionally has no `Debug`, `Clone`, or serialization.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopProviderSetupSaveInput {
+    template: DesktopProviderSetupTemplateInput,
+    protocol: Option<DesktopProviderSetupProtocolInput>,
+    endpoint: Option<String>,
+    credential_source: DesktopProviderSetupCredentialSourceInput,
+    api_key: Option<String>,
+    model_id: String,
+    label: Option<String>,
+}
+
+impl DesktopProviderSetupSaveInput {
+    pub(crate) fn into_native(self) -> DesktopProviderSetupSaveRequest {
+        DesktopProviderSetupSaveRequest {
+            template: self.template.into(),
+            protocol: self.protocol.map(Into::into),
+            endpoint: self.endpoint,
+            credential_source: self.credential_source.into(),
+            api_key: self.api_key,
+            model_id: self.model_id,
+            label: self.label,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderConnectionInventorySummary {
+    config_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model: Option<DesktopProviderModelRefSummary>,
+    connections: Vec<DesktopProviderConnectionSummary>,
+    issues: Vec<DesktopProviderConnectionIssueSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_migration: Option<DesktopProviderLegacyMigrationPreviewSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProviderLegacyMigrationPreviewSummary {
+    revision: String,
+    connection_count: u64,
+    inline_credential_count: u64,
+    environment_reference_count: u64,
+}
+
+impl From<DesktopProviderLegacyMigrationPreview> for DesktopProviderLegacyMigrationPreviewSummary {
+    fn from(value: DesktopProviderLegacyMigrationPreview) -> Self {
+        Self {
+            revision: value.revision,
+            connection_count: value.connection_count,
+            inline_credential_count: value.inline_credential_count,
+            environment_reference_count: value.environment_reference_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProviderConnectionSummary {
+    id: String,
+    label: String,
+    provider_label: String,
+    protocol_label: String,
+    endpoint_display: String,
+    credential_source: &'static str,
+    readiness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model: Option<DesktopProviderModelRefSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue: Option<DesktopProviderConnectionIssueSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProviderConnectionIssueSummary {
+    code: String,
+    message: String,
+}
+
+impl From<DesktopProviderConnectionInventory> for DesktopProviderConnectionInventorySummary {
+    fn from(value: DesktopProviderConnectionInventory) -> Self {
+        Self {
+            config_mode: match value.config_mode {
+                sigil_desktop::DesktopProviderConfigMode::LegacyV1 => "legacy_v1",
+                sigil_desktop::DesktopProviderConfigMode::V2 => "v2",
+                sigil_desktop::DesktopProviderConfigMode::Mixed => "mixed",
+                sigil_desktop::DesktopProviderConfigMode::UnsupportedFuture => "unsupported_future",
+            },
+            default_model: value.default_model.map(Into::into),
+            connections: value
+                .connections
+                .into_iter()
+                .map(|connection| DesktopProviderConnectionSummary {
+                    id: connection.id,
+                    label: connection.label,
+                    provider_label: connection.provider_label,
+                    protocol_label: connection.protocol_label,
+                    endpoint_display: connection.endpoint_display,
+                    credential_source: provider_credential_source_label(
+                        connection.credential_source,
+                    ),
+                    readiness: provider_readiness_label(connection.readiness),
+                    default_model: connection.default_model.map(Into::into),
+                    issue: connection
+                        .issue
+                        .map(|issue| DesktopProviderConnectionIssueSummary {
+                            code: issue.code,
+                            message: issue.message,
+                        }),
+                })
+                .collect(),
+            issues: value
+                .issues
+                .into_iter()
+                .map(|issue| DesktopProviderConnectionIssueSummary {
+                    code: issue.code,
+                    message: issue.message,
+                })
+                .collect(),
+            legacy_migration: value.legacy_migration.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderSetupCatalogSummary {
+    connection_id: String,
+    provider_label: String,
+    state: String,
+    models: Vec<DesktopProviderSetupModelSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested_model: Option<String>,
+    manual_entry_allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProviderSetupModelSummary {
+    model_id: String,
+    display_name: String,
+    availability: String,
+    recommended: bool,
+    provenance: String,
+}
+
+impl From<DesktopProviderSetupCatalog> for DesktopProviderSetupCatalogSummary {
+    fn from(value: DesktopProviderSetupCatalog) -> Self {
+        Self {
+            connection_id: value.connection_id,
+            provider_label: value.provider_label,
+            state: value.state,
+            models: value
+                .models
+                .into_iter()
+                .map(|model| DesktopProviderSetupModelSummary {
+                    model_id: model.model_id,
+                    display_name: model.display_name,
+                    availability: model.availability,
+                    recommended: model.recommended,
+                    provenance: model.provenance,
+                })
+                .collect(),
+            suggested_model: value.suggested_model,
+            manual_entry_allowed: value.manual_entry_allowed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderSetupSaveSummary {
+    default_model: DesktopProviderModelRefSummary,
+    inventory: DesktopProviderConnectionInventorySummary,
+    save_warning: bool,
+}
+
+impl From<DesktopProviderSetupSaveResult> for DesktopProviderSetupSaveSummary {
+    fn from(value: DesktopProviderSetupSaveResult) -> Self {
+        Self {
+            default_model: value.default_model.into(),
+            inventory: value.inventory.into(),
+            save_warning: value.save_warning,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderLegacyMigrationSummary {
+    default_model: DesktopProviderModelRefSummary,
+    inventory: DesktopProviderConnectionInventorySummary,
+    migrated_connection_count: u64,
+    moved_inline_credential_count: u64,
+    preserved_environment_reference_count: u64,
+    outcome: DesktopProviderLegacyMigrationOutcomeSummary,
+    warnings: Vec<DesktopProviderLegacyMigrationWarningSummary>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopProviderLegacyMigrationOutcomeSummary {
+    Published,
+    PublishedWithWarning,
+}
+
+impl From<DesktopProviderLegacyMigrationOutcome> for DesktopProviderLegacyMigrationOutcomeSummary {
+    fn from(value: DesktopProviderLegacyMigrationOutcome) -> Self {
+        match value {
+            DesktopProviderLegacyMigrationOutcome::Published => Self::Published,
+            DesktopProviderLegacyMigrationOutcome::PublishedWithWarning => {
+                Self::PublishedWithWarning
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopProviderLegacyMigrationWarningSummary {
+    FilesystemDurabilityUncertain,
+    PublicationVisibilityReconciled,
+}
+
+impl From<DesktopProviderLegacyMigrationWarning> for DesktopProviderLegacyMigrationWarningSummary {
+    fn from(value: DesktopProviderLegacyMigrationWarning) -> Self {
+        match value {
+            DesktopProviderLegacyMigrationWarning::FilesystemDurabilityUncertain => {
+                Self::FilesystemDurabilityUncertain
+            }
+            DesktopProviderLegacyMigrationWarning::PublicationVisibilityReconciled => {
+                Self::PublicationVisibilityReconciled
+            }
+        }
+    }
+}
+
+impl From<DesktopProviderLegacyMigrationResult> for DesktopProviderLegacyMigrationSummary {
+    fn from(value: DesktopProviderLegacyMigrationResult) -> Self {
+        Self {
+            default_model: value.default_model.into(),
+            inventory: value.inventory.into(),
+            migrated_connection_count: value.migrated_connection_count,
+            moved_inline_credential_count: value.moved_inline_credential_count,
+            preserved_environment_reference_count: value.preserved_environment_reference_count,
+            outcome: value.outcome.into(),
+            warnings: value.warnings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+fn provider_credential_source_label(value: DesktopProviderCredentialSource) -> &'static str {
+    match value {
+        DesktopProviderCredentialSource::Environment => "environment",
+        DesktopProviderCredentialSource::SystemKeyring => "system_keyring",
+        DesktopProviderCredentialSource::Stored => "stored",
+        DesktopProviderCredentialSource::None => "none",
+        DesktopProviderCredentialSource::LegacyPlaintext => "legacy_plaintext",
+    }
+}
+
+fn provider_readiness_label(value: DesktopProviderConnectionReadiness) -> &'static str {
+    match value {
+        DesktopProviderConnectionReadiness::Ready => "ready",
+        DesktopProviderConnectionReadiness::NeedsCredential => "needs_credential",
+        DesktopProviderConnectionReadiness::CredentialUnavailable => "credential_unavailable",
+        DesktopProviderConnectionReadiness::NeedsModel => "needs_model",
+        DesktopProviderConnectionReadiness::Unverified => "unverified",
+        DesktopProviderConnectionReadiness::Invalid => "invalid",
+    }
+}
+
 fn support_status_label(value: DesktopSupportStatus) -> &'static str {
     match value {
         DesktopSupportStatus::Ok => "ok",
@@ -272,6 +632,15 @@ pub(crate) struct DesktopProviderModelRefInput {
 pub(crate) struct DesktopProviderModelRefSummary {
     pub(crate) connection_id: String,
     pub(crate) model_id: String,
+}
+
+impl From<sigil_desktop::DesktopProviderModelRef> for DesktopProviderModelRefSummary {
+    fn from(value: sigil_desktop::DesktopProviderModelRef) -> Self {
+        Self {
+            connection_id: value.connection_id,
+            model_id: value.model_id,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

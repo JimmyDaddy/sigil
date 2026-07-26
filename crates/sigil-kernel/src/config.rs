@@ -1126,6 +1126,29 @@ impl RootConfig {
         Self::load_with_model_request_env(path, |name| env::var(name).ok())
     }
 
+    /// Loads the exact persisted configuration without applying process environment overrides.
+    ///
+    /// Mutation and migration paths use this view so a temporary runtime override cannot become a
+    /// durable setting as a side effect of publishing an unrelated configuration change.
+    pub fn load_persisted(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        Self::parse_persisted(&raw)
+            .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))
+    }
+
+    /// Parses persisted TOML without consulting process environment overrides.
+    pub fn parse_persisted(raw: &str) -> Result<Self> {
+        let raw_value: toml::Value =
+            toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
+        let providers_present = raw_value.get("providers").is_some();
+        let connections_present = raw_value.get("connections").is_some();
+        let config: Self =
+            toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
+        config.validate_config_schema(providers_present, connections_present)?;
+        Ok(config)
+    }
+
     fn load_with_model_request_env(
         path: &Path,
         read_env: impl Fn(&str) -> Option<String>,
@@ -2547,7 +2570,9 @@ pub fn default_user_config_path() -> Result<PathBuf> {
 
 /// Resolves the config path that entrypoints should prefer on startup.
 ///
-/// Explicit paths always win. Otherwise Sigil uses `~/.sigil/sigil.toml`.
+/// Explicit paths always win. Relative explicit paths are anchored to the launch working
+/// directory so every runtime owner observes one stable absolute config identity. Otherwise
+/// Sigil uses `~/.sigil/sigil.toml`.
 ///
 /// Workspace-local `sigil.toml` files are intentionally not discovered implicitly because they
 /// often contain personal provider, permission, and MCP settings that should not be committed.
@@ -2555,12 +2580,16 @@ pub fn default_user_config_path() -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns an error when the implicit per-user config directory cannot be determined.
-pub fn preferred_config_path(explicit: Option<&Path>, _cwd: &Path) -> Result<PathBuf> {
+pub fn preferred_config_path(explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        });
+    }
     let default_path = default_user_config_path()?;
-    Ok(preferred_config_path_for_known_paths(
-        explicit,
-        default_path,
-    ))
+    Ok(preferred_config_path_for_known_paths(None, default_path))
 }
 
 fn preferred_config_path_for_known_paths(

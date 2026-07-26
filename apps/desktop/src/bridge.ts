@@ -38,7 +38,13 @@ import type {
   RunStreamStatus,
   RunAttachment,
   PermissionMode,
+  ProviderConnectionInventory,
+  ProviderLegacyMigrationResult,
   ProviderModelRef,
+  ProviderSetupCatalog,
+  ProviderSetupCatalogInput,
+  ProviderSetupSaveInput,
+  ProviderSetupSaveResult,
   ReasoningEffort,
   SkillBinding,
   RunContext,
@@ -63,6 +69,22 @@ export interface DesktopBridge {
   openExternalUrl(url: string): Promise<void>;
   supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
   exportSupportBundle(workspaceId: string): Promise<SupportSaveSummary>;
+  providerConnections(workspaceId: string): Promise<ProviderConnectionInventory>;
+  migrateLegacyProviderConnections(
+    workspaceId: string,
+    expectedRevision: string,
+  ): Promise<ProviderLegacyMigrationResult>;
+  recheckLegacyProviderMigration(
+    workspaceId: string,
+  ): Promise<ProviderConnectionInventory>;
+  providerSetupCatalog(
+    workspaceId: string,
+    input: ProviderSetupCatalogInput,
+  ): Promise<ProviderSetupCatalog>;
+  saveProviderSetup(
+    workspaceId: string,
+    input: ProviderSetupSaveInput,
+  ): Promise<ProviderSetupSaveResult>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
@@ -164,6 +186,21 @@ export const desktopBridge: DesktopBridge = {
     invoke<SupportDoctorReport>("desktop_support_doctor", { workspaceId }),
   exportSupportBundle: (workspaceId) =>
     invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId }),
+  providerConnections: (workspaceId) =>
+    invoke<ProviderConnectionInventory>("desktop_provider_connections", { workspaceId }),
+  migrateLegacyProviderConnections: (workspaceId, expectedRevision) =>
+    invoke<ProviderLegacyMigrationResult>("desktop_migrate_legacy_provider_connections", {
+      workspaceId,
+      expectedRevision,
+    }),
+  recheckLegacyProviderMigration: (workspaceId) =>
+    invoke<ProviderConnectionInventory>("desktop_recheck_legacy_provider_migration", {
+      workspaceId,
+    }),
+  providerSetupCatalog: (workspaceId, input) =>
+    invoke<ProviderSetupCatalog>("desktop_provider_setup_catalog", { workspaceId, input }),
+  saveProviderSetup: (workspaceId, input) =>
+    invoke<ProviderSetupSaveResult>("desktop_save_provider_setup", { workspaceId, input }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>

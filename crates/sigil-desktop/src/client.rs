@@ -16,8 +16,10 @@ use crate::{
         DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
         DesktopConversationRecoveryView, DesktopErrorResponse, DesktopProviderConnectionInventory,
-        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
-        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopProviderLegacyMigrationResult, DesktopProviderSetupCatalog,
+        DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
+        DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
+        DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
         DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
         DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
@@ -91,6 +93,57 @@ impl DesktopHttpClient {
         self.get_json(
             self.route(["settings", "provider-connections"])?,
             StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Atomically migrates one valid legacy provider configuration without exposing its keys.
+    pub async fn migrate_legacy_provider_connections(
+        &self,
+        expected_revision: String,
+    ) -> Result<DesktopProviderLegacyMigrationResult, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "migrate-legacy"])?,
+            &DesktopProviderLegacyMigrationRequest { expected_revision },
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Explicitly rechecks and, only when healthy, clears durable migration recovery.
+    pub async fn recheck_legacy_provider_migration(
+        &self,
+    ) -> Result<DesktopProviderConnectionInventory, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "recheck-migration"])?,
+            &(),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Loads one exact connection-scoped model catalog without publishing configuration.
+    pub async fn provider_setup_catalog(
+        &self,
+        request: DesktopProviderSetupCatalogRequest,
+    ) -> Result<DesktopProviderSetupCatalog, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "catalog"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Atomically stores one provider connection and saved compound default.
+    pub async fn save_provider_setup(
+        &self,
+        request: DesktopProviderSetupSaveRequest,
+    ) -> Result<DesktopProviderSetupSaveResult, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections"])?,
+            &request,
+            StatusCode::CREATED,
         )
         .await
     }
@@ -734,6 +787,12 @@ impl DesktopHttpClient {
         }
         serde_json::from_slice(&body).map_err(|_| DesktopClientError::InvalidResponse)
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct DesktopProviderLegacyMigrationRequest {
+    expected_revision: String,
 }
 
 /// Bounded incremental decoder for one authenticated run SSE response.

@@ -21,7 +21,10 @@ struct FakeCredentialStore {
     records: Arc<Mutex<BTreeMap<CredentialId, ProviderCredentialRecord>>>,
     fail_load: Arc<Mutex<bool>>,
     fail_delete: Arc<Mutex<bool>>,
+    fail_store_before_write: Arc<Mutex<bool>>,
     fail_store_after_write: Arc<Mutex<bool>>,
+    fail_store_on_call: Arc<Mutex<Option<usize>>>,
+    store_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -48,6 +51,17 @@ impl ProviderCredentialStore for FakeCredentialStore {
         &self,
         record: &ProviderCredentialRecord,
     ) -> Result<(), ProviderCredentialError> {
+        let call = self.store_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if *self
+            .fail_store_before_write
+            .lock()
+            .expect("pre-write store failure flag lock")
+        {
+            return Err(ProviderCredentialError::new(
+                ProviderCredentialErrorCode::CredentialStoreUnavailable,
+                "injected pre-write store failure",
+            ));
+        }
         self.records
             .lock()
             .expect("records lock")
@@ -56,6 +70,11 @@ impl ProviderCredentialStore for FakeCredentialStore {
             .fail_store_after_write
             .lock()
             .expect("store failure flag lock")
+            || self
+                .fail_store_on_call
+                .lock()
+                .expect("store call failure lock")
+                .is_some_and(|target| target == call)
         {
             return Err(ProviderCredentialError::new(
                 ProviderCredentialErrorCode::CredentialStoreRejected,
@@ -123,6 +142,24 @@ impl ProviderConfigPublisher for FakePublisher {
             *self.published.lock().expect("published lock") = Some(config.clone());
         }
         self.outcome.clone().map_err(|message| anyhow!(message))
+    }
+}
+
+struct AlternateConfigPublisher {
+    replacement: RootConfig,
+}
+
+impl ProviderConfigPublisher for AlternateConfigPublisher {
+    fn publish(
+        &self,
+        path: &Path,
+        _config: &RootConfig,
+        _lock: &sigil_kernel::ConfigUpdateLockGuard,
+    ) -> Result<ConfigPublishOutcome, anyhow::Error> {
+        std::fs::write(path, toml::to_string_pretty(&self.replacement)?)?;
+        Ok(ConfigPublishOutcome::PublishedVisibilityUncertain {
+            recovery_path: None,
+        })
     }
 }
 
@@ -776,6 +813,643 @@ api_key = "{secret}""#
     assert!(loaded.migration_required());
     assert!(!format!("{root:?}").contains(secret));
     assert!(!format!("{loaded:?}").contains(secret));
+}
+
+#[test]
+fn legacy_migration_plan_moves_all_inline_keys_and_preserves_environment_connections() {
+    let secret = "legacy-plan-secret-canary";
+    let root: RootConfig = toml::from_str(&format!(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+api_key = "{secret}"
+strict_tools_mode = "auto"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#
+    ))
+    .expect("multi-provider legacy config");
+
+    let preview = legacy_connection_migration_preview(&root)
+        .expect("legacy migration preview should prepare");
+    assert_eq!(preview.connection_count, 2);
+    assert_eq!(preview.inline_credential_count, 1);
+    assert_eq!(preview.environment_reference_count, 1);
+    assert_eq!(
+        preview.default_model,
+        ModelRef::new(
+            ConnectionId::new("deepseek-default").expect("connection id"),
+            "deepseek-private",
+        )
+        .expect("model ref")
+    );
+    let loaded = load_provider_connections(&root);
+    let deepseek = loaded
+        .connections
+        .get(&ConnectionId::new("deepseek-default").expect("connection id"))
+        .expect("projected DeepSeek connection");
+    assert_eq!(
+        deepseek.config.base_url,
+        "https://private.deepseek.example/v1"
+    );
+    let anthropic = loaded
+        .connections
+        .get(&ConnectionId::new("anthropic-default").expect("connection id"))
+        .expect("projected Anthropic connection");
+    assert!(matches!(
+        &anthropic.config.credential,
+        CredentialRefConfig::Environment { name }
+            if name == "SIGIL_ANTHROPIC_API_KEY"
+    ));
+    assert!(!format!("{preview:?}").contains(secret));
+}
+
+#[test]
+fn legacy_migration_plan_rejects_v2_and_malformed_legacy_configs() {
+    let v2 = materialize_v2_root_config(
+        &legacy_root(
+            "deepseek",
+            "deepseek-v4-flash",
+            r#"base_url = "https://api.deepseek.com""#,
+        ),
+        &BTreeMap::from([(deepseek_connection().id.clone(), deepseek_connection())]),
+        &ModelRef::new(
+            ConnectionId::new("deepseek-default").expect("connection id"),
+            "deepseek-v4-flash",
+        )
+        .expect("model ref"),
+    )
+    .expect("V2 config");
+    assert!(matches!(
+        legacy_connection_migration_preview(&v2),
+        Err(LegacyConnectionMigrationError::NotLegacy)
+    ));
+
+    let mut malformed = legacy_root(
+        "deepseek",
+        "deepseek-v4-flash",
+        r#"base_url = "https://api.deepseek.com""#,
+    );
+    malformed
+        .providers
+        .insert("broken".to_owned(), json!("not-an-object"));
+    assert!(matches!(
+        legacy_connection_migration_preview(&malformed),
+        Err(LegacyConnectionMigrationError::InvalidConfig)
+    ));
+}
+
+#[tokio::test]
+async fn legacy_migration_transaction_uses_exact_source_and_disk_truth() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[storage]
+credential_store = "file"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+api_key = "legacy-transaction-secret"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+    let outcome = migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher)
+        .await
+        .expect("legacy migration should publish");
+    assert_eq!(
+        outcome.status,
+        LegacyConnectionMigrationPublishStatus::Published
+    );
+    assert_eq!(outcome.connection_count, 2);
+    assert_eq!(outcome.inline_credential_count, 1);
+    assert_eq!(outcome.environment_reference_count, 1);
+    assert_eq!(store.records.lock().expect("records lock").len(), 1);
+    let persisted = std::fs::read_to_string(&path).expect("migrated config should read");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("deepseek-private"));
+    assert!(persisted.contains("https://private.deepseek.example/v1"));
+    assert!(!persisted.contains("legacy-transaction-secret"));
+
+    std::fs::write(&path, source).expect("legacy source should restore");
+    let changed = [source.as_slice(), b"\n# concurrent comment\n"].concat();
+    std::fs::write(&path, &changed).expect("concurrent source should write");
+    let records_before = store.records.lock().expect("records lock").len();
+    assert!(matches!(
+        migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await,
+        Err(LegacyConnectionMigrationTransactionError::Stale)
+    ));
+    assert_eq!(
+        store.records.lock().expect("records lock").len(),
+        records_before
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("stale source should remain"),
+        changed
+    );
+
+    std::fs::remove_file(&path).expect("stale source should be removable");
+    assert!(matches!(
+        migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await,
+        Err(LegacyConnectionMigrationTransactionError::Stale)
+    ));
+    assert_eq!(
+        store.records.lock().expect("records lock").len(),
+        records_before
+    );
+}
+
+#[tokio::test]
+async fn legacy_environment_only_migration_writes_no_credential_record() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "anthropic"
+model = "claude-private"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+
+    let outcome = migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher)
+        .await
+        .expect("environment-only migration should publish");
+
+    assert_eq!(outcome.inline_credential_count, 0);
+    assert_eq!(outcome.environment_reference_count, 1);
+    assert!(store.records.lock().expect("records lock").is_empty());
+    let persisted = std::fs::read_to_string(path).expect("migrated config should read");
+    assert!(persisted.contains("source = \"environment\""));
+    assert!(persisted.contains("SIGIL_ANTHROPIC_API_KEY"));
+    assert!(persisted.contains("claude-private"));
+}
+
+#[tokio::test]
+async fn legacy_visibility_uncertainty_rolls_back_when_old_source_is_still_live() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "visibility-secret-canary"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+    let publisher = FakePublisher::published(ConfigPublishOutcome::PublishedVisibilityUncertain {
+        recovery_path: Some(temp.path().join("sigil.previous")),
+    });
+
+    let result = migrate_legacy_provider_config(&path, source, &store, &publisher).await;
+
+    assert!(matches!(
+        result,
+        Err(LegacyConnectionMigrationTransactionError::NotPublished {
+            rollback_incomplete: false
+        })
+    ));
+    assert!(store.records.lock().expect("records lock").is_empty());
+    assert_eq!(
+        std::fs::read(&path).expect("old source should remain"),
+        source
+    );
+}
+
+#[tokio::test]
+async fn legacy_incomplete_rollback_persists_a_restart_safe_recovery_block() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "rollback-marker-secret"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+    *store.fail_delete.lock().expect("delete flag") = true;
+    let publisher = FakePublisher::published(ConfigPublishOutcome::PublishedVisibilityUncertain {
+        recovery_path: Some(temp.path().join("sigil.previous")),
+    });
+
+    assert!(matches!(
+        migrate_legacy_provider_config(&path, source, &store, &publisher).await,
+        Err(LegacyConnectionMigrationTransactionError::NotPublished {
+            rollback_incomplete: true
+        })
+    ));
+    assert_eq!(
+        legacy_migration_recovery_state(&path).expect("recovery marker should read"),
+        Some(LegacyMigrationRecoveryState::RollbackIncomplete)
+    );
+    let orphaned_credential_id = store
+        .records
+        .lock()
+        .expect("records lock")
+        .keys()
+        .next()
+        .cloned()
+        .expect("rollback failure should retain one orphan");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    let marker = std::fs::read_to_string(&marker_path).expect("recovery marker should read");
+    assert!(marker.contains(&orphaned_credential_id.to_string()));
+    assert!(!marker.contains("rollback-marker-secret"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&marker_path)
+                .expect("recovery marker metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert!(matches!(
+        migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await,
+        Err(
+            LegacyConnectionMigrationTransactionError::RecoveryRequired {
+                state: LegacyMigrationRecoveryState::RollbackIncomplete
+            }
+        )
+    ));
+    assert_eq!(store.records.lock().expect("records lock").len(), 1);
+
+    let legacy = RootConfig::parse_persisted(
+        std::str::from_utf8(source).expect("legacy source should be UTF-8"),
+    )
+    .expect("legacy source should parse");
+    let loaded = load_provider_connections(&legacy);
+    let default_model = loaded.default_model.expect("legacy default model");
+    let mut repaired_connections = loaded
+        .connections
+        .into_iter()
+        .map(|(id, loaded)| (id, loaded.config))
+        .collect::<BTreeMap<_, _>>();
+    repaired_connections
+        .get_mut(&default_model.connection_id)
+        .expect("default connection should exist")
+        .credential = CredentialRefConfig::Environment {
+        name: "SIGIL_API_KEY".to_owned(),
+    };
+    let repaired = materialize_v2_root_config(&legacy, &repaired_connections, &default_model)
+        .expect("healthy V2 repair should materialize");
+    let repaired_source = toml::to_string(&repaired).expect("healthy V2 should serialize");
+    std::fs::write(&path, &repaired_source).expect("healthy V2 repair should write");
+    let environment = MapEnvironment(BTreeMap::from([(
+        "SIGIL_API_KEY".to_owned(),
+        "repaired-environment-secret".to_owned(),
+    )]));
+    let healthy_inventory = connection_inventory_offline(&repaired, &environment);
+    *store.fail_delete.lock().expect("delete flag") = false;
+    assert!(
+        super::persistence::clear_legacy_migration_recovery_if_healthy(
+            &path,
+            repaired_source.as_bytes(),
+            &repaired,
+            &healthy_inventory,
+            super::persistence::RecoveryCredentialCleanupStore::Injected(&store),
+        )
+        .await
+        .expect("healthy V2 recheck should clean tracked orphan")
+    );
+    assert!(store.records.lock().expect("records lock").is_empty());
+    assert!(!marker_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_migration_publishes_a_recovery_guard_before_storing_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let lock_path = temp.path().join(".sigil.toml.update.lock");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "write-ahead-secret"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    std::fs::write(&lock_path, "").expect("config update lock should preexist");
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+        .expect("config update lock should be private");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o500))
+        .expect("config parent should become read-only");
+    let store = FakeCredentialStore::default();
+
+    let result = migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await;
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("config parent permissions should restore");
+
+    assert!(
+        matches!(
+            result,
+            Err(LegacyConnectionMigrationTransactionError::Save {
+                source: ConnectionSaveError::CredentialStoreWrite { .. }
+            })
+        ),
+        "unexpected migration result: {result:?}"
+    );
+    assert_eq!(store.store_calls.load(Ordering::SeqCst), 0);
+    assert!(store.records.lock().expect("records lock").is_empty());
+    assert!(
+        !temp
+            .path()
+            .join("sigil.toml.provider-migration-recovery-v1")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn recovery_recheck_preserves_tracked_credentials_referenced_by_healthy_v2() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    let store = FakeCredentialStore::default();
+    let credential_id = CredentialId::random();
+    store
+        .store(&ProviderCredentialRecord::new(
+            credential_id.clone(),
+            &PreparedCredential::api_key(ProviderFamily::DeepSeek, "published-secret"),
+        ))
+        .await
+        .expect("published credential should write");
+    let mut connection = deepseek_connection();
+    connection.credential = CredentialRefConfig::Stored {
+        id: credential_id.clone(),
+    };
+    let default_model =
+        ModelRef::new(connection.id.clone(), "deepseek-private").expect("default model");
+    let root = materialize_v2_root_config(
+        &legacy_root(
+            "deepseek",
+            "deepseek-private",
+            r#"base_url = "https://api.deepseek.com""#,
+        ),
+        &BTreeMap::from([(connection.id.clone(), connection)]),
+        &default_model,
+    )
+    .expect("V2 config should materialize");
+    let source = toml::to_string(&root).expect("V2 config should serialize");
+    std::fs::write(&path, &source).expect("V2 config should write");
+    std::fs::write(
+        &marker_path,
+        format!(
+            "sigil-provider-migration-recovery-v2\nrollback_incomplete\norphan={credential_id}\n"
+        ),
+    )
+    .expect("write-ahead recovery record should write");
+    let inventory = connection_inventory(&root, &store, &MapEnvironment::default()).await;
+
+    assert!(
+        super::persistence::clear_legacy_migration_recovery_if_healthy(
+            &path,
+            source.as_bytes(),
+            &root,
+            &inventory,
+            super::persistence::RecoveryCredentialCleanupStore::Injected(&store),
+        )
+        .await
+        .expect("healthy V2 recheck should resolve write-ahead guard")
+    );
+    assert!(
+        store
+            .records
+            .lock()
+            .expect("records lock")
+            .contains_key(&credential_id)
+    );
+    assert!(!marker_path.exists());
+}
+
+#[tokio::test]
+async fn legacy_visibility_reconciliation_requires_the_complete_target_config() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+api_key = "target-binding-secret"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let legacy = RootConfig::parse_persisted(
+        std::str::from_utf8(source).expect("legacy source should be UTF-8"),
+    )
+    .expect("legacy source should parse");
+    let loaded = load_provider_connections(&legacy);
+    let deepseek_id = ConnectionId::new("deepseek-default").expect("connection id");
+    let deepseek = loaded
+        .connections
+        .get(&deepseek_id)
+        .expect("DeepSeek projection")
+        .config
+        .clone();
+    let alternate = materialize_v2_root_config(
+        &legacy,
+        &BTreeMap::from([(deepseek_id.clone(), deepseek)]),
+        &ModelRef::new(deepseek_id, "deepseek-private").expect("model ref"),
+    )
+    .expect("alternate V2 should materialize");
+    let store = FakeCredentialStore::default();
+
+    let result = migrate_legacy_provider_config(
+        &path,
+        source,
+        &store,
+        &AlternateConfigPublisher {
+            replacement: alternate,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(LegacyConnectionMigrationTransactionError::ReconcileRequired)
+    ));
+    assert_eq!(store.records.lock().expect("records lock").len(), 1);
+    let disk = RootConfig::load_persisted(&path).expect("alternate V2 should remain inspectable");
+    assert_eq!(
+        load_provider_connections(&disk).connections.len(),
+        1,
+        "an incomplete same-default V2 must not be accepted as the migration target"
+    );
+    assert_eq!(
+        legacy_migration_recovery_state(&path).expect("recovery marker should read"),
+        Some(LegacyMigrationRecoveryState::ReconcileRequired)
+    );
+    assert!(matches!(
+        migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await,
+        Err(
+            LegacyConnectionMigrationTransactionError::RecoveryRequired {
+                state: LegacyMigrationRecoveryState::ReconcileRequired
+            }
+        )
+    ));
+
+    let default_model = load_provider_connections(&disk)
+        .default_model
+        .expect("alternate config should retain a default");
+    let healthy_inventory = ConnectionInventory {
+        mode: ConfigMode::V2,
+        default_model: Some(default_model.clone()),
+        entries: vec![ConnectionInventoryEntry {
+            id: default_model.connection_id.clone(),
+            label: "DeepSeek".to_owned(),
+            provider_label: "DeepSeek".to_owned(),
+            protocol_label: "DeepSeek".to_owned(),
+            endpoint_display: "private.deepseek.example".to_owned(),
+            credential_source: CredentialSourceView::Stored,
+            readiness: ConnectionReadiness::Ready,
+            default_model: Some(default_model),
+            issue: None,
+        }],
+        issues: Vec::new(),
+    };
+    assert!(
+        !super::persistence::clear_legacy_migration_recovery_if_healthy(
+            &path,
+            source,
+            &disk,
+            &healthy_inventory,
+            super::persistence::RecoveryCredentialCleanupStore::Injected(&store),
+        )
+        .await
+        .expect("stale recheck should remain blocked")
+    );
+    assert_eq!(
+        legacy_migration_recovery_state(&path).expect("stale recheck marker should read"),
+        Some(LegacyMigrationRecoveryState::ReconcileRequired)
+    );
+    assert!(
+        super::persistence::clear_legacy_migration_recovery_if_healthy(
+            &path,
+            &std::fs::read(&path).expect("live source should read"),
+            &disk,
+            &healthy_inventory,
+            super::persistence::RecoveryCredentialCleanupStore::Injected(&store),
+        )
+        .await
+        .expect("healthy explicit recheck should clear recovery")
+    );
+    assert_eq!(
+        legacy_migration_recovery_state(&path).expect("cleared marker should read"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn legacy_store_failure_before_write_is_not_reported_as_an_orphan() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "pre-write-secret"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+    *store
+        .fail_store_before_write
+        .lock()
+        .expect("pre-write flag") = true;
+
+    let result = migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await;
+
+    assert!(matches!(
+        result,
+        Err(LegacyConnectionMigrationTransactionError::Save {
+            source: ConnectionSaveError::CredentialStoreWrite {
+                orphaned_credential: false,
+                ..
+            }
+        })
+    ));
+    assert!(store.records.lock().expect("records lock").is_empty());
+    assert_eq!(
+        std::fs::read(&path).expect("legacy source should remain"),
+        source
+    );
+}
+
+#[tokio::test]
+async fn multi_inline_legacy_failure_rolls_back_every_created_record() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("sigil.toml");
+    let source = br#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "first-inline-secret"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "second-inline-secret"
+"#;
+    std::fs::write(&path, source).expect("legacy source should write");
+    let store = FakeCredentialStore::default();
+    *store.fail_store_on_call.lock().expect("store call failure") = Some(2);
+
+    let result = migrate_legacy_provider_config(&path, source, &store, &RootConfigPublisher).await;
+
+    assert!(matches!(
+        result,
+        Err(LegacyConnectionMigrationTransactionError::Save {
+            source: ConnectionSaveError::CredentialStoreWrite {
+                orphaned_credential: false,
+                ..
+            }
+        })
+    ));
+    assert!(store.records.lock().expect("records lock").is_empty());
+    assert_eq!(store.store_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        std::fs::read(&path).expect("legacy source should remain"),
+        source
+    );
 }
 
 #[tokio::test]

@@ -34,6 +34,10 @@ When configuration is missing, make at most three main choices: provider, creden
 model. `Review, trust folder, save and start` confirms the route and allows the launch directory to
 be used as the workspace. Quick Setup writes a named V2 connection and the compound saved default.
 
+In Sigil Desktop, open a project first. A new computer or missing config opens the same three-step
+provider wizard before **New conversation** becomes available. The Settings page later shows every
+saved connection and can add another one without opening a conversation first.
+
 For normal local use, choose the secure credential store; a pasted key is held only long enough
 to create a credential record, and `sigil.toml` stores a random reference. The default `auto`
 policy prefers the system store and uses owner-only `~/.sigil/credentials.json` only when the

@@ -34,6 +34,9 @@ sigil
 start` 会确认 route，并允许把启动目录作为工作区。快速设置会写入一个命名的 V2 connection 和
 复合保存默认值。
 
+在 Sigil Desktop 中先打开项目。新电脑或缺少配置时，会在开放**新建会话**前进入同样的三步
+Provider 向导。之后可直接在设置页查看全部已保存连接并添加新连接，不需要先打开一次会话。
+
 普通本机使用请选择安全凭据存储；粘贴的 key 只在创建凭据记录期间保留，`sigil.toml` 仅保存
 随机引用。默认 `auto` 优先系统存储，仅在系统存储不可用时使用 owner-only 的
 `~/.sigil/credentials.json`。CI 或已由 Shell 管理 secret 时选择允许列表中的环境变量。详见

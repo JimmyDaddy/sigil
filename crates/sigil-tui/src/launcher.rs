@@ -41,6 +41,7 @@ use sigil_kernel::RootConfig;
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
+use sigil_runtime::provider_connections::legacy_migration_recovery_state;
 #[cfg(not(test))]
 use sigil_runtime::support::SupportBuildInfo;
 
@@ -598,7 +599,28 @@ where
             }
             app
         }
-        Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
+        Err(error) => {
+            let config_error = config_path.exists().then(|| error.to_string());
+            let startup_error = match legacy_migration_recovery_state(&config_path) {
+                Ok(Some(state)) => Some(format!(
+                    "provider migration recovery is pending ({}); existing provider state remains unchanged until recovery is rechecked{}",
+                    state.code(),
+                    config_error
+                        .as_deref()
+                        .map(|error| format!("; config load also failed: {error}"))
+                        .unwrap_or_default(),
+                )),
+                Err(_) => Some(format!(
+                    "provider migration recovery state is unavailable; existing provider state remains unchanged until diagnostics are reviewed{}",
+                    config_error
+                        .as_deref()
+                        .map(|error| format!("; config load also failed: {error}"))
+                        .unwrap_or_default(),
+                )),
+                Ok(None) => config_error,
+            };
+            AppState::from_setup(config_path.clone(), cwd, startup_error)
+        }
     };
     Ok((app, worker))
 }

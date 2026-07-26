@@ -383,6 +383,12 @@ stream_idle_timeout_secs = 11
     assert_eq!(config.model_request.request_timeout_secs, 13);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 29);
     assert_eq!(config.model_request.stream_total_timeout_secs, Some(31));
+
+    let persisted = RootConfig::load_persisted(&path)
+        .expect("persisted config should ignore runtime overrides");
+    assert_eq!(persisted.model_request.request_timeout_secs, 7);
+    assert_eq!(persisted.model_request.stream_idle_timeout_secs, 11);
+    assert_eq!(persisted.model_request.stream_total_timeout_secs, None);
 }
 
 #[test]
@@ -524,6 +530,12 @@ fn preferred_config_path_uses_explicit_or_user_config_file() {
     assert_eq!(
         preferred_config_path(None, temp.path()).expect("user config path should win"),
         default_user_config_path().expect("default user config path should resolve")
+    );
+
+    assert_eq!(
+        preferred_config_path(Some(Path::new("relative.toml")), temp.path())
+            .expect("relative explicit path should resolve"),
+        temp.path().join("relative.toml")
     );
 }
 

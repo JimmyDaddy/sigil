@@ -557,7 +557,7 @@ fn mouse_click_setup_and_config_invalid_targets_are_noops() -> Result<()> {
 
 #[test]
 fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &v2_test_config());
     app.set_terminal_size(120, 20);
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;

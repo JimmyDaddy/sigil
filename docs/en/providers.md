@@ -1,4 +1,4 @@
-<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
+<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,migrate-a-legacy-configuration,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
 
 # Provider Guide
 
@@ -22,6 +22,9 @@ fallback.
 
 Quick Setup is the shortest first-use path: choose provider, credential source, and model, then
 review and save. Use manual V2 config for repeatable local or CI defaults.
+In `/config` → **Provider**, Enter on **Connection** opens an explicit chooser for saved
+connections and provider templates; `A` opens the add-provider group directly. Up/Down works on
+standard macOS keyboards, and adding never guesses the next provider.
 The model chooser is scoped to the selected connection: it starts with that provider's bundled
 default and refreshes a remote list only when discovery is supported. `M` is offered only after
 an authoritative remote/fresh-cache response, a confirmed empty catalog, or an explicit
@@ -30,6 +33,47 @@ stale-cache failures must be repaired or retried first. Loading, authenticated r
 rejection, offline/TLS failure, unsupported discovery, and malformed responses are distinct
 states; Sigil does not fill another provider's models into the list. A confirmed empty remote
 catalog clears the candidates and permits acknowledged manual entry.
+After a successful catalog load, leaving and reopening the picker reuses the exact
+connection/fingerprint view for ten minutes. An older in-process view remains visible as
+unverified while Sigil refreshes it in the background, so menu navigation does not repeatedly
+replace the list with a blocking loading state.
+
+## Migrate A Legacy Configuration
+
+When Sigil finds a valid V1 `[providers]` configuration, it keeps the old route usable but asks
+before upgrading it. Migration is local: it preserves every projected connection, endpoint,
+provider option, active default model, and role route without loading a model catalog or contacting
+the provider.
+
+- Desktop shows **Migrate your existing provider setup** both when opening the project and in
+  Settings. Review the connection/key/environment counts and default route, then choose
+  **Migrate securely**. **Continue for now** leaves the compatible V1 route unchanged for that
+  launch; adding a connection stays unavailable until migration succeeds.
+- TUI shows **Legacy migration** as the first Provider row in `/config`. Press Enter once to
+  migrate all legacy connections atomically. No PageUp/PageDown sequence or separate save is
+  required. If the file changed after `/config` opened, close and reopen `/config`, review it
+  again, and retry.
+
+Inline V1 keys move directly from the runtime-loaded config to the configured protected credential
+store; they do not pass through the Desktop renderer or a TUI field. Existing environment-variable
+references remain references. Existing conversations and the current TUI session keep their
+resolved route; the migrated saved default applies to new conversations.
+
+Before writing each migrated credential, Sigil publishes a bounded, typed, secret-free,
+owner-only recovery record beside the config. The record can contain only the opaque credential
+IDs that the native owner must reconcile plus the original credential-storage mode; those values
+never enter the renderer, HTTP responses, logs, or diagnostics. Recheck holds the config update
+lock and confirms that both the config bytes and recovery record are still the reviewed versions
+before cleanup. `auto` does not claim cleanup while the system credential store is unavailable.
+The record is removed after a confirmed publish or complete rollback. If either result is
+uncertain, the block survives Desktop/TUI restarts and project switches. Desktop changes the
+primary action to **Recheck configuration**; TUI changes the first row to
+**Migration recovery** / **Enter recheck**. Repair the current config or credential source, then
+use that explicit action. Recheck preserves IDs referenced by a healthy V2 config, deletes tracked
+unreferenced credentials, and can return an exact unchanged valid V1 config to migration-ready
+state after rollback cleanup. Publication reconciliation still requires a complete healthy V2
+config. If the config is missing or malformed while a recovery record remains, TUI setup also
+stays fail-closed. Sigil never converts the action into a blind retry.
 
 ## Authentication Priority
 
@@ -61,8 +105,9 @@ Templates are available under [`docs/examples/config`](../examples/config). Revi
 Check, in order: `[agent].connection`, `[agent].model`, the matching
 `[connections.<id>]` block, endpoint, credential-source readiness, and provider-specific limits.
 `/config` shows the current session route separately from the saved default. Existing V1
-`[providers]` configuration remains readable, but migration is explicit and preserves the exact
-provider/model. Keep `permission.mode = "manual"` while diagnosing, then use
+`[providers]` configuration remains readable; follow **Migrate A Legacy Configuration** above
+instead of adding a duplicate connection or hand-editing credential IDs. Keep
+`permission.mode = "manual"` while diagnosing, then use
 [Troubleshooting](troubleshooting.md) for shared symptoms.
 
 <!-- public-doc-cta: open-provider-guide -->

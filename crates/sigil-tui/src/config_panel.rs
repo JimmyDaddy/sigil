@@ -13,7 +13,10 @@ pub(crate) use sigil_runtime::{
     ANTHROPIC_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
 };
 pub(crate) use sigil_runtime::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
-use sigil_runtime::{ProviderStrictToolsMode, ResolvedAgentProfile};
+use sigil_runtime::{
+    ProviderStrictToolsMode, ResolvedAgentProfile,
+    provider_connections::LegacyMigrationRecoveryState,
+};
 
 mod appearance;
 mod collection;
@@ -26,6 +29,7 @@ mod mcp_server;
 mod provider;
 mod section;
 use connections::ProviderConnectionDraft;
+pub(crate) use connections::{ConnectionPickerChoice, ConnectionPickerChoiceKind};
 #[cfg(test)]
 use display::display_ratio;
 pub(crate) use display::{
@@ -147,6 +151,8 @@ pub(crate) struct ConfigState {
     pub(crate) plugin_warnings: Vec<String>,
     pub(crate) draft: ConfigDraft,
     pub(crate) current_session_route: Option<ModelRef>,
+    pub(crate) source_revision: Option<[u8; 32]>,
+    pub(crate) legacy_migration_recovery: Option<LegacyMigrationRecoveryState>,
     pub(crate) draft_revision: u64,
     pub(crate) dirty: bool,
     pub(crate) close_guard_armed: bool,
@@ -179,11 +185,17 @@ impl ConfigState {
             plugin_warnings: Vec::new(),
             draft,
             current_session_route,
+            source_revision: None,
+            legacy_migration_recovery: None,
             draft_revision: 0,
             dirty: false,
             close_guard_armed: false,
             pending_connection_delete: None,
         }
+    }
+
+    pub(crate) fn requires_legacy_migration_attention(&self) -> bool {
+        self.legacy_migration_recovery.is_some() || self.draft.requires_legacy_config_migration()
     }
 
     pub(crate) fn mark_dirty(&mut self) {

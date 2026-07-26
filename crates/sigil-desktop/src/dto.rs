@@ -132,6 +132,15 @@ pub struct DesktopProviderConnectionEntry {
     pub issue: Option<DesktopProviderConnectionIssue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderLegacyMigrationPreview {
+    pub revision: String,
+    pub connection_count: u64,
+    pub inline_credential_count: u64,
+    pub environment_reference_count: u64,
+}
+
 /// Secret-free provider settings projection owned by native Rust code.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -141,6 +150,124 @@ pub struct DesktopProviderConnectionInventory {
     pub default_model: Option<DesktopProviderModelRef>,
     pub connections: Vec<DesktopProviderConnectionEntry>,
     pub issues: Vec<DesktopProviderConnectionIssue>,
+    #[serde(default)]
+    pub legacy_migration: Option<DesktopProviderLegacyMigrationPreview>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderSetupTemplate {
+    DeepSeek,
+    OpenAi,
+    Anthropic,
+    Gemini,
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderSetupCredentialSource {
+    Environment,
+    SecureStore,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderSetupProtocol {
+    Responses,
+    ChatCompletions,
+}
+
+/// Secret-bearing model-catalog request admitted only by the native desktop boundary.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Deserialize`.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderSetupCatalogRequest {
+    pub template: DesktopProviderSetupTemplate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<DesktopProviderSetupProtocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub credential_source: DesktopProviderSetupCredentialSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderSetupModel {
+    pub model_id: String,
+    pub display_name: String,
+    pub availability: String,
+    pub recommended: bool,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderSetupCatalog {
+    pub connection_id: String,
+    pub provider_label: String,
+    pub state: String,
+    pub models: Vec<DesktopProviderSetupModel>,
+    #[serde(default)]
+    pub suggested_model: Option<String>,
+    pub manual_entry_allowed: bool,
+}
+
+/// Secret-bearing atomic setup request admitted only by the native desktop boundary.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Deserialize`.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderSetupSaveRequest {
+    pub template: DesktopProviderSetupTemplate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<DesktopProviderSetupProtocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub credential_source: DesktopProviderSetupCredentialSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    pub model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderSetupSaveResult {
+    pub default_model: DesktopProviderModelRef,
+    pub inventory: DesktopProviderConnectionInventory,
+    pub save_warning: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderLegacyMigrationOutcome {
+    Published,
+    PublishedWithWarning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderLegacyMigrationWarning {
+    FilesystemDurabilityUncertain,
+    PublicationVisibilityReconciled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderLegacyMigrationResult {
+    pub default_model: DesktopProviderModelRef,
+    pub inventory: DesktopProviderConnectionInventory,
+    pub migrated_connection_count: u64,
+    pub moved_inline_credential_count: u64,
+    pub preserved_environment_reference_count: u64,
+    pub outcome: DesktopProviderLegacyMigrationOutcome,
+    pub warnings: Vec<DesktopProviderLegacyMigrationWarning>,
 }
 
 /// Request body for creating one process-local session handle.

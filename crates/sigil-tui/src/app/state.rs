@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
+    time::Instant,
 };
 
 use sigil_kernel::{
@@ -117,6 +118,8 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) worker_rebind_required: bool,
     pub(crate) active_balance_refresh_id: Option<u64>,
     pub(in crate::app) active_model_picker_refresh: Option<PendingModelPickerRefresh>,
+    pub(in crate::app) connection_model_catalog_views:
+        BTreeMap<String, CachedConnectionModelCatalogView>,
     pub(in crate::app) setup_model_catalog_rx: Option<
         std::sync::mpsc::Receiver<
             Result<sigil_runtime::provider_connections::ModelCatalogResult, String>,
@@ -138,6 +141,12 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) active_task: Option<ActiveTaskRuntimeStatus>,
     pub(crate) task_provider_route_diagnostics: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
     pub(crate) task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::app) struct CachedConnectionModelCatalogView {
+    pub(in crate::app) cached_at: Instant,
+    pub(in crate::app) result: sigil_runtime::provider_connections::ModelCatalogResult,
 }
 
 #[cfg(not(test))]

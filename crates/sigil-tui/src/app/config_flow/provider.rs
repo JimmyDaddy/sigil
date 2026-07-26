@@ -3,8 +3,8 @@ use super::*;
 pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
     lines.push("[connections]".to_owned());
     lines.extend(config_state.draft.connection_rows());
-    lines.push("  + Add connection  [Ctrl-N]".to_owned());
-    lines.push("  switch PgUp/PgDn · delete Ctrl-D".to_owned());
+    lines.push("  Enter on Connection to choose or add".to_owned());
+    lines.push("  A add · D set default · Ctrl-D delete".to_owned());
     lines.push(String::new());
     lines.push("[default for new sessions]".to_owned());
     lines.push(render_config_value_row(

@@ -2,17 +2,14 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::{
-    AgentConfig, CompactionConfig, ConfigUpdateLockGuard, ConnectionId, MemoryConfig, ModelRef,
-    PermissionConfig, RootConfig, SecretString, SessionConfig, WorkspaceConfig,
-};
+use sigil_kernel::{ConfigUpdateLockGuard, ConnectionId, ModelRef, RootConfig, SecretString};
 #[cfg(not(test))]
 use sigil_runtime::provider_connections::ConfiguredProviderCredentialStore;
 use sigil_runtime::provider_connections::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, CredentialRefConfig,
     PreparedCredential, ProviderConfigPublisher, ProviderConnectionConfig, ProviderFamily,
-    ProviderProtocol, RootConfigPublisher, load_provider_connections, materialize_v2_root_config,
-    provider_connection_template, save_connection_config,
+    ProviderProtocol, RootConfigPublisher, default_setup_root_config, load_provider_connections,
+    materialize_v2_root_config, provider_connection_template, save_connection_config,
 };
 
 use super::{
@@ -42,7 +39,7 @@ impl AppState {
         if state.selected_field == SetupField::Provider {
             let mut lines = vec![
                 "Set up a model connection".to_owned(),
-                "First choose the provider or endpoint family you want to use.".to_owned(),
+                "Step 1 of 4 · Choose the provider or endpoint you want to connect.".to_owned(),
                 String::new(),
             ];
             for (index, provider_name) in SETUP_PROVIDER_ORDER.iter().enumerate() {
@@ -59,7 +56,7 @@ impl AppState {
             }
             lines.extend([
                 String::new(),
-                "Up/Down/Left/Right browse · Enter choose · Ctrl-C quit".to_owned(),
+                "Up/Down choose · Enter continue · Ctrl-C quit".to_owned(),
             ]);
             if let Some(error) = &state.startup_error {
                 lines.extend([String::new(), format!("load failed: {error}")]);
@@ -69,7 +66,7 @@ impl AppState {
 
         let mut lines = vec![
             "Set up a model connection".to_owned(),
-            "Complete authentication and choose a model for this connection.".to_owned(),
+            "Steps 2–4 · Authenticate, choose a model, then review and start.".to_owned(),
             String::new(),
             render_setup_value_row(
                 SetupField::Provider,
@@ -137,7 +134,7 @@ impl AppState {
 
         lines.push(String::new());
         lines.push(
-            "Tab/Up/Down move · Enter continue · Left/Right choose · Ctrl-S save · Ctrl-C quit"
+            "Up/Down move · Enter continue · Left/Right change option · Ctrl-S save · Ctrl-C quit"
                 .to_owned(),
         );
         lines
@@ -730,44 +727,5 @@ impl sigil_runtime::provider_connections::ProviderCredentialStore for TestSetupC
             .expect("test setup credential store lock")
             .remove(credential_id)
             .is_some())
-    }
-}
-
-fn default_setup_root_config() -> RootConfig {
-    RootConfig {
-        config_version: None,
-        workspace: WorkspaceConfig {
-            root: ".".to_owned(),
-        },
-        storage: Default::default(),
-        session: SessionConfig::default(),
-        agent: AgentConfig {
-            provider: String::new(),
-            connection: None,
-            model: String::new(),
-            max_turns: None,
-            tool_timeout_secs: 30,
-        },
-        model_request: Default::default(),
-        permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: true },
-        skills: Default::default(),
-        compaction: CompactionConfig {
-            enabled: true,
-            soft_threshold_ratio: 0.5,
-            hard_threshold_ratio: 0.8,
-            context_window_tokens: None,
-            tail_messages: 6,
-        },
-        code_intelligence: Default::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: Default::default(),
-        providers: BTreeMap::new(),
-        connections: BTreeMap::new(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
     }
 }

@@ -92,6 +92,7 @@ root = "{}"
 [storage]
 state_root = "{}"
 cache_root = "{}"
+credential_store = "file"
 
 [session]
 log_dir = "{}"
@@ -580,7 +581,7 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
 }
 
 #[test]
-fn real_tui_migrates_legacy_inline_secret_to_environment_without_backup() -> Result<()> {
+fn real_tui_migrates_legacy_inline_secret_to_protected_store_without_backup() -> Result<()> {
     let workspace = test_workspace()?;
     let config_path = workspace.join("sigil.toml");
     let session_dir = workspace.join("sessions");
@@ -617,11 +618,9 @@ fn real_tui_migrates_legacy_inline_secret_to_environment_without_backup() -> Res
             "deepseek-v4-flash",
             |output, writer| {
                 write_input(writer, b"/config\r")?;
-                wait_for_text(output, "legacy plaintext")?;
-                write_input(writer, b"E")?;
-                wait_for_text(output, "confirmed environment credential migration")?;
-                write_input(writer, &[0x13])?;
-                wait_for_text(output, "saved config")?;
+                wait_for_text(output, "Legacy migration")?;
+                write_input(writer, b"\r")?;
+                wait_for_text(output, "migrated 1 legacy connection(s)")?;
 
                 let root = RootConfig::load(&config_path)?;
                 assert_eq!(root.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
@@ -634,7 +633,20 @@ fn real_tui_migrates_legacy_inline_secret_to_environment_without_backup() -> Res
                 assert!(root.providers.is_empty());
                 let serialized = fs::read_to_string(&config_path)?;
                 assert!(!serialized.contains("test-key"));
-                assert!(serialized.contains("source = \"environment\""));
+                assert!(serialized.contains("source = \"stored\""));
+                let credential_wire: serde_json::Value = serde_json::from_slice(&fs::read(
+                    workspace
+                        .join(".process-home")
+                        .join(".sigil")
+                        .join("credentials.json"),
+                )?)?;
+                assert_eq!(
+                    credential_wire["records"]
+                        .as_object()
+                        .context("credential records should be an object")?
+                        .len(),
+                    1
+                );
                 write_input(writer, &[0x1b])?;
                 thread::sleep(Duration::from_millis(200));
                 Ok(())

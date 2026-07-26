@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use super::*;
 use crate::provider_connections::{PreparedCredential, ProviderFamily};
@@ -6,14 +12,14 @@ use crate::provider_connections::{PreparedCredential, ProviderFamily};
 #[derive(Default)]
 struct MemoryStore {
     records: Mutex<BTreeMap<CredentialId, ProviderCredentialRecord>>,
-    unavailable: bool,
+    unavailable: AtomicBool,
     rejected: bool,
 }
 
 impl MemoryStore {
     fn unavailable() -> Self {
         Self {
-            unavailable: true,
+            unavailable: AtomicBool::new(true),
             ..Self::default()
         }
     }
@@ -26,7 +32,7 @@ impl MemoryStore {
     }
 
     fn preflight(&self) -> Result<(), ProviderCredentialError> {
-        if self.unavailable {
+        if self.unavailable.load(Ordering::SeqCst) {
             return Err(ProviderCredentialError::new(
                 ProviderCredentialErrorCode::CredentialStoreUnavailable,
                 "test store unavailable",
@@ -39,6 +45,10 @@ impl MemoryStore {
             ));
         }
         Ok(())
+    }
+
+    fn set_unavailable(&self, unavailable: bool) {
+        self.unavailable.store(unavailable, Ordering::SeqCst);
     }
 }
 
@@ -104,11 +114,19 @@ async fn auto_falls_back_only_when_native_store_is_unavailable() {
         .expect("file fallback load")
         .expect("fallback record");
     assert_eq!(loaded.secret().expose_secret(), "auto-secret");
+    let delete_error = store
+        .delete(&record.credential_id)
+        .await
+        .expect_err("auto delete must not claim full cleanup while keyring is unavailable");
+    assert_eq!(
+        delete_error.code,
+        ProviderCredentialErrorCode::CredentialStoreUnavailable.as_str()
+    );
     assert!(
-        store
-            .delete(&record.credential_id)
+        file.load(&record.credential_id)
             .await
-            .expect("file fallback delete")
+            .expect("file fallback query")
+            .is_none()
     );
 
     let rejected = ConfiguredProviderCredentialStore::injected(
@@ -117,6 +135,40 @@ async fn auto_falls_back_only_when_native_store_is_unavailable() {
         Some(file),
     );
     assert!(rejected.store(&record).await.is_err());
+}
+
+#[tokio::test]
+async fn auto_delete_waits_for_native_store_recovery_before_claiming_cleanup() {
+    let keyring = Arc::new(MemoryStore::default());
+    let file = Arc::new(MemoryStore::default());
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        keyring.clone(),
+        Some(file),
+    );
+    let record = record();
+
+    store
+        .store(&record)
+        .await
+        .expect("native store should accept");
+    keyring.set_unavailable(true);
+    let error = store
+        .delete(&record.credential_id)
+        .await
+        .expect_err("temporary native outage must keep cleanup fail-closed");
+    assert_eq!(
+        error.code,
+        ProviderCredentialErrorCode::CredentialStoreUnavailable.as_str()
+    );
+
+    keyring.set_unavailable(false);
+    assert!(
+        store
+            .delete(&record.credential_id)
+            .await
+            .expect("recovered native store should complete cleanup")
+    );
 }
 
 #[tokio::test]

@@ -232,7 +232,7 @@ impl ConfigField {
     pub(crate) fn help_text(self) -> &'static str {
         match self {
             Self::ProviderName => {
-                "Connection being edited. PgUp/PgDn switches drafts; Ctrl-N adds and Ctrl-D removes."
+                "Connection being edited. Enter opens saved connections and explicit provider templates; A jumps to Add."
             }
             Self::ProviderModel => {
                 "Chat model used for new runs. Switching the saved default does not rewrite the current session."

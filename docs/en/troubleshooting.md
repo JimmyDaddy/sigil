@@ -45,9 +45,18 @@ Check that the environment-variable name belongs to the selected connection and 
 | `catalog_unsupported` | This provider/endpoint does not expose discovery | Use the provider-owned bundled list or manual entry |
 | `catalog_malformed` | The response was not a valid catalog | Fix the endpoint or gateway; remote metadata is not trusted to add capabilities |
 
-If Doctor reports `mode=legacy_v1`, `/config` can perform an explicit migration. Review the
-projected connection and exact model before saving. A mismatch is a warning, not an implicit
-provider change; mixed V1/V2 or future schemas fail closed.
+If Doctor reports `mode=legacy_v1`, use the Desktop migration card or `/config` →
+**Legacy migration** → Enter. Review the connection/key/environment counts and exact default
+route first; migration requires no provider network or model loading. An ordinary pre-publish
+credential-store failure keeps the old configuration active; Sigil reloads the current inventory
+before offering a retry. If the UI instead says the file changed, reopen the view and review the
+new revision. If it says reconciliation or cleanup is required, do not retry blindly: open
+**Support**, inspect the current config with Doctor, and resolve that state first. That workspace
+remains blocked across navigation, workspace switches, Desktop/TUI restarts, and process restarts
+until **Recheck configuration** in Desktop or **Enter recheck** on TUI's **Migration recovery**
+row confirms a credential-aware healthy V2 configuration. Do not add duplicate connections or
+hand-edit credential IDs. Mixed V1/V2 and future schemas fail closed and must be repaired or
+opened with a compatible Sigil version.
 
 ## Theme Colors Are Hard To Read
 

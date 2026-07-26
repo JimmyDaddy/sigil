@@ -45,9 +45,15 @@ sigil doctor
 | `catalog_unsupported` | 当前 provider/端点不提供 discovery | 使用 provider 自带列表或手动输入 |
 | `catalog_malformed` | 返回值不是合法模型目录 | 修复端点或网关；远端元数据不会扩展本地能力 |
 
-如果 Doctor 报告 `mode=legacy_v1`，可以在 `/config` 中显式迁移。保存前检查投影后的
-connection 和精确模型。旧配置不一致只会给出警告，不会暗中切换 provider；V1/V2 混合配置和
-未来版本配置会失败关闭。
+如果 Doctor 报告 `mode=legacy_v1`，请使用 Desktop 迁移卡片，或在 `/config` →
+**Legacy migration** 上按 Enter。先检查连接数、密钥数、环境变量引用数和精确默认 route；
+迁移不需要 Provider 网络或模型 loading。普通的发布前凭据存储失败会保留旧配置；Sigil 会先
+重新加载当前 inventory，再允许重试。如果提示文件已变化，请重新打开页面并复核新版本；如果
+提示需要 reconcile 或 cleanup，不要盲目重试，请打开**支持**，用 Doctor 检查当前配置并先解决
+该状态。这个工作区在跨页面导航、项目切换、Desktop/TUI 重启和进程重启后仍会保持阻断；只有在
+Desktop 选择**重新检查配置**，或在 TUI 的 **Migration recovery** 行按 **Enter recheck**，
+并确认 credential-aware 的 V2 配置健康后才会解除。不要新增重复 connection 或手工编辑
+credential ID。V1/V2 混合配置和未来版本配置会失败关闭，必须修复或使用兼容版本的 Sigil 打开。
 
 ## 主题颜色难以阅读
 

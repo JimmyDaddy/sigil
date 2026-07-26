@@ -70,7 +70,7 @@ impl DesktopLaunchRequest {
         if self
             .config_path
             .as_ref()
-            .is_some_and(|config_path| !config_path.is_file())
+            .is_some_and(|config_path| config_path.exists() && !config_path.is_file())
         {
             return Err(DesktopLaunchError::InvalidRequest(
                 "configuration is not a file",

@@ -62,6 +62,27 @@ pub(crate) fn test_config() -> RootConfig {
     }
 }
 
+pub(crate) fn v2_test_config() -> RootConfig {
+    let base = test_config();
+    let connection_id =
+        sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id");
+    let (connection, model_id) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::DeepSeek,
+        sigil_runtime::provider_connections::ProviderProtocol::DeepSeek,
+        connection_id.clone(),
+        "DeepSeek",
+    )
+    .expect("test provider connection");
+    let default_model =
+        sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
+    sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &std::collections::BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )
+    .expect("test V2 config")
+}
+
 pub(crate) fn resolved_session_log_dir(config: &RootConfig, workspace_root: &Path) -> PathBuf {
     sigil_runtime::resolve_sigil_paths(&config.storage, &config.session, workspace_root)
         .session_log_dir

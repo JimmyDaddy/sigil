@@ -261,7 +261,11 @@ impl AppState {
         {
             return false;
         }
-        self.runtime.active_model_picker_refresh = None;
-        self.apply_connection_model_catalog(result)
+        let active = self
+            .runtime
+            .active_model_picker_refresh
+            .take()
+            .expect("active refresh checked above");
+        self.apply_connection_model_catalog_with_cache_policy(result, active.cacheable_catalog_view)
     }
 }

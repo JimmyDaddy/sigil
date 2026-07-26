@@ -9,7 +9,8 @@ use sigil_runtime::{
     provider_connections::{
         ConnectionCredentialUpdate, ConnectionSaveDraft, CredentialRefConfig, LoadedCredentialRef,
         PreparedCredential, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
-        load_provider_connections, provider_connection_template,
+        legacy_connection_migration_preview, load_provider_connections,
+        provider_connection_template,
     },
 };
 
@@ -22,6 +23,19 @@ pub(super) struct ProviderConnectionDraft {
     pub(super) staged_credential: Option<PreparedCredential>,
     pub(super) legacy_inline: bool,
     pub(super) repair_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConnectionPickerChoiceKind {
+    Existing(ConnectionId),
+    AddProvider(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConnectionPickerChoice {
+    pub(crate) kind: ConnectionPickerChoiceKind,
+    pub(crate) label: String,
+    pub(crate) detail: String,
 }
 
 pub(super) fn connection_drafts_from_root_config(
@@ -200,6 +214,24 @@ impl ConfigDraft {
             .is_some_and(|draft| draft.legacy_inline)
     }
 
+    pub(crate) fn requires_legacy_config_migration(&self) -> bool {
+        legacy_connection_migration_preview(&self.base_root_config).is_ok()
+    }
+
+    pub(crate) fn legacy_config_migration_summary(&self) -> String {
+        legacy_connection_migration_preview(&self.base_root_config).map_or_else(
+            |_| "unavailable".to_owned(),
+            |preview| {
+                format!(
+                    "{} connection(s) · {} inline key(s) · {} environment ref(s)",
+                    preview.connection_count,
+                    preview.inline_credential_count,
+                    preview.environment_reference_count
+                )
+            },
+        )
+    }
+
     pub(crate) fn selected_connection_summary(&self) -> String {
         self.selected_connection()
             .map(|draft| {
@@ -328,9 +360,23 @@ impl ConfigDraft {
         self.load_selected_connection()
     }
 
-    pub(crate) fn add_connection(&mut self) -> Result<()> {
+    pub(crate) fn select_connection(&mut self, connection_id: &ConnectionId) -> Result<()> {
+        anyhow::ensure!(
+            self.connection_drafts.contains_key(connection_id),
+            "selected connection is unavailable"
+        );
+        if !self
+            .selected_connection()
+            .is_some_and(|draft| draft.repair_required)
+        {
+            self.capture_selected_connection()?;
+        }
+        self.selected_connection_id = connection_id.clone();
+        self.load_selected_connection()
+    }
+
+    pub(crate) fn add_connection_for_provider(&mut self, provider_name: &str) -> Result<()> {
         self.capture_selected_connection()?;
-        let provider_name = sigil_runtime::next_provider_name(&self.provider_name);
         let (family, protocol) = provider_identity(provider_name)?;
         let base = match protocol {
             ProviderProtocol::DeepSeek => "deepseek",
@@ -361,6 +407,36 @@ impl ConfigDraft {
         );
         self.selected_connection_id = id;
         self.load_selected_connection()
+    }
+
+    pub(crate) fn connection_picker_choices(&self) -> Vec<ConnectionPickerChoice> {
+        let mut choices = self
+            .connection_drafts
+            .iter()
+            .map(|(id, draft)| {
+                let mut tags = vec![
+                    provider_key_for_connection(&draft.config).to_owned(),
+                    draft.model.clone(),
+                    credential_label(draft).to_owned(),
+                ];
+                if id == &self.default_model.connection_id {
+                    tags.push("saved default".to_owned());
+                }
+                ConnectionPickerChoice {
+                    kind: ConnectionPickerChoiceKind::Existing(id.clone()),
+                    label: draft.config.label.clone(),
+                    detail: tags.join(" · "),
+                }
+            })
+            .collect::<Vec<_>>();
+        choices.extend([
+            add_provider_choice(DEEPSEEK_PROVIDER_KEY, "DeepSeek"),
+            add_provider_choice(OPENAI_RESPONSES_PROVIDER_KEY, "OpenAI"),
+            add_provider_choice(ANTHROPIC_PROVIDER_KEY, "Anthropic"),
+            add_provider_choice(GEMINI_PROVIDER_KEY, "Google Gemini"),
+            add_provider_choice(OPENAI_COMPAT_PROVIDER_KEY, "OpenAI-compatible"),
+        ]);
+        choices
     }
 
     pub(crate) fn delete_selected_connection(
@@ -431,12 +507,14 @@ impl ConfigDraft {
             draft.legacy_inline,
             "selected connection does not require legacy credential migration"
         );
+        let CredentialRefConfig::Environment { name } = &draft.config.credential else {
+            bail!("selected connection has no environment credential");
+        };
         anyhow::ensure!(
-            matches!(
-                draft.config.credential,
-                CredentialRefConfig::Environment { .. }
-            ),
-            "selected connection has no environment credential"
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "environment credential {name} is not available; keep the legacy key or paste a replacement"
         );
         self.confirmed_legacy_environment
             .insert(self.selected_connection_id.clone());
@@ -497,18 +575,7 @@ impl ConfigDraft {
                 } else {
                     ""
                 };
-                let credential = if draft.legacy_inline {
-                    "migration required"
-                } else if draft.repair_required {
-                    "invalid · remove with Ctrl-D"
-                } else {
-                    match draft.config.credential {
-                        CredentialRefConfig::Environment { .. } => "environment",
-                        CredentialRefConfig::SystemKeyring { .. } => "legacy keyring",
-                        CredentialRefConfig::Stored { .. } => "secure store",
-                        CredentialRefConfig::None => "no auth",
-                    }
-                };
+                let credential = credential_label(draft);
                 format!(
                     "{selected} {}  {} · {credential}{default}",
                     draft.config.label, draft.model
@@ -535,6 +602,29 @@ impl ConfigDraft {
         self.provider_api_key.clear();
         load_deepseek_options(self, &selected.config.options);
         Ok(())
+    }
+}
+
+fn add_provider_choice(provider_name: &str, label: &str) -> ConnectionPickerChoice {
+    ConnectionPickerChoice {
+        kind: ConnectionPickerChoiceKind::AddProvider(provider_name.to_owned()),
+        label: format!("Add {label}"),
+        detail: "create an unsaved connection from this provider template".to_owned(),
+    }
+}
+
+fn credential_label(draft: &ProviderConnectionDraft) -> &'static str {
+    if draft.legacy_inline {
+        "migration required"
+    } else if draft.repair_required {
+        "invalid · remove with Ctrl-D"
+    } else {
+        match draft.config.credential {
+            CredentialRefConfig::Environment { .. } => "environment",
+            CredentialRefConfig::SystemKeyring { .. } => "legacy keyring",
+            CredentialRefConfig::Stored { .. } => "secure store",
+            CredentialRefConfig::None => "no auth",
+        }
     }
 }
 

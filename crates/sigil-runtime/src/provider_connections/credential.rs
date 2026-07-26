@@ -59,6 +59,14 @@ impl PreparedCredential {
         }
     }
 
+    pub(crate) fn api_key_secret(provider_family: ProviderFamily, secret: SecretString) -> Self {
+        Self {
+            provider_family,
+            auth_kind: CredentialAuthKind::ApiKey,
+            secret,
+        }
+    }
+
     #[must_use]
     pub fn secret(&self) -> &SecretString {
         &self.secret
