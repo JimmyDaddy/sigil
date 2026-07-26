@@ -122,6 +122,78 @@ pub(super) fn subagent_step_prompt(
 const TASK_STEP_DEPENDENCY_CONTEXT_MAX_CHARS: usize = 16_000;
 const TASK_STEP_DEPENDENCY_CONTEXT_TRUNCATION_MARKER: &str =
     "\n[additional dependency results truncated by host]";
+const TASK_PARTICIPANT_FINAL_REPORT_MAX_BYTES: u64 = 64 * 1024;
+
+fn task_participant_handoff_text(
+    session: &Session,
+    attempt: &TaskParticipantAttemptEntry,
+    result: &TaskParticipantResultEntry,
+) -> String {
+    verified_task_participant_final_report(session, attempt, result)
+        .or_else(|| compact_task_participant_excerpt(&result.summary))
+        .unwrap_or_else(|| result.summary.clone())
+}
+
+fn verified_task_participant_final_report(
+    session: &Session,
+    attempt: &TaskParticipantAttemptEntry,
+    result: &TaskParticipantResultEntry,
+) -> Option<String> {
+    let expected_relative_path = attempt
+        .child_session_ref
+        .as_path()
+        .with_extension("final.md");
+    let expected_display_path = expected_relative_path.display().to_string();
+    let artifact = result.artifact_refs.iter().find(|artifact| {
+        artifact.kind == "final_report" && artifact.path == expected_display_path
+    })?;
+    let expected_hash = artifact.hash.as_deref()?;
+    if expected_hash.len() != 64
+        || !expected_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+
+    let parent_store_path = session.store_path()?;
+    let parent_dir = parent_store_path.parent().unwrap_or_else(|| Path::new("."));
+    let artifact_path = parent_dir.join(expected_relative_path);
+    let metadata = std::fs::symlink_metadata(&artifact_path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > TASK_PARTICIPANT_FINAL_REPORT_MAX_BYTES
+    {
+        return None;
+    }
+    let bytes = std::fs::read(&artifact_path).ok()?;
+    if u64::try_from(bytes.len()).ok()? > TASK_PARTICIPANT_FINAL_REPORT_MAX_BYTES {
+        return None;
+    }
+    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    if actual_hash != expected_hash {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let safe_text = crate::safe_persistence_text(&text);
+    let trimmed = safe_text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn compact_task_participant_excerpt(summary: &str) -> Option<String> {
+    let compact: serde_json::Value = serde_json::from_str(summary).ok()?;
+    if compact
+        .get("final_report_truncated_from_inline_result")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let excerpt = compact.get("excerpt").and_then(serde_json::Value::as_str)?;
+    let safe_excerpt = crate::safe_persistence_text(excerpt);
+    let trimmed = safe_excerpt.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
 
 pub(super) fn task_step_dependency_result_context(
     session: &Session,
@@ -178,10 +250,13 @@ pub(super) fn task_step_dependency_result_context(
             )
             .into_iter()
             .rev()
-            .find_map(|attempt| task.participant_results.get(&attempt.attempt_id))
-            .map(|result| result.summary.as_str())
-            .or(dependency_state.summary.as_deref())
-            .unwrap_or("completed without a retained summary");
+            .find_map(|attempt| {
+                task.participant_results
+                    .get(&attempt.attempt_id)
+                    .map(|result| task_participant_handoff_text(session, attempt, result))
+            })
+            .or_else(|| dependency_state.summary.clone())
+            .unwrap_or_else(|| "completed without a retained summary".to_owned());
         results.push(format!(
             "- {} [{}]\n  summary: {}",
             dependency.title,
@@ -253,8 +328,12 @@ pub(super) fn task_synthesis_prompt(
             )
             .into_iter()
             .rev()
-            .find_map(|attempt| task.participant_results.get(&attempt.attempt_id))
-            .map(|result| {
+            .find_map(|attempt| {
+                task.participant_results
+                    .get(&attempt.attempt_id)
+                    .map(|result| (attempt, result))
+            })
+            .map(|(attempt, result)| {
                 let result_ref = result
                     .final_answer_ref
                     .as_ref()
@@ -271,7 +350,7 @@ pub(super) fn task_synthesis_prompt(
                     step.title,
                     step.step_id.as_str(),
                     result_ref,
-                    result.summary
+                    task_participant_handoff_text(session, attempt, result)
                 )
             })
             .unwrap_or_else(|| {

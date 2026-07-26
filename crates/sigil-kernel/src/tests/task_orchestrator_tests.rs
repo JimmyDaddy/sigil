@@ -935,6 +935,42 @@ fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
 
 #[test]
 fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files() -> Result<()> {
+    let mut session = Session::new("planner", "model");
+    let (task_id, downstream, mut attempt) = seed_dependency_handoff(&mut session)?;
+    let mut result = participant_result_entry(
+        &attempt,
+        "Parser returns an owned normalized String from src/parser.rs.",
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
+    session.append_control(ControlEntry::TaskParticipantResult(result))?;
+    attempt.status = TaskParticipantAttemptStatus::Completed;
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
+
+    let context = task_step_dependency_result_context(&session, &task_id, 1, &downstream)?
+        .expect("dependent step should receive a host-owned handoff");
+    assert!(context.contains("Direct dependency results supplied by the host"));
+    assert!(context.contains("Inspect parser [inspect_parser]"));
+    assert!(context.contains("owned normalized String from src/parser.rs"));
+    assert!(context.contains("do not search for or invent result files"));
+
+    let prompt = subagent_step_prompt(
+        "review parser and formatter",
+        1,
+        &downstream,
+        Some(&context),
+        None,
+    );
+    assert!(prompt.contains(&context));
+    Ok(())
+}
+
+fn seed_dependency_handoff(
+    session: &mut Session,
+) -> Result<(TaskId, TaskStepSpec, TaskParticipantAttemptEntry)> {
     let task_id = TaskId::new("task_dependency_handoff")?;
     let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
     let upstream = read_executor_step("inspect_parser", "Inspect parser", Vec::new())?;
@@ -943,7 +979,6 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
         "Consolidate review",
         vec![upstream.step_id.clone()],
     )?;
-    let mut session = Session::new("planner", "model");
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref,
@@ -975,7 +1010,7 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
         Some(&upstream.step_id),
         1,
     )?;
-    let mut attempt = TaskParticipantAttemptEntry {
+    let attempt = TaskParticipantAttemptEntry {
         attempt_id: attempt_id.clone(),
         task_id: task_id.clone(),
         purpose: TaskParticipantPurpose::Step,
@@ -988,11 +1023,54 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
         reason: None,
     };
     session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    Ok((task_id, downstream, attempt))
+}
+
+#[test]
+fn downstream_step_prompt_inlines_hash_verified_final_report_artifact() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let parent_dir = store
+        .path()
+        .parent()
+        .expect("parent session store should have a directory")
+        .to_owned();
+    let mut session = Session::new("planner", "model").with_store(store);
+    let (task_id, downstream, mut attempt) = seed_dependency_handoff(&mut session)?;
+    let full_report = "Complete parser analysis with normalization and error propagation details.";
+    let artifact_relative_path = attempt
+        .child_session_ref
+        .as_path()
+        .with_extension("final.md");
+    let artifact_path = parent_dir.join(&artifact_relative_path);
+    std::fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("final report artifact should have a parent"),
+    )?;
+    std::fs::write(&artifact_path, full_report)?;
+    let artifact_hash = super::hash_text(full_report);
+    let artifact = crate::AgentArtifactRef {
+        kind: "final_report".to_owned(),
+        path: artifact_relative_path.display().to_string(),
+        hash: Some(artifact_hash.clone()),
+    };
+    let compact = json!({
+        "summary": "child agent produced a long final report",
+        "final_report_truncated_from_inline_result": true,
+        "excerpt": "short parser excerpt",
+        "full_result_artifact": artifact,
+    })
+    .to_string();
     let mut result = participant_result_entry(
         &attempt,
-        "Parser returns an owned normalized String from src/parser.rs.",
+        &compact,
         None,
-        Vec::new(),
+        vec![crate::AgentArtifactRef {
+            kind: "final_report".to_owned(),
+            path: artifact_relative_path.display().to_string(),
+            hash: Some(artifact_hash),
+        }],
         Vec::new(),
         Vec::new(),
     )?;
@@ -1002,20 +1080,72 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
     session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
 
     let context = task_step_dependency_result_context(&session, &task_id, 1, &downstream)?
-        .expect("dependent step should receive a host-owned handoff");
-    assert!(context.contains("Direct dependency results supplied by the host"));
-    assert!(context.contains("Inspect parser [inspect_parser]"));
-    assert!(context.contains("owned normalized String from src/parser.rs"));
-    assert!(context.contains("do not search for or invent result files"));
+        .expect("dependent step should receive a verified artifact handoff");
+    assert!(context.contains(full_report));
+    assert!(!context.contains("short parser excerpt"));
+    assert!(!context.contains("full_result_artifact"));
+    assert!(!context.contains("children/"));
+    Ok(())
+}
 
-    let prompt = subagent_step_prompt(
-        "review parser and formatter",
-        1,
-        &downstream,
-        Some(&context),
+#[test]
+fn downstream_step_prompt_falls_back_to_excerpt_for_tampered_final_report() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let parent_dir = store
+        .path()
+        .parent()
+        .expect("parent session store should have a directory")
+        .to_owned();
+    let mut session = Session::new("planner", "model").with_store(store);
+    let (task_id, downstream, mut attempt) = seed_dependency_handoff(&mut session)?;
+    let artifact_relative_path = attempt
+        .child_session_ref
+        .as_path()
+        .with_extension("final.md");
+    let artifact_path = parent_dir.join(&artifact_relative_path);
+    std::fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("final report artifact should have a parent"),
+    )?;
+    std::fs::write(&artifact_path, "tampered report contents")?;
+    let expected_hash = super::hash_text("original report contents");
+    let artifact = crate::AgentArtifactRef {
+        kind: "final_report".to_owned(),
+        path: artifact_relative_path.display().to_string(),
+        hash: Some(expected_hash.clone()),
+    };
+    let compact = json!({
+        "summary": "child agent produced a long final report",
+        "final_report_truncated_from_inline_result": true,
+        "excerpt": "safe bounded parser excerpt",
+        "full_result_artifact": artifact,
+    })
+    .to_string();
+    let mut result = participant_result_entry(
+        &attempt,
+        &compact,
         None,
-    );
-    assert!(prompt.contains(&context));
+        vec![crate::AgentArtifactRef {
+            kind: "final_report".to_owned(),
+            path: artifact_relative_path.display().to_string(),
+            hash: Some(expected_hash),
+        }],
+        Vec::new(),
+        Vec::new(),
+    )?;
+    result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
+    session.append_control(ControlEntry::TaskParticipantResult(result))?;
+    attempt.status = TaskParticipantAttemptStatus::Completed;
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
+
+    let context = task_step_dependency_result_context(&session, &task_id, 1, &downstream)?
+        .expect("dependent step should receive a bounded fallback handoff");
+    assert!(context.contains("safe bounded parser excerpt"));
+    assert!(!context.contains("tampered report contents"));
+    assert!(!context.contains("full_result_artifact"));
+    assert!(!context.contains("children/"));
     Ok(())
 }
 
