@@ -1479,6 +1479,8 @@ fn slash_selector_executes_selected_effort_candidate() -> Result<()> {
 
 #[test]
 fn slash_selector_and_execution_reject_unadmitted_custom_model_ids() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let previous_session_id = app.session_id.clone();
     app.composer.input = "/model ds-custom".to_owned();
