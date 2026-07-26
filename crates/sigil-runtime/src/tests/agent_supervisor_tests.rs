@@ -553,13 +553,13 @@ impl Provider for PlannerDiscoveryProvider {
                             "probe_id": "runtime",
                             "title": "Inspect runtime",
                             "objective": "Inspect runtime orchestration boundaries",
-                            "path_hints": ["crates/sigil-runtime"]
+                            "path_hints": ["./"]
                         },
                         {
                             "probe_id": "kernel",
                             "title": "Inspect kernel",
                             "objective": "Inspect kernel task contracts",
-                            "path_hints": ["crates/sigil-kernel"]
+                            "path_hints": null
                         }
                     ]
                 })
@@ -617,6 +617,30 @@ impl Provider for RejectedDiscoveryPlannerProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .any(|content| content.contains(r#""type":"task_discovery_results""#))
+        {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-plan-after-corrected-discovery".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "plan_version": 1,
+                        "status": "accepted",
+                        "steps": [{
+                            "step_id": "implement",
+                            "title": "Implement after corrected research",
+                            "role": "executor"
+                        }]
+                    })
+                    .to_string(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
         if let Some(error) = request
             .messages
             .iter()
@@ -631,15 +655,14 @@ impl Provider for RejectedDiscoveryPlannerProvider {
                 Some(error.to_owned());
             return Ok(Box::pin(stream::iter(vec![
                 Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-plan-after-rejection".to_owned(),
-                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    id: "call-corrected-discovery".to_owned(),
+                    name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
                     args_json: json!({
-                        "plan_version": 1,
-                        "status": "accepted",
-                        "steps": [{
-                            "step_id": "implement",
-                            "title": "Implement without duplicated research",
-                            "role": "executor"
+                        "probes": [{
+                            "probe_id": "runtime-corrected",
+                            "title": "Inspect runtime after correction",
+                            "objective": "Inspect runtime orchestration after correcting the invalid batch",
+                            "path_hints": ["crates/sigil-runtime"]
                         }]
                     })
                     .to_string(),
@@ -647,7 +670,6 @@ impl Provider for RejectedDiscoveryPlannerProvider {
                 Ok(ProviderChunk::Done),
             ])));
         }
-
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ToolCallComplete(ToolCall {
                 id: "call-overlapping-discovery".to_owned(),
@@ -3206,7 +3228,7 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
 }
 
 #[tokio::test]
-async fn planner_discovery_rejects_overlapping_batch_before_any_provider_start() -> Result<()> {
+async fn planner_discovery_rejects_overlapping_batch_without_consuming_valid_retry() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
     budget.max_subagents = 4;
@@ -3290,7 +3312,11 @@ async fn planner_discovery_rejects_overlapping_batch_before_any_provider_start()
         .await?;
 
     assert_eq!(output.accepted_plan.plan_version, 1);
-    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "the rejected batch must start no provider, while one corrected batch remains admissible"
+    );
     assert!(
         observed_error
             .lock()
@@ -3299,7 +3325,7 @@ async fn planner_discovery_rejects_overlapping_batch_before_any_provider_start()
             .is_some_and(|error| error.contains("whole_batch_rejected"))
     );
     let projection = session.agent_thread_state_projection();
-    assert_eq!(projection.threads.len(), 1);
+    assert_eq!(projection.threads.len(), 2);
     assert!(supervisor.active_profile_ids().is_empty());
     Ok(())
 }

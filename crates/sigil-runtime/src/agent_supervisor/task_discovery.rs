@@ -116,7 +116,6 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 "request_task_discovery may be called at most once per planning attempt",
             ));
         }
-        self.requested = true;
 
         let probes = match parse_task_discovery_probes(args, self.max_probes) {
             Ok(probes) => probes,
@@ -128,6 +127,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 ));
             }
         };
+        self.requested = true;
         let cancellation = match self.cancellation.clone() {
             Some(cancellation) if !cancellation.is_cancel_requested() => cancellation,
             Some(_) => {
@@ -495,9 +495,10 @@ impl Tool for TaskDiscoveryTool {
                                 "title": { "type": "string" },
                                 "objective": { "type": "string" },
                                 "path_hints": {
-                                    "type": "array",
+                                    "type": ["array", "null"],
                                     "maxItems": MAX_DISCOVERY_PATH_HINTS,
-                                    "items": { "type": "string" }
+                                    "items": { "type": "string" },
+                                    "description": "Optional workspace-relative hints. Omit, use null or an empty array for a whole-workspace probe. A root marker such as . or ./ is normalized to the same whole-workspace scope."
                                 }
                             },
                             "required": ["probe_id", "title", "objective"],
@@ -555,7 +556,7 @@ struct RawTaskDiscoveryProbe {
     title: String,
     objective: String,
     #[serde(default)]
-    path_hints: Vec<String>,
+    path_hints: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -710,15 +711,18 @@ fn parse_task_discovery_probes(args: &Value, max_probes: usize) -> Result<Vec<Ta
         if !objectives.insert(objective.clone()) {
             bail!("planner discovery contains duplicate objective");
         }
-        if raw_probe.path_hints.len() > MAX_DISCOVERY_PATH_HINTS {
+        let raw_path_hints = raw_probe.path_hints.unwrap_or_default();
+        if raw_path_hints.len() > MAX_DISCOVERY_PATH_HINTS {
             bail!(
                 "planner discovery probe {} has too many path hints",
                 probe_id.as_str()
             );
         }
         let mut path_hints = BTreeSet::new();
-        for hint in raw_probe.path_hints {
-            path_hints.insert(normalize_discovery_path_hint(&hint)?);
+        for hint in raw_path_hints {
+            if let Some(hint) = normalize_discovery_path_hint(&hint)? {
+                path_hints.insert(hint);
+            }
         }
         probes.push(TaskDiscoveryProbe {
             probe_id,
@@ -743,7 +747,7 @@ fn bounded_required_text(label: &str, value: &str, max_chars: usize) -> Result<S
     Ok(value)
 }
 
-fn normalize_discovery_path_hint(value: &str) -> Result<String> {
+fn normalize_discovery_path_hint(value: &str) -> Result<Option<String>> {
     let value = sigil_kernel::safe_persistence_text(value).trim().to_owned();
     if value.is_empty() {
         bail!("planner discovery path hint cannot be empty");
@@ -766,9 +770,9 @@ fn normalize_discovery_path_hint(value: &str) -> Result<String> {
         }
     }
     if normalized.as_os_str().is_empty() {
-        bail!("planner discovery path hint cannot resolve to the workspace root");
+        return Ok(None);
     }
-    Ok(normalized.to_string_lossy().into_owned())
+    Ok(Some(normalized.to_string_lossy().into_owned()))
 }
 
 fn reject_overlapping_probe_paths(probes: &[TaskDiscoveryProbe]) -> Result<()> {
