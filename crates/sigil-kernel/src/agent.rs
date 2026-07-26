@@ -36,11 +36,12 @@ use crate::{
         task_routing_system_prompt_contract_material,
     },
     task_orchestrator::{
+        task_participant_finalization_prompt_contract_material,
         task_participant_system_prompt_contract_material,
         task_planner_system_prompt_contract_material,
     },
     tool::{
-        PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
+        PreparedToolCall, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
         ToolProgressSink, ToolRegistry, ToolResult, ToolSpec, ToolSubject,
     },
 };
@@ -110,6 +111,8 @@ use tool_results::{
     agent_tool_result_satisfies_delegation, append_invalid_tool_input_result, emit_tool_result,
     record_and_emit_tool_result, record_tool_run_outcome,
 };
+
+const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
 
 struct RoutingMicroturnEventFilter<'a, H> {
     inner: &'a mut H,
@@ -1303,6 +1306,8 @@ where
                 None
             }
         };
+        let is_task_participant =
+            matches!(purpose.as_ref(), Some(AgentRunPurpose::TaskParticipant(_)));
         if task_handoff_binding.is_some()
             && tools.spec_for(REQUEST_TASK_PLANNING_TOOL_NAME).is_some()
         {
@@ -1468,6 +1473,10 @@ where
         let mut task_routing_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
+        let mut participant_post_mutation_read_calls = 0usize;
+        let mut participant_finalization_pending = false;
+        let mut participant_finalization_prompt_injected = false;
+        let mut participant_finalization_dispatched = false;
 
         let mut model_turns = 0usize;
         loop {
@@ -1487,6 +1496,21 @@ where
                     pending_join_context_keys.clear();
                 }
                 return Err(anyhow!("run cancellation requested before next model turn"));
+            }
+            if is_task_participant
+                && !participant_finalization_dispatched
+                && !outcome.changed_files.is_empty()
+                && options.max_turns.is_some_and(|max_turns| {
+                    max_turns > 0 && model_turns.saturating_add(1) >= max_turns
+                })
+            {
+                participant_finalization_pending = true;
+            }
+            if participant_finalization_pending && !participant_finalization_prompt_injected {
+                transient_context.push(ModelMessage::system(
+                    task_participant_finalization_prompt_contract_material(),
+                ));
+                participant_finalization_prompt_injected = true;
             }
             if let Some(max_turns) = options.max_turns
                 && model_turns >= max_turns
@@ -1527,7 +1551,11 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            let mut tool_specs = if task_routing_decision_pending {
+            let participant_finalization_turn =
+                participant_finalization_pending && !participant_finalization_dispatched;
+            let mut tool_specs = if participant_finalization_turn {
+                Vec::new()
+            } else if task_routing_decision_pending {
                 vec![
                     request_task_planning_tool_spec(),
                     continue_without_task_planning_tool_spec(),
@@ -1548,6 +1576,10 @@ where
                 if task_guidance_assessment.is_some() {
                     tool_specs.push(task_guidance_apply_tool_spec());
                 }
+            }
+            if participant_finalization_turn {
+                participant_finalization_pending = false;
+                participant_finalization_dispatched = true;
             }
             let initial_frozen_request = initial_frozen_provider_request.take();
             let provider_logical_run_id = if initial_frozen_request.is_some() {
@@ -1585,13 +1617,18 @@ where
                             runtime_context.clone(),
                             &current_run_overlays,
                         )?;
-                    let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
-                        Some(preparer) => Some(preparer.prepare_turn().await?),
-                        None => None,
+                    let prepared_hosted_turn =
+                        match (participant_finalization_turn, hosted_turn_preparer.as_ref()) {
+                            (true, _) | (false, None) => None,
+                            (false, Some(preparer)) => Some(preparer.prepare_turn().await?),
+                        };
+                    let current_hosted_tools = if participant_finalization_turn {
+                        &[][..]
+                    } else {
+                        prepared_hosted_turn
+                            .as_ref()
+                            .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice())
                     };
-                    let current_hosted_tools = prepared_hosted_turn
-                        .as_ref()
-                        .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice());
                     request.hosted_tools = current_hosted_tools.to_vec();
                     let current_hosted_processor = prepared_hosted_turn
                         .as_ref()
@@ -1708,6 +1745,19 @@ where
             }
 
             if !completed_calls.is_empty() {
+                let changed_files_before_batch = outcome.changed_files.len();
+                let participant_read_calls_in_batch = if is_task_participant {
+                    completed_calls
+                        .iter()
+                        .filter(|call| {
+                            tools
+                                .spec_for(&call.name)
+                                .is_some_and(|spec| spec.access == ToolAccess::Read)
+                        })
+                        .count()
+                } else {
+                    0
+                };
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
@@ -2006,6 +2056,20 @@ where
                         return Err(error);
                     }
                 }
+                if is_task_participant {
+                    if outcome.changed_files.len() > changed_files_before_batch {
+                        participant_post_mutation_read_calls = 0;
+                    } else if !outcome.changed_files.is_empty() {
+                        participant_post_mutation_read_calls = participant_post_mutation_read_calls
+                            .saturating_add(participant_read_calls_in_batch);
+                        if participant_post_mutation_read_calls
+                            >= TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT
+                            && !participant_finalization_dispatched
+                        {
+                            participant_finalization_pending = true;
+                        }
+                    }
+                }
                 let settled_join_context = match agent_delegate.as_deref_mut() {
                     Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,
                     None => None,
@@ -2206,6 +2270,30 @@ where
                 ))?;
                 transient_context.push(ModelMessage::user(blocker_prompt));
                 continue;
+            }
+            if participant_finalization_dispatched && assistant_text.trim().is_empty() {
+                handler.handle(RunEvent::Notice(
+                    "task participant finalization returned no bounded result".to_owned(),
+                ))?;
+                outcome.terminal_reason = AgentRunTerminalReason::MaxTurns;
+                outcome.tool_calls = total_tool_calls;
+                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
+                append_run_lifecycle_events(
+                    session,
+                    "interrupted",
+                    outcome.terminal_reason,
+                    None,
+                    total_tool_calls,
+                )?;
+                return Ok(AgentRunOutput {
+                    result: AgentRunResult {
+                        final_text: String::new(),
+                        tool_calls: total_tool_calls,
+                        final_message_id: None,
+                    },
+                    outcome,
+                    disposition: AgentRunDisposition::Interrupted,
+                });
             }
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let mut hosted_finalized = hosted_finalized;

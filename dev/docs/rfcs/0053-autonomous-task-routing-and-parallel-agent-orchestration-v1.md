@@ -366,6 +366,10 @@ pub intent_refs: Vec<IntentVersionRef>;
   verification policy/check 由 host 绑定到产生 mutation 的 step 并在 participant 结束后执行，
   不能生成一个缺少 verification tool 的模型 participant 去反复探测。`TaskStepMode::Verify`
   继续保留为持久化与系统/导入 plan 的兼容语义，但 runtime 不把模型只读结论升级为系统证据。
+- mutation 已发生的 Task participant 只保留有界 read-only 收敛尾部；超过额度或即将耗尽
+  `max_turns` 时，host 注入 route-fingerprinted finalization contract，并在最后一轮同时移除
+  client/hosted tools。模型必须返回 bounded result；空结果继续记为 Interrupted，不能把已写入
+  workspace 但未收口的 participant 误报为 completed。该约束不作用于 ordinary conversation。
 
 ### 7.4 Plan mode handoff
 

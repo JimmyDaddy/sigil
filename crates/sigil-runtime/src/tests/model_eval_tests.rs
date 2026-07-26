@@ -15,8 +15,11 @@ use sigil_kernel::{
     TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
     TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
-    continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
-    task_routing_system_prompt_contract_material, write_file_with_mutation,
+    changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
+    request_task_planning_tool_spec, runtime_context_v1_system_prompt_contract_material,
+    task_participant_finalization_prompt_contract_material,
+    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
+    write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -25,6 +28,7 @@ use tokio::{
 };
 
 use crate::{
+    agent_supervisor::task_discovery_system_prompt,
     application_run::ApplicationRunServices,
     model_eval::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalOrchestrationRouteContractV1,
@@ -242,6 +246,21 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     assert_eq!(
         first.routing_prompt_digest,
         format!("sha256:{:x}", Sha256::digest(expected_routing_material))
+    );
+    let mut expected_system_material = b"sigil-orchestration-system-prompt-v1\0".to_vec();
+    expected_system_material.extend(
+        serde_json::to_vec(&serde_json::json!({
+            "runtime_context": runtime_context_v1_system_prompt_contract_material(),
+            "changeset_only_child": changeset_only_child_contract_prompt(),
+            "planner_discovery": task_discovery_system_prompt(),
+            "task_participant": task_participant_system_prompt_contract_material(),
+            "task_participant_finalization": task_participant_finalization_prompt_contract_material(),
+        }))
+        .expect("serialize system prompt contract material"),
+    );
+    assert_eq!(
+        first.system_prompt_digest,
+        format!("sha256:{:x}", Sha256::digest(expected_system_material))
     );
     assert!(first.sigil_build.ends_with(&first.sigil_commit));
 }

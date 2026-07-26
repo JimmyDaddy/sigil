@@ -48,6 +48,13 @@ pub fn task_participant_system_prompt_contract_material() -> &'static str {
     "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. When the host supplies direct dependency results, treat them as the authoritative handoff; do not search for or invent result files. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
 }
 
+/// Stable host-owned convergence instruction for a participant that already mutated its workspace
+/// but keeps spending turns on read-only tail work.
+#[must_use]
+pub fn task_participant_finalization_prompt_contract_material() -> &'static str {
+    "The accepted task step has already produced a workspace mutation and then used its bounded read-only convergence allowance without producing a final answer. Client and hosted tools are disabled for this finalization turn. Return a concise final result now: state what changed, name any known limitation, and do not request or describe additional tool work."
+}
+
 pub(super) fn planner_prompt(
     objective: &str,
     worktree_availability: TaskPlannerWorktreeAvailability,

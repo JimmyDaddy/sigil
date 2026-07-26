@@ -109,6 +109,7 @@ use prompts::{
     task_synthesis_prompt,
 };
 pub use prompts::{
+    task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
     task_planner_system_prompt_contract_material,
 };

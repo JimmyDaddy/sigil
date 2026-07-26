@@ -42,13 +42,14 @@ use crate::{
     ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
     ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
     VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    plan_text_hash, task_participant_system_prompt_contract_material,
-    task_routing_system_prompt_contract_material,
+    plan_text_hash, task_participant_finalization_prompt_contract_material,
+    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 
 use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
-    AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext, emit_tool_result,
+    AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
+    TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, emit_tool_result,
 };
 
 struct MockProvider;
@@ -512,6 +513,10 @@ struct ForegroundTerminalProvider {
     tool_completed: Arc<AtomicBool>,
 }
 struct WorkspaceMutationToolProvider;
+struct PostMutationReadLoopProvider {
+    calls: Arc<AtomicUsize>,
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
 
 #[async_trait]
 impl Provider for ToolSideEffectProvider {
@@ -725,6 +730,60 @@ impl Provider for WorkspaceMutationToolProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+#[async_trait]
+impl Provider for PostMutationReadLoopProvider {
+    fn name(&self) -> &str {
+        "mock-post-mutation-read-loop"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let tools_disabled = request.tools.is_empty();
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if tools_disabled {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "mutation complete after bounded inspection".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+
+        let (name, args_json) = if call_index == 0 {
+            ("workspace_mutation", "{}")
+        } else {
+            ("echo", r#"{"value":"inspect again"}"#)
+        };
+        let call_id = format!("call-post-mutation-{call_index}");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: call_id.clone(),
+                name: name.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: call_id.clone(),
+                delta: args_json.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: call_id,
+                name: name.to_owned(),
+                args_json: args_json.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 
@@ -1270,7 +1329,10 @@ impl Tool for WorkspaceMutatingCustomTool {
             call_id,
             "workspace_mutation",
             "mutated workspace",
-            ToolResultMeta::default(),
+            ToolResultMeta {
+                changed_files: vec!["mutated.txt".to_owned()],
+                ..ToolResultMeta::default()
+            },
         ))
     }
 }
@@ -5039,6 +5101,150 @@ async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<(
         .position(|message| message.content.as_deref() == Some(step_prompt))
         .expect("participant request should include the step prompt");
     assert!(contract_index < prompt_index);
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_forces_toolless_finalization_after_post_mutation_read_tail() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WorkspaceMutatingCustomTool));
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        PostMutationReadLoopProvider {
+            calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-post-mutation-read-loop", "mock-model").with_store(store);
+    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "Apply the accepted mutation and return the result.",
+    )])
+    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+        task_id: TaskId::new("task-convergence")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("write-step")?,
+        attempt_id: TaskParticipantAttemptId::new("participant-convergence-1")?,
+    }));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(20),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.result.final_text,
+        "mutation complete after bounded inspection"
+    );
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswer
+    );
+    assert_eq!(
+        output.result.tool_calls,
+        TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 1
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 2
+    );
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    let final_request = requests.last().expect("finalization request");
+    assert!(final_request.tools.is_empty());
+    assert!(final_request.hosted_tools.is_empty());
+    assert!(final_request.messages.iter().any(|message| {
+        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
+    }));
+    assert!(
+        requests[..requests.len() - 1]
+            .iter()
+            .all(|request| !request.tools.is_empty())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WorkspaceMutatingCustomTool));
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        PostMutationReadLoopProvider {
+            calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-post-mutation-read-loop", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("Keep inspecting."),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(8),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::MaxTurns
+    );
+    assert_eq!(output.disposition, AgentRunDisposition::Interrupted);
+    assert_eq!(calls.load(Ordering::SeqCst), 8);
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert!(requests.iter().all(|request| !request.tools.is_empty()));
+    assert!(requests.iter().all(|request| {
+        request.messages.iter().all(|message| {
+            message.content.as_deref()
+                != Some(task_participant_finalization_prompt_contract_material())
+        })
+    }));
     Ok(())
 }
 
