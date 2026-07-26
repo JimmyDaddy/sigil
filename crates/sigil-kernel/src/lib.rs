@@ -514,7 +514,8 @@ pub use task_handoff::{
     REQUEST_TASK_PLANNING_TOOL_NAME, TaskAdmissionReason, TaskAdmissionTrigger,
     TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffProjectionEntry,
     TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskPlanningHandoffBinding,
-    continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+    continue_without_task_planning_tool_spec,
+    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
     task_planning_reason_codes, task_routing_system_prompt_contract_material,
     validate_continue_without_task_planning_call,
 };

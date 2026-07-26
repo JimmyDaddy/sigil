@@ -11,7 +11,8 @@ use sigil_kernel::{
     AgentRole, ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES, ORCHESTRATION_EVAL_MIN_POSITIVE_CASES,
     OrchestrationEvalCaseClass, RootConfig, ToolRegistry, ToolRegistryScope, ToolSpec,
     WorkspaceTrust, changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
-    request_task_planning_tool_spec, runtime_context_v1_system_prompt_contract_material,
+    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
+    runtime_context_v1_system_prompt_contract_material,
     task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_plan_update_tool_spec,
     task_planner_prompt_contract_material, task_routing_system_prompt_contract_material,
@@ -105,6 +106,7 @@ pub fn build_model_eval_orchestration_route_contract(
         b"sigil-orchestration-routing-prompt-v1\0",
         &json!({
             "system_prompt": task_routing_system_prompt_contract_material(),
+            "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
             "tools": [
                 request_task_planning_tool_spec(),
                 continue_without_task_planning_tool_spec(),

@@ -37,6 +37,12 @@ Read-only does not automatically mean simple. Comparative research across multip
 Do not inspect files, run commands, edit code, start solving the task, or produce free text in this routing microturn. The host will either start the durable planner or begin an ordinary conversation turn after your typed decision."#
 }
 
+/// Stable host-owned transition contract after the model selects ordinary conversation.
+#[must_use]
+pub fn direct_conversation_continuation_prompt_contract_material() -> &'static str {
+    "The routing-only microturn is complete and the typed decision selected an ordinary conversation turn. Fulfill the original user request now, using the ordinary tools advertised in this request when they are needed. Do not discuss or restate the routing decision, announce future work, or stop at an intention to act. Return a final answer only after the requested outcome is complete or you can truthfully report a concrete blocker."
+}
+
 /// Stable identity for one conversation-to-task handoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]

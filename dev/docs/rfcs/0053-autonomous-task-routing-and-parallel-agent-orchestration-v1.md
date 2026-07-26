@@ -370,6 +370,10 @@ pub intent_refs: Vec<IntentVersionRef>;
   `max_turns` 时，host 注入 route-fingerprinted finalization contract，并在最后一轮同时移除
   client/hosted tools。模型必须返回 bounded result；空结果继续记为 Interrupted，不能把已写入
   workspace 但未收口的 participant 误报为 completed。该约束不作用于 ordinary conversation。
+- `continue_without_task_planning` 的 typed negative decision 结束 routing-only microturn 后，
+  host 必须注入 route-fingerprinted direct-execution continuation contract，再恢复 ordinary
+  tools。模型需要执行原请求，不能只复述 routing decision、宣布将要行动后直接结束；该转换仍由
+  模型的 typed semantic decision 驱动，不扫描用户 prompt 关键词。
 
 ### 7.4 Plan mode handoff
 

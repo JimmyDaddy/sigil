@@ -32,7 +32,8 @@ use crate::{
     task_handoff::{
         CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef,
         REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId, TaskPlanningHandoffBinding,
-        continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+        continue_without_task_planning_tool_spec,
+        direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
         task_routing_system_prompt_contract_material,
     },
     task_orchestrator::{
@@ -2094,6 +2095,9 @@ where
                 }
                 if accepted_direct_conversation {
                     task_routing_decision_pending = false;
+                    transient_context.push(ModelMessage::system(
+                        direct_conversation_continuation_prompt_contract_material(),
+                    ));
                 } else if task_routing_decision_pending {
                     if !task_routing_retry_used {
                         task_routing_retry_used = true;

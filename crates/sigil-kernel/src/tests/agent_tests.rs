@@ -42,7 +42,8 @@ use crate::{
     ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
     ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
     VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    plan_text_hash, task_participant_finalization_prompt_contract_material,
+    direct_conversation_continuation_prompt_contract_material, plan_text_hash,
+    task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 
@@ -5038,6 +5039,10 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
     assert!(requests[1].tools.iter().all(|tool| {
         tool.name != REQUEST_TASK_PLANNING_TOOL_NAME
             && tool.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+    }));
+    assert!(requests[1].messages.iter().any(|message| {
+        message.content.as_deref()
+            == Some(direct_conversation_continuation_prompt_contract_material())
     }));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
     Ok(())

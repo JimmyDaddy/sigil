@@ -16,7 +16,8 @@ use sigil_kernel::{
     TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
     changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
-    request_task_planning_tool_spec, runtime_context_v1_system_prompt_contract_material,
+    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
+    runtime_context_v1_system_prompt_contract_material,
     task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
     write_file_with_mutation,
@@ -236,6 +237,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     expected_routing_material.extend(
         serde_json::to_vec(&serde_json::json!({
             "system_prompt": task_routing_system_prompt_contract_material(),
+            "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
             "tools": [
                 request_task_planning_tool_spec(),
                 continue_without_task_planning_tool_spec(),
