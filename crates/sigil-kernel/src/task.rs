@@ -743,7 +743,7 @@ pub fn task_guidance_apply_result_content(entry: &TaskGuidanceAppliedEntry) -> S
 pub fn task_plan_update_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. Use subagent_write for changeset-only proposals or physically isolated worktree edits."
+        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation when a delegated child must implement and integrate changes."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -774,7 +774,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
-                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. Use subagent_write with changeset_only for proposal-only work or worktree for a physically isolated writer."
+                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree for a physically isolated writer that must implement and integrate changes."
                             },
                             "depends_on": {
                                 "type": "array",
@@ -792,7 +792,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "isolation": {
                                 "type": "string",
                                 "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
-                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only or worktree. Read/review/verify steps always use shared_read_only."
+                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only or worktree. changeset_only produces a proposal and pauses for manual merge review; use worktree for delegated implementation. Read/review/verify steps always use shared_read_only."
                             }
                         },
                         "required": ["step_id", "title", "role"],

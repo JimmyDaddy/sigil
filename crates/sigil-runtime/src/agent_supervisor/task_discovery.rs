@@ -477,7 +477,7 @@ impl Tool for TaskDiscoveryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
-            description: "Run one host-owned batch of independent read-only Explore probes before producing the task plan. Call at most once in this planning attempt. The host waits for all terminal results and resumes this planner automatically; never call wait_agent.".to_owned(),
+            description: "Run one host-owned batch of independent read-only Explore probes before producing the task plan. Call exactly once when a required repository target is described only by a component, subsystem, feature, language, or workstream name rather than an explicit workspace-relative path. The host waits for all terminal results and resumes this planner automatically; never guess paths, call this tool again, or call wait_agent.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

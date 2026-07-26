@@ -904,12 +904,17 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
 
     assert!(prompt.contains("request_task_discovery exactly once"));
     assert!(prompt.contains("spawn_agents, or wait_agent"));
-    assert!(prompt.contains("Bind every planned path and target"));
+    assert!(prompt.contains("Bind every planned path and target verbatim"));
+    assert!(prompt.contains("never poll or guess a language"));
+    assert!(prompt.contains("direct durable handoffs"));
+    assert!(prompt.contains("analysis-only or no-modification"));
+    assert!(prompt.contains("shared_read_only isolation"));
     assert!(prompt.contains("omit speculative test-writing"));
     assert!(prompt.contains("role executor for ordinary task-participant reads and edits"));
     assert!(prompt.contains("role subagent_read"));
-    assert!(prompt.contains("role subagent_write with isolation changeset_only"));
-    assert!(prompt.contains("isolation worktree"));
+    assert!(prompt.contains("changeset_only is proposal-only"));
+    assert!(prompt.contains("pauses for manual merge review"));
+    assert!(prompt.contains("role subagent_write with isolation worktree"));
     assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
 }
 
@@ -917,12 +922,17 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
 fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
     let planner = task_planner_system_prompt_contract_material();
     assert!(planner.contains("overrides the ordinary instruction to inspect the workspace"));
-    assert!(planner.contains("request_task_discovery at most once"));
-    assert!(planner.contains("must come from the objective or a completed discovery result"));
+    assert!(planner.contains("request_task_discovery exactly once"));
+    assert!(planner.contains("A component, subsystem, feature, language, or workstream name"));
+    assert!(planner.contains("come verbatim from the objective or a completed discovery result"));
+    assert!(planner.contains("returned directly and durably to the host"));
+    assert!(planner.contains("analysis-only or no-modification objective"));
+    assert!(planner.contains("shared_read_only isolation"));
     assert!(planner.contains("configured acceptance checks"));
     assert!(planner.contains("only when the objective explicitly requests test changes"));
-    assert!(planner.contains("do not add a generic repository-overview step"));
-    assert!(planner.contains("do not add a separate summary"));
+    assert!(planner.contains("unchanged-file confirmation step"));
+    assert!(planner.contains("changeset_only creates a proposal"));
+    assert!(planner.contains("pauses for manual merge review"));
     assert!(task_planner_prompt_contract_material().contains(planner));
 
     let participant = task_participant_system_prompt_contract_material();

@@ -497,11 +497,10 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
         spec.description
             .contains("executor for ordinary main-session")
     );
-    assert!(spec.description.contains("changeset-only proposals"));
-    assert!(
-        spec.description
-            .contains("physically isolated worktree edits")
-    );
+    assert!(spec.description.contains("changeset_only is proposal-only"));
+    assert!(spec.description.contains("pauses for manual merge review"));
+    assert!(spec.description.contains("explicit objective paths"));
+    assert!(spec.description.contains("worktree isolation"));
     assert!(spec.input_schema.to_string().contains("display_name"));
     assert!(spec.input_schema.to_string().contains("depends_on"));
     assert!(spec.input_schema.to_string().contains("shared_read_only"));

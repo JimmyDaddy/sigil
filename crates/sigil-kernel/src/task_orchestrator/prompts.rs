@@ -7,7 +7,37 @@ use super::*;
 /// consume the planner's turn budget before it commits a plan.
 #[must_use]
 pub fn task_planner_system_prompt_contract_material() -> &'static str {
-    "You are the isolated planner for one durable task. This planning phase overrides the ordinary instruction to inspect the workspace directly: do not call repository, shell, terminal, generic task, or agent tools. If repository facts are genuinely required, call request_task_discovery at most once with bounded non-overlapping probes; otherwise call task_plan_update immediately. Use only tool names advertised in the current request and stop as soon as task_plan_update succeeds.\n\nCreate the smallest executable plan that satisfies the objective. Every file, module, test target, or command named by the plan must come from the objective or a completed discovery result; never infer neighboring tests, fixtures, documentation, or handoff files. When the objective already names exact modules, files, or independent workstreams, plan those directly and do not add a generic repository-overview step. The host performs final synthesis and configured acceptance checks after mutation or integration, so do not add a separate summary, report-writing, synthesis, compilation, or test-running step. Add a step that changes tests only when the objective explicitly requests test changes or discovery proves an exact existing test target is required. Keep independent read-only investigations dependency-free and assign them to subagent_read when parallel exploration is useful. Use executor for ordinary main-workspace reads and edits. Use subagent_write only for changeset_only proposals or worktree-isolated edits. Never invent a tool name."
+    concat!(
+        "You are the isolated planner for one durable task. This planning phase overrides the ",
+        "ordinary instruction to inspect the workspace directly: do not call repository, shell, ",
+        "terminal, generic task, or agent tools. If any executable step needs repository facts ",
+        "that are not explicit workspace-relative paths in the objective, you MUST call ",
+        "request_task_discovery exactly once with bounded non-overlapping probes before planning. ",
+        "A component, subsystem, feature, language, or workstream name is not a path and must ",
+        "never be expanded into guessed files. If all required repository paths are already ",
+        "explicit, call task_plan_update immediately. Use only tool names advertised in the ",
+        "current request and stop as soon as task_plan_update succeeds.\n\n",
+        "Create the smallest executable plan that satisfies the objective. Every file, module, ",
+        "test target, or command named by the plan must come verbatim from the objective or a ",
+        "completed discovery result; never infer neighboring tests, fixtures, documentation, ",
+        "package manifests, or handoff files. Participant results are returned directly and ",
+        "durably to the host. Never plan an intermediate report or handoff file unless the ",
+        "objective explicitly requires that persistent workspace artifact. For an analysis-only ",
+        "or no-modification objective, every step must use read or review mode with ",
+        "shared_read_only isolation; the host produces the final synthesis from participant ",
+        "results, so never add a write-mode synthesis step. Keep independent read-only ",
+        "investigations dependency-free and assign them to subagent_read when parallel ",
+        "exploration is useful.\n\n",
+        "The host performs final synthesis and configured acceptance checks after mutation or ",
+        "integration. Do not add a separate summary, report-writing, synthesis, compilation, ",
+        "test-running, acceptance-only, or unchanged-file confirmation step. Add a step that ",
+        "changes tests only when the objective explicitly requests test changes or discovery ",
+        "proves an exact existing test target is required. Use executor for ordinary ",
+        "main-workspace reads and edits. changeset_only creates a proposal that pauses for ",
+        "manual merge review; use it only when the objective explicitly requests a proposal or ",
+        "review. When a delegated child must implement and integrate changes, use worktree ",
+        "isolation, or use executor for sequential workspace edits. Never invent a tool name."
+    )
 }
 
 /// Stable system-level contract for one accepted task-plan participant.
@@ -18,7 +48,7 @@ pub fn task_participant_system_prompt_contract_material() -> &'static str {
 
 pub(super) fn planner_prompt(objective: &str) -> String {
     format!(
-        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. After task_plan_update succeeds, stop; do not inspect files, execute steps, or summarize execution progress. Do not call generic task, spawn_agent, spawn_agents, or wait_agent tools. When independent repository facts are genuinely needed before planning, you may call planner-only request_task_discovery exactly once with non-overlapping probes; the host returns all bounded results automatically, so never poll. Bind every planned path and target to the objective or those returned discovery results. The host runs configured acceptance checks, so omit speculative test-writing, compilation, and check-only steps. Use role executor for ordinary task-participant reads and edits, including sequential_workspace_write steps. To delegate read-only research during execution, add role subagent_read steps. Use role subagent_write with isolation changeset_only for proposal-only work, or isolation worktree when the child must edit and test inside a physical isolated checkout; do not pair subagent_write with sequential_workspace_write. If the objective contains a user-approved plan, preserve its stated scope and order; only add, remove, or reorder steps when needed for correctness, and include the reason in the affected step detail.\n\nObjective:\n{objective}"
+        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. After task_plan_update succeeds, stop; do not inspect files, execute steps, or summarize execution progress. Do not call generic task, spawn_agent, spawn_agents, or wait_agent tools. If a required repository target is described only by a component, subsystem, feature, language, or workstream name instead of an explicit workspace-relative path, call planner-only request_task_discovery exactly once with non-overlapping probes before planning. The host returns all bounded results automatically, so never poll or guess a language, file, directory, package manifest, test, or report path. Bind every planned path and target verbatim to the objective or returned discovery results. Participant outputs are direct durable handoffs; do not create report files for communication unless the objective explicitly requests a persistent workspace artifact. For analysis-only or no-modification work, use only read or review steps with shared_read_only isolation and let the host synthesize the final response. The host also runs configured acceptance checks, so omit speculative test-writing, compilation, check-only, unchanged-file confirmation, report-writing, and synthesis steps. Use role executor for ordinary task-participant reads and edits, including sequential_workspace_write steps. To delegate read-only research during execution, add role subagent_read steps. changeset_only is proposal-only and pauses for manual merge review; select it only when the objective explicitly requests a proposal or review. Use role subagent_write with isolation worktree when a delegated child must implement and integrate changes, or use executor for sequential workspace edits; do not pair subagent_write with sequential_workspace_write. If the objective contains a user-approved plan, preserve its stated scope and order; only add, remove, or reorder steps when needed for correctness, and include the reason in the affected step detail.\n\nObjective:\n{objective}"
     )
 }
 

@@ -2790,6 +2790,15 @@ fn planner_runtime_tool_view_exposes_only_bounded_discovery() {
             .spec_for(REQUEST_TASK_DISCOVERY_TOOL_NAME)
             .is_some()
     );
+    let discovery = with_discovery
+        .spec_for(REQUEST_TASK_DISCOVERY_TOOL_NAME)
+        .expect("planner discovery tool");
+    assert!(
+        discovery
+            .description
+            .contains("rather than an explicit workspace-relative path")
+    );
+    assert!(discovery.description.contains("never guess paths"));
     assert!(with_discovery.spec_for("read_file").is_none());
     assert!(base.spec_for("read_file").is_some());
     assert!(
