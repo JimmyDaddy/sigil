@@ -3063,7 +3063,7 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
             })
             .with_cancellation(cancellation.handle());
     let mut handler = RecordingEventHandler::default();
-    let mut approval = AutoApproveHandler;
+    let mut approval = CountingApprovalHandler::default();
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -3089,6 +3089,10 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
     .expect("planner discovery should complete without polling")?;
 
     assert_eq!(output.accepted_plan.plan_version, 1);
+    assert_eq!(
+        approval.decisions, 0,
+        "bounded read-only planner discovery must not request headless execution approval"
+    );
     assert_eq!(max_active.load(Ordering::SeqCst), 2);
     assert_eq!(active.load(Ordering::SeqCst), 0);
     let results = observed_results

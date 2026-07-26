@@ -509,7 +509,7 @@ impl Tool for TaskDiscoveryTool {
                 "additionalProperties": false
             }),
             category: ToolCategory::Agent,
-            access: ToolAccess::Execute,
+            access: ToolAccess::Read,
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
