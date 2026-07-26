@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a-O8b implemented；O8c harness、typed routing microturn 与 confirmed-pre-dispatch connect retry implemented，O8c qualified real-model evidence、O8d deferred
+状态：accepted / O0-O8d implementation complete；每个 release route 的 `auto + proactive` 激活仍由 exact-build qualified manifest 独立决定，源码与 legacy 默认保持 fail-closed
 
 创建日期：2026-07-22
 
@@ -29,12 +29,15 @@ Sigil 已有 durable task、planner/executor/subagent role、agent profile、chi
 append-only task projection 和 task DAG。下列列表同时保留 RFC 建立时的历史基线与当前剩余；
 已经由 O2-O6b2b 关闭的项目必须按实现检查点理解，不能作为待办重复实施：
 
-- RFC 建立时普通 chat 只有显式 `/task`；O2 已接入 structured task admission，剩余问题是
-  HTTP/Desktop parity、默认 rollout 和真实 routing eval。
-- `[task].routing_policy` 已在 O1 加入兼容解析，并由 O2 接入 TUI 普通输入；`default_mode` 只保留 composer 偏好语义。Production HTTP/Desktop 已附加 foreground task executor，但完整 Task control/recovery parity 尚未完成，兼容默认值继续保持 manual。
+- RFC 建立时普通 chat 只有显式 `/task`；O2 已接入 structured task admission，O8b 已完成
+  HTTP/Desktop parity，O8c/O8d 已把默认切换收窄为每个 exact release route 的外部准入事实。
+- `[task].routing_policy` 已在 O1 加入兼容解析，并由 O2 接入 TUI 普通输入；`default_mode`
+  只保留 composer 偏好语义。Production HTTP/Desktop 已共享 foreground executor、typed control
+  与 restart recovery contract。
 - `multi_agent_mode = "explicit_request_only"` 是默认值，`spawn_agent` 描述明确禁止因任务复杂而主动委派。
 - O1 之前 `multi_agent_mode` 只停留在模型提示层；当前 runtime spawn admission 已在 provider、budget 和 thread 创建前执行硬检查。
-- ordinary chat 的显式 delegation hard gate 在 kernel 有类型和测试，但 TUI 生产输入没有稳定绑定。
+- ordinary chat 的显式 delegation 使用 exact proposal approval 与 typed invocation grant；
+  TUI 不扫描自然语言关键词铸造 authority。
 - O4b3a 之前 planner 不能先声明一组受控 Explore probes，再利用并行调研结果形成计划；当前
   TUI Task planner 已接入一次性的 host-owned read-only discovery batch。
 - O5a 之前 task scheduler 虽能选出 `read_only_batch`，runner 仍对 batch 中的步骤逐项 `.await`；当前 shared-read-only participant 已进入真实并发执行。
@@ -1010,10 +1013,11 @@ allow_write_subagents = true
 - O0 事实基线已落地：RFC-0007 和回归测试明确当前只有 ready batching，runner 仍串行；planner internal prompt 污染的基线断言已在 O2 翻转为 transient-only。
 - O1a 已落地安全基础：`multi_agent_mode` 在 provider、budget reservation 和 `AgentThreadStarted` 之前 fail closed；`none` 同时覆盖 model spawn 与 `@profile`。生产 runtime 不再暴露 ambient authority setter，模型工具参数不能提供 authority。每次成功启动前追加 `AgentDelegationAdmitted`，绑定 thread、profile、mode、source、objective hash 与冻结后的 tool-contract fingerprint。
 - O1b 已落地第一阶段：child 的 ancestor、parent、role、profile materialized policies 在 concrete ToolSpec、operation、network effect 和 subjects 上逐层求最严格决策；prepared execution 复用同一 policy chain。invocation-scoped permission grant 尚未实现，不得把当前实现描述为四层 permission meet。
-- O1e 尚未落地：普通自然语言输入在 `explicit_request_only` 下还不能形成 host-owned
-  delegation authority；当前只有 `@profile` 和 accepted TaskPlan 等 typed source 可以获得
-  authority。invocation-scoped grant、确认后的 natural-language delegation handoff 和逐 tool-call
-  revalidation 必须在默认切换前完成。
+- O1e 已落地：普通自然语言只允许模型提出 typed delegation proposal，用户对 exact proposal
+  的显式确认才会形成 host-owned `UserExplicit` authority；`@profile` 与 accepted TaskPlan
+  继续使用各自 typed source。invocation-scoped grant 绑定 root logical run、cancellation、
+  workspace snapshot、profile/role/isolation、权限与网络 upper bound、tool-contract fingerprint
+  和 expiry，并在 provider admission 前重新校验。
 - O1c 已落地：proactive Explore 基于冻结 registry 的实际 ToolSpec、network effect 和 `ToolMutationTracking` 证明；Custom/MCP 默认 unknown，已审计的本地只读 Custom tool 显式声明 `None`；detachable 分支复用同一证明。
 - O1d 已落地配置基础：新增 `routing_policy = "manual" | "auto"`，缺字段保持 `manual`；O2 已接入生产 consumer，兼容迁移 warning 和新安装默认值仍留待 O8。
 - O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。O8b 已让 production HTTP/Desktop 附加同一 foreground executor/synthesis、typed control 与 restart recovery contract。
@@ -1857,10 +1861,12 @@ TLS handshake EOF 在任何可确认的 provider 输出前失败，route gate �
   effect、改变冻结身份或不是该 rejection 时 fail closed 为 stale/non-retryable。最终 effective
   attempt 仍决定 Delivered/Rejected/Stale 或 429 retry proof。
 
-O8c 尚未完成：仍需从包含 typed routing microturn 和上述 retry contract 的新 HEAD 重建同一候选
-release 与 route contract，重新通过 deterministic、PTY 和目标 provider route 的
-30 case × 3 真实模型报告，最终得到 `qualified` route gate。运行仍须由 release owner 显式确认
-route 与成本准入；在此之前 O8d 继续被阻止。
+O8c 的实现与准入协议已经完成。qualification 不作为可漂移的源码布尔值保存：release owner
+必须从最终候选 binary 生成 route contract，并对同一 commit/build/config/prompt/tool/corpus
+identity 重新执行 deterministic、PTY、chaos 与目标 provider route 的 30 case × 3 真实模型
+报告。只有报告自身产生 `qualified` route gate 时，后续 release assembly 才能生成 sidecar；
+旧候选、不同 task config（包括 `auto + explicit_request_only`）或不同 build 的成功报告都不能
+授权 `auto + proactive`。
 
 O8d：默认切换、迁移与回滚。
 
@@ -1881,6 +1887,23 @@ O8d：默认切换、迁移与回滚。
   handoff/proactive spawn；rollback 不需要删除 durable task history。
 - README、EN/ZH user/config/safety 文档、migration note、doctor 和 setup 默认展示必须与真实
   binary 一致。
+
+O8d implementation checkpoint（2026-07-27）：
+
+- `sigil-runtime` 从完整 qualified report 生成 path-free
+  `sigil-orchestration-rollout-v1.json`。加载器拒绝 symlink、非普通文件、超限 JSON、未知字段、
+  stale build/commit、identity digest 漂移、不完整 repetition、阈值失败与任何 hard invariant。
+- Quick Setup 只在缺少配置时计算候选 `auto + proactive` task digest，并要求 provider adapter、
+  provider kind、官方 endpoint family、canonical model、build 与 digest 全部精确匹配；其他
+  route、缺少/无效 sidecar 与 custom endpoint 都保持 `manual + explicit_request_only`。已有配置
+  与 legacy `default_mode=chat` 不进入该写入路径。
+- route-local kill switch 在 conversation handoff 与 exact agent spawn admission 前从 typed durable
+  facts 计算；触发后同一 session/build 的后续输入同时降级 routing policy 与 multi-agent mode，
+  但 accepted TaskPlan authority、恢复和 durable Task history 保留。Doctor 同时展示 coarse
+  rollback、release qualification 和 session-local report handle。
+- release archive 只允许由 exact built binary 消费 report 并 create-new sidecar；npm platform
+  package 与 Homebrew 将 sidecar 安装在 binary 旁。Release workflow 的 URL + SHA-256 输入成对
+  出现并由每个 native binary 再次校验；不提供输入的普通 release 合法地保持保守默认。
 
 O8 退出条件：满足第 22 节 Definition of Done 和上述冻结阈值；阈值只能通过 RFC amendment
 调整，不能在实现时临时放宽。
@@ -1942,7 +1965,9 @@ RFC-0053 只有同时满足以下条件才算完成：
 
 ## 23. Rollout rule
 
-实现期默认保持现有 `manual + explicit_request_only`，按剩余 slice 逐项落地并开启内部 dogfood。
+源码 schema、legacy load 与没有 qualified sidecar 的 release 始终保持
+`manual + explicit_request_only`；新安装是否启用自动编排由安装 binary 旁的 exact-route
+qualified sidecar 决定。
 
 只有同时满足以下指标，才将新安装默认切换为 `routing_policy = "auto"`、
 `multi_agent_mode = "proactive"`：

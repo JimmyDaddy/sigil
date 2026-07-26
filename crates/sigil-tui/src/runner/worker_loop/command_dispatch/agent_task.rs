@@ -1,3 +1,4 @@
+use super::super::agent_runtime::effective_orchestration_root_config;
 use super::*;
 
 pub(super) fn dispatch_agent_task_command<P>(
@@ -66,9 +67,11 @@ where
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
                     state.agent.supervisor.clone(),
-                    root_config.clone(),
+                    effective_root_config,
                     agent.tool_registry().clone(),
                 )
                 .with_background_runs(state.agent.background_runs.clone());
@@ -259,6 +262,8 @@ where
                 let cancellation_target = RunCancellationTarget::Task {
                     task_id: task_id_value.clone(),
                 };
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let handle = spawn_skill_child_run(
                     runtime,
                     SkillChildRunSpawn {
@@ -271,7 +276,7 @@ where
                         skill_id,
                         arguments,
                         loaded,
-                        root_config: root_config.clone(),
+                        root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
@@ -387,6 +392,8 @@ where
                 let cancellation_target = RunCancellationTarget::Task {
                     task_id: task_id_value.clone(),
                 };
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -396,7 +403,7 @@ where
                         task_id_value,
                         parent_session_ref,
                         objective: prompt,
-                        root_config: root_config.clone(),
+                        root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
@@ -499,6 +506,8 @@ where
                 let cancellation_target = RunCancellationTarget::Task {
                     task_id: task_id_value.clone(),
                 };
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let handle = if needs_planning {
                     spawn_task_run(
                         runtime,
@@ -509,7 +518,7 @@ where
                             task_id_value,
                             parent_session_ref,
                             objective,
-                            root_config: root_config.clone(),
+                            root_config: effective_root_config.clone(),
                             options: options.clone(),
                             base_registry: agent.tool_registry().clone(),
                             agent_supervisor: state.agent.supervisor.clone(),
@@ -534,7 +543,7 @@ where
                             objective,
                             guidance,
                             guidance_promotion: None,
-                            root_config: root_config.clone(),
+                            root_config: effective_root_config,
                             options: options.clone(),
                             base_registry: agent.tool_registry().clone(),
                             agent_supervisor: state.agent.supervisor.clone(),
@@ -696,6 +705,8 @@ where
                 let cancellation_target = RunCancellationTarget::Task {
                     task_id: created.task_id_value.clone(),
                 };
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -705,7 +716,7 @@ where
                         task_id_value: created.task_id_value,
                         parent_session_ref,
                         objective: created.objective,
-                        root_config: root_config.clone(),
+                        root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),

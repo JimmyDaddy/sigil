@@ -95,6 +95,13 @@ Color-token groups are surfaces, borders, text, accents, selection/buttons, stat
 
 Roles are `planner`, `executor`, `subagent_read`, and `subagent_write`.
 
+The table shows schema and legacy-compatible defaults. Quick Setup may write
+`auto + proactive` only for a new installation whose provider, model, endpoint,
+task-config digest, and binary build exactly match a qualified release manifest.
+Missing, invalid, stale, or non-matching manifests fail closed to
+`manual + explicit_request_only`; existing configuration files are never silently
+migrated.
+
 ## Permission
 
 | Section / field | Default | Purpose |

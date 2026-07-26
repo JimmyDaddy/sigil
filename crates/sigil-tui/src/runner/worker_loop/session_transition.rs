@@ -143,17 +143,20 @@ where
         ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
             .reconcile(&mut session, &parent_session_ref, current_unix_time_ms())
             .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))?;
+    let effective_root_config =
+        super::agent_runtime::effective_orchestration_root_config(root_config, &session);
 
     let target_agent_registry =
         sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            root_config,
+            &effective_root_config,
             workspace_root,
             session.entries(),
         )
         .map_err(|error| {
             format!("failed to rebuild agent profiles for target session: {error:#}")
         })?;
-    let target_agent_budget = sigil_runtime::AgentBudgetPolicy::from_root_config(root_config);
+    let target_agent_budget =
+        sigil_runtime::AgentBudgetPolicy::from_root_config(&effective_root_config);
     let target_agent_supervisor = sigil_runtime::AgentSupervisor::new(
         target_agent_registry.clone(),
         target_agent_budget.clone(),
@@ -164,7 +167,7 @@ where
         &mut target_tool_registry,
         target_agent_registry,
         target_agent_budget,
-        root_config.task.multi_agent_mode,
+        effective_root_config.task.multi_agent_mode,
     )
     .map_err(|error| format!("failed to rebuild agent tools for target session: {error:#}"))?;
 

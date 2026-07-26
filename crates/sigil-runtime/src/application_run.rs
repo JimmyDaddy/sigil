@@ -1985,7 +1985,7 @@ async fn prepare_application_run_internal(
         source: anyhow!(error).context("application run blocking preparation task failed"),
     })??;
     let BlockingApplicationRunPreparation {
-        root_config,
+        mut root_config,
         workspace_root,
         session_path,
         session_lease,
@@ -2009,6 +2009,17 @@ async fn prepare_application_run_internal(
         agent_invocation,
         task_agent_registry,
     } = prepared;
+    let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
+        session.provider_name(),
+        session.model_name(),
+        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+    );
+    if queued_first_request.is_none() {
+        orchestration_route_guard
+            .enforce(&mut session, current_unix_time_ms())
+            .map_err(ApplicationRunPrepareError::execution)?;
+    }
+    orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -2063,11 +2074,7 @@ async fn prepare_application_run_internal(
         task_execution.is_some(),
         root_config.task.routing_policy,
     )
-    .with_orchestration_route_guard(crate::OrchestrationRouteGuard::new(
-        &root_config.agent.provider,
-        &root_config.agent.model,
-        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
-    ));
+    .with_orchestration_route_guard(orchestration_route_guard);
     if queued_first_request.is_none() && agent_invocation.is_none() {
         conversation_coordinator
             .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())

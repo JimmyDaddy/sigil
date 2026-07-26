@@ -25,7 +25,18 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-`routing_policy` 与输入框的 `default_mode` 是两件事。兼容默认值为 `manual`，因此普通输入仍从对话开始。TUI 设为 `auto` 后，模型可以把复杂普通输入通过 typed handoff 交给 durable planner/executor；简单问题仍直接回答，而且 handoff 不会绕过写文件、shell、网络或 merge 审批。Planner、Executor、Subagent 与最终 Synthesis transcript 均保存在隔离 child session，parent 只保留 bounded result 和一个由 host 提交的正式 final。相互独立且已证明为 shared-read-only 的 Task step 可以并发执行；`max_parallel_read_steps` 与 `max_subagents` 共同限制 fan-out，host 仍按稳定的 plan 顺序向 parent 提交终态结果。相互独立的 `ChangesetOnly` 写子智能体 step 也可以并发，受 `max_parallel_changeset_steps` 与 `max_subagents` 共同限制；同批成员绑定同一份不可变 parent workspace snapshot，只生成 proposal 而不修改 parent workspace，parent 重新校验 snapshot 后才提交 proposal/review 记录。受支持的 Git 仓库还可以整批并发运行相互独立的 physical `Worktree` writer。Sigil 会冻结 exact clean 或安全 dirty/untracked baseline，把每个 child 绑定到独立 owned checkout，提取有界 proposal，并通过 deterministic conflict graph 分配 integration lane；不冲突 lane 可以并发 apply 和 verification，但最终 promotion 仍要求 exact integration review 与 authoritative parent verification。直接或带副作用的 shared parent workspace 写入继续保持串行和独占。TUI 的 Task strip 和 info rail 会同时标出全部 active step，取消 Task 会收口整个 active batch。Planner 在接受计划前可以请求一次由 host 托管的独立只读 Explore 批次；`max_planning_research_agents` 默认是 `3`、硬上限是 `4`，设为 `0` 可关闭这个 planner-only fan-out。Host 会等待所有 probe 进入终态后自动恢复 Planner，不需要模型轮询命令。Production HTTP driver（包括 Desktop 持有的 `sigil serve` child）已经附加共享 foreground Task executor，显式 `auto` 配置可以进入 planner/executor/synthesis；但 HTTP/Desktop 尚未提供完整的 Task pause/continue、guidance、integration review 与 restart control surface，因此兼容默认值仍为 `manual`，当前也不宣称 application parity 完成。只读计划使用 `/plan`，需要确定进入多步骤执行时使用 `/task`；字段完整的 `sigil-plan-v2` DAG 会直接 promotion，不再二次规划。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
+以上数值是 schema 与迁移安全的兼容默认值。缺少配置时，只有 installed release 携带
+qualified sidecar，且 provider、model、官方 endpoint family、task-config digest 与 binary
+build 全部精确匹配，Quick Setup 才可能保存 `auto + proactive`。已有配置永远不会被重写；
+sidecar 缺失、无效、过期或不匹配时，会 fail closed 到上面的兼容值。`sigil doctor` 会报告
+rollout 状态。
+
+coarse rollback 是设置 `routing_policy = "manual"` 与
+`multi_agent_mode = "explicit_request_only"`。它会关闭自动 handoff 和 proactive spawn，
+但不会删除 durable Task history。route-local 零容忍不变量会对当前 session 与 build 的
+后续输入应用同样的 effective fallback。
+
+`routing_policy` 与输入框的 `default_mode` 是两件事。兼容默认值为 `manual`，因此普通输入仍从对话开始。TUI 设为 `auto` 后，模型可以把复杂普通输入通过 typed handoff 交给 durable planner/executor；简单问题仍直接回答，而且 handoff 不会绕过写文件、shell、网络或 merge 审批。Planner、Executor、Subagent 与最终 Synthesis transcript 均保存在隔离 child session，parent 只保留 bounded result 和一个由 host 提交的正式 final。相互独立且已证明为 shared-read-only 的 Task step 可以并发执行；`max_parallel_read_steps` 与 `max_subagents` 共同限制 fan-out，host 仍按稳定的 plan 顺序向 parent 提交终态结果。相互独立的 `ChangesetOnly` 写子智能体 step 也可以并发，受 `max_parallel_changeset_steps` 与 `max_subagents` 共同限制；同批成员绑定同一份不可变 parent workspace snapshot，只生成 proposal 而不修改 parent workspace，parent 重新校验 snapshot 后才提交 proposal/review 记录。受支持的 Git 仓库还可以整批并发运行相互独立的 physical `Worktree` writer。Sigil 会冻结 exact clean 或安全 dirty/untracked baseline，把每个 child 绑定到独立 owned checkout，提取有界 proposal，并通过 deterministic conflict graph 分配 integration lane；不冲突 lane 可以并发 apply 和 verification，但最终 promotion 仍要求 exact integration review 与 authoritative parent verification。直接或带副作用的 shared parent workspace 写入继续保持串行和独占。TUI 的 Task strip 和 info rail 会同时标出全部 active step，取消 Task 会收口整个 active batch。Planner 在接受计划前可以请求一次由 host 托管的独立只读 Explore 批次；`max_planning_research_agents` 默认是 `3`、硬上限是 `4`，设为 `0` 可关闭这个 planner-only fan-out。Host 会等待所有 probe 进入终态后自动恢复 Planner，不需要模型轮询命令。Production HTTP driver（包括 Desktop 持有的 `sigil serve` child）与 TUI 共享同一套 typed Task pause/continue、guidance、integration review、restart control 与 recovery contract。只读计划使用 `/plan`，需要确定进入多步骤执行时使用 `/task`；字段完整的 `sigil-plan-v2` DAG 会直接 promotion，不再二次规划。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
 
 ## 验证
 

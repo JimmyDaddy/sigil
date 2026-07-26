@@ -154,6 +154,14 @@ enum Commands {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Hidden release-owner adapter for deriving a path-free rollout sidecar.
+    #[command(name = "model-eval-rollout-manifest", hide = true)]
+    ModelEvalRolloutManifest {
+        #[arg(long = "report")]
+        report: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     // Hidden provider-specific developer diagnostics. Keep ordinary users on the
     // TUI, `run`, `doctor`, or explicit provider configuration surfaces.
     #[command(hide = true)]
@@ -359,6 +367,9 @@ async fn run_main() -> Result<u8> {
                 output,
             )?;
         }
+        Commands::ModelEvalRolloutManifest { report, output } => {
+            model_eval_rollout_manifest_command(&cwd, report, output)?;
+        }
         Commands::Prefix {
             prompt,
             assistant_prefix,
@@ -402,6 +413,29 @@ fn model_eval_route_contract_command(
         );
     }
     sigil_runtime::model_eval::write_model_eval_orchestration_route_contract(&contract, &output)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn model_eval_rollout_manifest_command(
+    launch_cwd: &Path,
+    report: PathBuf,
+    output: PathBuf,
+) -> Result<()> {
+    let report = if report.is_absolute() {
+        report
+    } else {
+        launch_cwd.join(report)
+    };
+    let output = if output.is_absolute() {
+        output
+    } else {
+        launch_cwd.join(output)
+    };
+    let report = sigil_runtime::load_orchestration_eval_report_manifest(&report)?;
+    let manifest = sigil_runtime::build_orchestration_rollout_manifest(&report)?;
+    sigil_runtime::write_orchestration_rollout_manifest(&manifest, &output)?;
     println!("wrote {}", output.display());
     Ok(())
 }

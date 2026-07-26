@@ -1,4 +1,4 @@
-<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
+<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-migration,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
 
 # Sigil Configuration Guide
 
@@ -55,6 +55,21 @@ Shell choice and terminal behavior are covered by [Terminal compatibility](termi
 `[storage].state_root` stores per-user sessions and artifacts; `[storage].cache_root` stores rebuildable data. `SIGIL_STATE_HOME` and `SIGIL_CACHE_HOME` override those roots. `[session].log_dir` changes only the session-log location for the current workspace.
 
 Retention limits are applied only through an explicit preview and confirmation under `/config` → **Storage**. Normal startup, resume, runs, and `sigil serve` do not delete sessions automatically. See [Manage saved sessions](user-guide.md#manage-saved-sessions).
+
+## Task Rollout And Migration
+
+The Rust schema and every existing configuration keep the compatibility values
+`routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"`
+unless you explicitly changed them. A missing-config Quick Setup may select
+`auto + proactive` only when the installed binary is accompanied by a qualified
+rollout manifest and the selected provider, model, official endpoint family,
+task config, and build all match its exact route.
+
+Upgrades never rewrite an existing config, including legacy
+`default_mode = "chat"`. A missing, malformed, stale, or non-matching manifest
+also stays conservative. Use `sigil doctor` to inspect the effective release
+qualification. Restoring the two compatibility values is the coarse rollback;
+it does not delete durable Task or agent history.
 
 ## Use Doctor When Setup Looks Wrong
 

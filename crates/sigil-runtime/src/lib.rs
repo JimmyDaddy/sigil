@@ -64,6 +64,7 @@ mod conversation_display_tests;
 
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod orchestration_guard; // route-local hard-invariant rollback and durable observation.
+mod orchestration_rollout; // release-qualified new-install orchestration defaults.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
 mod provider_pressure; // task-role provider route cooldown and shared backpressure.
@@ -177,6 +178,16 @@ pub use mcp_oauth_flow::{
 pub use mcp_oauth_http::{RuntimeMcpOAuthHttpExecutor, runtime_mcp_oauth_executor_for_user_action};
 pub use orchestration_guard::{
     ORCHESTRATION_RUNTIME_BUILD_ID, OrchestrationRouteGuard, orchestration_observation,
+};
+pub use orchestration_rollout::{
+    NewInstallOrchestrationRolloutDecision, NewInstallOrchestrationRolloutStatus,
+    ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME, ORCHESTRATION_ROLLOUT_MANIFEST_SCHEMA_VERSION,
+    OrchestrationRolloutManifestV1, SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST_ENV,
+    apply_new_install_orchestration_rollout, build_orchestration_rollout_manifest,
+    load_orchestration_eval_report_manifest, load_orchestration_rollout_manifest,
+    new_install_orchestration_rollout_decision,
+    new_install_orchestration_rollout_decision_for_config, orchestration_task_config_digest,
+    write_orchestration_rollout_manifest,
 };
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,

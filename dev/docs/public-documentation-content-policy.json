@@ -368,6 +368,7 @@
         "minimal-path",
         "workspace",
         "storage-and-session-paths",
+        "task-rollout-and-migration",
         "use-doctor-when-setup-looks-wrong"
       ],
       "cta_key": "open-configuration-reference",
@@ -378,6 +379,7 @@
           "Minimal Path",
           "Workspace",
           "Storage And Session Paths",
+          "Task Rollout And Migration",
           "Use Doctor When Setup Looks Wrong"
         ],
         "zh-CN": [
@@ -386,6 +388,7 @@
           "最小配置路径",
           "工作区",
           "存储与会话路径",
+          "Task Rollout 与迁移",
           "设置异常时使用 Doctor"
         ]
       },

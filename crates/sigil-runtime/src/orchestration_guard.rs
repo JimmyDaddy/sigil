@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use sigil_kernel::{
-    AgentResultContinuationStatus, ControlEntry, IntegrationPromotionStatus,
+    AgentResultContinuationStatus, ControlEntry, IntegrationPromotionStatus, MultiAgentMode,
     OrchestrationEvalObservationV1, OrchestrationHardInvariant, OrchestrationRouteDisabledEntry,
-    Session, SessionLogEntry, TaskAdmissionTrigger, TaskHandoffDecision,
+    Session, SessionLogEntry, TaskAdmissionTrigger, TaskConfig, TaskHandoffDecision,
     TaskParticipantAttemptStatus, TaskRoutingPolicy, TaskRunStatus, ToolExecutionStatus,
 };
 
@@ -96,6 +96,36 @@ impl OrchestrationRouteGuard {
         } else {
             configured_policy
         }
+    }
+
+    /// Returns the effective multi-agent mode after applying the route-local kill switch.
+    ///
+    /// A disabled proactive route falls back to explicit user or accepted-plan authority.
+    /// Explicit and fully disabled configurations are preserved.
+    #[must_use]
+    pub fn effective_multi_agent_mode(
+        &self,
+        session: &Session,
+        configured_mode: MultiAgentMode,
+    ) -> MultiAgentMode {
+        if configured_mode == MultiAgentMode::Proactive
+            && session
+                .orchestration_route_disablement_projection()
+                .is_disabled(&self.route_fingerprint, &self.sigil_build)
+        {
+            MultiAgentMode::ExplicitRequestOnly
+        } else {
+            configured_mode
+        }
+    }
+
+    /// Applies the exact route/build kill switch to one runtime-owned task configuration.
+    ///
+    /// This does not rewrite the user's persisted configuration. It only constrains the
+    /// effective configuration used for subsequent inputs in the disabled session.
+    pub fn apply_effective_task_config(&self, session: &Session, task: &mut TaskConfig) {
+        task.routing_policy = self.effective_policy(session, task.routing_policy);
+        task.multi_agent_mode = self.effective_multi_agent_mode(session, task.multi_agent_mode);
     }
 }
 

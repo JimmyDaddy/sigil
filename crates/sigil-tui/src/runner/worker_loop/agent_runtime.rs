@@ -1,5 +1,19 @@
 use super::*;
 
+pub(in crate::runner) fn effective_orchestration_root_config(
+    root_config: &RootConfig,
+    session: &Session,
+) -> RootConfig {
+    let mut effective = root_config.clone();
+    sigil_runtime::OrchestrationRouteGuard::new(
+        session.provider_name(),
+        session.model_name(),
+        sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+    )
+    .apply_effective_task_config(session, &mut effective.task);
+    effective
+}
+
 pub(in crate::runner) struct WorkerAgentEventSink {
     pub(in crate::runner) sender: mpsc::Sender<WorkerMessage>,
 }
@@ -121,7 +135,7 @@ pub(in crate::runner) fn collect_finished_background_agent_runs(
     let mut handler = ChannelEventHandler::new(message_tx.clone());
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
@@ -244,7 +258,7 @@ where
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, &run_session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
@@ -443,7 +457,7 @@ where
     }
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, &run_session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
@@ -684,7 +698,7 @@ where
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, &run_session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
@@ -928,7 +942,7 @@ pub(in crate::runner) fn cancel_agent_thread(
     };
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
@@ -958,7 +972,7 @@ pub(in crate::runner) fn message_agent_thread(
     };
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
-        root_config.clone(),
+        effective_orchestration_root_config(root_config, session),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());

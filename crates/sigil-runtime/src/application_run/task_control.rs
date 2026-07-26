@@ -174,7 +174,7 @@ pub async fn prepare_application_task_continuation(
         source: anyhow!(error).context("application Task continuation preparation worker failed"),
     })??;
     let BlockingApplicationRunPreparation {
-        root_config,
+        mut root_config,
         workspace_root,
         session_path,
         session_lease,
@@ -221,6 +221,15 @@ pub async fn prepare_application_task_continuation(
             source: anyhow!("attached Task executor disappeared during preparation"),
         })?;
     let provider_capabilities = provider.capabilities();
+    let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
+        session.provider_name(),
+        session.model_name(),
+        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+    );
+    orchestration_route_guard
+        .enforce(&mut session, current_unix_time_ms())
+        .map_err(ApplicationRunPrepareError::execution)?;
+    orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider_capabilities,

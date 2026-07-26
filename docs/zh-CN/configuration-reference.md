@@ -95,6 +95,11 @@
 
 可配置的角色包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
 
+表中列出的是 schema 与 legacy 兼容默认值。只有新安装的 provider、model、endpoint、
+task-config digest 与 binary build 全部精确匹配 qualified release manifest 时，Quick Setup
+才会写入 `auto + proactive`。manifest 缺失、无效、过期或 route 不匹配时，一律 fail closed
+到 `manual + explicit_request_only`；已有配置文件不会被静默迁移。
+
 ## 权限
 
 | 区块 / 字段 | 默认值 | 用途 |

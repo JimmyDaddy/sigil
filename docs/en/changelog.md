@@ -13,11 +13,13 @@ This page lists user-facing release notes. For support boundaries and early-prev
 - Added an authenticated, restart-durable historical session catalog to `sigil serve` for future desktop clients, with bounded pagination, title search, provider/pin/state filters, and explicit stale-cursor recovery. Session logs remain the source of truth, and catalog failures do not stop runs or recording.
 - Added a desktop runtime bridge for trusted local clients: durable catalog entries can be reopened after restart, startup and server metadata have one versioned JSON shape, and an opt-in stdin owner pipe triggers graceful shutdown without PID polling.
 - Added a source-built desktop dogfood shell with native workspace selection, durable history, conversation runs, exact approval and cancellation controls, and verification evidence over the same authenticated local server used by automation. CI builds short-lived unsigned macOS, Linux, and Windows dogfood artifacts; these are not a public install channel.
+- Added exact-route orchestration rollout manifests. Qualified releases may enable `auto + proactive` for matching new installations, while missing, stale, invalid, or different-route manifests fail closed.
 
 ### Changed
 
 - Reworked the desktop dogfood shell around workspace/session navigation, one conversation task surface, and a verification inspector. It replays bounded saved messages, retains control of runs across navigation while the workspace service stays open, separates final replies from progress and tool output, and provides focused approval, diff, evidence, and draft-aware composer behavior.
 - Added one consistent desktop visual system, adaptive wide/two-pane/compact layouts, system light and dark themes, high-contrast and reduced-motion handling, keyboard focus capture/restore, terminal-only streaming announcements, and usable reflow down to 320 CSS pixels.
+- Existing and legacy configurations are never silently migrated to automatic orchestration. Doctor reports release qualification, and `manual + explicit_request_only` remains the coarse rollback without deleting Task history.
 
 ### Fixed
 

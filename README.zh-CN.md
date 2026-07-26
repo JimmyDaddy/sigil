@@ -52,6 +52,8 @@ sigil
 
 缺少配置时，Sigil 会打开 Quick Setup。选择 provider 和 model、填写认证信息；如果状态不完整，运行 `sigil doctor`。按照[快速开始](docs/zh-CN/quickstart.md)，可以从第一次只读任务走到一个经过检查的小改动。
 
+只有当某个 release 为自身 binary 携带 exact-route qualified manifest 时，Quick Setup 才会为匹配的新安装启用自动 Task routing 和主动只读 Explore 子智能体。其他 route、缺少 sidecar 的 release，以及所有已有配置都继续保持保守的 `manual + explicit_request_only`。这只改变编排方式，不会授予文件、Shell、网络、MCP、外部目录或 merge 权限。见[高级配置](docs/zh-CN/advanced-configuration.md#任务规划)。
+
 ## 深入了解
 
 | 指南 | 内容 |

@@ -1,4 +1,6 @@
-use super::super::agent_runtime::chat_agent_run_input_with_repo_context;
+use super::super::agent_runtime::{
+    chat_agent_run_input_with_repo_context, effective_orchestration_root_config,
+};
 use super::*;
 
 pub(super) fn dispatch_run_plan_command<P>(
@@ -96,9 +98,11 @@ where
                 let agent = Arc::clone(agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
+                let effective_root_config =
+                    effective_orchestration_root_config(root_config, &run_session);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
                     state.agent.supervisor.clone(),
-                    root_config.clone(),
+                    effective_root_config.clone(),
                     agent.tool_registry().clone(),
                 )
                 .with_background_runs(state.agent.background_runs.clone());
@@ -132,7 +136,7 @@ where
                         sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
                     ),
                 );
-                let task_root_config = root_config.clone();
+                let task_root_config = effective_root_config;
                 let task_base_registry = agent.tool_registry().clone();
                 let task_agent_supervisor = state.agent.supervisor.clone();
                 let task_role_provider_builder = Arc::clone(role_provider_builder);

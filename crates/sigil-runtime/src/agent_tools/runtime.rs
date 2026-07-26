@@ -108,6 +108,19 @@ impl AgentToolRuntime {
         self
     }
 
+    pub(super) fn enforce_effective_multi_agent_mode(
+        &self,
+        session: &mut Session,
+    ) -> Result<MultiAgentMode> {
+        let guard = crate::OrchestrationRouteGuard::new(
+            session.provider_name(),
+            session.model_name(),
+            crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+        );
+        guard.enforce(session, crate::current_unix_time_ms())?;
+        Ok(guard.effective_multi_agent_mode(session, self.root_config.task.multi_agent_mode))
+    }
+
     /// Test-only injection for exercising host-owned delegation admission.
     ///
     /// Production model-tool runtimes receive source-bound authority from the root agent loop.

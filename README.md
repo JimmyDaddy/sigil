@@ -52,6 +52,8 @@ sigil
 
 Quick Setup opens when configuration is missing. Choose a provider and model, add authentication, and run `sigil doctor` if anything looks incomplete. The [Quickstart](docs/en/quickstart.md) takes you from a first read-only task to a small reviewed change.
 
+A release may enable automatic Task routing and proactive read-only Explore agents for a new installation only when it ships an exact-route qualification manifest for its own binary. Other routes, releases without that sidecar, and every existing configuration keep the conservative `manual + explicit_request_only` behavior. This changes orchestration only; it never grants file, shell, network, MCP, external-directory, or merge permission. See [Advanced Configuration](docs/en/advanced-configuration.md#task-planning).
+
 ## Go deeper
 
 | Guide | What it covers |

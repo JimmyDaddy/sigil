@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sigil_kernel::{
-    ControlEntry, ModelMessage, OrchestrationHardInvariant, Session, SessionLogEntry,
-    TaskHandoffId, TaskHandoffRequestedEntry, TaskRoutingPolicy,
+    ControlEntry, ModelMessage, MultiAgentMode, OrchestrationHardInvariant, Session,
+    SessionLogEntry, TaskConfig, TaskHandoffId, TaskHandoffRequestedEntry, TaskRoutingPolicy,
 };
 
 use super::{OrchestrationRouteGuard, orchestration_observation};
@@ -61,9 +61,29 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
         TaskRoutingPolicy::Manual
     );
     assert_eq!(
+        guard.effective_multi_agent_mode(&session, MultiAgentMode::Proactive),
+        MultiAgentMode::ExplicitRequestOnly
+    );
+    let mut effective_task = TaskConfig {
+        routing_policy: TaskRoutingPolicy::Auto,
+        multi_agent_mode: MultiAgentMode::Proactive,
+        ..TaskConfig::default()
+    };
+    guard.apply_effective_task_config(&session, &mut effective_task);
+    assert_eq!(effective_task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(
+        effective_task.multi_agent_mode,
+        MultiAgentMode::ExplicitRequestOnly
+    );
+    assert_eq!(
         OrchestrationRouteGuard::new("provider", "other-model", "build-1")
             .effective_policy(&session, TaskRoutingPolicy::Auto),
         TaskRoutingPolicy::Auto
+    );
+    assert_eq!(
+        OrchestrationRouteGuard::new("provider", "other-model", "build-1")
+            .effective_multi_agent_mode(&session, MultiAgentMode::Proactive),
+        MultiAgentMode::Proactive
     );
     assert_eq!(
         OrchestrationRouteGuard::new("provider", "model", "build-2")

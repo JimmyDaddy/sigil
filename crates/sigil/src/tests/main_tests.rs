@@ -139,6 +139,26 @@ fn cli_parses_hidden_model_eval_route_contract_command() -> Result<()> {
 }
 
 #[test]
+fn cli_parses_hidden_model_eval_rollout_manifest_command() -> Result<()> {
+    let cli = Cli::try_parse_from([
+        "sigil",
+        "model-eval-rollout-manifest",
+        "--report",
+        "/tmp/eval-manifest.json",
+        "--output",
+        "/tmp/sigil-orchestration-rollout-v1.json",
+    ])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::ModelEvalRolloutManifest { report, output })
+            if report == Path::new("/tmp/eval-manifest.json")
+                && output == Path::new("/tmp/sigil-orchestration-rollout-v1.json")
+    ));
+    Ok(())
+}
+
+#[test]
 fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
     assert_eq!(super::parse_model_eval_cost_microusd("0.50")?, 500_000);
     assert!(super::parse_model_eval_cost_microusd("0").is_err());

@@ -873,6 +873,7 @@ impl AppState {
                 ModelPickerTarget::Setup => {
                     if let Some(state) = self.setup_state.as_mut() {
                         state.model = value.clone();
+                        state.refresh_orchestration_rollout();
                     }
                     self.last_notice = Some(format!("selected model {value}"));
                 }
@@ -910,6 +911,7 @@ impl AppState {
                 TextInputTarget::SetupModel => {
                     if let Some(state) = self.setup_state.as_mut() {
                         state.model = value.clone();
+                        state.refresh_orchestration_rollout();
                     }
                     self.last_notice = Some(format!("updated model {value}"));
                 }

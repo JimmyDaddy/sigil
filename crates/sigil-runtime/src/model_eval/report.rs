@@ -87,8 +87,7 @@ fn build_orchestration_eval_report_record(
         .as_ref()
         .expect("preflight prevents mixed orchestration campaigns");
     let config = RootConfig::load(&execution.config_path)?;
-    let task_config = toml::to_string(&config.task)?;
-    let task_config_digest = sha256_digest(task_config.as_bytes());
+    let task_config_digest = crate::orchestration_task_config_digest(&config.task)?;
     let route_fingerprint = sha256_digest(
         format!(
             "sigil-orchestration-route-v1\0{}\0{}\0{}\0{}\0{}\0{}",

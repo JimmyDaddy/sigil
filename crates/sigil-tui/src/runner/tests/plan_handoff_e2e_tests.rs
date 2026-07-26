@@ -911,21 +911,6 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
         prompt: "inspect kernel and runtime before implementing".to_owned(),
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
-    let _ = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::Event(event)
-                if matches!(
-                    event.as_ref(),
-                    sigil_kernel::RunEvent::ToolApprovalRequested { call, .. }
-                        if call.id == "planner-discovery-call"
-                )
-        )
-    })?;
-    worker.send(WorkerCommand::ApprovalDecision {
-        call_id: "planner-discovery-call".to_owned(),
-        approved: true,
-    })?;
     let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::TaskRunFinished { .. })
     })?;

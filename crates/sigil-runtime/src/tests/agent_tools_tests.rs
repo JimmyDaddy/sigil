@@ -2610,6 +2610,88 @@ async fn proactive_explore_accepts_verified_local_read_contract() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn route_kill_switch_denies_proactive_spawn_before_provider_build() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    append_duplicate_task_final(&mut session)?;
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-killed-proactive").await?;
+
+    assert!(result.is_error());
+    assert!(
+        result
+            .content
+            .contains("multi_agent_mode=explicit_request_only")
+    );
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn route_kill_switch_preserves_accepted_plan_spawn_authority() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    )
+    .with_delegation_authority(DelegationAuthority::AcceptedTaskPlan {
+        task_id: TaskId::new("task_kill_switch")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("step_kill_switch")?,
+    });
+    let mut session = Session::new("parent", "model");
+    append_duplicate_task_final(&mut session)?;
+
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "call-killed-plan").await?;
+
+    assert!(!result.is_error(), "{}", result.content);
+    assert!(!session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+fn append_duplicate_task_final(session: &mut Session) -> Result<()> {
+    let entry =
+        ControlEntry::TaskFinalAnswerCommitted(sigil_kernel::TaskFinalAnswerCommittedEntry {
+            task_id: TaskId::new("task_duplicate_final")?,
+            plan_version: 1,
+            synthesis_attempt_id: sigil_kernel::TaskParticipantAttemptId::new(
+                "attempt_duplicate_final",
+            )?,
+            message_id: "message-duplicate-final".to_owned(),
+            content_hash: format!("sha256:{}", "a".repeat(64)),
+        });
+    session.append_control(entry.clone())?;
+    session.append_control(entry)?;
+    Ok(())
+}
+
 #[test]
 fn spawn_agent_args_default_to_join_before_final() -> Result<()> {
     let parsed = super::surface::SpawnAgentArgs::parse(&json!({

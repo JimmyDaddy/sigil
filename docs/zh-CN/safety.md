@@ -33,6 +33,8 @@ Sigil 把安全落实为一套清晰的决策过程：先理解准备执行的�
 - 中断工具在恢复后仍显示为中断，不会静默重跑。
 - `sigil serve` 只面向受信任的本机客户端：服务仅监听回环地址，特权路由需要认证。
 - 通过快速设置或 `/config` 保存凭据，会写入明文本机配置。
+- 自动 Task routing 和 proactive Explore 子智能体不会授予工具权限；文件、Shell、网络、MCP、外部目录与 merge 仍是相互独立的决策。
+- 任一零容忍编排不变量只会禁用当前 session 中受影响的 provider/model/build route。后续输入回退到 `manual + explicit_request_only`；已接受 Task plan 的恢复仍可继续，durable Task history 不会被删除。
 
 控制项见[权限与沙箱](permissions-and-sandbox.md)，数据与凭据见[隐私](privacy.md)，外部服务的信任设置见 [MCP 指南](mcp.md)，本地服务细节见[参考](reference.md)。
 

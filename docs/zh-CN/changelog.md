@@ -13,11 +13,13 @@
 - 为未来桌面客户端增加 `sigil serve` 的带认证、跨重启历史会话目录，支持有边界的分页、标题搜索、模型服务/固定/来源状态筛选，并在游标过期时明确要求重新查询。会话日志仍是事实来源，目录故障不会阻止运行或记录。
 - 增加供受信任本机客户端使用的桌面运行桥接：服务重启后可重新打开目录中的 durable session，启动信息与服务元数据共用一份版本化 JSON，并可通过显式启用的 stdin owner pipe 在不轮询 PID 的情况下触发优雅关闭。
 - 增加从源码构建的桌面 dogfood 壳：通过同一套带认证的本机服务完成原生工作区选择、durable 历史、对话运行、精确审批与取消以及验证证据查看。CI 会生成短期保留且未签名的 macOS、Linux 与 Windows dogfood artifact；它们不是公开安装渠道。
+- 增加 exact-route orchestration rollout manifest。qualified release 可以为匹配的新安装启用 `auto + proactive`；manifest 缺失、过期、无效或 route 不匹配时会 fail closed。
 
 ### 调整
 
 - 围绕工作区/会话导航、单一对话任务表面和验证检查器重构桌面 dogfood 壳。它能够回放有边界的已保存消息，在工作区服务保持打开时跨导航保留运行控制，将最终回复与进度/工具输出分开，并提供聚焦的审批、差异、证据和会话草稿交互。
 - 为桌面壳增加统一视觉系统、自适应宽屏/双栏/紧凑布局、跟随系统的亮色与暗色主题、高对比度与减少动画适配、键盘焦点捕获/恢复、只在结束时播报流式运行摘要，以及低至 320 CSS 像素的可用重排。
+- 已有配置与 legacy 配置不会被静默迁移到自动编排。Doctor 会报告 release qualification；`manual + explicit_request_only` 仍是 coarse rollback，且不会删除 Task history。
 
 ### 修复
 

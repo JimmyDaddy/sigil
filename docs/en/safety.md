@@ -33,6 +33,8 @@ Deny and restate the scope when the preview is surprising or too broad.
 - An interrupted tool is shown as interrupted after restore and is not silently run again.
 - `sigil serve` is for a trusted local client: it listens on loopback and requires authentication for privileged routes.
 - Saving credentials through Quick Setup or `/config` writes plaintext local configuration.
+- Automatic Task routing and proactive Explore agents do not grant tool permission. File, Shell, network, MCP, external-directory, and merge decisions remain independent.
+- A zero-tolerance orchestration invariant disables only the affected provider/model/build route for that session. Subsequent input falls back to `manual + explicit_request_only`; accepted Task-plan recovery remains available, and durable Task history is retained.
 
 Use [Permissions and sandbox](permissions-and-sandbox.md) for controls, [Privacy](privacy.md) for data and credentials, [MCP](mcp.md) for external-server trust, and [Reference](reference.md) for local-service details.
 

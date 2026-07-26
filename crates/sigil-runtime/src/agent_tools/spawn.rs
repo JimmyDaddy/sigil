@@ -49,8 +49,14 @@ impl AgentToolRuntime {
             }
         };
         let authority = delegation_context.authority.clone();
+        let effective_multi_agent_mode = match self.enforce_effective_multi_agent_mode(session) {
+            Ok(mode) => mode,
+            Err(error) => {
+                return agent_spawn_denied_tool_result(call, format!("{error:#}"));
+            }
+        };
         if let Err(error) = admit_model_agent_spawn(
-            self.root_config.task.multi_agent_mode,
+            effective_multi_agent_mode,
             &authority,
             &resolved_profile,
             &child_registry,
@@ -823,8 +829,9 @@ impl AgentToolRuntime {
             profile_tool_scope,
         );
         let authority = DelegationAuthority::UserExplicit;
+        let effective_multi_agent_mode = self.enforce_effective_multi_agent_mode(session)?;
         admit_model_agent_spawn(
-            self.root_config.task.multi_agent_mode,
+            effective_multi_agent_mode,
             &authority,
             &request.resolved_profile,
             &child_registry,

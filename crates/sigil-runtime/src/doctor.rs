@@ -29,6 +29,7 @@ const MAX_SESSION_STREAM_DOCTOR_BYTES: u64 = 16 * 1024 * 1024;
 
 mod code_intel; // code-intelligence and LSP readiness checks.
 mod mcp; // MCP server, plugin hook, and command availability checks.
+mod orchestration; // release rollout and coarse orchestration rollback state.
 mod providers; // provider config, auth, capability, and sandbox checks.
 mod session; // workspace, storage, and session stream checks.
 mod terminal; // terminal profile, mouse, and clipboard checks.
@@ -37,6 +38,7 @@ mod web; // offline Web V1 capability and route diagnostics.
 pub use code_intel::build_code_intelligence_checks;
 use code_intel::check_code_intelligence;
 use mcp::{CommandStatus, check_mcp_servers, check_plugin_hooks, command_status};
+use orchestration::check_orchestration_rollout;
 use providers::{check_execution_backend, check_provider};
 use session::{
     check_orchestration_route_disablement, check_session_streams, check_storage_paths,
@@ -204,6 +206,7 @@ pub fn build_doctor_report_with_options(
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
+    check_orchestration_rollout(&mut report, &root_config);
     check_orchestration_route_disablement(
         &mut report,
         &sigil_paths.session_log_dir,

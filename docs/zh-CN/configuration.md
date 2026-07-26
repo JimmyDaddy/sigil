@@ -1,4 +1,4 @@
-<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
+<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-migration,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
 
 # Sigil 配置指南
 
@@ -55,6 +55,18 @@ Shell 选择和终端行为见[终端兼容性](terminal-compatibility.md)；可
 `[storage].state_root` 存放用户会话和变更记录；`[storage].cache_root` 存放可以重建的数据。`SIGIL_STATE_HOME` 和 `SIGIL_CACHE_HOME` 会覆盖对应的根目录。`[session].log_dir` 只改变当前工作区的会话日志位置。
 
 保留期限只会在 `/config` → **Storage** 中经过预览和确认后应用。普通启动、恢复、运行和 `sigil serve` 不会自动删除会话。见[管理已保存的会话](user-guide.md#管理已保存的会话)。
+
+## Task Rollout 与迁移
+
+除非用户显式修改，否则 Rust schema 与所有已有配置继续使用兼容值
+`routing_policy = "manual"` 和 `multi_agent_mode = "explicit_request_only"`。
+只有在缺少配置、安装的 binary 同时携带 qualified rollout manifest，并且所选 provider、
+model、官方 endpoint family、task config 与 build 全部精确匹配时，Quick Setup 才可能选择
+`auto + proactive`。
+
+升级不会重写已有配置，也不会改写 legacy `default_mode = "chat"`。manifest 缺失、损坏、
+过期或 route 不匹配时同样保持保守值。使用 `sigil doctor` 检查当前 release qualification。
+把两个字段恢复为兼容值就是 coarse rollback；它不会删除 durable Task 或 agent history。
 
 ## 设置异常时使用 Doctor
 

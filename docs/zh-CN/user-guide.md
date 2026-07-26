@@ -73,6 +73,12 @@ TUI 是日常使用的主界面。`sigil run` 为脚本提供文本、JSON 或 J
 
 任务界面会显示步骤、当前状态和子智能体的工作；需要你检查时，还会显示验证卡片。按 `Alt-V` 可以直接聚焦。恢复会话只会还原已保存的任务状态，不会自动继续执行。
 
+新安装的 qualified release 可能在 Quick Setup 中显示 `auto / proactive`。这个选择与 release
+中携带的精确 provider route 和 binary build 绑定；已有配置不会改变。运行 `sigil doctor`
+可以确认当前配置是否匹配 release qualification。要关闭自动 handoff 和 proactive spawn，
+同时保留已有 Task history，请设置 `routing_policy = "manual"` 和
+`multi_agent_mode = "explicit_request_only"`。
+
 ## 审批和文件变更
 
 只读文件与搜索工具通常直接运行。写入、删除、命令、网络和外部工具遵守配置的权限策略。

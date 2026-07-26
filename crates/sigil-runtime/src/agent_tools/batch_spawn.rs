@@ -122,6 +122,17 @@ impl AgentToolRuntime {
             }
         };
         let authority = delegation_context.authority.clone();
+        let effective_multi_agent_mode = match self.enforce_effective_multi_agent_mode(session) {
+            Ok(mode) => mode,
+            Err(error) => {
+                return batch_spawn_error(
+                    call,
+                    ToolErrorKind::PermissionDenied,
+                    None,
+                    format!("{error:#}"),
+                );
+            }
+        };
         let Some(root_cancellation) = self.run_cancellation.clone() else {
             return batch_spawn_error(
                 call,
@@ -171,7 +182,7 @@ impl AgentToolRuntime {
                 resolved_profile.profile.tool_scope.clone(),
             );
             if let Err(error) = admit_model_agent_spawn(
-                self.root_config.task.multi_agent_mode,
+                effective_multi_agent_mode,
                 &authority,
                 &resolved_profile,
                 &child_registry,

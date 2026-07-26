@@ -73,6 +73,13 @@ Use `/plan` for a read-only plan and accept the Plan ready card only when you wa
 
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
+A newly installed qualified release may show `auto / proactive` in Quick Setup.
+That choice is bound to the exact provider route and binary build shipped with
+the release. Existing configurations stay unchanged. Run `sigil doctor` to see
+whether the configured route matches the release qualification. To turn off
+automatic handoff and proactive spawning without deleting Task history, set
+`routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"`.
+
 ## Approvals and File Changes
 
 Read-only file and search tools usually run directly. Writes, deletes, commands, network access, and external tools follow the configured permission policy.

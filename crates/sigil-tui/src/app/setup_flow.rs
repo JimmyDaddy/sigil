@@ -7,8 +7,8 @@ use sigil_kernel::{
     WorkspaceConfig,
 };
 use sigil_runtime::{
-    default_provider_config_fields, provider_api_key_env_name, set_provider_config_fields,
-    supported_provider_name,
+    apply_new_install_orchestration_rollout, default_provider_config_fields,
+    provider_api_key_env_name, set_provider_config_fields, supported_provider_name,
 };
 
 use super::{
@@ -58,6 +58,12 @@ impl AppState {
             String::new(),
             "[notes]".to_owned(),
             format!("auth={}", state.auth_summary()),
+            format!(
+                "orchestration={} / {} ({})",
+                state.orchestration_rollout.routing_policy.as_str(),
+                state.orchestration_rollout.multi_agent_mode.as_str(),
+                state.orchestration_rollout.status.as_str()
+            ),
             "defaults: ask / mem on / compact on".to_owned(),
         ];
 
@@ -189,6 +195,7 @@ impl AppState {
         match state.selected_field {
             SetupField::Model => {
                 state.model = value.clone();
+                state.refresh_orchestration_rollout();
                 self.last_notice = Some(format!("updated model {value}"));
             }
             SetupField::ApiKey => {
@@ -222,7 +229,12 @@ impl AppState {
                 return Ok(None);
             }
         };
-        self.last_notice = Some(format!("saved config to {}", state.config_path.display()));
+        self.last_notice = Some(format!(
+            "saved config to {}; orchestration={} / {}",
+            state.config_path.display(),
+            root_config.task.routing_policy.as_str(),
+            root_config.task.multi_agent_mode.as_str()
+        ));
         Ok(Some(AppAction::SetupCompleted {
             config_path: state.config_path.clone(),
             root_config: Box::new(root_config),
@@ -337,5 +349,6 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
     let mut provider_fields = default_provider_config_fields(provider_name, model);
     provider_fields.api_key = state.api_key.trim().to_owned();
     set_provider_config_fields(&mut root_config, provider_name, &provider_fields, None)?;
+    let _rollout = apply_new_install_orchestration_rollout(&mut root_config);
     Ok(root_config)
 }

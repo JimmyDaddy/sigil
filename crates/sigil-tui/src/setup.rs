@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, env, path::PathBuf};
 
 use sigil_runtime::{
-    DEFAULT_SETUP_PROVIDER_KEY, default_provider_model, next_provider_name,
-    provider_api_key_env_name,
+    DEFAULT_SETUP_PROVIDER_KEY, NewInstallOrchestrationRolloutDecision, default_provider_model,
+    new_install_orchestration_rollout_decision, next_provider_name, provider_api_key_env_name,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,20 +64,25 @@ pub(crate) struct SetupState {
     pub(crate) model: String,
     pub(crate) api_key: String,
     pub(crate) startup_error: Option<String>,
+    pub(crate) orchestration_rollout: NewInstallOrchestrationRolloutDecision,
     provider_drafts: BTreeMap<String, SetupProviderDraft>,
 }
 
 impl SetupState {
     pub(crate) fn new(config_path: PathBuf, startup_error: Option<String>) -> Self {
         let provider_name = DEFAULT_SETUP_PROVIDER_KEY.to_owned();
+        let model = default_provider_model(&provider_name)
+            .expect("default setup provider must have a default model");
+        let orchestration_rollout =
+            new_install_orchestration_rollout_decision(&provider_name, &model);
         Self {
             config_path,
             selected_field: SetupField::Provider,
-            model: default_provider_model(&provider_name)
-                .expect("default setup provider must have a default model"),
+            model,
             api_key: String::new(),
             provider_name,
             startup_error,
+            orchestration_rollout,
             provider_drafts: BTreeMap::new(),
         }
     }
@@ -102,6 +107,12 @@ impl SetupState {
             });
         self.model = draft.model;
         self.api_key = draft.api_key;
+        self.refresh_orchestration_rollout();
+    }
+
+    pub(crate) fn refresh_orchestration_rollout(&mut self) {
+        self.orchestration_rollout =
+            new_install_orchestration_rollout_decision(&self.provider_name, &self.model);
     }
 
     pub(crate) fn api_key_env_name(&self) -> Option<&'static str> {

@@ -1,6 +1,7 @@
 use super::super::setup_flow::{build_setup_root_config, validate_setup_state};
 use super::*;
 use crate::setup::SetupState;
+use sigil_kernel::{MultiAgentMode, TaskRoutingPolicy};
 use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 
 #[test]
@@ -17,6 +18,7 @@ fn setup_lines_include_startup_error_and_missing_auth_summary() {
 
     assert!(lines.contains("load failed: config load failed"));
     assert!(lines.contains("auth=missing"));
+    assert!(lines.contains("orchestration=manual / explicit_request_only"));
     assert_eq!(app.last_notice(), Some("config load failed"));
 }
 
@@ -80,6 +82,11 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
     };
     assert_eq!(saved_path, config_path);
     assert_eq!(root_config.agent.provider, "deepseek");
+    assert_eq!(root_config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(
+        root_config.task.multi_agent_mode,
+        MultiAgentMode::ExplicitRequestOnly
+    );
     assert!(saved_path.exists());
     Ok(())
 }
