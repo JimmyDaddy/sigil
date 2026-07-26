@@ -630,6 +630,10 @@ corpus_version = "rfc-0053-v1"
     );
     assert!(config.task.enabled);
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
+    assert_eq!(
+        config.task.multi_agent_mode,
+        sigil_kernel::MultiAgentMode::Proactive
+    );
 }
 
 #[test]
@@ -891,6 +895,18 @@ corpus_version = "rfc-0053-v1"
                 .identity
                 .canonical_model_id,
             "deepseek-v4-flash"
+        );
+        let expected_task = sigil_kernel::TaskConfig {
+            routing_policy: TaskRoutingPolicy::Auto,
+            multi_agent_mode: sigil_kernel::MultiAgentMode::Proactive,
+            ..sigil_kernel::TaskConfig::default()
+        };
+        assert_eq!(
+            orchestration_manifest.route_gates[0]
+                .identity
+                .task_config_digest,
+            crate::orchestration_task_config_digest(&expected_task)
+                .expect("digest rollout task policy")
         );
         let requests = requests.lock().expect("requests lock");
         assert_eq!(requests.len(), 2);

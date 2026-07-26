@@ -231,7 +231,8 @@ pub fn write_isolated_model_eval_config(
     config.code_intelligence.enabled = false;
     config.task.enabled = fixture.orchestration.is_some();
     if fixture.orchestration.is_some() {
-        config.task.routing_policy = sigil_kernel::TaskRoutingPolicy::Auto;
+        config.task =
+            crate::orchestration_rollout::orchestration_rollout_task_candidate(&config.task);
     }
     config.web.enabled = false;
     config.web.network_mode = NetworkPolicy::Deny;
@@ -277,9 +278,10 @@ pub fn write_isolated_model_eval_config(
         bail!("isolated model eval config did not round-trip its safety boundary");
     }
     if fixture.orchestration.is_some()
-        && reloaded.task.routing_policy != sigil_kernel::TaskRoutingPolicy::Auto
+        && (reloaded.task.routing_policy != sigil_kernel::TaskRoutingPolicy::Auto
+            || reloaded.task.multi_agent_mode != sigil_kernel::MultiAgentMode::Proactive)
     {
-        bail!("isolated orchestration eval config did not retain automatic routing");
+        bail!("isolated orchestration eval config did not retain the rollout task policy");
     }
     sync_directory(run_root)?;
 

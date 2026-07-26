@@ -220,9 +220,7 @@ pub fn load_orchestration_rollout_manifest(path: &Path) -> Result<OrchestrationR
 pub fn apply_new_install_orchestration_rollout(
     root_config: &mut RootConfig,
 ) -> NewInstallOrchestrationRolloutDecision {
-    let mut candidate_task = root_config.task.clone();
-    candidate_task.routing_policy = TaskRoutingPolicy::Auto;
-    candidate_task.multi_agent_mode = MultiAgentMode::Proactive;
+    let candidate_task = orchestration_rollout_task_candidate(&root_config.task);
     let decision = new_install_orchestration_rollout_decision_for_config_and_task(
         root_config,
         &candidate_task,
@@ -239,11 +237,7 @@ pub fn new_install_orchestration_rollout_decision(
     provider_name: &str,
     model_name: &str,
 ) -> NewInstallOrchestrationRolloutDecision {
-    let task = TaskConfig {
-        routing_policy: TaskRoutingPolicy::Auto,
-        multi_agent_mode: MultiAgentMode::Proactive,
-        ..TaskConfig::default()
-    };
+    let task = orchestration_rollout_task_candidate(&TaskConfig::default());
     let candidate = RolloutRouteCandidate {
         provider_adapter: provider_config_key(provider_name).to_owned(),
         provider_kind: provider_config_key(provider_name).to_owned(),
@@ -272,6 +266,18 @@ pub fn orchestration_task_config_digest(task: &TaskConfig) -> Result<String> {
     let serialized =
         toml::to_string(task).context("failed to serialize orchestration task config")?;
     Ok(sha256_digest(serialized.as_bytes()))
+}
+
+/// Returns the exact task policy whose evidence may authorize the new-install rollout.
+///
+/// Model evaluation and Quick Setup must use this same constructor so evidence gathered under
+/// `auto + explicit_request_only` can never authorize `auto + proactive`.
+#[must_use]
+pub(crate) fn orchestration_rollout_task_candidate(task: &TaskConfig) -> TaskConfig {
+    let mut candidate = task.clone();
+    candidate.routing_policy = TaskRoutingPolicy::Auto;
+    candidate.multi_agent_mode = MultiAgentMode::Proactive;
+    candidate
 }
 
 fn new_install_orchestration_rollout_decision_for_config_and_task(
