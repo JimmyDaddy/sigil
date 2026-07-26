@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build-release-archive.sh [--target <triple>] [--out-dir <dir>] [--skip-smoke]
+Usage: scripts/build-release-archive.sh [--target <triple>] [--out-dir <dir>] [--orchestration-eval-manifest <path>] [--skip-smoke]
 
 Build the release `sigil` binary, run install-oriented smoke checks, and write a
 versioned tar.gz archive plus a sha256 checksum file.
@@ -11,6 +11,9 @@ versioned tar.gz archive plus a sha256 checksum file.
 Options:
   --target TRIPLE  Build for an explicit Rust target triple.
   --out-dir DIR    Output directory. Defaults to dist.
+  --orchestration-eval-manifest PATH
+                   Qualified RFC-0053 report for this exact commit. The built
+                   binary validates it and derives the release rollout sidecar.
   --skip-smoke     Do not run `sigil --version` and `sigil doctor` on the built binary.
   -h, --help       Show this help.
 USAGE
@@ -22,6 +25,7 @@ cd "${repo_root}"
 out_dir="dist"
 target_triple=""
 run_smoke=1
+orchestration_eval_manifest=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +43,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       out_dir="$2"
+      shift 2
+      ;;
+    --orchestration-eval-manifest)
+      if [[ $# -lt 2 ]]; then
+        echo "missing value for --orchestration-eval-manifest" >&2
+        exit 2
+      fi
+      orchestration_eval_manifest="$2"
       shift 2
       ;;
     --skip-smoke)
@@ -81,6 +93,7 @@ fi
 
 echo "building sigil ${version} for ${target_triple}"
 SIGIL_BUILD_GIT_HASH="${git_hash}" \
+  SIGIL_RUNTIME_BUILD_GIT_HASH="${git_hash}" \
   SIGIL_BUILD_TARGET="${target_triple}" \
   SIGIL_BUILD_PROFILE="release" \
   cargo build -p sigil --release --locked "${target_args[@]}"
@@ -105,6 +118,12 @@ payload_dir="${stage_dir}/${archive_base}"
 mkdir -p "${payload_dir}"
 
 cp "${binary_path}" "${payload_dir}/${binary_name}"
+if [[ -n "${orchestration_eval_manifest}" ]]; then
+  echo "deriving qualified orchestration rollout sidecar"
+  "${binary_path}" model-eval-rollout-manifest \
+    --report "${orchestration_eval_manifest}" \
+    --output "${payload_dir}/sigil-orchestration-rollout-v1.json"
+fi
 cp LICENSE README.md README.zh-CN.md "${payload_dir}/"
 mkdir -p "${payload_dir}/assets"
 mkdir -p "${payload_dir}/assets/logo"

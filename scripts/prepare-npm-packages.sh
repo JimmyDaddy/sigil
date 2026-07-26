@@ -119,6 +119,14 @@ for archive in "${archives[@]}"; do
 
   mkdir -p "${package_dir}/bin"
   cp "${binary_path}" "${package_dir}/bin/${binary_name}"
+  rollout_manifest="${payload_dir}/sigil-orchestration-rollout-v1.json"
+  if [[ -e "${rollout_manifest}" ]]; then
+    if [[ ! -f "${rollout_manifest}" || -L "${rollout_manifest}" ]]; then
+      echo "invalid orchestration rollout sidecar in ${archive}" >&2
+      exit 1
+    fi
+    cp "${rollout_manifest}" "${package_dir}/bin/sigil-orchestration-rollout-v1.json"
+  fi
   cp "${payload_dir}/LICENSE" "${package_dir}/LICENSE"
   if [[ "${os}" != "win32" ]]; then
     chmod 0755 "${package_dir}/bin/${binary_name}"

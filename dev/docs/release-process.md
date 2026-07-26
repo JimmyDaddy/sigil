@@ -23,6 +23,15 @@ Manual recovery of an already-created tag requires both `publish: true` and the
 existing `v`-prefixed tag. The workflow checks out that tag for every build and
 publish step. Treat this as a public release action, not as package preflight.
 
+The optional `orchestration_eval_manifest_url` and
+`orchestration_eval_manifest_sha256` inputs are a paired release-owner control.
+Use them only for a report produced by the exact tagged commit after the
+RFC-0053 deterministic, PTY, chaos, and real-model gates pass. Every native
+candidate binary validates the downloaded report before deriving a path-free
+`sigil-orchestration-rollout-v1.json` sidecar. Invalid, stale, unqualified, or
+different-build reports fail the archive build. Leaving both inputs empty
+produces a conservative release without the sidecar.
+
 ## Workflow
 
 The release workflow is `.github/workflows/release.yml`. Tag pushes always use
@@ -68,6 +77,13 @@ Each tar archive should include the `sigil` binary, `LICENSE`, README files,
 `assets/logo/*`, `site/assets/screenshots/tui-session.svg`, and installation docs
 so the license and repository-relative README image links remain available after
 extraction.
+
+Qualified-route releases also include
+`sigil-orchestration-rollout-v1.json` beside the binary. The npm platform package
+copies it into the same `bin` directory, and the Homebrew formula installs it
+beside `sigil`. The root npm launcher does not interpret the file. Missing
+sidecars are valid and retain `manual + explicit_request_only`; packaging must
+never synthesize a sidecar without a report accepted by the exact binary.
 
 The generated `sigil-ai.rb` is the source of truth for the
 `JimmyDaddy/homebrew-sigil` tap update. After the GitHub release succeeds, the
@@ -191,6 +207,17 @@ scripts/build-release-archive.sh
 scripts/render-homebrew-formula.sh --version 0.0.1-alpha.5 --url https://example.invalid/sigil.tar.gz --sha256 0000000000000000000000000000000000000000000000000000000000000000 --output /tmp/sigil-ai.rb
 scripts/generate-release-notes.sh HEAD >/tmp/sigil-release-notes.md
 ```
+
+After an exact candidate has produced a qualified report, exercise the
+sidecar-bearing archive path separately:
+
+```bash
+scripts/build-release-archive.sh \
+  --orchestration-eval-manifest /absolute/path/to/orchestration/manifest.json
+```
+
+The command must fail if the report targets a different commit or build. Do not
+copy a report-derived sidecar into another archive manually.
 
 If the release workflow fails after publishing partial artifacts, delete the
 draft or failed release before retrying the same tag.

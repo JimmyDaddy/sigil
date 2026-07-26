@@ -15,6 +15,14 @@ on:
         description: "Existing tag to publish; ignored when publish is false"
         required: false
         type: string
+      orchestration_eval_manifest_url:
+        description: "Optional HTTPS URL for an exact-build qualified RFC-0053 report"
+        required: false
+        type: string
+      orchestration_eval_manifest_sha256:
+        description: "Required SHA-256 when an orchestration report URL is supplied"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -34,11 +42,27 @@ jobs:
         env:
           PUBLISH: ${{ inputs.publish }}
           RELEASE_TAG: ${{ inputs.tag }}
+          ORCHESTRATION_EVAL_MANIFEST_URL: ${{ inputs.orchestration_eval_manifest_url }}
+          ORCHESTRATION_EVAL_MANIFEST_SHA256: ${{ inputs.orchestration_eval_manifest_sha256 }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PUBLISH}" == "true" ]]; then
             if [[ -z "${RELEASE_TAG}" || "${RELEASE_TAG}" != v* ]]; then
               echo "manual publish requires an existing v-prefixed tag" >&2
+              exit 1
+            fi
+          fi
+          if [[ -n "${ORCHESTRATION_EVAL_MANIFEST_URL}" || -n "${ORCHESTRATION_EVAL_MANIFEST_SHA256}" ]]; then
+            if [[ -z "${ORCHESTRATION_EVAL_MANIFEST_URL}" || -z "${ORCHESTRATION_EVAL_MANIFEST_SHA256}" ]]; then
+              echo "orchestration report URL and SHA-256 must be supplied together" >&2
+              exit 1
+            fi
+            if [[ "${ORCHESTRATION_EVAL_MANIFEST_URL}" != https://* ]]; then
+              echo "orchestration report URL must use HTTPS" >&2
+              exit 1
+            fi
+            if [[ ! "${ORCHESTRATION_EVAL_MANIFEST_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+              echo "orchestration report SHA-256 must contain 64 hexadecimal characters" >&2
               exit 1
             fi
           fi
@@ -75,7 +99,29 @@ jobs:
 
       - name: Build release archive
         shell: bash
-        run: scripts/build-release-archive.sh --out-dir dist
+        env:
+          ORCHESTRATION_EVAL_MANIFEST_URL: ${{ inputs.orchestration_eval_manifest_url }}
+          ORCHESTRATION_EVAL_MANIFEST_SHA256: ${{ inputs.orchestration_eval_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          archive_args=(--out-dir dist)
+          if [[ -n "${ORCHESTRATION_EVAL_MANIFEST_URL}" ]]; then
+            report_path="${RUNNER_TEMP}/orchestration-eval-manifest.json"
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --output "${report_path}" \
+              "${ORCHESTRATION_EVAL_MANIFEST_URL}"
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual_sha256="$(sha256sum "${report_path}" | awk '{print $1}')"
+            else
+              actual_sha256="$(shasum -a 256 "${report_path}" | awk '{print $1}')"
+            fi
+            if [[ "${actual_sha256,,}" != "${ORCHESTRATION_EVAL_MANIFEST_SHA256,,}" ]]; then
+              echo "orchestration report checksum mismatch" >&2
+              exit 1
+            fi
+            archive_args+=(--orchestration-eval-manifest "${report_path}")
+          fi
+          scripts/build-release-archive.sh "${archive_args[@]}"
 
       - name: Generate provenance attestation
         uses: actions/attest@v4

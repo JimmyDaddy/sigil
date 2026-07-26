@@ -150,6 +150,9 @@ ${source_block}
 
   def install
     bin.install "sigil"
+    if File.exist?("sigil-orchestration-rollout-v1.json")
+      bin.install "sigil-orchestration-rollout-v1.json"
+    end
   end
 
   test do
