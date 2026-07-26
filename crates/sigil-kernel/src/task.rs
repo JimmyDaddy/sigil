@@ -798,7 +798,7 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
         description: format!(
-            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
+            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only investigation or advisory review. Verification checks are system-owned and must not be represented as participant steps. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
             worktree_availability.planner_material()
         ),
         input_schema: json!({
@@ -830,7 +830,7 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
-                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree for a physically isolated writer that must implement and integrate changes."
+                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only investigation or advisory review. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree for a physically isolated writer that must implement and integrate changes."
                             },
                             "depends_on": {
                                 "type": "array",
@@ -842,13 +842,13 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
                             },
                             "mode": {
                                 "type": "string",
-                                "enum": ["read", "write", "review", "verify"],
-                                "description": "Optional step intent. Omit when the role default is enough. Reviewer output is advisory; verify steps are still bound to system verification."
+                                "enum": ["read", "write", "review"],
+                                "description": "Optional participant intent. Omit when the role default is enough. Reviewer output is advisory; system verification is not a participant step."
                             },
                             "isolation": {
                                 "type": "string",
                                 "enum": isolation_modes,
-                                "description": format!("Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires an advertised child-write isolation. changeset_only produces a proposal and pauses for manual merge review. Read/review/verify steps always use shared_read_only. Worktree planning capability: {}", worktree_availability.planner_material())
+                                "description": format!("Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires an advertised child-write isolation. changeset_only produces a proposal and pauses for manual merge review. Read/review steps always use shared_read_only. Worktree planning capability: {}", worktree_availability.planner_material())
                             }
                         },
                         "required": ["step_id", "title", "role"],
@@ -943,6 +943,14 @@ pub fn task_plan_update_entry(
         })
         .collect::<Result<Vec<_>>>()?;
     validate_task_plan_graph_steps(&steps)?;
+    if steps
+        .iter()
+        .any(|step| step.effective_mode() == TaskStepMode::Verify)
+    {
+        bail!(
+            "task planner cannot create verify participant steps; trusted verification is system-owned"
+        );
+    }
     if !context.worktree_availability.is_available()
         && steps
             .iter()

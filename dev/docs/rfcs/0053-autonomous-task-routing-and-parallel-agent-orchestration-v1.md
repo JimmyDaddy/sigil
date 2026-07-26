@@ -362,6 +362,10 @@ pub intent_refs: Vec<IntentVersionRef>;
   intent 的 write 仍可执行和审查，但其产物标记为 `unassigned/shared`，不能获得意图级改写权限。
 - read/review/verify step 可以关联多个 intent closure；其输出只提供 evidence link，不把模型结论
   变成 acceptance criterion 已通过的系统证据。
+- autonomous planner 的 `task_plan_update` participant schema 不暴露 `verify` mode；可信
+  verification policy/check 由 host 绑定到产生 mutation 的 step 并在 participant 结束后执行，
+  不能生成一个缺少 verification tool 的模型 participant 去反复探测。`TaskStepMode::Verify`
+  继续保留为持久化与系统/导入 plan 的兼容语义，但 runtime 不把模型只读结论升级为系统证据。
 
 ### 7.4 Plan mode handoff
 

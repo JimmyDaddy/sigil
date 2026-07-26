@@ -514,11 +514,8 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
             .to_string()
             .contains("sequential_workspace_write")
     );
-    assert!(
-        spec.input_schema
-            .to_string()
-            .contains("delegated read-only verification")
-    );
+    assert!(spec.description.contains("system-owned"));
+    assert!(!spec.input_schema.to_string().contains("\"verify\""));
 }
 
 #[test]
@@ -728,11 +725,11 @@ fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
                     "isolation":"sequential_workspace_write"
                 },
                 {
-                    "step_id":"verify",
-                    "title":"Verify",
-                    "role":"executor",
+                    "step_id":"review",
+                    "title":"Review",
+                    "role":"subagent_read",
                     "depends_on":["implement"],
-                    "mode":"verify",
+                    "mode":"review",
                     "isolation":"shared_read_only"
                 }
             ]
@@ -763,7 +760,38 @@ fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
         .and_then(|task| task.plans.get(&1))
         .and_then(|plan| plan.graph.as_ref())
         .expect("accepted plan should project valid task graph");
-    assert_eq!(projected_graph.steps[2].mode, TaskStepMode::Verify);
+    assert_eq!(projected_graph.steps[2].mode, TaskStepMode::Review);
+    Ok(())
+}
+
+#[test]
+fn task_plan_update_rejects_system_owned_verify_participant_steps() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
+    };
+    let call = ToolCall {
+        id: "call-verify".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[{
+                "step_id":"verify",
+                "title":"Compile",
+                "role":"executor",
+                "mode":"verify",
+                "isolation":"shared_read_only"
+            }]
+        }"#
+        .to_owned(),
+    };
+
+    let error = task_plan_update_entry(&context, &call)
+        .expect_err("planner-created verify participant must fail closed");
+    assert!(error.to_string().contains("system-owned"));
     Ok(())
 }
 
