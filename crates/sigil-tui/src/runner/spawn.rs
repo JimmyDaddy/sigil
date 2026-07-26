@@ -6,10 +6,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use sigil_kernel::{
-    Agent, EgressAuditRecorder, EgressDisclosurePresenter, ExtensionProcessNetworkAdmission,
-    InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder,
-    ProviderCapabilities, ResolvedModelRoute, RootConfig, Session, SessionLogEntry, WorkspaceTrust,
-    workspace_trust_from_entries,
+    Agent, ControlEntry, EgressAuditRecorder, EgressDisclosurePresenter,
+    ExtensionProcessNetworkAdmission, InteractionMode, JsonlSessionStore, McpServerStartup,
+    MutationEventRecorder, ProviderCapabilities, ResolvedModelRoute, RootConfig, Session,
+    SessionLogEntry, WorkspaceTrust, workspace_trust_from_entries,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
 use tokio::runtime::Runtime;
@@ -187,9 +187,9 @@ fn initialize_worker_session_route(
             .context("model_route_not_configured: complete provider setup before starting")?;
     let existing_entries = JsonlSessionStore::read_entries(session_log_path)
         .context("failed to inspect durable session route")?;
-    let fallback_route_for_new_session = existing_entries
-        .is_empty()
-        .then_some(fallback_route.clone());
+    let fallback_route_for_new_session =
+        session_has_only_route_initialization_prelude(&existing_entries)
+            .then_some(fallback_route.clone());
     let store = JsonlSessionStore::new(session_log_path)?;
     let session = Session::load_from_store_with_route(
         fallback_provider_name,
@@ -214,6 +214,15 @@ fn initialize_worker_session_route(
         "session_route_drift: durable model identity does not match its frozen route"
     );
     Ok((provider_name, route))
+}
+
+fn session_has_only_route_initialization_prelude(entries: &[SessionLogEntry]) -> bool {
+    entries.iter().all(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(_))
+        )
+    })
 }
 
 pub(super) fn load_session_entries_with_workspace_trust(

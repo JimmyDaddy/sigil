@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -22,6 +23,30 @@ def tool(name: str) -> dict[str, object]:
 
 
 class OrchestrationPtyAcceptanceTests(unittest.TestCase):
+    def test_write_config_uses_v2_unauthenticated_loopback_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "sigil.toml"
+            MODULE.write_config(
+                config,
+                workspace=root / "workspace",
+                state_root=root / "state",
+                cache_root=root / "cache",
+                session_dir=root / "sessions",
+                port=43123,
+            )
+
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("config_version = 2", text)
+            self.assertIn('connection = "orchestration-fixture"', text)
+            self.assertIn("[connections.orchestration-fixture]", text)
+            self.assertIn('provider = "custom"', text)
+            self.assertIn('protocol = "chat_completions"', text)
+            self.assertIn('base_url = "http://127.0.0.1:43123/v1"', text)
+            self.assertIn('credential = { source = "none" }', text)
+            self.assertNotIn("[providers.", text)
+            self.assertNotIn("api_key", text)
+
     def test_screen_text_click_uses_one_based_sgr_coordinates(self) -> None:
         class Runner:
             def __init__(self) -> None:

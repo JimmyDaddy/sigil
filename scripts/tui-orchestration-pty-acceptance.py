@@ -529,7 +529,9 @@ def write_config(
 ) -> None:
     endpoint = f"http://127.0.0.1:{port}/v1"
     path.write_text(
-        f'''[workspace]
+        f'''config_version = 2
+
+[workspace]
 root = "{workspace}"
 
 [storage]
@@ -540,7 +542,7 @@ cache_root = "{cache_root}"
 log_dir = "{session_dir}"
 
 [agent]
-provider = "openai_compat"
+connection = "orchestration-fixture"
 model = "{MODEL_NAME}"
 max_turns = 8
 tool_timeout_secs = 10
@@ -571,9 +573,12 @@ keyboard_enhancement = "off"
 mouse_capture = true
 osc52_clipboard = false
 
-[providers.openai_compat]
+[connections.orchestration-fixture]
+label = "Orchestration fixture"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{endpoint}"
-api_key = "orchestration-fixture-key"
+credential = {{ source = "none" }}
 ''',
         encoding="utf-8",
     )

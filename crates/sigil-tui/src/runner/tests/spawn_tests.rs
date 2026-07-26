@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, time::Duration};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, ControlEntry, DurableEventType, JsonlSessionStore, McpServerConfig,
+    AgentConfig, ConnectionId, ControlEntry, DurableEventType, JsonlSessionStore, McpServerConfig,
     McpServerStartup, MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionLogEntry,
     SessionStreamRecord, WorkspaceConfig, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     stable_workspace_id,
@@ -61,6 +61,27 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
+}
+
+fn v2_loopback_root_config(workspace_root: &std::path::Path) -> Result<RootConfig> {
+    let connection_id = ConnectionId::new("orchestration-fixture")?;
+    let mut root_config = deepseek_root_config(workspace_root);
+    root_config.config_version = Some(2);
+    root_config.agent.provider.clear();
+    root_config.agent.connection = Some(connection_id.clone());
+    root_config.agent.model = "fixture-model".to_owned();
+    root_config.providers.clear();
+    root_config.connections.insert(
+        connection_id.to_string(),
+        json!({
+            "label": "Orchestration fixture",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:43123/v1",
+            "credential": { "source": "none" }
+        }),
+    );
+    Ok(root_config)
 }
 
 fn recv_message(message_rx: &mpsc::Receiver<WorkerMessage>) -> Result<WorkerMessage> {
@@ -182,6 +203,91 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
     let ready = recv_message(&message_rx)?;
     assert!(matches!(ready, WorkerMessage::WorkerReady));
     command_tx.send(WorkerCommand::Shutdown)?;
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_worker_initializes_v2_route_after_workspace_trust_prelude() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-spawn-after-trust.jsonl");
+    JsonlSessionStore::new(&session_log_path)?.append(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
+            workspace_id: stable_workspace_id(&workspace_root)?,
+            workspace_trust_snapshot_id: "workspace-trust:test".to_owned(),
+            trust: WorkspaceTrust::Trusted,
+            decided_by_event_id: None,
+            reason: Some("trusted before worker startup".to_owned()),
+        }),
+    ))?;
+
+    let (command_tx, message_rx) = spawn_agent_worker(
+        v2_loopback_root_config(&workspace_root)?,
+        session_log_path.clone(),
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+
+    assert!(matches!(
+        recv_message(&message_rx)?,
+        WorkerMessage::WorkerReady
+    ));
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    let route = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            resolved_model_route,
+            ..
+        }) => resolved_model_route.as_ref(),
+        _ => None,
+    });
+    assert_eq!(
+        route.map(|route| route.model_ref.connection_id.as_str()),
+        Some("orchestration-fixture")
+    );
+    assert_eq!(
+        route.map(|route| route.model_ref.model_id.as_str()),
+        Some("fixture-model")
+    );
+    command_tx.send(WorkerCommand::Shutdown)?;
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_worker_does_not_rebind_legacy_identity_after_workspace_trust() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-spawn-legacy-after-trust.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
+            workspace_id: stable_workspace_id(&workspace_root)?,
+            workspace_trust_snapshot_id: "workspace-trust:test".to_owned(),
+            trust: WorkspaceTrust::Trusted,
+            decided_by_event_id: None,
+            reason: Some("legacy session trust".to_owned()),
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "openai_compat".to_owned(),
+        model_name: "fixture-model".to_owned(),
+        resolved_model_route: None,
+    }))?;
+
+    let (_command_tx, message_rx) = spawn_agent_worker(
+        v2_loopback_root_config(&workspace_root)?,
+        session_log_path,
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+
+    assert!(matches!(
+        recv_message(&message_rx)?,
+        WorkerMessage::RunFailed(ref error) if error.contains("session_route_missing")
+    ));
     Ok(())
 }
 
