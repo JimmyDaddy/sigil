@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ConversationForkOutput, ConversationForkProjection,
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
-    JsonlSessionStore, MessageRole, ModelMessage, SessionLogEntry, SessionRef,
+    JsonlSessionStore, MessageRole, ModelMessage, RootConfig, SessionLogEntry, SessionRef,
     SessionStreamCompatibilityError, SessionStreamRecord, fork_conversation_at_turn,
     safe_persistence_text,
 };
@@ -598,6 +598,8 @@ impl LocalSessionLifecycleService {
         expected_session_id: &str,
         source_turn_digest: &str,
         destination_key: &str,
+        root_config: &RootConfig,
+        target_model_ref: &sigil_kernel::ModelRef,
     ) -> Result<ConversationForkOutput> {
         if source_turn_digest.trim().is_empty() || destination_key.trim().is_empty() {
             bail!("conversation fork turn digest and destination key must not be empty");
@@ -608,12 +610,11 @@ impl LocalSessionLifecycleService {
         let records = JsonlSessionStore::read_event_records(&binding.session_log_path)
             .with_context(|| format!("failed to read {}", binding.session_log_path.display()))?;
         let projection = project_records(&records)?;
-        let provider_name = projection
-            .provider_name
-            .ok_or_else(|| anyhow!("source session has no provider identity"))?;
-        let model_name = projection
-            .model_name
-            .ok_or_else(|| anyhow!("source session has no model identity"))?;
+        let _ = projection.resolved_model_route.as_ref();
+        let (provider_name, resolved_model_route) =
+            crate::provider_connections::resolve_model_route(root_config, target_model_ref)
+                .map_err(anyhow::Error::new)?;
+        let model_name = resolved_model_route.model_ref.model_id.clone();
         let parent = binding
             .session_log_path
             .parent()
@@ -641,6 +642,7 @@ impl LocalSessionLifecycleService {
                 destination_path,
                 provider_name,
                 model_name,
+                resolved_model_route: Some(resolved_model_route),
             },
         )
     }
@@ -1314,6 +1316,7 @@ struct SessionRecordProjection {
     session_id: Option<String>,
     provider_name: Option<String>,
     model_name: Option<String>,
+    resolved_model_route: Option<sigil_kernel::ResolvedModelRoute>,
     title: Option<String>,
     messages: Vec<ModelMessage>,
     external_provenance: Vec<ExternalProvenanceEntry>,
@@ -1358,9 +1361,13 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name,
                 model_name,
+                resolved_model_route,
             }) => {
                 projection.provider_name.get_or_insert(provider_name);
                 projection.model_name.get_or_insert(model_name);
+                if projection.resolved_model_route.is_none() {
+                    projection.resolved_model_route = resolved_model_route;
+                }
             }
             SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name }) => {
                 projection.model_name = Some(model_name);

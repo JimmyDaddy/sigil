@@ -45,12 +45,12 @@ use super::{
     application_session_frontier_view, application_session_transcript_page,
     application_task_integration_review_view, application_terminal_projection,
     application_verification_view, attach_application_request_context, bind_application_session,
-    bind_application_session_with_model, bind_existing_application_session,
-    constrain_application_tool_registry, continue_application_task_handoff,
-    default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
-    prepare_application_run_blocking, prepare_application_task_continuation,
-    record_application_preparation_cancellation, rerun_application_verification,
-    validate_execution_contract,
+    bind_application_session_with_model, bind_application_session_with_model_ref,
+    bind_existing_application_session, constrain_application_tool_registry,
+    continue_application_task_handoff, default_application_session_path,
+    optional_eager_mcp_warning, prepare_application_run, prepare_application_run_blocking,
+    prepare_application_task_continuation, record_application_preparation_cancellation,
+    rerun_application_verification, validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -105,6 +105,70 @@ fn append_running_application_task(
     session.append_controls(controls)
 }
 
+fn write_application_test_config(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_unauthenticated_application_test_config(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = { source = "none" }
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_legacy_application_test_config(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-key"
+base_url = "https://api.deepseek.com"
+"#,
+    )?;
+    Ok(())
+}
+
 #[test]
 fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -114,6 +178,7 @@ fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     session.append_user_message(ModelMessage::user("hello"))?;
     let scope = session.session_scope_id().to_owned();
@@ -147,8 +212,9 @@ impl EgressDisclosurePresenter for RejectingDisclosurePresenter {
 
 struct ApplicationTaskRoleProviderBuilder;
 
+#[async_trait]
 impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
-    fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+    async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
         Ok(Box::new(ApplicationTaskRoleProvider { role }))
     }
 }
@@ -371,16 +437,7 @@ async fn verification_view_uses_durable_truth_and_rerun_shares_the_foreground_le
 {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/verification.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     assert!(application_verification_view(&binding.session_log_path)?.is_none());
@@ -422,16 +479,7 @@ async fn integration_review_projection_is_scope_checked_and_acceptance_shares_th
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/integration.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     let before = std::fs::read(&binding.session_log_path)?;
@@ -604,19 +652,11 @@ api_key = "test-secret-key"
 }
 
 #[test]
-fn adapter_session_binding_accepts_only_offered_models_for_new_durable_identity() -> Result<()> {
+fn adapter_session_binding_accepts_connection_models_and_rejects_unknown_connections() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let selected_path = temp.path().join("state/sessions/pro.jsonl");
 
     let binding = bind_application_session_with_model(
@@ -634,24 +674,55 @@ model = "deepseek-v4-flash"
     assert_eq!(context.model_name, "deepseek-v4-pro");
     assert!(
         context
-            .available_models
-            .contains(&"deepseek-v4-flash".to_owned())
+            .model_options
+            .iter()
+            .any(|option| option.model_name == "deepseek-v4-flash")
     );
     assert!(
         context
-            .available_models
-            .contains(&"deepseek-v4-pro".to_owned())
+            .model_options
+            .iter()
+            .any(|option| option.model_name == "deepseek-v4-pro")
     );
 
-    let rejected = bind_application_session_with_model(
+    let manual = bind_application_session_with_model(
         &config_path,
         temp.path(),
-        Some(&temp.path().join("state/sessions/unknown.jsonl")),
+        Some(&temp.path().join("state/sessions/manual.jsonl")),
+        Some("unknown-model"),
+    )?;
+    let manual_context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &manual.session_log_path,
+        &manual.session_scope_id,
+    )?;
+    assert_eq!(manual_context.model_name, "unknown-model");
+
+    let connection_id = sigil_kernel::ConnectionId::new("deepseek-default")?;
+    let rejected_unadmitted_model = bind_application_session_with_model_ref(
+        &config_path,
+        temp.path(),
+        Some(&temp.path().join("state/sessions/unadmitted-model.jsonl")),
+        Some(&connection_id),
         Some("unknown-model"),
     );
     assert!(matches!(
-        rejected,
+        rejected_unadmitted_model,
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+
+    let missing_connection = sigil_kernel::ConnectionId::new("missing-connection")?;
+    let rejected = bind_application_session_with_model_ref(
+        &config_path,
+        temp.path(),
+        Some(&temp.path().join("state/sessions/unknown-connection.jsonl")),
+        Some(&missing_connection),
+        Some("deepseek-v4-pro"),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ApplicationRunPrepareError::Configuration { .. })
     ));
     Ok(())
 }
@@ -660,16 +731,7 @@ model = "deepseek-v4-flash"
 fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/existing.jsonl");
     let created = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
 
@@ -683,19 +745,76 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
+fn session_reopen_binding_migrates_an_exact_legacy_v1_route_once() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_legacy_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/legacy-route.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    })?;
+    session.append_user_message(ModelMessage::user("hello"))?;
+    let expected_scope = session.session_scope_id().to_owned();
+    drop(session);
+
+    let reopened = bind_existing_application_session(&config_path, &session_path)?;
+    assert_eq!(reopened.session_scope_id, expected_scope);
+    let migrated_entries = JsonlSessionStore::read_entries(&session_path)?;
+    let migrated_routes = migrated_entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route: Some(route),
+                ..
+            }) => Some(route),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(migrated_routes.len(), 1);
+    assert_eq!(
+        migrated_routes[0].model_ref.connection_id.as_str(),
+        "deepseek-default"
+    );
+    assert_eq!(migrated_routes[0].model_ref.model_id, "deepseek-v4-flash");
+    let after_first_open = std::fs::read(&session_path)?;
+
+    let reopened_again = bind_existing_application_session(&config_path, &session_path)?;
+    assert_eq!(reopened_again, reopened);
+    assert_eq!(std::fs::read(&session_path)?, after_first_open);
+    let context =
+        application_run_context_view(&config_path, temp.path(), &session_path, &expected_scope)?;
+    assert_eq!(context.model_ref, migrated_routes[0].model_ref);
+    Ok(())
+}
+
+#[test]
+fn session_reopen_binding_does_not_rebind_a_route_less_v2_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/route-less-v2.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    }))?;
+    let before = std::fs::read(&session_path)?;
+
+    assert!(bind_existing_application_session(&config_path, &session_path).is_err());
+    assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
+#[test]
 fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/context.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
 
@@ -707,17 +826,28 @@ model = "deepseek-v4-flash"
     )?;
     assert_eq!(empty.provider_name, "deepseek");
     assert_eq!(empty.model_name, "deepseek-v4-flash");
+    assert_eq!(empty.model_ref.connection_id.as_str(), "deepseek-default");
+    assert_eq!(empty.model_ref.model_id, "deepseek-v4-flash");
     assert_eq!(
         empty.default_permission_mode,
         sigil_kernel::PermissionMode::Manual
     );
-    assert_eq!(empty.available_models.len(), 2);
     assert_eq!(empty.model_options.len(), 2);
     let pro = empty
         .model_options
         .iter()
         .find(|option| option.model_name == "deepseek-v4-pro")
         .expect("pro model option");
+    assert_eq!(
+        pro.availability,
+        crate::provider_connections::ModelAvailability::Unverified
+    );
+    assert!(
+        empty.model_options.iter().all(|option| {
+            option.availability != crate::provider_connections::ModelAvailability::Available
+        }),
+        "bundled and configured-only application models must not claim remote availability"
+    );
     assert_eq!(pro.default_reasoning_effort, Some(ReasoningEffort::Max));
     assert_eq!(
         pro.available_reasoning_efforts,
@@ -799,19 +929,12 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
-fn run_model_selection_keeps_the_session_and_rejects_stale_capabilities() -> Result<()> {
+fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabilities() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
+    let root_config = RootConfig::load(&config_path)?;
     let session_path = temp.path().join("state/sessions/model-switch.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     let context = application_run_context_view(
@@ -821,7 +944,7 @@ model = "deepseek-v4-flash"
         &binding.session_scope_id,
     )?;
     let store = JsonlSessionStore::new(&binding.session_log_path)?;
-    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
     let mut request =
         ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "run-model");
     request.model_name = Some("deepseek-v4-pro".to_owned());
@@ -834,20 +957,60 @@ model = "deepseek-v4-flash"
     request.reasoning_effort = pro_option.default_reasoning_effort.clone();
     request.reasoning_effort_binding = pro_option.reasoning_effort_binding.clone();
 
-    admit_application_model_selection(&request, &mut session)?;
+    assert!(matches!(
+        admit_application_model_selection(
+            &request,
+            &root_config,
+            &session,
+            &temp.path().join("cache"),
+        ),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+
+    let connection_id = sigil_kernel::ConnectionId::new("deepseek-default")?;
+    let pro_path = temp.path().join("state/sessions/model-switch-pro.jsonl");
+    let pro_binding = bind_application_session_with_model_ref(
+        &config_path,
+        temp.path(),
+        Some(&pro_path),
+        Some(&connection_id),
+        Some("deepseek-v4-pro"),
+    )?;
+    let pro_context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &pro_binding.session_log_path,
+        &pro_binding.session_scope_id,
+    )?;
+    request.model_selection_binding = Some(pro_context.model_selection_binding.clone());
+    let pro_store = JsonlSessionStore::new(&pro_binding.session_log_path)?;
+    let pro_session = Session::load_from_store("deepseek", "deepseek-v4-pro", pro_store)?;
+    admit_application_model_selection(
+        &request,
+        &root_config,
+        &pro_session,
+        &temp.path().join("cache"),
+    )?;
     let mut selected_config = RootConfig::load(&config_path)?;
-    selected_config.agent.model = session.model_name().to_owned();
+    selected_config.agent.provider = "deepseek".to_owned();
+    selected_config.agent.model = "deepseek-v4-pro".to_owned();
     admit_application_reasoning_effort(&request, &selected_config)?;
 
-    assert_eq!(session.session_scope_id(), binding.session_scope_id);
-    assert_eq!(session.model_name(), "deepseek-v4-pro");
+    assert_ne!(pro_session.session_scope_id(), binding.session_scope_id);
+    assert_eq!(pro_session.session_scope_id(), pro_binding.session_scope_id);
+    assert_eq!(pro_session.model_name(), "deepseek-v4-pro");
     let selected_context = application_run_context_view(
         &config_path,
         temp.path(),
-        &binding.session_log_path,
-        &binding.session_scope_id,
+        &pro_binding.session_log_path,
+        &pro_binding.session_scope_id,
     )?;
     assert_eq!(selected_context.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        selected_context.model_ref.connection_id.as_str(),
+        "deepseek-default"
+    );
+    assert_eq!(selected_context.model_ref.model_id, "deepseek-v4-pro");
     assert_eq!(
         selected_context.default_reasoning_effort,
         Some(ReasoningEffort::Max)
@@ -855,9 +1018,88 @@ model = "deepseek-v4-flash"
     let mut stale = request;
     stale.model_name = Some("deepseek-v4-flash".to_owned());
     assert!(matches!(
-        admit_application_model_selection(&stale, &mut session),
+        admit_application_model_selection(
+            &stale,
+            &root_config,
+            &pro_session,
+            &temp.path().join("cache"),
+        ),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn run_context_uses_only_the_exact_connection_fresh_catalog_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let cache_root = temp.path().join("cache");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[storage]
+cache_root = "{}"
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-cache"
+model = "local-cache-model"
+
+[connections.local-cache]
+label = "Local cached"
+provider = "custom"
+protocol = "responses"
+base_url = "http://127.0.0.1:11434/v1"
+credential = {{ source = "none" }}
+"#,
+            cache_root.display()
+        ),
+    )?;
+    let root_config = RootConfig::load(&config_path)?;
+    let loaded = crate::provider_connections::load_provider_connections(&root_config);
+    let connection = &loaded
+        .connections
+        .get(&sigil_kernel::ConnectionId::new("local-cache").expect("connection id should parse"))
+        .expect("exact connection should load")
+        .config;
+    let cached_ref = sigil_kernel::ModelRef::new(connection.id.clone(), "local-cache-model")?;
+    crate::provider_connections::seed_unauthenticated_catalog_cache_for_test(
+        &cache_root,
+        connection,
+        &[crate::provider_connections::ModelCatalogEntry {
+            model_ref: cached_ref,
+            display_name: "Cached exact model".to_owned(),
+            availability: crate::provider_connections::ModelAvailability::Available,
+            recommendation: crate::provider_connections::ModelRecommendation::Recommended,
+            provenance: crate::provider_connections::ModelCatalogProvenance::Remote,
+        }],
+    )?;
+
+    let binding = bind_application_session(&config_path, temp.path(), None)?;
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+
+    assert_eq!(context.model_options.len(), 1);
+    let option = &context.model_options[0];
+    assert_eq!(option.model_ref.connection_id.as_str(), "local-cache");
+    assert_eq!(option.model_name, "local-cache-model");
+    assert_eq!(option.display_name, "Cached exact model");
+    assert_eq!(
+        option.availability,
+        crate::provider_connections::ModelAvailability::Available
+    );
+    assert_eq!(
+        option.provenance,
+        crate::provider_connections::ModelCatalogProvenance::Cache
+    );
     Ok(())
 }
 
@@ -1041,16 +1283,7 @@ model = "deepseek-v4-flash"
 fn transcript_page_is_scope_checked_chronological_bounded_and_argument_free() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/transcript.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     let store = JsonlSessionStore::new(&binding.session_log_path)?;
@@ -1119,16 +1352,7 @@ model = "deepseek-v4-flash"
 fn transcript_page_projects_durable_reasoning_notes_without_other_control_data() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp
         .path()
         .join("state/sessions/reasoning-transcript.jsonl");
@@ -1176,16 +1400,7 @@ model = "deepseek-v4-flash"
 fn transcript_page_truncates_utf8_content_without_breaking_character_boundaries() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/large-transcript.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     let store = JsonlSessionStore::new(&binding.session_log_path)?;
@@ -1211,16 +1426,7 @@ model = "deepseek-v4-flash"
 fn preparation_cancellation_is_durable_idempotent_and_secret_safe() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
+    write_application_test_config(&config_path)?;
     let session_path = temp.path().join("state/sessions/http.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
 
@@ -1812,25 +2018,19 @@ model = "application-task-model"
 async fn application_task_continuation_reopens_exact_task_and_returns_synthesis() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[task]
-enabled = true
-
-[providers.deepseek]
-api_key = "test-secret-key"
-"#,
-    )?;
+    write_unauthenticated_application_test_config(&config_path)?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
-    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let (provider_name, route) =
+        crate::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let mut session = Session::load_from_store_with_route(
+        provider_name,
+        route.model_ref.model_id.clone(),
+        Some(route),
+        store,
+    )?;
     let task_id = TaskId::new("task-application-continuation")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),

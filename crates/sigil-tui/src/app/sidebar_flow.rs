@@ -53,7 +53,8 @@ impl AppState {
         };
         let mut next_config = root_config.clone();
         next_config.permission.mode = cycle_permission_mode(next_config.permission.mode);
-        persisted_root_config(&next_config).save(&self.config_path)?;
+        persisted_root_config(&next_config)
+            .save_if_unchanged(&self.config_path, &persisted_root_config(root_config))?;
         self.apply_runtime_config_snapshot(&next_config);
         self.last_notice = Some(format!(
             "permission mode = {}",

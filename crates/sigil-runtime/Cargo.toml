@@ -9,9 +9,12 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 futures.workspace = true
+fs2.workspace = true
 ignore.workspace = true
 image.workspace = true
+keyring.workspace = true
 libc.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
@@ -34,9 +37,9 @@ tempfile.workspace = true
 uuid.workspace = true
 url.workspace = true
 unicode-normalization.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-fs2.workspace = true
 tokio.workspace = true
 
 [lints]

@@ -205,9 +205,11 @@ impl AppState {
             AppAction::ForkLocalSession {
                 request_id,
                 source_path,
+                current_model_route,
             } => WorkerCommand::ForkLocalSession {
                 request_id,
                 source_path,
+                current_model_route,
             },
             AppAction::ExportLocalSession {
                 request_id,
@@ -269,6 +271,8 @@ impl AppState {
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
+            | AppAction::StartNewModelSession { .. }
+            | AppAction::SetDefaultModel { .. }
             | AppAction::CopyToClipboard { .. }
             | AppAction::CopySecretToClipboard { .. }
             | AppAction::OpenExternalUrl { .. }

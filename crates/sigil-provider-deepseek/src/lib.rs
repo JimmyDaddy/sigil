@@ -1,4 +1,5 @@
 mod capabilities;
+mod catalog;
 mod client;
 mod compaction_token_profile;
 mod config;
@@ -19,6 +20,7 @@ mod stream;
 mod tools;
 
 pub use capabilities::deepseek_capabilities;
+pub use catalog::{BUNDLED_DEEPSEEK_MODELS, DeepSeekCatalogModel, parse_deepseek_model_list};
 pub use compaction_token_profile::{
     DEFAULT_DEEPSEEK_V4_FLASH_ENCODER_SHA256, DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT,
     DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS,
@@ -41,6 +43,9 @@ pub use pricing::context_window_tokens as deepseek_context_window_tokens;
 pub use provider::DeepSeekProvider;
 pub use reasoning_effort::deepseek_reasoning_efforts;
 
+#[cfg(test)]
+#[path = "tests/catalog_tests.rs"]
+mod catalog_tests;
 #[cfg(test)]
 #[path = "tests/reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;

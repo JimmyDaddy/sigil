@@ -187,6 +187,7 @@ fn approval_source_agent_helper_uses_profile_and_thread_fallbacks() -> anyhow::R
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                     effective_tool_scope_hash: "tools".to_owned(),

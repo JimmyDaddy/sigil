@@ -16,9 +16,9 @@ use ratatui::{
 };
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, ControlEntry, EventHandler, JsonlSessionStore, MemoryConfig,
-    ModelMessage, PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
-    WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
+    AgentConfig, CONFIG_VERSION_V2, CompactionConfig, ConnectionId, ControlEntry, EventHandler,
+    JsonlSessionStore, MemoryConfig, ModelMessage, ModelRef, PermissionConfig, RootConfig,
+    RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
 };
 
 use super::{
@@ -30,13 +30,15 @@ use super::{
     next_mouse_capture_action, next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
     plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
     prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
-    render_scrollback_rows, render_tui_exit_resume_hint, restore_initial_session_from_disk,
-    scrollback_plain_line, scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
-    should_sync_terminal_scrollback, wrap_scrollback_text,
+    render_scrollback_rows, render_tui_exit_resume_hint, restart_worker_after_session_transition,
+    restore_initial_session_from_disk, scrollback_plain_line, scrollback_row_style,
+    scrollback_separator, scrollback_wrapped_rows, should_sync_terminal_scrollback,
+    wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -47,6 +49,7 @@ fn test_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -63,6 +66,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -70,11 +74,37 @@ fn test_config() -> RootConfig {
 
 fn test_config_for_workspace(workspace_root: &Path) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
         ..test_config()
     }
+}
+
+fn v2_test_config(default_connection: &str) -> RootConfig {
+    let mut config = test_config();
+    config.config_version = Some(CONFIG_VERSION_V2);
+    config.agent.provider.clear();
+    config.agent.connection =
+        Some(ConnectionId::new(default_connection).expect("valid test connection"));
+    config.agent.model = format!("{default_connection}-model");
+    for connection_id in ["primary", "secondary"] {
+        config.connections.insert(
+            connection_id.to_owned(),
+            json!({
+                "label": connection_id,
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_API_KEY"
+                }
+            }),
+        );
+    }
+    config
 }
 
 #[test]
@@ -1234,6 +1264,32 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 }
 
 #[test]
+fn build_initial_app_keeps_setup_fail_closed_when_recovery_exists_without_config() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        temp.path()
+            .join("sigil.toml.provider-migration-recovery-v1"),
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )?;
+
+    let (app, worker) = build_initial_app(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(anyhow!("config is missing")),
+        |_root_config, _app| Err(anyhow!("spawner should not run")),
+    )?;
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider migration recovery is pending"))
+    );
+    Ok(())
+}
+
+#[test]
 fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root_config = test_config_for_workspace(temp.path());
@@ -1269,6 +1325,83 @@ fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
 
     let shutdown = old_commands.recv()?;
     assert!(matches!(shutdown, WorkerCommand::Shutdown));
+    assert!(worker.is_some());
+    Ok(())
+}
+
+#[test]
+fn config_save_restarts_worker_on_current_session_route_not_new_default() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let current_config = v2_test_config("primary");
+    let mut saved_config = v2_test_config("secondary");
+    saved_config.agent.model = "secondary-model".to_owned();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &current_config);
+    app.apply_runtime_config_snapshot(&saved_config);
+    let (old_runtime, old_commands) = fake_worker_runtime();
+    let mut worker = Some(old_runtime);
+    let mut spawned_config = None;
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::ConfigSaved {
+            root_config: Box::new(saved_config),
+        },
+        |root_config, _app| {
+            spawned_config = Some(root_config);
+            Ok(fake_worker_runtime().0)
+        },
+    )?;
+
+    assert!(matches!(old_commands.recv()?, WorkerCommand::Shutdown));
+    let spawned_config = spawned_config.expect("replacement worker config");
+    assert_eq!(
+        spawned_config
+            .agent
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("primary")
+    );
+    assert_eq!(spawned_config.agent.model, "primary-model");
+    assert_eq!(
+        app.root_config_snapshot()
+            .and_then(|config| config.agent.connection.as_ref())
+            .map(ConnectionId::as_str),
+        Some("secondary")
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_repair_save_keeps_legacy_worker_when_session_has_no_compound_route() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let saved_config = v2_test_config("primary");
+    app.apply_runtime_config_snapshot(&saved_config);
+    let (old_runtime, old_commands) = fake_worker_runtime();
+    let mut worker = Some(old_runtime);
+    let mut spawn_called = false;
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::ConfigSaved {
+            root_config: Box::new(saved_config),
+        },
+        |_root_config, _app| {
+            spawn_called = true;
+            Ok(fake_worker_runtime().0)
+        },
+    )?;
+
+    assert!(matches!(
+        old_commands.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert!(!spawn_called);
     assert!(worker.is_some());
     Ok(())
 }
@@ -1424,6 +1557,56 @@ fn drain_worker_messages_returns_clean_without_runtime() -> Result<()> {
     let mut worker = None;
 
     assert!(!drain_worker_messages(&mut app, &mut worker)?);
+    Ok(())
+}
+
+#[test]
+fn session_transition_restarts_worker_against_the_restored_compound_route() -> Result<()> {
+    let config = v2_test_config("primary");
+    let target_model = ModelRef::new(
+        ConnectionId::new("secondary")?,
+        "secondary-model".to_owned(),
+    )?;
+    let (_, target_route) =
+        sigil_runtime::provider_connections::resolve_model_route(&config, &target_model)?;
+    let target_session = PathBuf::from(".sigil/sessions/session-secondary.jsonl");
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let (old_worker, _old_commands) = fake_worker_runtime();
+    let mut worker = Some(old_worker);
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path: target_session.clone(),
+        provider_name: "deepseek".to_owned(),
+        model_name: target_model.model_id.clone(),
+        entries: vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: target_model.model_id.clone(),
+            resolved_model_route: Some(target_route.clone()),
+        })],
+    })?;
+
+    let mut spawn_count = 0;
+    assert!(restart_worker_after_session_transition(
+        &mut app,
+        &mut worker,
+        |root_config, rebound_app| {
+            spawn_count += 1;
+            assert_eq!(root_config.config_version, Some(CONFIG_VERSION_V2));
+            assert_eq!(rebound_app.session_log_path, target_session);
+            assert_eq!(
+                rebound_app.runtime.model_route.as_ref(),
+                Some(&target_route)
+            );
+            Ok(fake_worker_runtime().0)
+        }
+    )?);
+    assert_eq!(spawn_count, 1);
+    assert!(worker.is_some());
+    assert!(!restart_worker_after_session_transition(
+        &mut app,
+        &mut worker,
+        |_root_config, _app| Err(anyhow!("spawner must not run twice"))
+    )?);
     Ok(())
 }
 

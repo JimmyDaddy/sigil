@@ -1,42 +1,44 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readLastSession, writeLastSession } from "./preferences";
+import { readDefaultModel, writeDefaultModel } from "./preferences";
 
 afterEach(() => {
   window.localStorage.clear();
 });
 
-describe("desktop session preferences", () => {
-  it("stores the last selected durable session per workspace", () => {
-    expect(writeLastSession("workspace-a", {
-      sessionRef: "session-a.jsonl",
-      sessionId: "durable-a",
-      label: "Last conversation",
-    })).toBe(true);
-    expect(writeLastSession("workspace-b", {
-      sessionRef: "session-b.jsonl",
-      sessionId: "durable-b",
+describe("desktop provider model preferences", () => {
+  it("round-trips an exact compound model identity", () => {
+    expect(writeDefaultModel("workspace-1", {
+      connectionId: "openai-primary",
+      modelId: "gpt-4.1",
     })).toBe(true);
 
-    expect(readLastSession("workspace-a")).toEqual({
-      sessionRef: "session-a.jsonl",
-      sessionId: "durable-a",
-      label: "Last conversation",
-    });
-    expect(readLastSession("workspace-b")).toEqual({
-      sessionRef: "session-b.jsonl",
-      sessionId: "durable-b",
+    expect(readDefaultModel("workspace-1")).toEqual({
+      connectionId: "openai-primary",
+      modelId: "gpt-4.1",
     });
   });
 
-  it("rejects malformed stored values and clears only the requested workspace", () => {
-    window.localStorage.setItem("sigil.desktop.last-sessions.v1", JSON.stringify({
-      "workspace-a": { sessionRef: 42, sessionId: "durable-a" },
-      "workspace-b": { sessionRef: "session-b.jsonl", sessionId: "durable-b" },
-    }));
+  it("does not guess a connection for a legacy bare model preference", () => {
+    window.localStorage.setItem(
+      "sigil.desktop.default-models.v1",
+      JSON.stringify({ "workspace-1": "deepseek-v4-pro" }),
+    );
 
-    expect(readLastSession("workspace-a")).toBeUndefined();
-    expect(writeLastSession("workspace-b", undefined)).toBe(true);
-    expect(readLastSession("workspace-b")).toBeUndefined();
+    expect(readDefaultModel("workspace-1")).toBeUndefined();
+  });
+
+  it("rejects malformed compound identities", () => {
+    window.localStorage.setItem(
+      "sigil.desktop.default-models.v2",
+      JSON.stringify({
+        "workspace-1": {
+          connectionId: "",
+          modelId: "gpt-4.1",
+        },
+      }),
+    );
+
+    expect(readDefaultModel("workspace-1")).toBeUndefined();
   });
 });

@@ -14,6 +14,30 @@
 | `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
 | Vitest / Testing Library / jsdom | `4.1.10` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
 
+### Conversation Markdown、数学公式与图表（RFC-0054）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.1` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
+| `rehype-sanitize` | `6.0.0` | `apps/desktop/src/markdown` | 在 React 渲染前执行显式 Markdown schema，只允许 Sigil 使用的结构、class 与受限属性；不启用 `rehype-raw` | MIT；rehypejs/rehype-sanitize | 模型、历史 session 和 provider 内容均视为不可信；raw HTML、script、iframe、object 与不受控 URL 不进入 DOM |
+| `mermaid` | `11.16.0` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
+| `dompurify` | `3.4.12` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
+
+RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也不启动额外进程、不创建临时文件、
+不访问网络。Desktop CSP 保持 `default-src 'self'`、`img-src 'self' data:`、`object-src 'none'`、
+`frame-src 'none'`，所有 CSS、font、KaTeX 和 Mermaid 资源随应用 bundle 分发。
+
+依赖引入前后的 production build 对比：主 JS 从 `770.44 kB / 229.53 kB gzip` 增至
+`818.91 kB / 247.35 kB gzip`；KaTeX 与 Mermaid 保持异步 chunk，其中 KaTeX core 为
+`259.63 kB / 77.62 kB gzip`，Mermaid core 为 `36.27 kB / 12.07 kB gzip`，各图种实现继续由
+Vite 拆分。`pnpm audit --audit-level high` 当前为零漏洞；`openapi-typescript` 传递图中的
+`js-yaml` 通过 workspace override 固定为 `4.3.0`；其
+`@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.8`，以修复
+`GHSA-mh99-v99m-4gvg` 的无界 expansion-length DoS，直到上游约束自然覆盖对应修复版本。两个
+override 都由 contract regeneration、完整 desktop check 和 high-severity audit 验证。升级
+KaTeX、Mermaid、DOMPurify 或 sanitize pipeline 时必须重跑不可信 URL/HTML/SVG 语料、安全审计和
+bundle 差异检查，不得只以视觉 smoke 通过作为升级依据。
+
 R44.2同时复用workspace既有`reqwest`、`serde`、`tokio`、`url`、`uuid`与`thiserror`。Rust typed client使用
 launcher私有bearer、no-proxy/no-redirect client、bounded JSON response和opaque command IDs；它不依赖`sigil-http`
 实现crate。`pnpm audit --audit-level high`在引入时无已知漏洞。
@@ -127,6 +151,19 @@ K25.12B2 的 coordinator 强制 `stage ciphertext -> append+sync Committed -> at
 | `zeroize` | 复用 `1.8.2`；默认 feature | `sigil-mcp/streamable_http/oauth,oauth_credential` | 包裹 serialized credential bytes、decoded secret fields、Basic client-auth 中间材料；公开 carrier 继续使用 kernel `SecretString`，无 serde contract 且 drop 清零 | `Apache-2.0 OR MIT`；RustCrypto | 只提供 best-effort memory clearing，不把它表述为内存取证防护；Debug/error/status 只输出 bounded 非 secret 投影 |
 
 R40.3 没有引入新版本或来源；该切片完成时的两项显式例外已在后续供应链变更中继续按同一精确台账机制演进。
+
+## Provider connection credential lifecycle（RFC-0056 R56.2）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `keyring` | 复用 `3.6.3` 与既有 native feature 集 | `sigil-runtime/provider_connections/keyring_store` | 保存绑定 credential ID、provider family、auth kind 和 rotation generation 的 versioned API-key record；所有 native 调用进入 `spawn_blocking`。明确 rejected/invalid/oversize 均 fail closed；仅 `storage.credential_store = "auto"` 且 native store 明确 unavailable 时，configured store 才使用 owner-only file backend | `MIT OR Apache-2.0`；`hwchen/keyring-rs` | 继续使用跨平台最窄的 2560-byte record cap；native macOS/Windows/Linux round trip 属于 R56.7 hosted conformance |
+| `fs2` | 复用 `0.4.3` | `sigil-runtime/provider_connections/file_store` | 对 `~/.sigil/credentials.json` 的独立 sidecar lock 取得 shared/exclusive advisory lease，配合 bounded/versioned JSON、same-parent atomic publish 和 owner-only permissions，避免并发 reader/writer 丢失更新 | `MIT OR Apache-2.0`；`danburkert/fs2-rs` | file backend 是受权限保护的 plaintext credential store，不宣称加密；不得进入主 config、workspace、session、cache、log、snapshot 或 support data |
+| `ring` | 复用 `0.17.14`；默认 feature | `sigil-runtime/provider_connections/credential,persistence` | 为每次 COW read-back 生成 process-local random HMAC key，只比较同进程 secret equality；key、tag 和 secret 都不持久化或进入 Debug/error | `Apache-2.0 AND ISC`；`briansmith/ring` | 该 fingerprint 不是 credential identity、cache key 或离线 verifier；比较完成即丢弃 |
+| `zeroize` | 复用 `1.8.2`；默认 feature | `sigil-runtime/provider_connections/{keyring_store,file_store}` | 包裹 credential serialized record bytes、file read/write buffers 与 encoded record strings；公开 secret carrier 继续复用 kernel `SecretString` | `Apache-2.0 OR MIT`；RustCrypto | 仅提供 best-effort drop-time clearing；DTO、Doctor、session 和 config 不暴露 raw secret 或 credential ID |
+| `libc` | 复用 workspace `0.2.186` | `sigil-kernel/config` | Unix 同目录 temporary config 使用 `O_NOFOLLOW`，并结合 create-new、parent identity 和 rename/fsync contract 拒绝 symlink/replacement 路径 | `MIT OR Apache-2.0`；rust-lang/libc | 只在 Unix cfg 下消费；Windows 继续使用 inherited ACL、`ReplaceFileW` / `MoveFileExW` contract |
+
+R56.2 没有引入新的版本或来源。provider credential store 与 MCP OAuth store 使用不同 service、
+record schema 和 public trait，避免把 API key、OAuth token 与 continuation key 的 scope/lifecycle 合并。
 
 ## Context Compaction V2 portable tokenizer（K25.10/K25.13）
 

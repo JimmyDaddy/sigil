@@ -72,6 +72,86 @@ impl AppState {
         self.config_snapshot.as_ref()
     }
 
+    pub(crate) fn runtime_config_for_current_session(
+        &self,
+        mut saved_config: RootConfig,
+    ) -> anyhow::Result<Option<RootConfig>> {
+        let Some(route) = self.runtime.model_route.as_ref() else {
+            if saved_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
+                // Legacy sessions do not carry a compound route. After an explicit V1 -> V2
+                // repair save there is therefore no established route to preserve. Keep the
+                // already-running legacy worker instead of silently rebinding the session to
+                // the newly saved default.
+                return Ok(None);
+            }
+            saved_config.agent.provider = self.runtime.provider_name.clone();
+            saved_config.agent.connection = None;
+            saved_config.agent.model = self.runtime.model_name.clone();
+            return Ok(Some(saved_config));
+        };
+        let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
+            &saved_config,
+            route,
+        )
+        .map_err(anyhow::Error::new)?;
+        if saved_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
+            saved_config.agent.provider.clear();
+            saved_config.agent.connection = Some(route.model_ref.connection_id.clone());
+        } else {
+            saved_config.agent.provider = provider_name;
+            saved_config.agent.connection = None;
+        }
+        saved_config.agent.model = route.model_ref.model_id.clone();
+        Ok(Some(saved_config))
+    }
+
+    pub(crate) fn record_started_model_route(&mut self) {
+        let Some(root_config) = self.config_snapshot.as_ref() else {
+            return;
+        };
+        let Some(model_ref) = self
+            .runtime
+            .model_route
+            .as_ref()
+            .map(|route| route.model_ref.clone())
+        else {
+            return;
+        };
+        if let Err(error) = sigil_runtime::provider_connections::record_recent_model_ref(
+            &self.sigil_paths.state_root,
+            root_config,
+            &model_ref,
+        ) {
+            self.push_event(
+                "model_recent",
+                format!(
+                    "not recorded: {}",
+                    sigil_kernel::safe_persistence_text(&error.to_string())
+                ),
+            );
+            return;
+        }
+        self.recent_model_refs
+            .retain(|candidate| candidate != &model_ref);
+        self.recent_model_refs.insert(0, model_ref);
+        self.recent_model_refs.truncate(20);
+    }
+
+    pub(crate) fn apply_saved_default_model(&mut self, root_config: RootConfig) {
+        let default = sigil_runtime::provider_connections::load_provider_connections(&root_config)
+            .default_model;
+        self.schedule_connection_inventory_refresh(&root_config);
+        self.config_snapshot = Some(root_config);
+        if let Some(default) = default {
+            let notice = format!(
+                "saved default -> {}/{}; current session unchanged",
+                default.connection_id, default.model_id
+            );
+            self.last_notice = Some(notice.clone());
+            self.push_timeline(super::TimelineRole::Notice, notice);
+        }
+    }
+
     pub fn set_terminal_size(&mut self, width: u16, height: u16) -> bool {
         let next_width = width.max(3);
         let next_height = height.max(8);

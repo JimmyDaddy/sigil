@@ -31,6 +31,7 @@ const catalog: ExtensionCatalog = {
     {
       id: "explore",
       invocationToken: "@explore",
+      name: "Explore",
       description: "Explore the workspace.",
       source: "system",
       kind: "subagent",

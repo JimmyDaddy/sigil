@@ -18,6 +18,7 @@ fn finalized_session(path: &Path, prompt: &str) -> Result<()> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     session.append_user_message(ModelMessage::user(prompt))?;
     let assistant = ModelMessage::assistant_with_kind(
@@ -266,6 +267,7 @@ fn promoted_user_projects_once_into_catalog_and_export_without_user_message_even
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "chat".to_owned(),
+        resolved_model_route: None,
     }))?;
     let queue_id = ConversationInputQueueId::new("export-promoted")?;
     let prompt = project_conversation_prompt_for_persistence("Export promoted history");
@@ -355,6 +357,7 @@ fn safe_session_export_redacts_text_omits_tool_calls_and_is_content_bound() -> R
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "chat".to_owned(),
+        resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::User(ModelMessage::user(
         "token=raw-secret https://example.com/private?sig=raw-secret",
@@ -433,6 +436,7 @@ fn safe_session_export_keeps_image_metadata_without_process_local_bytes() -> Res
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "openai".to_owned(),
         model_name: "gpt-5".to_owned(),
+        resolved_model_route: None,
     }))?;
     let mut user = ModelMessage::user("inspect\n\n[Image attachment 1: image/png]");
     user.image_attachments.push(ImageAttachment::from_bytes(

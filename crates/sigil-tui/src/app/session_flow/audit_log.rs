@@ -64,6 +64,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ControlEntry::SessionIdentity {
             provider_name,
             model_name,
+            ..
         } => format!("[ctl] session {provider_name}/{model_name}"),
         ControlEntry::SessionModelSelected { model_name } => {
             format!("[ctl] session model {model_name}")

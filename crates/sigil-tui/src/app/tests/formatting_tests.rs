@@ -59,9 +59,16 @@ fn formatting_helpers_cover_normalization_and_layout() {
     assert_eq!(ratio_to_percent(-1.0), 0);
     assert_eq!(ratio_to_percent(1.234), 123);
 
-    assert_eq!(
-        build_model_picker_options(" custom-model ", Vec::new()).last(),
-        Some(&"custom-model".to_owned())
+    let model_options = build_model_picker_options("deepseek", " custom-model ", None);
+    assert!(
+        model_options
+            .iter()
+            .all(|option| option.model_id != "custom-model")
+    );
+    assert!(
+        model_options
+            .iter()
+            .all(|option| option.provider_name == "deepseek")
     );
     assert_eq!(non_empty_or("  value  ", "fallback"), "value");
     assert_eq!(non_empty_or("   ", "fallback"), "fallback");
@@ -429,11 +436,38 @@ fn format_terminal_task_block_redacted_keeps_full_output_preview_for_expansion()
 }
 
 #[test]
-fn build_model_picker_options_uses_known_models_and_appends_custom_current() {
-    let options = build_model_picker_options(" custom-model ", Vec::new());
+fn build_model_picker_options_uses_only_the_active_provider_catalog() {
+    let options = build_model_picker_options("deepseek", " custom-model ", None);
 
-    assert!(options.iter().any(|option| option == "deepseek-v4-flash"));
-    assert!(options.iter().any(|option| option == "custom-model"));
+    assert!(
+        options
+            .iter()
+            .any(|option| option.model_id == "deepseek-v4-flash")
+    );
+    assert!(
+        !options
+            .iter()
+            .any(|option| option.model_id == "custom-model")
+    );
+    assert!(
+        options
+            .iter()
+            .all(|option| option.provider_name == "deepseek")
+    );
+
+    let openai = build_model_picker_options("openai_responses", "gpt-4.1", None);
+    assert_eq!(openai.len(), 1);
+    assert_eq!(openai[0].provider_name, "openai_responses");
+    assert_eq!(openai[0].model_id, "gpt-4.1");
+
+    let legacy_mismatch = build_model_picker_options("openai_responses", "deepseek-v4-flash", None);
+    assert_eq!(legacy_mismatch.len(), 1);
+    assert_eq!(legacy_mismatch[0].model_id, "gpt-4.1");
+
+    let unknown_legacy =
+        build_model_picker_options("openai_responses", "deepseek-legacy-private", None);
+    assert_eq!(unknown_legacy.len(), 1);
+    assert_eq!(unknown_legacy[0].model_id, "gpt-4.1");
 }
 
 #[test]

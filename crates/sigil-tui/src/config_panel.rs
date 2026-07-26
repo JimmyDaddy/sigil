@@ -1,19 +1,26 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use sigil_kernel::{
-    CodeIntelStartup, PermissionMode, PluginManifestSnapshot, RootConfig, SkillDescriptor,
-    SyntaxThemeId, TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId,
-    UsageCostCurrency, VerificationAutoRunPolicy,
+    CodeIntelStartup, ConnectionId, ModelRef, PermissionMode, PluginManifestSnapshot, RootConfig,
+    SecretString, SkillDescriptor, SyntaxThemeId, TerminalKeyboardEnhancement,
+    TerminalNotificationMethod, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
 };
 #[cfg(test)]
 pub(crate) use sigil_runtime::{
     ANTHROPIC_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
 };
 pub(crate) use sigil_runtime::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
-use sigil_runtime::{ProviderStrictToolsMode, ResolvedAgentProfile};
+use sigil_runtime::{
+    ProviderStrictToolsMode, ResolvedAgentProfile,
+    provider_connections::LegacyMigrationRecoveryState,
+};
 
 mod appearance;
 mod collection;
+mod connections;
 mod display;
 mod draft;
 mod field;
@@ -21,6 +28,8 @@ mod footer_action;
 mod mcp_server;
 mod provider;
 mod section;
+use connections::ProviderConnectionDraft;
+pub(crate) use connections::{ConnectionPickerChoice, ConnectionPickerChoiceKind};
 #[cfg(test)]
 use display::display_ratio;
 pub(crate) use display::{
@@ -31,7 +40,6 @@ pub(crate) use footer_action::ConfigFooterAction;
 pub(crate) use mcp_server::McpServerDraft;
 #[cfg(test)]
 pub(crate) use mcp_server::McpTransportDraft;
-use provider::ProviderFieldDraft;
 #[cfg(test)]
 pub(crate) use provider::cycle_provider_name;
 #[cfg(test)]
@@ -54,14 +62,17 @@ pub(crate) enum ConfigFieldMove {
     Unavailable,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ConfigDraft {
     pub(crate) base_root_config: RootConfig,
     pub(crate) provider_name: String,
     pub(crate) provider_model: String,
-    pub(crate) provider_api_key: String,
+    pub(crate) provider_api_key: SecretString,
     pub(crate) provider_base_url: String,
-    provider_drafts: BTreeMap<String, ProviderFieldDraft>,
+    connection_drafts: BTreeMap<ConnectionId, ProviderConnectionDraft>,
+    pub(crate) selected_connection_id: ConnectionId,
+    pub(crate) default_model: ModelRef,
+    pub(crate) confirmed_legacy_environment: BTreeSet<ConnectionId>,
     pub(crate) provider_beta_base_url: String,
     pub(crate) provider_anthropic_base_url: String,
     pub(crate) provider_user_id_strategy: String,
@@ -101,6 +112,25 @@ pub(crate) struct ConfigDraft {
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
+impl fmt::Debug for ConfigDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConfigDraft")
+            .field("provider_name", &self.provider_name)
+            .field("provider_model", &self.provider_model)
+            .field("provider_api_key", &"[redacted]")
+            .field("provider_base_url", &"[redacted endpoint]")
+            .field("connection_count", &self.connection_drafts.len())
+            .field("selected_connection_id", &self.selected_connection_id)
+            .field("default_model", &self.default_model)
+            .field("permission_mode", &self.permission_mode)
+            .field("web_enabled", &self.web_enabled)
+            .field("memory_enabled", &self.memory_enabled)
+            .field("compaction_enabled", &self.compaction_enabled)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigState {
     pub(crate) selected_section: ConfigSection,
@@ -120,13 +150,20 @@ pub(crate) struct ConfigState {
     pub(crate) plugin_manifests: Vec<PluginManifestSnapshot>,
     pub(crate) plugin_warnings: Vec<String>,
     pub(crate) draft: ConfigDraft,
+    pub(crate) current_session_route: Option<ModelRef>,
+    pub(crate) source_revision: Option<[u8; 32]>,
+    pub(crate) legacy_migration_recovery: Option<LegacyMigrationRecoveryState>,
+    pub(crate) draft_revision: u64,
     pub(crate) dirty: bool,
     pub(crate) close_guard_armed: bool,
+    pub(crate) pending_connection_delete: Option<ConnectionId>,
 }
 
 impl ConfigState {
     pub(crate) fn from_root_config(root_config: &RootConfig) -> Self {
         let selected_section = ConfigSection::Provider;
+        let draft = ConfigDraft::from_root_config(root_config);
+        let current_session_route = Some(draft.default_model.clone());
         Self {
             selected_section,
             show_advanced: false,
@@ -146,10 +183,28 @@ impl ConfigState {
             skill_warnings: Vec::new(),
             plugin_manifests: Vec::new(),
             plugin_warnings: Vec::new(),
-            draft: ConfigDraft::from_root_config(root_config),
+            draft,
+            current_session_route,
+            source_revision: None,
+            legacy_migration_recovery: None,
+            draft_revision: 0,
             dirty: false,
             close_guard_armed: false,
+            pending_connection_delete: None,
         }
+    }
+
+    pub(crate) fn requires_legacy_migration_attention(&self) -> bool {
+        self.legacy_migration_recovery.is_some() || self.draft.requires_legacy_config_migration()
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.draft_revision = self.draft_revision.saturating_add(1);
+    }
+
+    pub(crate) fn bump_draft_revision(&mut self) {
+        self.draft_revision = self.draft_revision.saturating_add(1);
     }
 
     pub(crate) fn set_section(&mut self, section: ConfigSection) {

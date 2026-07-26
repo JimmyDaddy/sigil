@@ -16,7 +16,8 @@ Use `sigil doctor --output json` when you need a redacted diagnostic file for a 
 
 | Symptom | First check | Next action |
 |---|---|---|
-| Setup keeps reopening | Provider credentials | Reopen `/config` and save a valid provider |
+| Setup keeps reopening | Connection readiness | Reopen `/config` and save one ready connection and model |
+| The model list looks wrong | Selected connection | Confirm the `connection-id/model-id`; never expect models from another connection |
 | Wrong files appear | Workspace path | Restart from the intended directory |
 | A tool is blocked | Approval or sandbox message | Review the reason; change policy only if intended |
 | MCP is unavailable | `/config` → MCP Servers | Fix auth, config, or start mode |
@@ -25,11 +26,37 @@ Use `sigil doctor --output json` when you need a redacted diagnostic file for a 
 
 ## Quick Setup Opens Every Time
 
-Sigil has no usable provider configuration or credential. Open `/config`, choose a provider, save it, and run `/doctor`. For exact fields, see [Providers](providers.md) and [Configuration Reference](configuration-reference.md).
+Sigil has no usable provider connection, credential, or saved model route. Open `/config`, choose a provider, credential source, and model, then review and save. Quick Setup asks for at most those three decisions. Run `sigil doctor` and confirm a compound `default=connection-id/model-id`. For exact fields, see [Providers](providers.md) and [Configuration Reference](configuration-reference.md).
 
 ## Sigil Cannot Find The API Key
 
-Check that the credential name matches the selected provider and that the terminal launching Sigil inherited it. Restart Sigil after changing shell variables. Prefer provider config or the system credential flow where documented; do not paste secrets into issue reports.
+Check that the environment-variable name belongs to the selected connection and that the terminal launching Sigil inherited it. Restart Sigil after changing shell variables. For a stored credential, reopen `/config` and repair that connection. In default `auto` mode, a system-store unavailable error may use owner-only `~/.sigil/credentials.json`; rejected or malformed system records do not silently fall back. Never put an API key in `sigil.toml` or an issue report.
+
+### Provider Connection Or Model Catalog Is Not Ready
+
+`sigil doctor` reports each connection independently and never prints secret values or credential IDs. Match the result to the UI state:
+
+| State | Meaning | Action |
+|---|---|---|
+| `needs_credential` / `credential_unavailable` | The selected source is missing or the configured store cannot read it | Repair that connection's environment binding or stored record; verify `[storage].credential_store` |
+| `auth_rejected` | The endpoint rejected this connection's credential | Replace that credential; Sigil will not try another connection |
+| `offline`, `tls_rejected`, `protocol_mismatch` | The configured endpoint cannot be safely reached with the selected protocol | Check network, TLS, endpoint, and protocol |
+| `remote_empty` | Discovery succeeded but returned no models | Enter an exact model ID manually |
+| `catalog_unsupported` | This provider/endpoint does not expose discovery | Use the provider-owned bundled list or manual entry |
+| `catalog_malformed` | The response was not a valid catalog | Fix the endpoint or gateway; remote metadata is not trusted to add capabilities |
+
+If Doctor reports `mode=legacy_v1`, use the Desktop migration card or `/config` →
+**Legacy migration** → Enter. Review the connection/key/environment counts and exact default
+route first; migration requires no provider network or model loading. An ordinary pre-publish
+credential-store failure keeps the old configuration active; Sigil reloads the current inventory
+before offering a retry. If the UI instead says the file changed, reopen the view and review the
+new revision. If it says reconciliation or cleanup is required, do not retry blindly: open
+**Support**, inspect the current config with Doctor, and resolve that state first. That workspace
+remains blocked across navigation, workspace switches, Desktop/TUI restarts, and process restarts
+until **Recheck configuration** in Desktop or **Enter recheck** on TUI's **Migration recovery**
+row confirms a credential-aware healthy V2 configuration. Do not add duplicate connections or
+hand-edit credential IDs. Mixed V1/V2 and future schemas fail closed and must be repaired or
+opened with a compatible Sigil version.
 
 ## Theme Colors Are Hard To Read
 

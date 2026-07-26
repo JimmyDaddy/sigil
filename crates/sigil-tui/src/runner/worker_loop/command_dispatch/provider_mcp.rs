@@ -47,6 +47,24 @@ where
                     state.refresh.provider_status_tx.clone(),
                 );
             }
+            ProviderMcpCommand::RefreshConnectionModels {
+                cache_root,
+                root_config,
+                request,
+                prepared_credential,
+            } => {
+                state
+                    .refresh
+                    .provider_status_tasks
+                    .refresh_connection_models(
+                        runtime,
+                        cache_root,
+                        *root_config,
+                        request,
+                        prepared_credential,
+                        state.refresh.provider_status_tx.clone(),
+                    );
+            }
             ProviderMcpCommand::CancelProviderModelsRefresh { request_id } => {
                 state
                     .refresh

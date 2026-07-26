@@ -326,8 +326,9 @@ fn mouse_click_setup_field_selects_then_activates() -> Result<()> {
         temp.path().to_path_buf(),
         None,
     );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let model_index = 1;
+    let model_index = 2;
     let (column, row) = setup_field_point(&layout, model_index);
 
     let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
@@ -358,6 +359,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
         temp.path().to_path_buf(),
         None,
     );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let save_index = 3;
     let (column, row) = setup_field_point(&layout, save_index);
@@ -367,7 +369,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.last_notice(),
-        Some("provide api_key or export SIGIL_API_KEY")
+        Some("enter an API key to save in the secure credential store")
     );
     assert_eq!(
         app.setup_state
@@ -555,7 +557,7 @@ fn mouse_click_setup_and_config_invalid_targets_are_noops() -> Result<()> {
 
 #[test]
 fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &v2_test_config());
     app.set_terminal_size(120, 20);
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
@@ -583,6 +585,7 @@ fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
 fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },

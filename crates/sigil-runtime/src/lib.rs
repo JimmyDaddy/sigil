@@ -86,6 +86,7 @@ pub mod context;
 pub mod context_window;
 pub mod conversation_coordinator;
 pub mod conversation_display;
+mod definition_file_io;
 pub mod doctor;
 pub mod egress_ordering;
 mod exa_text_v1;
@@ -105,6 +106,7 @@ pub mod plugins;
 pub mod portable_compaction;
 pub mod product_view;
 pub mod provider_config;
+pub mod provider_connections;
 pub mod provider_debug;
 pub mod provider_status;
 pub mod session_control;
@@ -224,7 +226,7 @@ pub use provider_config::{
     DEFAULT_SETUP_PROVIDER_KEY, DeepSeekProviderConfigFields, GEMINI_PROVIDER_KEY,
     ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
     PROVIDER_KEYS, ProviderConfigFields, ProviderStatusConfig, ProviderStrictToolsMode,
-    deepseek_provider_config_fields, deepseek_provider_status_config,
+    bundled_provider_models, deepseek_provider_config_fields, deepseek_provider_status_config,
     deepseek_provider_value_for_setup, default_provider_config_fields, default_provider_model,
     default_setup_provider_model, model_request_config_fields, next_provider_name,
     normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
@@ -339,7 +341,10 @@ pub use mcp_registry::{
 };
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
-    SecretSource, build_provider, build_role_provider, load_anthropic_config, load_deepseek_config,
+    SecretSource, build_provider, build_provider_async, build_provider_for_model_ref,
+    build_provider_for_model_ref_async, build_provider_for_model_ref_with_credentials,
+    build_provider_with_credentials, build_role_provider, build_role_provider_async,
+    build_role_provider_with_credentials, load_anthropic_config, load_deepseek_config,
     load_gemini_config, load_openai_compat_config, load_openai_responses_config,
     provider_capabilities_for_name, provider_capability_view, provider_config_key,
     resolve_anthropic_api_key, resolve_anthropic_api_key_with_session, resolve_anthropic_config,

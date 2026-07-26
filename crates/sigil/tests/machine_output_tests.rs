@@ -24,7 +24,9 @@ fn test_workspace(name: &str) -> PathBuf {
 fn write_config(path: &Path, base_url: &str) {
     let workspace = path.parent().expect("config should have a parent");
     let config = format!(
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [storage]
@@ -32,19 +34,19 @@ state_root = "{}"
 cache_root = "{}"
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
+connection = "local-test"
+model = "gpt-4.1"
 tool_timeout_secs = 5
 
 [model_request]
 request_timeout_secs = 5
 
-[providers.deepseek]
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{base_url}"
-beta_base_url = "{base_url}"
-anthropic_base_url = "{base_url}"
-api_key = "test-key"
-strict_tools_mode = "auto"
+credential = {{ source = "none" }}
 "#,
         workspace.join("state").display(),
         workspace.join("cache").display()
@@ -247,7 +249,7 @@ fn json_process_configuration_error_is_structured_and_exits_two() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "error");
-    assert_eq!(record["error"]["code"], "configuration_invalid");
+    assert_eq!(record["error"]["code"], "model_route_not_configured");
     assert!(!stdout.contains("missing.toml"));
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }

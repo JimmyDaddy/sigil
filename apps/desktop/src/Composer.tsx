@@ -11,11 +11,14 @@ import {
 } from "react";
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
+import type { ComposerActivityState } from "./features/conversation/composerActivity";
+import { modelOptionIsSelectable } from "./types";
 import type {
   AgentBinding,
   AgentCatalogEntry,
   PermissionMode,
   ReasoningEffort,
+  ModelOption,
   RunContext,
   SkillBinding,
   SkillCatalogEntry,
@@ -46,6 +49,7 @@ export function Composer({
   queuePaused,
   queueBusy,
   queuePanel,
+  activityState,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -79,6 +83,7 @@ export function Composer({
   queuePaused: boolean;
   queueBusy: boolean;
   queuePanel?: ReactNode;
+  activityState?: ComposerActivityState;
   onModelChange: (modelName: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -249,12 +254,14 @@ export function Composer({
           modelSelectRef.current?.focus();
           return true;
         }
-        const model = runContext?.availableModels.find((candidate) => candidate === argument);
-        if (model === undefined) {
+        const model = runContext?.modelOptions.find(
+          (candidate) => candidate.modelName === argument,
+        );
+        if (model === undefined || !modelOptionIsSelectable(model)) {
           onNotice(t("unsupportedModel", { value: argument }), true);
           return false;
         }
-        if (model !== selectedModelName) onModelChange(model);
+        if (model.modelName !== selectedModelName) onModelChange(model.modelName);
         return true;
       }
       case "open_agent_workbench":
@@ -296,14 +303,34 @@ export function Composer({
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   };
   const modelName = selectedModelName ?? runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
-  const models = runContext?.availableModels ?? (runContext === undefined ? [] : [runContext.modelName]);
-  const modelOption = runContext?.modelOptions.find((option) => option.modelName === modelName);
+  const modelOptions = runContext?.modelOptions ?? [];
+  const modelOption = modelOptions.find((option) => option.modelName === modelName);
+  const modelOptionValue = (option: ModelOption) =>
+    `${option.modelRef.connectionId}/${option.modelRef.modelId}`;
+  const modelOptionLabel = (option: ModelOption) => {
+    const identity = option.displayName === option.modelName
+      ? option.modelName
+      : `${option.displayName} · ${option.modelName}`;
+    return option.availability === "available"
+      ? identity
+      : option.availability === "unverified"
+        ? `${identity} · ${t("unverified")}`
+        : `${identity} · ${t("unavailable")}`;
+  };
+  const selectedModelValue = modelOption === undefined ? "" : modelOptionValue(modelOption);
+  const selectableModelCount = modelOptions.filter(
+    modelOptionIsSelectable,
+  ).length;
   const availableReasoningEfforts = modelOption?.availableReasoningEfforts ?? [];
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
+  const activity = activityState === undefined ? undefined : composerActivityCopy(activityState, t);
 
   return (
     <>
-    <form className="composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <form
+      className={`composer${activityState === undefined ? "" : ` has-activity activity-${activityState}`}`}
+      onSubmit={(event) => { event.preventDefault(); void submit(); }}
+    >
       {suggestionsOpen ? (
         <ComposerSuggestions
           id={suggestionListId}
@@ -315,6 +342,24 @@ export function Composer({
           onSelect={selectSuggestion}
           onActiveIndexChange={setActiveSuggestion}
         />
+      ) : null}
+      {activity !== undefined ? (
+        <div
+          className="composer-activity"
+          role={activityState === "connection_error" ? "alert" : "status"}
+          aria-live={activityState === "connection_error" ? "assertive" : "polite"}
+          aria-atomic="true"
+        >
+          <span className="composer-activity-indicator" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          <span className="composer-activity-copy">
+            <strong>{activity.label}</strong>
+            <small>{activity.detail}</small>
+          </span>
+        </div>
       ) : null}
       <div className="composer-surface">
         {selectedSkill !== undefined || selectedAgent !== undefined ? (
@@ -420,12 +465,25 @@ export function Composer({
                   containerClassName="composer-model-field"
                   className="composer-model-select"
                   ref={modelSelectRef}
-                  value={selectedModelName ?? runContext?.modelName ?? ""}
-                  disabled={active || submissionBlocked || runContextBusy || models.length < 2}
-                  onChange={(event) => onModelChange(event.target.value)}
+                  value={selectedModelValue}
+                  disabled={active || submissionBlocked || runContextBusy || selectableModelCount === 0}
+                  onChange={(event) => {
+                    const selected = modelOptions.find(
+                      (option) => modelOptionValue(option) === event.target.value,
+                    );
+                    if (selected !== undefined && modelOptionIsSelectable(selected)) {
+                      onModelChange(selected.modelName);
+                    }
+                  }}
                 >
-                  {models.length === 0 ? <option value="">{modelName}</option> : models.map((model) => (
-                    <option key={model} value={model}>{model}</option>
+                  {modelOptions.length === 0 ? <option value="">{modelName}</option> : modelOptions.map((option) => (
+                    <option
+                      key={modelOptionValue(option)}
+                      value={modelOptionValue(option)}
+                      disabled={!modelOptionIsSelectable(option)}
+                    >
+                      {modelOptionLabel(option)}
+                    </option>
                   ))}
                 </Select>
               </div>
@@ -572,6 +630,29 @@ function focusWithoutScroll(element: HTMLElement | null): void {
   element?.focus({ preventScroll: true });
 }
 
+function composerActivityCopy(state: ComposerActivityState, t: ReturnType<typeof useLocale>["t"]) {
+  switch (state) {
+    case "starting":
+      return { label: t("composerActivityStarting"), detail: t("composerActivityStartingDetail") };
+    case "connecting":
+      return { label: t("composerActivityConnecting"), detail: t("composerActivityConnectingDetail") };
+    case "running":
+      return { label: t("composerActivityRunning"), detail: t("composerActivityRunningDetail") };
+    case "waiting_for_approval":
+      return { label: t("composerActivityApproval"), detail: t("composerActivityApprovalDetail") };
+    case "stopping":
+      return { label: t("composerActivityStopping"), detail: t("composerActivityStoppingDetail") };
+    case "recovering":
+      return { label: t("composerActivityRecovering"), detail: t("composerActivityRecoveringDetail") };
+    case "reconnecting":
+      return { label: t("composerActivityReconnecting"), detail: t("composerActivityReconnectingDetail") };
+    case "connection_error":
+      return { label: t("composerActivityConnectionError"), detail: t("composerActivityConnectionErrorDetail") };
+    case "finalizing":
+      return { label: t("composerActivityFinalizing"), detail: t("composerActivityFinalizingDetail") };
+  }
+}
+
 interface LeadingInvocationToken {
   token: string;
   query: string;
@@ -594,18 +675,36 @@ function buildSuggestions(
   if (context === undefined || leading === undefined) return [];
   const query = leading.query.toLocaleLowerCase();
   if (leading.kind === "command") {
-    return context.extensionCatalog.commands
+    const commands = context.extensionCatalog.commands
       .filter((entry) => entry.available)
       .filter((entry) =>
         entry.canonical.toLocaleLowerCase().includes(query) ||
         entry.aliases.some((alias) => alias.toLocaleLowerCase().includes(query)),
       )
       .map(commandSuggestion);
+    const skills = context.extensionCatalog.skills
+      .filter((entry) => entry.invocationToken.startsWith("/"))
+      .filter((entry) =>
+        entry.invocationToken.toLocaleLowerCase().includes(query) ||
+        entry.name.toLocaleLowerCase().includes(query.slice(1)),
+      )
+      .map(skillSuggestion);
+    return [...commands, ...skills];
   }
   if (leading.kind === "skill" && selectedSkill === undefined) {
     return context.extensionCatalog.skills
+      .filter((entry) => entry.invocationToken.startsWith("$"))
       .filter((entry) =>
         entry.invocationToken.toLocaleLowerCase().includes(query) ||
+        entry.name.toLocaleLowerCase().includes(query.slice(1)),
+      )
+      .map(skillSuggestion);
+  }
+  if (leading.kind === "agent") {
+    return context.extensionCatalog.agents
+      .filter((entry) =>
+        entry.invocationToken.toLocaleLowerCase().includes(query) ||
+        entry.id.toLocaleLowerCase().includes(query.slice(1)) ||
         entry.name.toLocaleLowerCase().includes(query.slice(1)),
       )
       .map((entry) => ({
@@ -613,28 +712,24 @@ function buildSuggestions(
         token: entry.invocationToken,
         label: entry.name,
         description: entry.description,
-        kind: "skill" as const,
-        available: entry.available && entry.binding !== undefined,
-        unavailableReason: entry.unavailableReason,
-      }));
-  }
-  if (leading.kind === "agent") {
-    return context.extensionCatalog.agents
-      .filter((entry) =>
-        entry.invocationToken.toLocaleLowerCase().includes(query) ||
-        entry.id.toLocaleLowerCase().includes(query.slice(1)),
-      )
-      .map((entry) => ({
-        id: entry.id,
-        token: entry.invocationToken,
-        label: entry.id,
-        description: entry.description,
         kind: "agent" as const,
         available: entry.available && entry.binding !== undefined,
         unavailableReason: entry.unavailableReason,
       }));
   }
   return [];
+}
+
+function skillSuggestion(entry: SkillCatalogEntry): ComposerSuggestion {
+  return {
+    id: entry.id,
+    token: entry.invocationToken,
+    label: entry.name,
+    description: entry.description,
+    kind: "skill",
+    available: entry.available && entry.binding !== undefined,
+    unavailableReason: entry.unavailableReason,
+  };
 }
 
 function commandSuggestion(entry: RunContext["extensionCatalog"]["commands"][number]): ComposerSuggestion {
@@ -662,10 +757,12 @@ function resolveCommand(context: RunContext | undefined, prompt: string) {
 }
 
 function resolveSkill(context: RunContext | undefined, prompt: string) {
-  if (context === undefined || !prompt.startsWith("$")) return undefined;
-  const match = prompt.match(/^\$([^\s]+)\s+([\s\S]+)$/u);
+  if (context === undefined || !/^[/$]/u.test(prompt)) return undefined;
+  const match = prompt.match(/^([/$][^\s]+)\s+([\s\S]+)$/u);
   if (match === null) return undefined;
-  const skill = context.extensionCatalog.skills.find((entry) => entry.id === match[1]);
+  const skill = context.extensionCatalog.skills.find(
+    (entry) => entry.invocationToken === match[1],
+  );
   return skill === undefined ? undefined : { skill, prompt: match[2].trim() };
 }
 
@@ -673,7 +770,10 @@ function resolveAgent(context: RunContext | undefined, prompt: string) {
   if (context === undefined || !prompt.startsWith("@")) return undefined;
   const match = prompt.match(/^@([^\s]+)\s+([\s\S]+)$/u);
   if (match === null) return undefined;
-  const agent = context.extensionCatalog.agents.find((entry) => entry.id === match[1]);
+  const token = `@${match[1]}`;
+  const agent = context.extensionCatalog.agents.find(
+    (entry) => entry.invocationToken === token,
+  );
   return agent === undefined ? undefined : { agent, prompt: match[2].trim() };
 }
 

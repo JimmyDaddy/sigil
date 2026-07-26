@@ -3,8 +3,9 @@ use std::{fs, path::Path};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    Agent, AssistantMessageKind, ControlEntry, DurableEventType, EventClass, JsonlSessionStore,
-    ModelMessage, Session, StorageRoot, ToolRegistry,
+    Agent, AssistantMessageKind, CONFIG_VERSION_V2, ConnectionId, ControlEntry, DurableEventType,
+    EventClass, JsonlSessionStore, ModelMessage, ModelRef, ResolvedModelRoute, Session,
+    StorageRoot, ToolRegistry,
 };
 use sigil_runtime::{
     LocalSessionLifecycleOperationKind, LocalSessionLifecycleRecoveryStatus,
@@ -23,6 +24,7 @@ fn write_finalized_session(path: &Path, prompt: &str) -> Result<()> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     session.append_user_message(ModelMessage::user(prompt))?;
     let assistant = ModelMessage::assistant_with_kind(
@@ -60,12 +62,36 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     write_finalized_session(&retention_path, "retention")?;
 
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.config_version = Some(CONFIG_VERSION_V2);
+    root_config.agent.provider.clear();
+    root_config.agent.connection = Some(ConnectionId::new("saved-default")?);
+    root_config.agent.model = "saved-default-model".to_owned();
+    for connection_id in ["saved-default", "current-route"] {
+        root_config.connections.insert(
+            connection_id.to_owned(),
+            json!({
+                "label": connection_id,
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_API_KEY"
+                }
+            }),
+        );
+    }
     root_config.session.log_dir = Some(session_dir.display().to_string());
     root_config.storage.state_root =
         StorageRoot::Path(temp.path().join("state").display().to_string());
     root_config.storage.cache_root =
         StorageRoot::Path(temp.path().join("cache").display().to_string());
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let mut current_route_config = root_config.clone();
+    current_route_config.agent.connection = Some(ConnectionId::new("current-route")?);
+    current_route_config.agent.model = "current-route-model".to_owned();
+    let current_model_route =
+        sigil_runtime::provider_connections::resolve_default_model_route(&current_route_config)?.1;
     let agent = Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, current_path.clone(), agent, workspace_root)?;
 
@@ -181,18 +207,55 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     ));
     assert!(!retention_path.exists());
 
+    let invalid_current_route = ResolvedModelRoute::new(
+        ModelRef::new(ConnectionId::new("missing-route")?, "missing-model")?,
+        "deepseek",
+        "deepseek",
+        "missing-route-fingerprint",
+    )?;
     worker.send(WorkerCommand::ForkLocalSession {
         request_id: 19,
-        source_path: current_path,
+        source_path: current_path.clone(),
+        current_model_route: invalid_current_route,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionForked { request_id: 19, .. }))?,
+        worker.recv_until(|message| matches!(
+            message,
+            WorkerMessage::LocalSessionLifecycleFailed { request_id: 19, .. }
+        ))?,
+        WorkerMessage::LocalSessionLifecycleFailed { error, .. }
+            if error.contains("explicit current route")
+    ));
+
+    worker.send(WorkerCommand::ForkLocalSession {
+        request_id: 20,
+        source_path: current_path,
+        current_model_route,
+    })?;
+    let fork_path = match worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::LocalSessionForked { request_id: 20, .. }
+        )
+    })? {
         WorkerMessage::LocalSessionForked {
             session_log_path,
             copied_message_count: 2,
             ..
-        } if session_log_path.is_file()
-    ));
+        } if session_log_path.is_file() => session_log_path,
+        message => panic!("unexpected fork response: {message:?}"),
+    };
+    let fork_entries = JsonlSessionStore::read_entries(&fork_path)?;
+    assert!(fork_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            sigil_kernel::SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route: Some(route),
+                ..
+            }) if route.model_ref.connection_id.as_str() == "current-route"
+                && route.model_ref.model_id == "current-route-model"
+        )
+    }));
 
     worker.shutdown()?;
     let service = LocalSessionLifecycleService::new(

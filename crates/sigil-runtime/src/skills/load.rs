@@ -290,6 +290,7 @@ fn load_skill_context(
 
     let entry = SkillLoadEntry {
         skill_id: descriptor.id.clone(),
+        display_name: Some(descriptor.name.clone()),
         sha256,
         source: descriptor.source.clone(),
         entrypoint: descriptor.entrypoint.clone(),

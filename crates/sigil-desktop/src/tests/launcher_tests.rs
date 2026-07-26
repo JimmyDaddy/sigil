@@ -45,6 +45,36 @@ fn implicit_user_config_launch_does_not_require_or_pass_workspace_config() {
 }
 
 #[test]
+fn explicit_config_launch_allows_first_run_path_that_does_not_exist_yet() {
+    let binary = std::env::current_exe().expect("current test binary should resolve");
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = std::env::temp_dir().join(format!(
+        "sigil-desktop-missing-{}.toml",
+        uuid::Uuid::new_v4()
+    ));
+    let request = DesktopLaunchRequest::new(&binary, &config, &workspace);
+
+    request
+        .validate()
+        .expect("first-run launch should allow a config path before its first publish");
+    assert!(!config.exists());
+}
+
+#[test]
+fn explicit_config_launch_rejects_an_existing_directory() {
+    let binary = std::env::current_exe().expect("current test binary should resolve");
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let request = DesktopLaunchRequest::new(&binary, &workspace, &workspace);
+
+    assert!(matches!(
+        request.validate(),
+        Err(DesktopLaunchError::InvalidRequest(
+            "configuration is not a file"
+        ))
+    ));
+}
+
+#[test]
 fn explicit_config_launch_keeps_the_config_argument() {
     let request = DesktopLaunchRequest::new(
         "/private/canary/sigil",

@@ -175,6 +175,7 @@ fn agent_entries(
                 profile_snapshot_id: snapshot_id,
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
+                model_ref: None,
                 reasoning_effort: None,
                 workspace_root: WorkspaceRootSnapshot::new(workspace_root.display().to_string())?,
                 effective_tool_scope_hash: "sha256:tools".to_owned(),

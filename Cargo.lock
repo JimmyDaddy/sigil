@@ -4865,6 +4865,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -4929,7 +4930,9 @@ version = "0.0.1-alpha.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "fs2",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -4955,6 +4958,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "keyring",
+ "libc",
  "ring",
  "serde",
  "serde_json",
@@ -4966,6 +4970,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -5101,8 +5106,10 @@ dependencies = [
  "futures",
  "ignore",
  "image",
+ "keyring",
  "libc",
  "reqwest 0.12.28",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5124,6 +5131,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5185,6 +5193,7 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
 ]
 

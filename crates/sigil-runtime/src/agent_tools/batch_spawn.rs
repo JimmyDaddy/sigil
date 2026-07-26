@@ -26,7 +26,7 @@ struct StartedBatchSpawnMember {
 }
 
 impl AgentToolRuntime {
-    pub(super) fn spawn_agents(
+    pub(super) async fn spawn_agents(
         &mut self,
         session: &mut Session,
         call: &ToolCall,
@@ -268,11 +268,11 @@ impl AgentToolRuntime {
                     );
                 }
             };
-            let child_provider = match self.provider_factory.build_provider(
-                &self.root_config,
-                role,
-                &spawn.profile_id,
-            ) {
+            let child_provider = match self
+                .provider_factory
+                .build_provider(&self.root_config, role, &spawn.profile_id)
+                .await
+            {
                 Ok(provider) => provider,
                 Err(error) => {
                     return batch_spawn_error(

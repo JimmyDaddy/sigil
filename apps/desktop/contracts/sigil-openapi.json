@@ -424,6 +424,14 @@
       "ApplicationModelOption": {
         "additionalProperties": false,
         "properties": {
+          "availability": {
+            "enum": [
+              "available",
+              "unverified",
+              "configured_unavailable"
+            ],
+            "type": "string"
+          },
           "available_reasoning_efforts": {
             "items": {
               "$ref": "#/components/schemas/ReasoningEffort"
@@ -441,7 +449,23 @@
               }
             ]
           },
+          "display_name": {
+            "type": "string"
+          },
           "model_name": {
+            "type": "string"
+          },
+          "model_ref": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
+          "provenance": {
+            "enum": [
+              "remote",
+              "cache",
+              "bundled",
+              "configured",
+              "manual"
+            ],
             "type": "string"
           },
           "reasoning_effort_binding": {
@@ -449,9 +473,21 @@
               "string",
               "null"
             ]
+          },
+          "recommendation": {
+            "enum": [
+              "recommended",
+              "standard"
+            ],
+            "type": "string"
           }
         },
         "required": [
+          "model_ref",
+          "display_name",
+          "availability",
+          "recommendation",
+          "provenance",
           "model_name",
           "available_reasoning_efforts"
         ],
@@ -1367,6 +1403,16 @@
                 ],
                 "type": "string"
               },
+              "skill": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConversationDisplaySkillReference"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "text": {
                 "maxLength": 65536,
                 "type": [
@@ -1798,6 +1844,26 @@
           "items",
           "has_more",
           "gap_facts"
+        ],
+        "type": "object"
+      },
+      "ConversationDisplaySkillReference": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
         ],
         "type": "object"
       },
@@ -2508,6 +2574,9 @@
             "const": "fork_conversation",
             "type": "string"
           },
+          "model_ref": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
           "source_turn_digest": {
             "maxLength": 512,
             "minLength": 1,
@@ -2516,7 +2585,8 @@
         },
         "required": [
           "kind",
-          "source_turn_digest"
+          "source_turn_digest",
+          "model_ref"
         ],
         "type": "object"
       },
@@ -3027,6 +3097,486 @@
         ],
         "type": "object"
       },
+      "ProviderConfigMode": {
+        "enum": [
+          "legacy_v1",
+          "v2",
+          "mixed",
+          "unsupported_future"
+        ],
+        "type": "string"
+      },
+      "ProviderConnectionEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "credential_source": {
+            "$ref": "#/components/schemas/ProviderCredentialSource"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderModelRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "endpoint_display": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issue": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderConnectionIssue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "protocol_label": {
+            "type": "string"
+          },
+          "provider_label": {
+            "type": "string"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/ProviderConnectionReadiness"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "provider_label",
+          "protocol_label",
+          "endpoint_display",
+          "credential_source",
+          "readiness"
+        ],
+        "type": "object"
+      },
+      "ProviderConnectionInventory": {
+        "additionalProperties": false,
+        "properties": {
+          "config_mode": {
+            "$ref": "#/components/schemas/ProviderConfigMode"
+          },
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderConnectionEntry"
+            },
+            "type": "array"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderModelRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderConnectionIssue"
+            },
+            "type": "array"
+          },
+          "legacy_migration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderLegacyMigrationPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "config_mode",
+          "connections",
+          "issues"
+        ],
+        "type": "object"
+      },
+      "ProviderConnectionIssue": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ProviderConnectionReadiness": {
+        "enum": [
+          "ready",
+          "needs_credential",
+          "credential_unavailable",
+          "needs_model",
+          "unverified",
+          "invalid"
+        ],
+        "type": "string"
+      },
+      "ProviderCredentialSource": {
+        "enum": [
+          "environment",
+          "system_keyring",
+          "stored",
+          "none",
+          "legacy_plaintext"
+        ],
+        "type": "string"
+      },
+      "ProviderLegacyMigrationOutcome": {
+        "enum": [
+          "published",
+          "published_with_warning"
+        ],
+        "type": "string"
+      },
+      "ProviderLegacyMigrationPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "environment_reference_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "inline_credential_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "connection_count",
+          "inline_credential_count",
+          "environment_reference_count"
+        ],
+        "type": "object"
+      },
+      "ProviderLegacyMigrationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "type": "object"
+      },
+      "ProviderLegacyMigrationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "default_model": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
+          "inventory": {
+            "$ref": "#/components/schemas/ProviderConnectionInventory"
+          },
+          "migrated_connection_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "moved_inline_credential_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProviderLegacyMigrationOutcome"
+          },
+          "preserved_environment_reference_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderLegacyMigrationWarning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "default_model",
+          "inventory",
+          "migrated_connection_count",
+          "moved_inline_credential_count",
+          "preserved_environment_reference_count",
+          "outcome",
+          "warnings"
+        ],
+        "type": "object"
+      },
+      "ProviderLegacyMigrationWarning": {
+        "enum": [
+          "filesystem_durability_uncertain",
+          "publication_visibility_reconciled"
+        ],
+        "type": "string"
+      },
+      "ProviderModelRef": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupCatalog": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "manual_entry_allowed": {
+            "type": "boolean"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderSetupModel"
+            },
+            "type": "array"
+          },
+          "provider_label": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "suggested_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection_id",
+          "provider_label",
+          "state",
+          "models",
+          "manual_entry_allowed"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupCatalogRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "maxLength": 16384,
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "credential_source": {
+            "$ref": "#/components/schemas/ProviderSetupCredentialSource"
+          },
+          "endpoint": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSetupProtocol"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "template": {
+            "$ref": "#/components/schemas/ProviderSetupTemplate"
+          }
+        },
+        "required": [
+          "template",
+          "credential_source"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupCredentialSource": {
+        "enum": [
+          "environment",
+          "secure_store",
+          "none"
+        ],
+        "type": "string"
+      },
+      "ProviderSetupModel": {
+        "additionalProperties": false,
+        "properties": {
+          "availability": {
+            "enum": [
+              "available",
+              "unverified",
+              "configured_unavailable"
+            ],
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "provenance": {
+            "enum": [
+              "remote",
+              "cache",
+              "bundled",
+              "configured",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "recommended": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model_id",
+          "display_name",
+          "availability",
+          "recommended",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupProtocol": {
+        "enum": [
+          "responses",
+          "chat_completions"
+        ],
+        "type": "string"
+      },
+      "ProviderSetupSaveRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "maxLength": 16384,
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "credential_source": {
+            "$ref": "#/components/schemas/ProviderSetupCredentialSource"
+          },
+          "endpoint": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "maxLength": 160,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderSetupProtocol"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "template": {
+            "$ref": "#/components/schemas/ProviderSetupTemplate"
+          }
+        },
+        "required": [
+          "template",
+          "credential_source",
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupSaveResult": {
+        "additionalProperties": false,
+        "properties": {
+          "default_model": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
+          "inventory": {
+            "$ref": "#/components/schemas/ProviderConnectionInventory"
+          },
+          "save_warning": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "default_model",
+          "inventory",
+          "save_warning"
+        ],
+        "type": "object"
+      },
+      "ProviderSetupTemplate": {
+        "enum": [
+          "deep_seek",
+          "open_ai",
+          "anthropic",
+          "gemini",
+          "open_ai_compatible"
+        ],
+        "type": "string"
+      },
       "PublicAssistantMessage": {
         "properties": {
           "assistant_kind": {
@@ -3481,14 +4031,6 @@
       "RunContextView": {
         "additionalProperties": false,
         "properties": {
-          "available_models": {
-            "items": {
-              "type": "string"
-            },
-            "minItems": 1,
-            "type": "array",
-            "uniqueItems": true
-          },
           "available_permission_modes": {
             "items": {
               "$ref": "#/components/schemas/PermissionMode"
@@ -3552,9 +4094,12 @@
             "minItems": 1,
             "type": "array"
           },
+          "model_ref": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
           "model_selection": {
             "enum": [
-              "per_run"
+              "fresh_session"
             ],
             "type": "string"
           },
@@ -3572,9 +4117,9 @@
           }
         },
         "required": [
+          "model_ref",
           "provider_name",
           "model_name",
-          "available_models",
           "model_options",
           "model_selection",
           "model_selection_binding",
@@ -3873,6 +4418,15 @@
           "live_events": {
             "type": "boolean"
           },
+          "provider_connections": {
+            "type": "boolean"
+          },
+          "provider_migration": {
+            "type": "boolean"
+          },
+          "provider_setup": {
+            "type": "boolean"
+          },
           "run_context": {
             "type": "boolean"
           },
@@ -3907,7 +4461,10 @@
           "task_integration",
           "run_context",
           "agent_activity",
-          "support_diagnostics"
+          "support_diagnostics",
+          "provider_connections",
+          "provider_setup",
+          "provider_migration"
         ],
         "type": "object"
       },
@@ -3931,7 +4488,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 9,
+            "const": 11,
             "type": "integer"
           },
           "server_version": {
@@ -7420,6 +7977,175 @@
           }
         },
         "summary": "Rerun one exact stale-safe recommended verification check"
+      }
+    },
+    "/settings/provider-connections": {
+      "get": {
+        "description": "Returns connection identity, readiness, credential source classification, and the compound saved default. Credential values, stored-credential identifiers, raw private endpoints, config paths, and provider-private JSON are excluded.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderConnectionInventory"
+                }
+              }
+            },
+            "description": "Native-owner provider connection inventory"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read secret-free provider connection settings"
+      },
+      "post": {
+        "description": "Validates the exact provider/model route, stores a supplied credential through the configured secure credential backend, and publishes the connection plus saved default as one recoverable operation.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderSetupSaveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSetupSaveResult"
+                }
+              }
+            },
+            "description": "Saved provider connection and refreshed secret-free inventory"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Validate and atomically save one provider connection"
+      }
+    },
+    "/settings/provider-connections/catalog": {
+      "post": {
+        "description": "Uses the selected template, endpoint, authentication source, and process-staged credential without publishing configuration. Catalog cache entries are reused when valid.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderSetupCatalogRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSetupCatalog"
+                }
+              }
+            },
+            "description": "Connection-scoped model catalog"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Load an exact connection-scoped provider model catalog"
+      }
+    },
+    "/settings/provider-connections/migrate-legacy": {
+      "post": {
+        "description": "Moves inline legacy credentials directly from the server-loaded config into the configured credential store, preserves environment references and routes, and does not contact a provider catalog.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLegacyMigrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLegacyMigrationResult"
+                }
+              }
+            },
+            "description": "Published V2 configuration and secret-free migration summary"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Atomically migrate all valid legacy provider connections"
+      }
+    },
+    "/settings/provider-connections/recheck-migration": {
+      "post": {
+        "description": "Clears a persisted migration recovery block only when the current config and credential-aware inventory are a complete healthy V2 state. Otherwise the returned inventory retains the recovery issue.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderConnectionInventory"
+                }
+              }
+            },
+            "description": "Rechecked secret-free provider inventory"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Explicitly recheck durable provider migration recovery"
       }
     },
     "/support/bundle": {

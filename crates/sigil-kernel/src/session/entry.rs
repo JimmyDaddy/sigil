@@ -175,6 +175,8 @@ pub enum ControlEntry {
     SessionIdentity {
         provider_name: String,
         model_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_model_route: Option<crate::ResolvedModelRoute>,
     },
     SessionModelSelected {
         model_name: String,

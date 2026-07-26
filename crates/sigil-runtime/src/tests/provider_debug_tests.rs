@@ -100,6 +100,7 @@ async fn fim_debug_stream_routes_through_runtime_adapter() -> Result<()> {
 
 fn test_root_config(base_url: &str) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -107,6 +108,7 @@ fn test_root_config(base_url: &str) -> RootConfig {
         session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 5,
@@ -133,6 +135,7 @@ fn test_root_config(base_url: &str) -> RootConfig {
                 "strict_tools_mode": "auto"
             }),
         )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }

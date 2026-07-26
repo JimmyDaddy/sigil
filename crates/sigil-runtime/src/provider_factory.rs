@@ -7,6 +7,19 @@ use super::*;
 /// Returns an error when the configured provider is unsupported or its provider-specific
 /// configuration cannot be parsed or initialized.
 pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
+    if root_config.config_version.is_some()
+        || !root_config.connections.is_empty()
+        || root_config.agent.connection.is_some()
+    {
+        let root_config = root_config.clone();
+        return block_on_provider_future("build_provider_async", async move {
+            build_provider_async(&root_config).await
+        });
+    }
+    build_legacy_provider(root_config)
+}
+
+fn build_legacy_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
     let timeouts = root_config.model_request.to_timeouts()?;
     match provider_config_key(&root_config.agent.provider) {
         "deepseek" => Ok(Box::new(DeepSeekProvider::new(
@@ -31,6 +44,263 @@ pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
         )?)),
         other => Err(anyhow!("unsupported provider {other}")),
     }
+}
+
+/// Resolves an exact V2 connection credential asynchronously before constructing its provider.
+///
+/// Legacy V1 configs retain their compatibility path until the user explicitly migrates.
+pub async fn build_provider_async(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
+    let credential_store =
+        crate::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
+            root_config,
+        );
+    let environment = crate::provider_connections::ProcessCredentialEnvironment;
+    build_provider_with_credentials(root_config, &credential_store, &environment).await
+}
+
+/// Injected variant of [`build_provider_async`] for tests and non-native credential owners.
+pub async fn build_provider_with_credentials(
+    root_config: &RootConfig,
+    credential_store: &dyn crate::provider_connections::ProviderCredentialStore,
+    environment: &dyn crate::provider_connections::CredentialEnvironment,
+) -> Result<Box<dyn Provider>> {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    if matches!(
+        loaded.mode,
+        crate::provider_connections::ConfigMode::Mixed
+            | crate::provider_connections::ConfigMode::UnsupportedFuture
+    ) {
+        anyhow::bail!(
+            "connection_config_invalid: {}",
+            loaded
+                .issues
+                .iter()
+                .map(|issue| issue.code)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    let model_ref = loaded
+        .default_model
+        .as_ref()
+        .ok_or_else(|| anyhow!("model_route_not_configured"))?;
+    build_provider_for_model_ref_with_credentials(
+        root_config,
+        model_ref,
+        credential_store,
+        environment,
+    )
+    .await
+}
+
+/// Builds the provider for one exact compound model identity.
+///
+/// This is the session-resume and fresh-session seam: a changed saved default cannot silently
+/// replace the connection/model frozen in the durable session route.
+pub async fn build_provider_for_model_ref_async(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+) -> Result<Box<dyn Provider>> {
+    let credential_store =
+        crate::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
+            root_config,
+        );
+    let environment = crate::provider_connections::ProcessCredentialEnvironment;
+    build_provider_for_model_ref_with_credentials(
+        root_config,
+        model_ref,
+        &credential_store,
+        &environment,
+    )
+    .await
+}
+
+/// Synchronous compatibility wrapper for exact-route owners already running on a blocking thread.
+pub fn build_provider_for_model_ref(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+) -> Result<Box<dyn Provider>> {
+    let root_config = root_config.clone();
+    let model_ref = model_ref.clone();
+    block_on_provider_future("build_provider_for_model_ref_async", async move {
+        build_provider_for_model_ref_async(&root_config, &model_ref).await
+    })
+}
+
+/// Injected exact-route provider construction for tests and native owners.
+pub async fn build_provider_for_model_ref_with_credentials(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+    credential_store: &dyn crate::provider_connections::ProviderCredentialStore,
+    environment: &dyn crate::provider_connections::CredentialEnvironment,
+) -> Result<Box<dyn Provider>> {
+    use crate::provider_connections::{
+        ConfigMode, ProviderFamily, ProviderProtocol, load_provider_connections,
+        resolve_connection_credential,
+    };
+
+    let loaded = load_provider_connections(root_config);
+    match loaded.mode {
+        ConfigMode::LegacyV1 => {
+            let default_model = loaded
+                .default_model
+                .as_ref()
+                .ok_or_else(|| anyhow!("model_route_not_configured"))?;
+            anyhow::ensure!(
+                default_model.connection_id == model_ref.connection_id,
+                "connection_not_found"
+            );
+            let mut exact = root_config.clone();
+            exact.agent.model = model_ref.model_id.clone();
+            return build_legacy_provider(&exact);
+        }
+        ConfigMode::V2 => {}
+        ConfigMode::Mixed | ConfigMode::UnsupportedFuture => {
+            anyhow::bail!(
+                "connection_config_invalid: {}",
+                loaded
+                    .issues
+                    .iter()
+                    .map(|issue| issue.code)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+    }
+    let blocking_issues = loaded
+        .issues
+        .iter()
+        .filter(|issue| {
+            issue.connection_id.is_none()
+                || issue.connection_id.as_deref() == Some(model_ref.connection_id.as_str())
+        })
+        .map(|issue| issue.code)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        blocking_issues.is_empty(),
+        "invalid default provider connection: {}",
+        blocking_issues.join(",")
+    );
+    let connection = loaded
+        .connections
+        .get(&model_ref.connection_id)
+        .ok_or_else(|| anyhow!("connection_not_found"))?;
+    let credential = resolve_connection_credential(
+        &connection.config,
+        &connection.credential,
+        credential_store,
+        environment,
+    )
+    .await
+    .map_err(anyhow::Error::new)?;
+    let timeouts = root_config.model_request.to_timeouts()?;
+    let api_key = credential
+        .secret
+        .as_ref()
+        .map(|secret| secret.expose_secret().to_owned());
+
+    match (connection.config.provider, connection.config.protocol) {
+        (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => {
+            let mut config: DeepSeekProviderConfig =
+                exact_connection_provider_config(&connection.config, api_key)?;
+            config.model = model_ref.model_id.clone();
+            Ok(Box::new(DeepSeekProvider::new_exact(config, timeouts)?))
+        }
+        (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses)
+        | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => {
+            let mut config: OpenAiResponsesProviderConfig =
+                exact_connection_provider_config(&connection.config, api_key)?;
+            config.model = model_ref.model_id.clone();
+            Ok(Box::new(OpenAiResponsesProvider::new_exact(
+                config, timeouts,
+            )?))
+        }
+        (ProviderFamily::Custom, ProviderProtocol::OpenAiChatCompletions) => {
+            let mut config: OpenAiCompatibleProviderConfig =
+                exact_connection_provider_config(&connection.config, api_key)?;
+            config.model = model_ref.model_id.clone();
+            Ok(Box::new(OpenAiCompatibleProvider::new_exact(
+                config, timeouts,
+            )?))
+        }
+        (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => {
+            let mut config: AnthropicProviderConfig =
+                exact_connection_provider_config(&connection.config, api_key)?;
+            config.model = model_ref.model_id.clone();
+            Ok(Box::new(AnthropicProvider::new_exact(config, timeouts)?))
+        }
+        (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => {
+            let mut config: GeminiProviderConfig =
+                exact_connection_provider_config(&connection.config, api_key)?;
+            config.model = model_ref.model_id.clone();
+            Ok(Box::new(GeminiProvider::new_exact(config, timeouts)?))
+        }
+        _ => Err(anyhow!("unsupported provider connection protocol")),
+    }
+}
+
+pub(crate) fn exact_connection_provider_config<T>(
+    connection: &crate::provider_connections::ProviderConnectionConfig,
+    api_key: Option<String>,
+) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut object = connection
+        .options
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("provider connection options must be an object"))?;
+    for reserved in [
+        "id",
+        "label",
+        "provider",
+        "protocol",
+        "base_url",
+        "model",
+        "credential",
+        "api_key",
+        "__runtime_model",
+    ] {
+        object.remove(reserved);
+    }
+    object.insert(
+        "base_url".to_owned(),
+        serde_json::Value::String(connection.base_url.clone()),
+    );
+    if let Some(api_key) = api_key {
+        object.insert("api_key".to_owned(), serde_json::Value::String(api_key));
+    }
+    serde_json::from_value(serde_json::Value::Object(object))
+        .context("invalid provider-specific connection options")
+}
+
+pub(crate) fn validate_connection_provider_options(
+    connection: &crate::provider_connections::ProviderConnectionConfig,
+) -> Result<()> {
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+
+    match (connection.provider, connection.protocol) {
+        (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => {
+            exact_connection_provider_config::<DeepSeekProviderConfig>(connection, None)?;
+        }
+        (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses)
+        | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => {
+            exact_connection_provider_config::<OpenAiResponsesProviderConfig>(connection, None)?;
+        }
+        (ProviderFamily::OpenAi, ProviderProtocol::OpenAiChatCompletions)
+        | (ProviderFamily::Custom, ProviderProtocol::OpenAiChatCompletions) => {
+            exact_connection_provider_config::<OpenAiCompatibleProviderConfig>(connection, None)?;
+        }
+        (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => {
+            exact_connection_provider_config::<AnthropicProviderConfig>(connection, None)?;
+        }
+        (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => {
+            exact_connection_provider_config::<GeminiProviderConfig>(connection, None)?;
+        }
+        _ => return Err(anyhow!("unsupported provider connection protocol")),
+    }
+    Ok(())
 }
 
 /// Product-facing support state for one provider-neutral capability.
@@ -252,9 +522,79 @@ fn capability_row(
 ///
 /// Returns an error when the resolved role provider is unsupported or malformed.
 pub fn build_role_provider(root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+    if root_config.config_version.is_some()
+        || !root_config.connections.is_empty()
+        || root_config.agent.connection.is_some()
+    {
+        let root_config = root_config.clone();
+        return block_on_provider_future("build_role_provider_async", async move {
+            build_role_provider_async(&root_config, role).await
+        });
+    }
     let role_config = root_config.task.role_config(role);
     let resolved = root_config_with_role_agent(root_config, role_config);
     build_provider(&resolved)
+}
+
+fn block_on_provider_future<F>(async_builder: &'static str, future: F) -> Result<Box<dyn Provider>>
+where
+    F: std::future::Future<Output = Result<Box<dyn Provider>>> + Send + 'static,
+{
+    anyhow::ensure!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "synchronous provider resolution cannot run inside an async runtime; use {async_builder}"
+    );
+    std::thread::Builder::new()
+        .name("sigil-provider-resolution".to_owned())
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build credential resolution runtime")?
+                .block_on(future)
+        })
+        .context("failed to start credential resolution thread")?
+        .join()
+        .map_err(|_| anyhow!("credential resolution thread panicked"))?
+}
+
+/// Async credential-aware role-provider construction.
+pub async fn build_role_provider_async(
+    root_config: &RootConfig,
+    role: AgentRole,
+) -> Result<Box<dyn Provider>> {
+    let credential_store =
+        crate::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
+            root_config,
+        );
+    let environment = crate::provider_connections::ProcessCredentialEnvironment;
+    build_role_provider_with_credentials(root_config, role, &credential_store, &environment).await
+}
+
+/// Injected async role-provider construction.
+pub async fn build_role_provider_with_credentials(
+    root_config: &RootConfig,
+    role: AgentRole,
+    credential_store: &dyn crate::provider_connections::ProviderCredentialStore,
+    environment: &dyn crate::provider_connections::CredentialEnvironment,
+) -> Result<Box<dyn Provider>> {
+    let role_config = root_config.task.role_config(role);
+    if root_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
+        anyhow::ensure!(
+            role_config.provider.is_none(),
+            "V2 role route cannot contain legacy provider"
+        );
+        let mut resolved = root_config.clone();
+        if let Some(connection) = role_config.connection.as_ref() {
+            resolved.agent.connection = Some(connection.clone());
+        }
+        if let Some(model) = role_config.model.as_deref() {
+            resolved.agent.model = model.to_owned();
+        }
+        return build_provider_with_credentials(&resolved, credential_store, environment).await;
+    }
+    let resolved = root_config_with_role_agent(root_config, role_config);
+    build_provider_with_credentials(&resolved, credential_store, environment).await
 }
 
 /// Parses the DeepSeek provider block from the shared root config.
@@ -356,10 +696,20 @@ pub enum SecretSource {
 }
 
 /// A resolved secret value and the storage layer it came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SecretResolution {
     pub value: String,
     pub source: SecretSource,
+}
+
+impl std::fmt::Debug for SecretResolution {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretResolution")
+            .field("value", &"[REDACTED]")
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// Resolves DeepSeek configuration with runtime overrides applied.

@@ -32,7 +32,7 @@ Sigil 把安全落实为一套清晰的决策过程：先理解准备执行的�
 - 文件恢复不会撤销 Shell 命令、远端服务、MCP 调用或其他外部变更。
 - 中断工具在恢复后仍显示为中断，不会静默重跑。
 - `sigil serve` 只面向受信任的本机客户端：服务仅监听回环地址，特权路由需要认证。
-- 通过快速设置或 `/config` 保存凭据，会写入明文本机配置。
+- 通过快速设置或 `/config` 保存粘贴的凭据时，密钥会进入已配置的安全凭据存储，`sigil.toml` 只保留不透明引用。默认 `auto` 在系统存储不可用时可使用 owner-only 的 `~/.sigil/credentials.json`；这个专属文件是受权限保护的明文，不是加密。
 - 自动 Task routing 和 proactive Explore 子智能体不会授予工具权限；文件、Shell、网络、MCP、外部目录与 merge 仍是相互独立的决策。
 - 任一零容忍编排不变量只会禁用当前 session 中受影响的 provider/model/build route。后续输入回退到 `manual + explicit_request_only`；已接受 Task plan 的恢复仍可继续，durable Task history 不会被删除。
 

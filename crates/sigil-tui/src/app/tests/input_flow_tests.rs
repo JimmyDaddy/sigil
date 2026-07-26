@@ -115,6 +115,7 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
                     effective_tool_scope_hash: "sha256:tools".to_owned(),
@@ -547,10 +548,9 @@ fn setup_field_paste_updates_selected_text_without_saving() {
         Path::new(".").to_path_buf(),
         None,
     );
-    app.setup_state
-        .as_mut()
-        .expect("setup state exists")
-        .selected_field = SetupField::ApiKey;
+    let state = app.setup_state.as_mut().expect("setup state exists");
+    state.selected_field = SetupField::ApiKey;
+    state.credential_source = crate::setup::SetupCredentialSource::SecureStore;
 
     app.handle_paste_text("sk-test\n");
 
@@ -560,7 +560,7 @@ fn setup_field_paste_updates_selected_text_without_saving() {
 }
 
 #[test]
-fn config_field_paste_updates_selected_text_without_submitting() {
+fn config_model_paste_requires_catalog_admission() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     app.config_state
@@ -570,13 +570,18 @@ fn config_field_paste_updates_selected_text_without_submitting() {
 
     app.handle_paste_text("custom\nmodel");
 
+    assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
     let state = app
         .config_state
         .as_ref()
         .expect("config state remains open");
-    assert_eq!(state.draft.provider_model, "custommodel");
-    assert!(state.dirty);
-    assert_eq!(app.last_notice(), Some("updated model"));
+    assert_eq!(state.draft.provider_model, "deepseek-v4-flash");
+    assert!(!state.dirty);
+    assert_eq!(
+        app.last_notice(),
+        Some("pasted model ids require catalog admission; choose a model or press M")
+    );
+    app.modal_state = None;
 
     app.config_state
         .as_mut()
@@ -588,14 +593,14 @@ fn config_field_paste_updates_selected_text_without_submitting() {
         .as_ref()
         .expect("config state remains open");
     assert_eq!(state.draft.provider_api_key, "sk-testwith-control");
-    assert_eq!(app.last_notice(), Some("updated api_key"));
+    assert_eq!(app.last_notice(), Some("updated credential"));
 
     app.config_state
         .as_mut()
         .expect("config state exists")
         .footer_selected = true;
     app.handle_paste_text("ignored");
-    assert_eq!(app.last_notice(), Some("updated api_key"));
+    assert_eq!(app.last_notice(), Some("updated credential"));
 
     app.config_state
         .as_mut()
@@ -606,7 +611,7 @@ fn config_field_paste_updates_selected_text_without_submitting() {
         .expect("config state exists")
         .selected_field = None;
     app.handle_paste_text("ignored");
-    assert_eq!(app.last_notice(), Some("updated api_key"));
+    assert_eq!(app.last_notice(), Some("updated credential"));
 }
 
 #[test]

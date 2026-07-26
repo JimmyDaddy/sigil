@@ -51,6 +51,18 @@ impl DeepSeekProvider {
     /// initialized from the provided config.
     pub fn new(config: DeepSeekProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
         let config = config.resolved()?;
+        Self::new_exact(config, timeouts)
+    }
+
+    /// Builds a provider from an already resolved connection snapshot.
+    ///
+    /// Unlike [`Self::new`], this constructor never consults process environment variables.
+    /// Runtime V2 connections use it so the selected connection cannot be silently redirected
+    /// after credential and endpoint resolution.
+    pub fn new_exact(
+        config: DeepSeekProviderConfig,
+        timeouts: ModelRequestTimeouts,
+    ) -> Result<Self> {
         let profile = config.profile();
         Ok(Self {
             profile,

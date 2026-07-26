@@ -1,11 +1,29 @@
 use super::*;
 use crate::app::MutationArtifactRetentionPreview;
+use crate::setup::SetupCredentialSource;
+use anyhow::Context;
 use ratatui::{Terminal, backend::TestBackend};
+use sigil_kernel::{CONFIG_VERSION_V2, ConnectionId};
 
 fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     let mut config = test_config();
     config.workspace.root = workspace_root.display().to_string();
     config
+}
+
+fn assert_stored_credential_without_plaintext(config: &RootConfig, secret: &str) -> Result<()> {
+    let loaded = sigil_runtime::provider_connections::load_provider_connections(config);
+    let default_model = loaded
+        .default_model
+        .as_ref()
+        .context("saved config should have a default route")?;
+    let connection = &loaded.connections[&default_model.connection_id].config;
+    assert!(matches!(
+        connection.credential,
+        sigil_runtime::provider_connections::CredentialRefConfig::Stored { .. }
+    ));
+    assert!(!toml::to_string(config)?.contains(secret));
+    Ok(())
 }
 
 #[test]
@@ -29,6 +47,8 @@ fn config_storage_section_shows_resolved_paths_readonly() {
     assert!(detail.contains("[roots]"));
     assert!(detail.contains("State root"));
     assert!(detail.contains("Cache root"));
+    assert!(detail.contains("Credential store"));
+    assert!(detail.contains("auto"));
     assert!(detail.contains("Workspace state"));
     assert!(detail.contains("Project assets"));
     assert!(detail.contains("Workspace skills"));
@@ -432,7 +452,7 @@ fn config_command_opens_first_editable_step() -> Result<()> {
     assert!(action.is_none());
     assert!(app.is_config_mode());
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Connection"));
     assert_eq!(app.config_status_summary(), "Provider · saved · sigil.toml");
     let nav = app.config_nav_lines().join("\n");
     assert!(nav.contains("Tab section"));
@@ -446,21 +466,21 @@ fn config_up_down_moves_between_fields_in_current_step() -> Result<()> {
     app.open_config_panel();
 
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Connection"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("Model"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Connection"));
     Ok(())
 }
 
 #[test]
-fn config_enter_on_provider_name_cycles_provider() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+fn config_enter_on_provider_name_opens_the_explicit_connection_picker() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &v2_test_config());
     app.open_config_panel();
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Connection"));
     app.config_state
         .as_mut()
         .expect("config state should still exist")
@@ -473,9 +493,13 @@ fn config_enter_on_provider_name_cycles_provider() -> Result<()> {
         .config_state
         .as_ref()
         .expect("config state should still exist");
-    assert_eq!(state.draft.provider_name, "openai_compat");
-    assert!(state.dirty);
-    assert_eq!(app.last_notice(), Some("provider -> openai_compat"));
+    assert_eq!(state.draft.provider_name, "deepseek");
+    assert!(!state.dirty);
+    assert!(app.has_modal());
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("[configured]"));
+    assert!(lines.contains("[add provider]"));
+    assert!(lines.contains("Up/Down choose"));
     Ok(())
 }
 
@@ -1079,7 +1103,7 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Connection"));
     Ok(())
 }
 
@@ -1092,8 +1116,21 @@ fn config_enter_starts_and_commits_text_edit() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.has_modal());
     assert_eq!(app.modal_title(), Some("Model"));
+    if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
+        state.catalog_state = crate::app::modal_flow::ModelCatalogState::Unsupported;
+        state.manual_entry_allowed = true;
+    } else {
+        panic!("model picker should remain open");
+    }
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    for _ in 0..32 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    }
+    for character in "deepseek-v4-pro".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     let state = app
@@ -1106,25 +1143,24 @@ fn config_enter_starts_and_commits_text_edit() -> Result<()> {
 }
 
 #[test]
-fn config_direct_typing_replaces_selected_text_value() -> Result<()> {
+fn config_direct_model_typing_opens_the_admission_picker() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
     assert!(app.has_modal());
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))?;
-    let detail = app.modal_lines().join("\n");
-    assert!(detail.contains("key: model"));
-    assert!(detail.contains("value: gp|"));
-    assert!(!detail.contains("deepseek-v4-flashg"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
     let state = app
         .config_state
         .as_ref()
         .expect("config state should still exist");
-    assert_eq!(state.draft.provider_model, "gp");
+    assert_eq!(state.draft.provider_model, "deepseek-v4-flash");
+    assert!(!state.dirty);
+    assert_eq!(
+        app.last_notice(),
+        Some("choose a catalog model or use M when manual entry is admitted")
+    );
     Ok(())
 }
 
@@ -1143,12 +1179,13 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
-    assert!(detail.contains("[authentication]"));
-    assert!(detail.contains("[endpoint]"));
+    assert!(detail.contains("[connections]"));
+    assert!(detail.contains("[default for new sessions]"));
+    assert!(detail.contains("[route status]"));
     assert!(detail.contains("[advanced]"));
     assert!(detail.contains("[details]"));
-    assert!(detail.contains("selected: Provider"));
-    assert!(detail.contains("key: provider"));
+    assert!(detail.contains("selected: Connection"));
+    assert!(detail.contains("key: connection"));
     assert!(detail.contains("controls: Tab section · Up/Down field · Enter edit"));
     assert!(detail.contains("actions: Down to actions · Ctrl-S save · Esc close"));
     assert!(!lines.iter().take(3).any(|line| line.contains("Tab")));
@@ -1517,8 +1554,21 @@ fn config_compaction_step_shows_effective_context_window_source() {
 #[test]
 fn config_compaction_step_uses_fallback_for_unknown_provider_window() {
     let mut config = test_config();
-    config.agent.provider = "custom".to_owned();
+    config.config_version = Some(CONFIG_VERSION_V2);
+    config.agent.provider.clear();
+    config.agent.connection = Some(ConnectionId::new("custom-default").expect("connection id"));
     config.agent.model = "custom-model".to_owned();
+    config.providers.clear();
+    config.connections = std::collections::BTreeMap::from([(
+        "custom-default".to_owned(),
+        serde_json::json!({
+            "label": "Custom",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "credential": {"source": "none"}
+        }),
+    )]);
     config.compaction.context_window_tokens = Some(128_000);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.open_config_panel();
@@ -3448,9 +3498,10 @@ fn config_mode_closes_on_escape() -> Result<()> {
 fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
@@ -3551,36 +3602,17 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
             .any(|line| line.trim_start().starts_with("context_window_tokens ="))
     );
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
-    assert!(
-        saved
-            .providers
-            .get("deepseek")
-            .is_some_and(|value| value.get("model").is_none())
-    );
+    assert_eq!(saved.config_version, Some(CONFIG_VERSION_V2));
+    assert_eq!(saved.agent.provider, "");
+    let loaded = sigil_runtime::provider_connections::load_provider_connections(&saved);
+    let default_model = loaded.default_model.as_ref().expect("default route");
+    let connection = &loaded.connections[&default_model.connection_id].config;
+    assert_eq!(connection.base_url, "https://example.invalid/api");
     assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("base_url"))
-            .and_then(|value| value.as_str()),
-        Some("https://example.invalid/api")
+        connection.options["user_id_strategy"],
+        "stable_per_workspace"
     );
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("user_id_strategy"))
-            .and_then(|value| value.as_str()),
-        Some("stable_per_workspace")
-    );
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("fim_model"))
-            .and_then(|value| value.as_str()),
-        Some("deepseek-v4-flash")
-    );
+    assert_eq!(connection.options["fim_model"], "deepseek-v4-flash");
     Ok(())
 }
 
@@ -3652,6 +3684,337 @@ fn config_verification_auto_run_persists_to_config() -> Result<()> {
 }
 
 #[test]
+fn config_legacy_environment_migration_accepts_real_terminal_shifted_e() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "environment-secret");
+    let legacy: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "legacy-secret"
+"#,
+    )?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &legacy);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("confirmed environment credential migration")
+    );
+    assert!(app.config_is_dirty());
+    Ok(())
+}
+
+#[test]
+fn config_enter_migrates_all_legacy_keys_and_publishes_v2() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let source = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+api_key = "deepseek-legacy-secret"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+api_key = "anthropic-legacy-secret"
+"#;
+    std::fs::write(&config_path, source)?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    let current_session_route = app.runtime.model_route.clone();
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state")
+        .selected_field = Some(ConfigField::ProviderName);
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Enter migrate"));
+    assert!(detail.contains("atomically upgrades every legacy connection"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("expected migrated config save");
+    };
+    assert_eq!(
+        root_config.config_version,
+        Some(sigil_kernel::CONFIG_VERSION_V2)
+    );
+    assert_eq!(
+        root_config
+            .agent
+            .connection
+            .as_ref()
+            .map(ToString::to_string),
+        Some("deepseek-default".to_owned())
+    );
+    assert_eq!(root_config.agent.model, "deepseek-private");
+    assert_eq!(app.runtime.model_route, current_session_route);
+    let persisted = std::fs::read_to_string(config_path)?;
+    assert!(persisted.contains("source = \"stored\""));
+    assert!(!persisted.contains("deepseek-legacy-secret"));
+    assert!(!persisted.contains("anthropic-legacy-secret"));
+    Ok(())
+}
+
+#[test]
+fn config_enter_migrates_environment_only_legacy_config() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let source = r#"
+[agent]
+provider = "anthropic"
+model = "claude-private"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+"#;
+    std::fs::write(&config_path, source)?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    app.open_config_panel();
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("0 inline key(s)"));
+    assert!(detail.contains("1 environment ref(s)"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("expected environment-only migration save");
+    };
+    assert_eq!(
+        root_config.config_version,
+        Some(sigil_kernel::CONFIG_VERSION_V2)
+    );
+    assert_eq!(root_config.agent.model, "claude-private");
+    let persisted = std::fs::read_to_string(config_path)?;
+    assert!(persisted.contains("source = \"environment\""));
+    assert!(persisted.contains("SIGIL_ANTHROPIC_API_KEY"));
+    Ok(())
+}
+
+#[test]
+fn config_recovery_marker_survives_reopen_and_blocks_blind_legacy_retry() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    let source = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "legacy-secret"
+"#;
+    std::fs::write(&config_path, source)?;
+    std::fs::write(
+        &marker_path,
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    app.open_config_panel();
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Migration recovery"));
+    assert!(detail.contains("Enter recheck"));
+    assert!(!detail.contains("Enter migrate"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(
+        app.last_notice(),
+        Some("resolve provider migration recovery before adding connections")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some(
+            "provider migration recovery remains blocked; repair the config and press Enter to recheck"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&config_path)?, source);
+    assert!(marker_path.exists());
+    Ok(())
+}
+
+#[test]
+fn config_recovery_marker_keeps_add_blocked_when_persisted_config_is_malformed() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    std::fs::write(&config_path, "not valid toml = [")?;
+    std::fs::write(
+        &marker_path,
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )?;
+    let config = v2_test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+
+    app.open_config_panel();
+
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("Migration recovery")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(
+        app.last_notice(),
+        Some("resolve provider migration recovery before adding connections")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider migration recheck unavailable"))
+    );
+    assert!(marker_path.exists());
+    Ok(())
+}
+
+#[test]
+fn config_recovery_marker_clears_only_after_a_healthy_v2_recheck() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "environment-secret");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    let config = v2_test_config();
+    config.save(&config_path)?;
+    std::fs::write(
+        &marker_path,
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    let current_session_route = app.runtime.model_route.clone();
+    app.open_config_panel();
+
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("Migration recovery")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("healthy V2 recheck should publish the refreshed runtime snapshot");
+    };
+    assert_eq!(root_config.config_version, Some(CONFIG_VERSION_V2));
+    assert!(!marker_path.exists());
+    assert_eq!(app.runtime.model_route, current_session_route);
+    assert_eq!(
+        app.last_notice(),
+        Some("provider migration recovery cleared after healthy V2 recheck")
+    );
+    assert!(
+        !app.config_detail_lines()
+            .join("\n")
+            .contains("Migration recovery")
+    );
+    Ok(())
+}
+
+#[test]
+fn config_enter_rejects_legacy_migration_after_source_changes() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let source = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "legacy-secret"
+"#;
+    std::fs::write(&config_path, source)?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    app.open_config_panel();
+
+    let changed_source = format!("# changed outside Sigil\n{source}");
+    std::fs::write(&config_path, &changed_source)?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some(
+            "provider config changed since it was opened; close and reopen /config before migrating"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(config_path)?, changed_source);
+    Ok(())
+}
+
+#[test]
+fn config_enter_rejects_relative_legacy_migration_after_source_changes() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix(".sigil-relative-config-test")
+        .tempdir_in(".")?;
+    let config_path = std::path::PathBuf::from(
+        temp.path()
+            .file_name()
+            .context("relative config test directory should have a name")?,
+    )
+    .join("sigil.toml");
+    assert!(!config_path.is_absolute());
+    let source = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "legacy-secret"
+"#;
+    std::fs::write(&config_path, source)?;
+    let legacy = RootConfig::parse_persisted(source)?;
+    let mut app = AppState::from_root_config(&config_path, &legacy);
+    app.open_config_panel();
+
+    let changed_source = format!("# changed outside Sigil\n{source}");
+    std::fs::write(&config_path, &changed_source)?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some(
+            "provider config changed since it was opened; close and reopen /config before migrating"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(config_path)?, changed_source);
+    Ok(())
+}
+
+#[test]
 fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
@@ -3689,9 +4052,10 @@ fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
 fn config_save_is_blocked_while_busy() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
@@ -3717,9 +4081,10 @@ fn config_save_is_blocked_while_busy() -> Result<()> {
 fn config_clean_save_skips_worker_restart_even_when_busy() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path;
     app.open_config_panel();
     app.runtime.is_busy = true;
@@ -3742,9 +4107,10 @@ fn config_clean_save_skips_worker_restart_even_when_busy() -> Result<()> {
 fn config_clean_footer_save_and_close_closes_without_worker_restart() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path;
     app.open_config_panel();
     app.runtime.is_busy = true;
@@ -3801,16 +4167,17 @@ fn config_close_requires_second_escape_when_dirty() -> Result<()> {
 fn config_ctrl_s_saves_and_keeps_config_open() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.draft.provider_api_key = "saved-from-ctrl-s".to_owned();
+    state.draft.provider_api_key = SecretString::new("saved-from-ctrl-s");
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -3820,24 +4187,11 @@ fn config_ctrl_s_saves_and_keeps_config_open() -> Result<()> {
     };
     assert!(app.is_config_mode());
     assert_eq!(app.last_notice(), Some("saved config"));
-    assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-ctrl-s")
-    );
+    assert_stored_credential_without_plaintext(&root_config, "saved-from-ctrl-s")?;
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-ctrl-s")
-    );
+    assert_stored_credential_without_plaintext(&saved, "saved-from-ctrl-s")?;
+    assert!(!std::fs::read_to_string(&config_path)?.contains("saved-from-ctrl-s"));
     Ok(())
 }
 
@@ -3845,9 +4199,10 @@ fn config_ctrl_s_saves_and_keeps_config_open() -> Result<()> {
 fn config_footer_enter_saves_without_function_keys() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
@@ -3855,7 +4210,7 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
         .as_mut()
         .expect("config state should exist after opening /config");
     state.focus_last_field();
-    state.draft.provider_api_key = "saved-from-footer".to_owned();
+    state.draft.provider_api_key = SecretString::new("saved-from-footer");
     state.dirty = true;
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -3866,24 +4221,10 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
     };
     assert!(app.is_config_mode());
     assert_eq!(app.last_notice(), Some("saved config"));
-    assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-footer")
-    );
+    assert_stored_credential_without_plaintext(&root_config, "saved-from-footer")?;
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-footer")
-    );
+    assert_stored_credential_without_plaintext(&saved, "saved-from-footer")?;
     Ok(())
 }
 
@@ -3891,16 +4232,17 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
 fn config_f3_saves_and_closes_without_switching_step() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.draft.provider_api_key = "saved-from-f3".to_owned();
+    state.draft.provider_api_key = SecretString::new("saved-from-f3");
     state.dirty = true;
     state.set_section(ConfigSection::Provider);
     state.selected_field = Some(ConfigField::ProviderApiKey);
@@ -3912,14 +4254,7 @@ fn config_f3_saves_and_closes_without_switching_step() -> Result<()> {
     };
     assert!(!app.is_config_mode());
     assert_eq!(app.last_notice(), Some("saved config and closed"));
-    assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-f3")
-    );
+    assert_stored_credential_without_plaintext(&root_config, "saved-from-f3")?;
     Ok(())
 }
 
@@ -3927,9 +4262,10 @@ fn config_f3_saves_and_closes_without_switching_step() -> Result<()> {
 fn config_footer_save_and_close_works_without_function_keys() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.config_path = config_path.clone();
     app.open_config_panel();
     let state = app
@@ -3937,7 +4273,7 @@ fn config_footer_save_and_close_works_without_function_keys() -> Result<()> {
         .as_mut()
         .expect("config state should exist after opening /config");
     state.selected_field = Some(ConfigField::ProviderName);
-    state.draft.provider_api_key = "saved-from-footer-close".to_owned();
+    state.draft.provider_api_key = SecretString::new("saved-from-footer-close");
     state.dirty = true;
     state.focus_footer(ConfigFooterAction::SaveAndClose);
 
@@ -3948,24 +4284,10 @@ fn config_footer_save_and_close_works_without_function_keys() -> Result<()> {
     };
     assert!(!app.is_config_mode());
     assert_eq!(app.last_notice(), Some("saved config and closed"));
-    assert_eq!(
-        root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-footer-close")
-    );
+    assert_stored_credential_without_plaintext(&root_config, "saved-from-footer-close")?;
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(
-        saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("saved-from-footer-close")
-    );
+    assert_stored_credential_without_plaintext(&saved, "saved-from-footer-close")?;
     Ok(())
 }
 
@@ -3984,8 +4306,15 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
         .selected_field = SetupField::Model;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.has_modal());
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist in setup mode")
+        .model = "deepseek-v4-pro".to_owned();
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist in setup mode")
+        .credential_source = SetupCredentialSource::SecureStore;
     app.setup_state
         .as_mut()
         .expect("setup state should exist in setup mode")
@@ -3995,6 +4324,10 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist in setup mode")
+        .admit_current_model_for_test();
     app.setup_state
         .as_mut()
         .expect("setup state should exist in setup mode")
@@ -4010,30 +4343,48 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     };
     assert_eq!(saved_path, config_path);
     assert_eq!(root_config.workspace.root, ".");
+    assert_eq!(root_config.config_version, Some(CONFIG_VERSION_V2));
+    assert_eq!(root_config.agent.provider, "");
+    assert_eq!(
+        root_config
+            .agent
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("deepseek-default")
+    );
     assert_eq!(root_config.agent.model, "deepseek-v4-pro");
     let saved = RootConfig::load(&saved_path)?;
-    assert_eq!(saved.agent.provider, "deepseek");
+    assert_eq!(saved.config_version, Some(CONFIG_VERSION_V2));
+    assert_eq!(saved.agent.provider, "");
+    assert_eq!(
+        saved.agent.connection.as_ref().map(ConnectionId::as_str),
+        Some("deepseek-default")
+    );
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
     assert_eq!(
         saved
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
+            .connections
+            .get("deepseek-default")
+            .and_then(|value| value.get("credential"))
+            .and_then(|value| value.get("source"))
             .and_then(|value| value.as_str()),
-        Some("test-inline-key")
+        Some("stored")
     );
-    assert_eq!(
+    assert!(
         root_config
-            .providers
-            .get("deepseek")
-            .and_then(|value| value.get("api_key"))
-            .and_then(|value| value.as_str()),
-        Some("test-inline-key")
+            .connections
+            .get("deepseek-default")
+            .and_then(|value| value.get("credential"))
+            .and_then(|value| value.get("id"))
+            .and_then(|value| value.as_str())
+            .is_some()
     );
     assert!(saved.memory.enabled);
     assert!(saved.compaction.enabled);
     assert_eq!(saved.compaction.context_window_tokens, None);
     let saved_raw = std::fs::read_to_string(&saved_path)?;
+    assert!(!saved_raw.contains("test-inline-key"));
     assert!(saved_raw.contains("[model_request]"));
     assert!(saved_raw.contains("stream_idle_timeout_secs = 180"));
     assert!(
@@ -4078,7 +4429,7 @@ fn setup_save_requires_credentials() -> Result<()> {
     assert_eq!(state.selected_field, SetupField::Save);
     assert_eq!(
         app.last_notice(),
-        Some("provide api_key or export SIGIL_API_KEY")
+        Some("enter an API key to save in the secure credential store")
     );
     Ok(())
 }
@@ -4249,21 +4600,58 @@ fn config_ctrl_c_quits_from_panel() -> Result<()> {
 
 #[test]
 fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &v2_test_config());
     app.open_config_panel();
 
+    let original_connection_count = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist")
+        .draft
+        .connection_rows()
+        .len();
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
+    assert!(app.has_modal());
+    assert!(!app.config_is_dirty());
     assert_eq!(
-        app.last_notice(),
-        Some("MCP server add uses `sigil mcp add`")
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .connection_rows()
+            .len(),
+        original_connection_count
+    );
+    assert!(app.modal_lines().join("\n").contains("[add provider]"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(!app.has_modal());
+    assert!(app.config_is_dirty());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .provider_name,
+        "openai_responses"
+    );
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .connection_rows()
+            .len(),
+        original_connection_count + 1
     );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("MCP server removal uses `sigil mcp remove`")
+        Some("press Ctrl-D again to remove connection openai-1")
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
@@ -4701,11 +5089,18 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
         .selected_field = Some(ConfigField::ProviderModel);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))?;
     assert_eq!(app.modal_title(), Some("Model"));
-    let ModalState::TextInput(state) = app.modal_state.as_ref().expect("text modal should open")
+    let ModalState::ModelPicker(_) = app.modal_state.as_ref().expect("model picker should open")
     else {
-        panic!("expected text input modal");
+        panic!("expected model picker");
     };
-    assert_eq!(state.buffer, "z");
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .provider_model,
+        "deepseek-v4-flash"
+    );
     app.modal_state = None;
 
     app.config_state
@@ -4726,9 +5121,10 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
 fn config_modal_f3_saves_and_closes_from_text_input() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let config = test_config();
+    config.save(&config_path)?;
 
-    let mut app = AppState::from_root_config(&config_path, &test_config());
+    let mut app = AppState::from_root_config(&config_path, &config);
     app.open_config_panel();
     app.config_state
         .as_mut()
@@ -4793,6 +5189,10 @@ fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     assert_eq!(app.config_section_title(), Some("Provider"));
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Permissions);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert_eq!(

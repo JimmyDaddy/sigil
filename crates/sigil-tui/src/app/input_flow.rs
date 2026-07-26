@@ -172,6 +172,16 @@ impl AppState {
         }
 
         match key.code {
+            KeyCode::Char('d' | 'D')
+                if self.active_pane == PaneFocus::Composer
+                    && key.modifiers.is_empty()
+                    && self.has_slash_selector()
+                    && self
+                        .selected_slash_entry()
+                        .is_some_and(|entry| entry.resolved.canonical == "/model") =>
+            {
+                return Ok(Some(self.set_selected_model_as_default()?));
+            }
             KeyCode::Char('z') | KeyCode::Char('Z')
                 if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
             {

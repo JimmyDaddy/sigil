@@ -1,14 +1,27 @@
 import { useState } from "react";
 
+import type { DesktopBridge } from "../../bridge";
 import type { ThemePreference } from "../../appearance/contract";
 import { useAppearance } from "../../appearance/ThemeProvider";
 import { type Locale, useLocale } from "../../i18n";
 import { readReopenLastWorkspace, writeDefaultModel, writeReopenLastWorkspace } from "../../preferences";
-import type { RunContext } from "../../types";
+import { modelOptionIsSelectable, providerInventoryNeedsLegacyMigration } from "../../types";
+import type {
+  ProviderConnectionInventory,
+  ProviderConnectionReadiness,
+  ProviderCredentialSource,
+  ProviderModelRef,
+  RunContext,
+} from "../../types";
 import { Icon } from "../../ui/icons";
 import { useNotifications } from "../../ui/feedback";
 import { Button, Checkbox, Select } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
+import {
+  LegacyProviderMigration,
+  type ProviderMigrationRecoveryBlock,
+} from "./LegacyProviderMigration";
+import { ProviderSetup } from "./ProviderSetup";
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -22,19 +35,35 @@ const themeOptions: readonly ThemePreference[] = [
 ];
 
 export function SettingsPage({
+  bridge,
   supportAvailable,
   workspaceId,
+  isWorkspaceActive,
+  providerInventory,
+  providerMigrationRecovery,
+  onProviderInventoryChange,
+  onProviderMigrationRecoveryBlocked,
+  onProviderMigrationRecoveryResolved,
   modelContext,
   defaultModel,
   onDefaultModelChange,
   onBack,
   onOpenSupport,
 }: {
+  readonly bridge: DesktopBridge;
   readonly supportAvailable: boolean;
   readonly workspaceId?: string;
+  readonly isWorkspaceActive: () => boolean;
+  readonly providerInventory?: ProviderConnectionInventory;
+  readonly providerMigrationRecovery?: ProviderMigrationRecoveryBlock;
+  readonly onProviderInventoryChange: (inventory: ProviderConnectionInventory) => boolean;
+  readonly onProviderMigrationRecoveryBlocked: (
+    block: ProviderMigrationRecoveryBlock,
+  ) => boolean;
+  readonly onProviderMigrationRecoveryResolved: () => boolean;
   readonly modelContext?: RunContext;
-  readonly defaultModel?: string;
-  readonly onDefaultModelChange: (modelName?: string) => void;
+  readonly defaultModel?: ProviderModelRef;
+  readonly onDefaultModelChange: (modelRef?: ProviderModelRef) => void;
   readonly onBack: () => void;
   readonly onOpenSupport: () => void;
 }) {
@@ -42,6 +71,8 @@ export function SettingsPage({
   const { locale, setLocale, t } = useLocale();
   const { notify } = useNotifications();
   const [reopenLastWorkspace, setReopenLastWorkspace] = useState(readReopenLastWorkspace);
+  const [providerSetupOpen, setProviderSetupOpen] = useState(false);
+  const [providerReloading, setProviderReloading] = useState(false);
 
   const updateStartup = (enabled: boolean) => {
     if (!writeReopenLastWorkspace(enabled)) {
@@ -51,13 +82,37 @@ export function SettingsPage({
     setReopenLastWorkspace(enabled);
   };
 
-  const updateDefaultModel = (modelName: string) => {
-    const preference = modelName === "" ? undefined : modelName;
+  const modelRefKey = (modelRef: ProviderModelRef) =>
+    `${modelRef.connectionId}/${modelRef.modelId}`;
+  const updateDefaultModel = (selection: string) => {
+    const selected = modelContext?.modelOptions.find(
+      (option) => modelRefKey(option.modelRef) === selection,
+    );
+    const preference = selection === ""
+      || selected === undefined
+      || !modelOptionIsSelectable(selected)
+      ? undefined
+      : selected.modelRef;
     if (workspaceId === undefined || !writeDefaultModel(workspaceId, preference)) {
       notify({ tone: "error", message: t("settingsSaveFailed") });
       return;
     }
     onDefaultModelChange(preference);
+  };
+  const reloadProviderConfiguration = async () => {
+    if (workspaceId === undefined) return;
+    setProviderReloading(true);
+    try {
+      onProviderInventoryChange(await bridge.providerConnections(workspaceId));
+    } catch {
+      if (isWorkspaceActive()) {
+        notify({ tone: "error", message: t("providerConnectionsUnavailable") });
+      }
+    } finally {
+      if (isWorkspaceActive()) {
+        setProviderReloading(false);
+      }
+    }
   };
 
   return (
@@ -70,6 +125,124 @@ export function SettingsPage({
     >
 
       <div className="settings-sections">
+        <section className="settings-section settings-provider" aria-labelledby="settings-provider">
+          <div className="settings-section-heading">
+            <Icon name="model" />
+            <div>
+              <h2 id="settings-provider">{t("providerConnections")}</h2>
+              <p>{t("providerConnectionsDetail")}</p>
+            </div>
+          </div>
+          <div className="provider-connection-settings">
+            {workspaceId === undefined ? (
+              <p className="settings-control-unavailable">{t("providerWorkspaceRequired")}</p>
+            ) : providerInventory === undefined ? (
+              <p className="settings-control-unavailable">{t("loadingProviderConnections")}</p>
+            ) : (
+              <>
+                {providerInventory.connections.length === 0 ? (
+                  <p className="settings-control-unavailable">{t("noProviderConnections")}</p>
+                ) : (
+                  <ul className="provider-connection-list">
+                    {providerInventory.connections.map((connection) => (
+                      <li key={connection.id}>
+                        <div>
+                          <strong>{connection.label}</strong>
+                          <span>{connection.providerLabel} · {connection.protocolLabel}</span>
+                          <span>
+                            {providerCredentialSourceLabel(connection.credentialSource, t)}
+                            {" · "}
+                            {connection.endpointDisplay}
+                          </span>
+                        </div>
+                        <small data-readiness={connection.readiness}>
+                          {providerReadinessLabel(connection.readiness, t)}
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {providerMigrationRecovery !== undefined
+                  || providerInventoryNeedsLegacyMigration(providerInventory) ? (
+                  <LegacyProviderMigration
+                    key={workspaceId}
+                    bridge={bridge}
+                    workspaceId={workspaceId}
+                    inventory={providerInventory}
+                    mode="settings"
+                    recoveryBlock={providerMigrationRecovery}
+                    onRecoveryBlocked={onProviderMigrationRecoveryBlocked}
+                    onRecoveryResolved={onProviderMigrationRecoveryResolved}
+                    onInventoryReloaded={onProviderInventoryChange}
+                    onOpenDiagnostics={onOpenSupport}
+                    onMigrated={(result) => {
+                      if (!onProviderInventoryChange(result.inventory)) return;
+                      onProviderMigrationRecoveryResolved();
+                      notify({
+                        tone: result.outcome === "published_with_warning" ? "warning" : "success",
+                        message: result.outcome === "published_with_warning"
+                          ? t("legacyMigrationSucceededWithWarning")
+                          : t("legacyMigrationSucceeded"),
+                      });
+                    }}
+                  />
+                ) : providerInventory.configMode === "v2" ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setProviderSetupOpen(true)}
+                  >
+                    {t("addProviderConnection")}
+                  </Button>
+                ) : (
+                  <div className="provider-setup-error" role="alert">
+                    <p>
+                      {providerInventory.configMode === "unsupported_future"
+                        ? t("providerConfigFutureDetail")
+                        : t("providerConfigMixedDetail")}
+                    </p>
+                    <div className="provider-setup-actions">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={providerReloading}
+                        onClick={() => void reloadProviderConfiguration()}
+                      >
+                        {providerReloading ? t("loading") : t("recheckProviderConfig")}
+                      </Button>
+                      <Button type="button" variant="quiet" onClick={onOpenSupport}>
+                        {t("openSupport")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          {providerSetupOpen
+            && workspaceId !== undefined
+            && providerInventory !== undefined ? (
+              <div className="settings-provider-setup">
+                <ProviderSetup
+                  bridge={bridge}
+                  workspaceId={workspaceId}
+                  inventory={providerInventory}
+                  mode="settings"
+                  onCancel={() => setProviderSetupOpen(false)}
+                  onRecoveryBlocked={(block) => {
+                    onProviderMigrationRecoveryBlocked(block);
+                    setProviderSetupOpen(false);
+                  }}
+                  onSaved={(inventory) => {
+                    if (!onProviderInventoryChange(inventory)) return;
+                    setProviderSetupOpen(false);
+                    notify({ tone: "success", message: t("providerSetupSaved") });
+                  }}
+                />
+              </div>
+            ) : null}
+        </section>
+
         <section className="settings-section" aria-labelledby="settings-model">
           <div className="settings-section-heading">
             <Icon name="model" />
@@ -84,12 +257,27 @@ export function SettingsPage({
             <Select
               label={t("defaultModel")}
               description={t("defaultModelProvider", { provider: modelContext.providerName })}
-              value={defaultModel ?? ""}
+              value={
+                defaultModel === undefined ? "" : modelRefKey(defaultModel)
+              }
               onChange={(event) => updateDefaultModel(event.currentTarget.value)}
             >
               <option value="">{t("workspaceDefaultModel")}</option>
               {modelContext.modelOptions.map((option) => (
-                <option key={option.modelName} value={option.modelName}>{option.modelName}</option>
+                <option
+                  key={modelRefKey(option.modelRef)}
+                  value={modelRefKey(option.modelRef)}
+                  disabled={!modelOptionIsSelectable(option)}
+                >
+                  {option.displayName === option.modelName
+                    ? option.modelName
+                    : `${option.displayName} · ${option.modelName}`}
+                  {option.availability === "available"
+                    ? ""
+                    : option.availability === "unverified"
+                      ? ` · ${t("unverified")}`
+                      : ` · ${t("unavailable")}`}
+                </option>
               ))}
             </Select>
           )}
@@ -200,6 +388,33 @@ export function SettingsPage({
       </div>
     </ApplicationPage>
   );
+}
+
+function providerReadinessLabel(
+  readiness: ProviderConnectionReadiness,
+  t: ReturnType<typeof useLocale>["t"],
+): string {
+  switch (readiness) {
+    case "ready": return t("providerReadiness_ready");
+    case "needs_credential": return t("providerReadiness_needs_credential");
+    case "credential_unavailable": return t("providerReadiness_credential_unavailable");
+    case "needs_model": return t("providerReadiness_needs_model");
+    case "unverified": return t("providerReadiness_unverified");
+    case "invalid": return t("providerReadiness_invalid");
+  }
+}
+
+function providerCredentialSourceLabel(
+  source: ProviderCredentialSource,
+  t: ReturnType<typeof useLocale>["t"],
+): string {
+  switch (source) {
+    case "environment": return t("environmentVariable");
+    case "system_keyring":
+    case "stored": return t("secureStore");
+    case "none": return t("noAuthentication");
+    case "legacy_plaintext": return t("legacyCredential");
+  }
 }
 
 function themeName(preference: ThemePreference, t: ReturnType<typeof useLocale>["t"]): string {

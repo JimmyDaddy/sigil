@@ -146,6 +146,7 @@ fn agent_thread_tool_blocks_include_mode_source_status_and_background_hint() -> 
         profile_snapshot_id: snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
         effective_tool_scope_hash: "tools".to_owned(),

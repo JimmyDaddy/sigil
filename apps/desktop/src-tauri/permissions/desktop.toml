@@ -77,3 +77,8 @@ commands.allow = ["desktop_verification", "desktop_rerun_verification"]
 identifier = "allow-desktop-support"
 description = "Allows the main local window to read redacted diagnostics and ask the native shell to save a private support report."
 commands.allow = ["desktop_support_doctor", "desktop_export_support_bundle"]
+
+[[permission]]
+identifier = "allow-desktop-provider-setup"
+description = "Allows the main local window to inspect secret-free provider readiness and submit one native-owned provider catalog, atomic setup, legacy migration, or explicit recovery recheck request."
+commands.allow = ["desktop_provider_connections", "desktop_migrate_legacy_provider_connections", "desktop_recheck_legacy_provider_migration", "desktop_provider_setup_catalog", "desktop_save_provider_setup"]

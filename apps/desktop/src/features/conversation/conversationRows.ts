@@ -11,6 +11,7 @@ interface TimelineRowBase {
   key: string;
   label: string;
   text: string;
+  skill?: MessageView["skill"];
   status?: string;
 }
 
@@ -91,7 +92,14 @@ function projectDisplayItem(
           ? `${content.imageAttachmentCount} attachment${content.imageAttachmentCount === 1 ? "" : "s"}`
           : undefined;
       if (content.role === "user") {
-        return [{ key: identity, kind: "user", label: t("you"), text, status: previewStatus }];
+        return [{
+          key: identity,
+          kind: "user",
+          label: t("you"),
+          text,
+          skill: content.skill,
+          status: previewStatus,
+        }];
       }
       const kind = content.assistantPhase === "tool_preamble" || content.assistantPhase === "progress"
         ? "progress"

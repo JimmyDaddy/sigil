@@ -13,6 +13,7 @@
 | `[workspace].root` | `"."` | 工作区目录；`"."` 表示启动 `sigil` 时所在的目录。 |
 | `[storage].state_root` | `"auto"` | 当前用户的 Sigil 持久状态目录。可用 `SIGIL_STATE_HOME` 覆盖。 |
 | `[storage].cache_root` | `"auto"` | 当前用户可重新生成的缓存目录。可用 `SIGIL_CACHE_HOME` 覆盖。 |
+| `[storage].credential_store` | `"auto"` | Provider API key 存储策略：`auto`、严格 `keyring`，或使用 `~/.sigil/credentials.json` 的 owner-only `file`。 |
 | `[session].log_dir` | 工作区状态目录下的 `sessions` | 会话日志位置。相对路径从工作区状态目录开始解析。 |
 | `[session.retention].max_sessions` | `500` | 手动清理后最多保留多少个状态为 `ready` 的会话。 |
 | `[session.retention].max_bytes` | `2147483648` | 手动清理后，状态为 `ready` 的会话最多占用多少字节。 |
@@ -27,15 +28,27 @@
 
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `[agent].provider` | 快速设置中的选择 | `deepseek`、`openai_compat`、`openai_responses`、`anthropic` 或 `gemini`。 |
-| `[agent].model` | 模型服务设置中的选择 | 默认对话模型。 |
+| `config_version` | 快速设置写入 `2` | 选择 provider connection 配置 schema；未来版本和 V1/V2 混用会 fail closed。 |
+| `[agent].connection` | 快速设置中的选择 | 保存默认 connection ID。 |
+| `[agent].model` | 模型服务设置中的选择 | 保存默认 connection 中的模型。 |
 | `[agent].tool_timeout_secs` | `30` | 工具超时秒数。 |
 | `[agent].max_turns` | 禁用 | 未收敛工具循环的可选上限。 |
+| `[connections.<id>].label` | 必填 | 面向用户的账户或端点名称。 |
+| `[connections.<id>].provider` | 必填 | `deepseek`、`openai`、`anthropic`、`gemini` 或 `custom`。 |
+| `[connections.<id>].protocol` | 必填 | `deepseek`、`responses`、`chat_completions`、`anthropic_messages` 或 `generate_content`，并受 provider 约束。 |
+| `[connections.<id>].base_url` | provider 默认值 | 此 connection 独立拥有的端点；带凭据的远端必须使用 HTTPS，无认证 HTTP 仅限回环地址。 |
+| `[connections.<id>].credential` | 快速设置中的选择 | `{ source = "environment", name = "..." }`、`{ source = "stored", id = "..." }` 或 `{ source = "none" }`。stored ID 由 Sigil 生成，不应手写；旧 `keyring` 引用仍可读取。 |
+| `[connections.<id>].options` | provider 默认值 | 由 provider 校验的 wire 选项；类似凭据的键会被拒绝。 |
 | `[model_request].request_timeout_secs` | `120` | 模型请求等待上限；单次启动可用 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_idle_timeout_secs` | `180` | 两个流式响应事件之间的最长等待时间；可用 `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_total_timeout_secs` | 未设置 | 整个流式响应的可选时限；可用 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 覆盖。 |
 
-各模型服务的配置区块与凭据说明见[模型服务指南](providers.md)。
+活动会话会保留自己的 `connection-id/model-id` 解析 route。修改保存默认值不会重写当前会话；空闲
+状态切换到 ready route 时会创建新会话。现有 V1 `[agent].provider` 与 `[providers.*]` 文件仍可
+读取；`/config` 会报告 legacy 模式，只有显式确认才迁移，并保留准确的 provider/model，同时从
+V2 中移除已迁移明文。
+
+provider 模板、凭据来源、模型发现与迁移排障见[模型服务指南](providers.md)。
 
 ## 执行
 
@@ -90,7 +103,7 @@
 | `[task].max_planning_research_agents` | `3` | 每次 Planner attempt 最多使用多少个只读 Explore probe；`0` 表示关闭，超过硬上限 `4` 的值会被截断。 |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`、`explicit_request_only` 或 `proactive`。 |
 | `[task].allow_write_subagents` | `true` | 符合条件的子智能体能否请求修改文件。 |
-| `[task.<role>].provider` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择模型服务、模型和推理强度。 |
+| `[task.<role>].connection` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择 V2 路由；`connection` 与 `model` 必须同时设置，V2 会拒绝旧 `provider` 字段。 |
 | `[task.<role>.tools].names` / `.prefixes` / `.allow_all` | 角色默认值 | 可按角色限制能够看到的工具。 |
 
 可配置的角色包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
@@ -138,7 +151,8 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[web].allowed_domains` / `.blocked_domains` / `.allowed_private_hosts` / `.allowed_private_cidrs` | `[]` | 可选的目标列表；私有网络目标必须显式匹配。 |
 | `[memory].enabled` | `true` | 加载工作区指令文件。 |
 | `[skills].enabled` / `.user_skills` / `.user_agents` | `true` | 开启发现到的可复用资源。 |
-| `[skills].compatibility_sources` | `[]` | 可选 `claude` 或 `reasonix` 导入。 |
+| `[skills].compatibility_auto_discover` | `true` | 导入标准 `.agents/skills`、Codex `.codex/agents`、OpenCode `.opencode/{skills,commands,agents}` 和 Claude Code `.claude/{skills,commands,agents}` 工作区资源。设为 `false` 可关闭默认兼容集合。 |
+| `[skills].compatibility_sources` | `[]` | 在默认集合之外添加兼容来源，例如为 `.reasonix/agents` 加入 `"reasonix"`；也可配合 `compatibility_auto_discover = false` 精确选择来源。 |
 | `[compaction].enabled` | `true` | 开启对话上下文精简。 |
 | `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | 提醒阈值和有限的空闲自动处理阈值；自动应用前仍要求本地检查结果为 `ready`。 |
 | `[compaction].fallback_context_window_tokens` | 未设置 | 无法获知模型上下文窗口时使用的备用值。 |

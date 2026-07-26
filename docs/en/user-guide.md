@@ -1,4 +1,4 @@
-<!-- public-doc-role: user-guide; authority: tui-daily-use-authority; sections: start,headless-and-local-api-workflows,main-screen,common-controls,image-attachments,slash-commands,config-panel,web-search-and-fetch,planned-tasks,approvals-and-file-changes,sessions-and-recovery,long-context-and-compaction,code-intelligence; cta: open-reference -->
+<!-- public-doc-role: user-guide; authority: tui-daily-use-authority; sections: start,headless-and-local-api-workflows,main-screen,common-controls,rich-conversation-content,image-attachments,slash-commands,config-panel,web-search-and-fetch,planned-tasks,approvals-and-file-changes,sessions-and-recovery,long-context-and-compaction,code-intelligence; cta: open-reference -->
 
 # Sigil TUI User Guide
 
@@ -33,6 +33,14 @@ The info rail is enabled by default when the terminal is wide enough. `F2` chang
 Drag across transcript text and press `Ctrl-C` to copy the selection when clipboard integration is available. `Ctrl-L` copies an active selection first; with no selection, it copies the latest assistant reply. Both use transcript content, so the info rail is excluded. With no selection, `Ctrl-C` keeps its normal cancel or exit behavior.
 
 Mouse mode also supports scrolling, composer placement, approval controls, menus, session rows, activities, and tool-card expansion. Terminal-specific copy, keyboard, mouse, tmux, and SSH checks are in [Terminal compatibility](terminal-compatibility.md).
+
+## Rich Conversation Content
+
+Sigil preserves the original Markdown as the durable message and renders headings, lists, tables, task lists, links, code, inline math, display math, and closed Mermaid fences as presentation only. A malformed or still-streaming fence is isolated to the live tail; it never rewrites the saved response or hides the remaining conversation.
+
+The desktop app renders formulas locally with KaTeX and shows closed Mermaid diagrams in a bounded local viewer. It does not load remote diagram assets or enable Mermaid links, callbacks, raw HTML, or scripts. Formula or diagram failures stay local to that block and retain copyable source.
+
+The TUI keeps the same content order without pretending that a terminal can reproduce browser layout: formulas are labeled LaTeX source, and Mermaid is a diagram section with type, state, summary, and optional source. When no higher-priority `Ctrl-O` action is active, `Ctrl-O` toggles the latest diagram source; `Ctrl-L` still copies the raw latest assistant reply. Wide tables and code use a local content viewport instead of widening the whole transcript.
 
 ## Image Attachments
 

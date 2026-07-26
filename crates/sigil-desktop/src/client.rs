@@ -16,17 +16,19 @@ use crate::{
         DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
         DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
-        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopRunCancelCommandReceipt,
-        DesktopRunCancelRequest, DesktopRunSnapshot, DesktopRunStartCommandReceipt,
-        DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
-        DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanRequest,
-        DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogPage, DesktopSessionContinuityView,
-        DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-        DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
-        DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
-        DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest,
-        DesktopSessionRenameRequest, DesktopSessionSnapshot, DesktopSessionTranscriptPage,
-        DesktopSupportBundleExport, DesktopSupportDoctorReport,
+        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopProviderConnectionInventory,
+        DesktopProviderLegacyMigrationResult, DesktopProviderSetupCatalog,
+        DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
+        DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
+        DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
+        DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
+        DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
+        DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteReceipt,
+        DesktopSessionInvalidSourceDeleteRequest, DesktopSessionListResponse,
+        DesktopSessionMutationReceipt, DesktopSessionOpenRequest, DesktopSessionQuarantineReceipt,
+        DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopSessionSnapshot,
+        DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
         DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationReviewRequest,
         DesktopTaskIntegrationReviewView, DesktopTaskPauseCommandReceipt, DesktopTaskPauseRequest,
         DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
@@ -94,6 +96,68 @@ impl DesktopHttpClient {
     pub async fn support_bundle(&self) -> Result<DesktopSupportBundleExport, DesktopClientError> {
         self.post_json(self.route(["support", "bundle"])?, &(), StatusCode::OK)
             .await
+    }
+
+    /// Reads the secret-free provider inventory through the native owner boundary.
+    pub async fn provider_connections(
+        &self,
+    ) -> Result<DesktopProviderConnectionInventory, DesktopClientError> {
+        self.get_json(
+            self.route(["settings", "provider-connections"])?,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Atomically migrates one valid legacy provider configuration without exposing its keys.
+    pub async fn migrate_legacy_provider_connections(
+        &self,
+        expected_revision: String,
+    ) -> Result<DesktopProviderLegacyMigrationResult, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "migrate-legacy"])?,
+            &DesktopProviderLegacyMigrationRequest { expected_revision },
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Explicitly rechecks and, only when healthy, clears durable migration recovery.
+    pub async fn recheck_legacy_provider_migration(
+        &self,
+    ) -> Result<DesktopProviderConnectionInventory, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "recheck-migration"])?,
+            &(),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Loads one exact connection-scoped model catalog without publishing configuration.
+    pub async fn provider_setup_catalog(
+        &self,
+        request: DesktopProviderSetupCatalogRequest,
+    ) -> Result<DesktopProviderSetupCatalog, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections", "catalog"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Atomically stores one provider connection and saved compound default.
+    pub async fn save_provider_setup(
+        &self,
+        request: DesktopProviderSetupSaveRequest,
+    ) -> Result<DesktopProviderSetupSaveResult, DesktopClientError> {
+        self.post_json(
+            self.route(["settings", "provider-connections"])?,
+            &request,
+            StatusCode::CREATED,
+        )
+        .await
     }
 
     /// Creates a new durable session through the server-owned runtime path.
@@ -841,6 +905,12 @@ impl DesktopHttpClient {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct DesktopProviderLegacyMigrationRequest {
+    expected_revision: String,
+}
+
 /// Bounded incremental decoder for one authenticated run SSE response.
 pub struct DesktopRunEventStream {
     response: Response,
@@ -1164,8 +1234,13 @@ fn validate_conversation_recovery_action(
             validate_recovery_token(checkpoint_id)?;
             validate_recovery_token(checkpoint_digest)
         }
-        DesktopConversationRecoveryCommandAction::ForkConversation { source_turn_digest } => {
-            validate_recovery_token(source_turn_digest)
+        DesktopConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest,
+            model_ref,
+        } => {
+            validate_recovery_token(source_turn_digest)?;
+            validate_recovery_token(&model_ref.connection_id)?;
+            validate_recovery_token(&model_ref.model_id)
         }
     }
 }

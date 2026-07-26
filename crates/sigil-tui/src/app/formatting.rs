@@ -11,7 +11,7 @@ use sigil_kernel::{
     ToolResult, ToolResultMeta, ToolResultStatus,
 };
 
-use crate::slash::KNOWN_MODEL_IDS;
+use sigil_runtime::{bundled_provider_models, normalize_provider_name};
 
 use super::file_type::{
     path_has_code_or_data_extension, path_has_document_extension, path_language,
@@ -1040,20 +1040,28 @@ fn looks_like_markdown_document(content: &str) -> bool {
         || (trimmed.contains('|') && trimmed.contains("---"))
 }
 
-pub(super) fn build_model_picker_options(current: &str, remote: Vec<String>) -> Vec<String> {
-    let mut options = if remote.is_empty() {
-        KNOWN_MODEL_IDS
-            .iter()
-            .map(|model| (*model).to_owned())
-            .collect::<Vec<_>>()
-    } else {
-        remote
-    };
-    let trimmed = current.trim();
-    if !trimmed.is_empty() && !options.iter().any(|option| option == trimmed) {
-        options.push(trimmed.to_owned());
-    }
-    options
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProviderModelIdentity {
+    pub(super) connection_id: Option<sigil_kernel::ConnectionId>,
+    pub(super) provider_name: String,
+    pub(super) model_id: String,
+}
+
+pub(super) fn build_model_picker_options(
+    provider_name: &str,
+    _current: &str,
+    remote: Option<Vec<String>>,
+) -> Vec<ProviderModelIdentity> {
+    let provider_name = normalize_provider_name(provider_name).to_owned();
+    remote
+        .unwrap_or_else(|| bundled_provider_models(&provider_name))
+        .into_iter()
+        .map(|model_id| ProviderModelIdentity {
+            connection_id: None,
+            provider_name: provider_name.clone(),
+            model_id,
+        })
+        .collect()
 }
 
 #[cfg_attr(coverage, allow(dead_code))]

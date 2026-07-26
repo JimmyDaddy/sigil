@@ -99,6 +99,10 @@ enum Commands {
         prompt: String,
         #[arg(long, value_enum, default_value = "text")]
         output: RunOutput,
+        #[arg(long, requires = "model")]
+        connection: Option<String>,
+        #[arg(long, requires = "connection")]
+        model: Option<String>,
     },
     Resume {
         session: Option<String>,
@@ -289,11 +293,34 @@ async fn run_main() -> Result<u8> {
         Commands::Run {
             prompt,
             output: RunOutput::Text,
-        } => run_command(&config_path, &cwd, prompt).await?,
-        Commands::Run { prompt, output } => {
-            let code = run_machine_command(&config_path, &cwd, prompt, output)
-                .await
-                .as_i32();
+            connection,
+            model,
+        } => {
+            run_command(
+                &config_path,
+                &cwd,
+                prompt,
+                connection.as_deref(),
+                model.as_deref(),
+            )
+            .await?
+        }
+        Commands::Run {
+            prompt,
+            output,
+            connection,
+            model,
+        } => {
+            let code = run_machine_command(
+                &config_path,
+                &cwd,
+                prompt,
+                output,
+                connection.as_deref(),
+                model.as_deref(),
+            )
+            .await
+            .as_i32();
             return Ok(u8::try_from(code).expect("machine exit codes must fit in u8"));
         }
         Commands::Resume { session } => {
@@ -845,6 +872,16 @@ impl ServeOwnerChannelWatcher {
     }
 }
 
+fn load_serve_root_config(config_path: &Path) -> Result<RootConfig> {
+    match RootConfig::load(config_path) {
+        Ok(config) => Ok(config),
+        Err(_) if !config_path.exists() => {
+            Ok(sigil_runtime::provider_connections::default_setup_root_config())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(not(test))]
 async fn serve_command(
     config_path: &Path,
@@ -854,7 +891,7 @@ async fn serve_command(
 ) -> Result<()> {
     let config = options.http_config();
     let mut plan = build_serve_startup_plan(options.clone(), token)?;
-    let root_config = RootConfig::load(config_path)?;
+    let root_config = load_serve_root_config(config_path)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
@@ -1000,20 +1037,52 @@ fn render_serve_startup_json(info: &HttpServerInfo) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string(info)?))
 }
 
-async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> Result<()> {
+fn cli_application_run_request(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    connection: Option<&str>,
+    model: Option<&str>,
+) -> std::result::Result<ApplicationRunRequest, ApplicationRunPrepareError> {
+    let mut request = ApplicationRunRequest::non_interactive(
+        config_path,
+        launch_cwd,
+        prompt,
+        uuid::Uuid::new_v4().to_string(),
+    );
+    match (connection, model) {
+        (None, None) => {}
+        (Some(connection), Some(model)) => {
+            request.model_connection_id = Some(
+                sigil_kernel::ConnectionId::new(connection.to_owned()).map_err(|error| {
+                    ApplicationRunPrepareError::InvalidInvocation {
+                        message: error.to_string(),
+                    }
+                })?,
+            );
+            request.model_name = Some(model.to_owned());
+        }
+        _ => {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: "--connection and --model must be supplied together".to_owned(),
+            });
+        }
+    }
+    Ok(request)
+}
+
+async fn run_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    connection: Option<&str>,
+    model: Option<&str>,
+) -> Result<()> {
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
     let services = ApplicationRunServices::new(disclosure_presenter);
-    let prepared = prepare_application_run(
-        ApplicationRunRequest::non_interactive(
-            config_path,
-            launch_cwd,
-            prompt,
-            uuid::Uuid::new_v4().to_string(),
-        ),
-        &services,
-    )
-    .await?;
+    let request = cli_application_run_request(config_path, launch_cwd, prompt, connection, model)?;
+    let prepared = prepare_application_run(request, &services).await?;
     let (execution, _control) = prepared.into_parts();
     let mut handler = StdoutEventHandler;
     let mut approval_handler = AutoApproveHandler;
@@ -1033,6 +1102,8 @@ async fn run_machine_command(
     launch_cwd: &Path,
     prompt: String,
     output: RunOutput,
+    connection: Option<&str>,
+    model: Option<&str>,
 ) -> MachineExitCode {
     let mut stdout = io::stdout();
     let mut cancellation =
@@ -1046,11 +1117,13 @@ async fn run_machine_command(
         }
         () = tokio::task::yield_now() => {}
     }
-    run_machine_command_with_cancellation(
+    run_machine_command_with_route_and_cancellation(
         config_path,
         launch_cwd,
         prompt,
         output,
+        connection,
+        model,
         &mut stdout,
         cancellation,
     )
@@ -1068,17 +1141,20 @@ async fn run_machine_command_with_writer<W>(
 where
     W: Write + Send,
 {
-    run_machine_command_with_cancellation(
+    run_machine_command_with_route_and_cancellation(
         config_path,
         launch_cwd,
         prompt,
         output,
+        None,
+        None,
         writer,
         std::future::pending(),
     )
     .await
 }
 
+#[cfg(test)]
 async fn run_machine_command_with_cancellation<W, F>(
     config_path: &Path,
     launch_cwd: &Path,
@@ -1091,20 +1167,52 @@ where
     W: Write + Send,
     F: Future<Output = Result<()>> + Send,
 {
+    run_machine_command_with_route_and_cancellation(
+        config_path,
+        launch_cwd,
+        prompt,
+        output,
+        None,
+        None,
+        writer,
+        cancellation,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_machine_command_with_route_and_cancellation<W, F>(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    output: RunOutput,
+    connection: Option<&str>,
+    model: Option<&str>,
+    writer: &mut W,
+    cancellation: F,
+) -> MachineExitCode
+where
+    W: Write + Send,
+    F: Future<Output = Result<()>> + Send,
+{
     debug_assert!(output != RunOutput::Text);
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
     let services = ApplicationRunServices::new(disclosure_presenter);
     let mut cancellation = Box::pin(cancellation);
-    let mut preparation = Box::pin(prepare_application_run(
-        ApplicationRunRequest::non_interactive(
-            config_path,
-            launch_cwd,
-            prompt,
-            uuid::Uuid::new_v4().to_string(),
-        ),
-        &services,
-    ));
+    let request =
+        match cli_application_run_request(config_path, launch_cwd, prompt, connection, model) {
+            Ok(request) => request,
+            Err(error) => {
+                let machine_error = machine_error_from_prepare(&error);
+                return write_machine_terminal(
+                    writer,
+                    MachineRecord::error(machine_error.clone()),
+                    MachineExitCode::for_error(machine_error.code),
+                );
+            }
+        };
+    let mut preparation = Box::pin(prepare_application_run(request, &services));
     let prepared = tokio::select! {
         biased;
         trigger = &mut cancellation => {
@@ -1302,6 +1410,9 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
     let code = match error.class() {
         ApplicationRunPrepareErrorClass::InvalidInvocation => MachineErrorCode::InvalidInvocation,
         ApplicationRunPrepareErrorClass::Configuration => MachineErrorCode::ConfigurationInvalid,
+        ApplicationRunPrepareErrorClass::ModelRouteNotConfigured => {
+            MachineErrorCode::ModelRouteNotConfigured
+        }
         ApplicationRunPrepareErrorClass::Execution => MachineErrorCode::ExecutionFailed,
         ApplicationRunPrepareErrorClass::Internal => MachineErrorCode::Internal,
     };

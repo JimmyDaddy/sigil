@@ -7,6 +7,15 @@ use sigil_kernel::SyntaxThemeId;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+mod block;
+mod inline;
+mod math;
+mod mermaid;
+mod normalize;
+mod projection;
+
+pub(crate) use projection::MarkdownPhase;
+
 use super::{
     primitives::{timeline_content_line, timeline_section_line_with_palette},
     syntax_highlight::highlight_code_to_spans_with_theme,
@@ -19,6 +28,27 @@ pub(crate) struct MarkdownRenderState {
     in_fenced_code: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MarkdownRenderCursor {
+    projection: Option<projection::MarkdownProjectionCursor>,
+    render_options: Option<MarkdownRenderOptions>,
+    stable_blocks: Vec<RenderedMarkdownBlockCache>,
+    last_reused_stable_blocks: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedMarkdownBlockCache {
+    key: String,
+    lines: Vec<Line<'static>>,
+}
+
+impl MarkdownRenderCursor {
+    #[cfg(test)]
+    pub(crate) fn last_reused_stable_blocks(&self) -> usize {
+        self.last_reused_stable_blocks
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MarkdownRenderOptions {
     pub max_content_width: usize,
@@ -27,6 +57,8 @@ pub(crate) struct MarkdownRenderOptions {
     pub syntax_theme: SyntaxThemeId,
     pub show_link_urls: bool,
     pub table_mode: TableRenderMode,
+    pub phase: MarkdownPhase,
+    pub show_diagram_source: bool,
 }
 
 impl MarkdownRenderOptions {
@@ -43,6 +75,8 @@ impl MarkdownRenderOptions {
             syntax_theme: SyntaxThemeId::default(),
             show_link_urls: true,
             table_mode: TableRenderMode::Compact,
+            phase: MarkdownPhase::Complete,
+            show_diagram_source: false,
         }
         .normalized()
     }
@@ -62,6 +96,16 @@ impl MarkdownRenderOptions {
 
     pub(crate) fn with_syntax_theme(mut self, syntax_theme: SyntaxThemeId) -> Self {
         self.syntax_theme = syntax_theme;
+        self
+    }
+
+    pub(crate) fn with_phase(mut self, phase: MarkdownPhase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    pub(crate) fn with_diagram_source(mut self, show_diagram_source: bool) -> Self {
+        self.show_diagram_source = show_diagram_source;
         self
     }
 }
@@ -100,10 +144,132 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
     options: MarkdownRenderOptions,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let source_lines = text.lines().collect::<Vec<_>>();
+    let mut cursor = MarkdownRenderCursor::default();
+    render_markdown_timeline_lines_with_palette_and_cursor(
+        accent,
+        body_style,
+        text,
+        options,
+        palette,
+        "tui",
+        &mut cursor,
+    )
+}
+
+pub(crate) fn render_markdown_timeline_lines_with_palette_and_cursor(
+    accent: Color,
+    body_style: Style,
+    text: &str,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+    content_id: &str,
+    cursor: &mut MarkdownRenderCursor,
+) -> Vec<Line<'static>> {
+    let update = projection::project_markdown_with_cursor(
+        text,
+        options.phase,
+        content_id,
+        cursor.projection.as_ref(),
+    );
+    let render_cache_compatible =
+        update.reused_stable_blocks > 0 && cursor.render_options == Some(options);
+    let previous_stable_blocks = if render_cache_compatible {
+        std::mem::take(&mut cursor.stable_blocks)
+    } else {
+        cursor.stable_blocks.clear();
+        Vec::new()
+    };
+    cursor.projection = Some(update.cursor);
+    cursor.render_options = Some(options);
+    if options.phase == MarkdownPhase::Complete {
+        cursor.last_reused_stable_blocks = 0;
+        cursor.stable_blocks.clear();
+        return render_projected_markdown_timeline_lines_with_palette(
+            accent,
+            body_style,
+            &update.projection.source,
+            options,
+            palette,
+            0,
+        );
+    }
+
+    let mut rendered = Vec::new();
+    let mut stable_blocks = Vec::new();
+    let mut reused_stable_blocks = 0usize;
+    let mut mermaid_offset = 0usize;
+    let mut source_cursor = 0usize;
+    for block in &update.projection.blocks {
+        if block.source_start > source_cursor {
+            append_inter_block_gap(
+                &mut rendered,
+                &update.projection.source[source_cursor..block.source_start],
+            );
+        }
+        let cached = render_cache_compatible
+            .then(|| {
+                previous_stable_blocks
+                    .iter()
+                    .find(|cached| cached.key == block.key)
+            })
+            .flatten();
+        let lines = if block.stability == projection::ProjectedMarkdownStability::Stable
+            && let Some(cached) = cached
+        {
+            reused_stable_blocks = reused_stable_blocks.saturating_add(1);
+            cached.lines.clone()
+        } else {
+            render_projected_markdown_timeline_lines_with_palette(
+                accent,
+                body_style,
+                &block.source,
+                options,
+                palette,
+                mermaid_offset,
+            )
+        };
+        if block.stability == projection::ProjectedMarkdownStability::Stable {
+            stable_blocks.push(RenderedMarkdownBlockCache {
+                key: block.key.clone(),
+                lines: lines.clone(),
+            });
+        }
+        if block.kind == projection::ProjectedMarkdownBlockKind::Mermaid {
+            mermaid_offset = mermaid_offset.saturating_add(1);
+        }
+        rendered.extend(lines);
+        source_cursor = block.source_end;
+    }
+    if source_cursor < update.projection.source.len() {
+        append_inter_block_gap(&mut rendered, &update.projection.source[source_cursor..]);
+    }
+    cursor.last_reused_stable_blocks = reused_stable_blocks;
+    cursor.stable_blocks = stable_blocks;
+    rendered
+}
+
+fn append_inter_block_gap(rendered: &mut Vec<Line<'static>>, gap: &str) {
+    if gap.trim().is_empty()
+        && gap.contains('\n')
+        && rendered.last().is_some_and(|line| !line.spans.is_empty())
+    {
+        rendered.push(Line::raw(String::new()));
+    }
+}
+
+fn render_projected_markdown_timeline_lines_with_palette(
+    accent: Color,
+    body_style: Style,
+    source: &str,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+    mermaid_offset: usize,
+) -> Vec<Line<'static>> {
+    let source_lines = source.lines().collect::<Vec<_>>();
     let mut rendered = Vec::new();
     let options = options.normalized();
     let mut index = 0usize;
+    let mut mermaid_count = mermaid_offset;
     while index < source_lines.len() {
         let line = source_lines[index];
         if line.trim().is_empty() {
@@ -115,6 +281,16 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
                 rendered.push(Line::raw(String::new()));
             }
             index += 1;
+            continue;
+        }
+        if let Some((next_index, formula_lines)) = math::display_math_block(&source_lines, index) {
+            rendered.extend(math::render_display_math(
+                accent,
+                &formula_lines,
+                options.max_content_width,
+                palette,
+            ));
+            index = next_index;
             continue;
         }
         if let Some((level, content)) = markdown_heading(line) {
@@ -133,13 +309,28 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
             };
             index += 1;
             let mut block_lines = Vec::new();
+            let mut closed = false;
             while index < source_lines.len() {
                 if fenced_code_language(source_lines[index]).is_some() {
                     index += 1;
+                    closed = true;
                     break;
                 }
                 block_lines.push(source_lines[index]);
                 index += 1;
+            }
+            if label.eq_ignore_ascii_case("mermaid") {
+                mermaid_count += 1;
+                rendered.extend(mermaid::render_mermaid_section(
+                    accent,
+                    &block_lines,
+                    closed,
+                    mermaid_count <= mermaid::MAX_DIAGRAMS_PER_MESSAGE,
+                    options.show_diagram_source,
+                    options.max_content_width,
+                    palette,
+                ));
+                continue;
             }
             if label == "sigil-plan-v1"
                 && let Some(plan_lines) =
@@ -238,6 +429,13 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
         index += 1;
     }
     rendered
+}
+
+pub(crate) fn contains_mermaid_diagram(text: &str) -> bool {
+    projection::project_markdown(text, MarkdownPhase::Complete, "detect")
+        .blocks
+        .iter()
+        .any(|block| block.kind == projection::ProjectedMarkdownBlockKind::Mermaid)
 }
 
 fn render_sigil_plan_block_with_palette(
@@ -1050,6 +1248,17 @@ pub(crate) fn render_inline_markdown_spans_with_palette(
             continue;
         }
 
+        if let Some((formula, consumed)) = math::inline_math(rest) {
+            spans.push(Span::styled(
+                formula.to_owned(),
+                Style::default()
+                    .fg(palette.markdown_math)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            rest = &rest[consumed..];
+            continue;
+        }
+
         if let Some(after) = rest.strip_prefix("**") {
             if let Some(end) = after.find("**") {
                 spans.push(Span::styled(
@@ -1336,9 +1545,28 @@ fn next_inline_marker(text: &str) -> Option<usize> {
         text.find('`'),
         text.find('['),
         text.find('*'),
+        unescaped_dollar_marker(text),
         next_underscore_marker(text),
     ];
     markers.into_iter().flatten().min()
+}
+
+fn unescaped_dollar_marker(text: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (index, character) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '$' {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn next_underscore_marker(text: &str) -> Option<usize> {
@@ -1438,6 +1666,10 @@ fn line_looks_like_code(line: &str) -> bool {
         || trimmed.starts_with('[')
         || trimmed.starts_with(']')
 }
+
+#[cfg(test)]
+#[path = "tests/markdown_cursor_tests.rs"]
+mod cursor_tests;
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/markdown_tests.rs"]

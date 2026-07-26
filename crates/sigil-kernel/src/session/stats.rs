@@ -1,4 +1,5 @@
 use super::*;
+use crate::ResolvedModelRoute;
 
 pub(super) fn apply_usage_control_entry(stats: &mut SessionStats, control: &ControlEntry) {
     if let ControlEntry::UsageSnapshot(usage) = control {
@@ -184,6 +185,7 @@ pub(super) fn session_identity_from_entries(
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name,
                 model_name,
+                ..
             }) if !identity_is_explicit => {
                 identity = Some((provider_name.clone(), model_name.clone()));
                 identity_is_explicit = true;
@@ -204,4 +206,18 @@ pub(super) fn session_identity_from_entries(
         }
     }
     identity
+}
+
+pub(super) fn session_resolved_route_from_entries(
+    entries: &[SessionLogEntry],
+) -> Option<ResolvedModelRoute> {
+    let route = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            resolved_model_route,
+            ..
+        }) => resolved_model_route.clone(),
+        _ => None,
+    })?;
+    let (_, final_model) = session_identity_from_entries(entries)?;
+    (route.model_ref.model_id == final_model).then_some(route)
 }

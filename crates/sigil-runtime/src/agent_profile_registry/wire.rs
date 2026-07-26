@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, de};
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfileKind, AgentResultPolicy, AgentTrustState, ApprovalMode,
-    CommandPermissionConfig, ExternalDirectoryConfig, ExternalDirectoryRule, PermissionConfig,
-    PermissionRule, ReasoningEffort, ToolRegistryScope,
+    CommandPermissionConfig, ConnectionId, ExternalDirectoryConfig, ExternalDirectoryRule,
+    PermissionConfig, PermissionRule, ReasoningEffort, ToolRegistryScope,
 };
 
 use crate::{LOAD_SKILL_TOOL_NAME, SPAWN_AGENT_TOOL_NAME};
@@ -25,6 +25,8 @@ pub(super) struct NativeAgentProfileWire {
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) provider: Option<String>,
+    #[serde(default)]
+    pub(super) connection: Option<ConnectionId>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
@@ -194,6 +196,7 @@ fn wire_from_frontmatter_fields(
         instructions: string("instructions"),
         model: string("model"),
         provider: string("provider"),
+        connection: string("connection").map(ConnectionId::new).transpose()?,
         reasoning_effort: string("reasoning_effort")
             .map(|value| parse_reasoning_effort(&value))
             .transpose()?,

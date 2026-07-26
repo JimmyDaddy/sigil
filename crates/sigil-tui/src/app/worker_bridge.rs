@@ -99,7 +99,9 @@ impl AppState {
     }
 
     pub fn poll_background_tasks(&mut self) -> bool {
-        self.reload_active_agent_child_transcript()
+        self.poll_setup_model_catalog()
+            | self.poll_connection_inventory()
+            | self.reload_active_agent_child_transcript()
     }
 
     pub fn has_pending_worker_commands(&self) -> bool {
@@ -114,9 +116,14 @@ impl AppState {
         self.runtime.pending_worker_commands.push(command);
     }
 
+    pub(crate) fn take_worker_rebind_required(&mut self) -> bool {
+        std::mem::take(&mut self.runtime.worker_rebind_required)
+    }
+
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
             WorkerMessage::WorkerReady => {
+                self.record_started_model_route();
                 self.push_event("worker", "ready");
             }
             WorkerMessage::Event(event) => self.handle(*event)?,
@@ -496,6 +503,7 @@ impl AppState {
                     entries,
                     "restored from disk",
                 );
+                self.runtime.worker_rebind_required = true;
                 self.schedule_balance_refresh();
             }
             WorkerMessage::NewSessionStarted {
@@ -514,6 +522,7 @@ impl AppState {
                     entries,
                     "started new session",
                 );
+                self.runtime.worker_rebind_required = true;
                 self.schedule_balance_refresh();
             }
             WorkerMessage::V2CompactionPreviewed { state } => {
@@ -708,6 +717,7 @@ impl AppState {
                     entries,
                     "conversation fork created",
                 );
+                self.runtime.worker_rebind_required = true;
                 self.last_notice = Some(format!(
                     "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
                 ));
@@ -751,6 +761,7 @@ impl AppState {
                     entries,
                     "local conversation fork created",
                 );
+                self.runtime.worker_rebind_required = true;
                 self.last_notice = Some(format!(
                     "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
                 ));
@@ -883,6 +894,9 @@ impl AppState {
                 result,
             } => {
                 self.apply_provider_models_refresh(request_id, base_url, result);
+            }
+            WorkerMessage::ConnectionModelsRefreshed { result } => {
+                self.apply_connection_models_refresh(result);
             }
             WorkerMessage::McpElicitationRequest {
                 request,

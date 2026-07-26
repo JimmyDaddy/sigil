@@ -402,6 +402,7 @@ impl JsonlSessionStore {
         &self,
         fallback_provider_name: String,
         fallback_model_name: String,
+        fallback_route: Option<crate::ResolvedModelRoute>,
     ) -> Result<(Vec<SessionLogEntry>, String, String)> {
         let mut writer = self
             .writer
@@ -423,6 +424,7 @@ impl JsonlSessionStore {
             let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: provider_name.clone(),
                 model_name: model_name.clone(),
+                resolved_model_route: fallback_route,
             });
             entries.push(entry);
             reconciled_entries.push(entries.last().expect("identity entry was pushed").clone());

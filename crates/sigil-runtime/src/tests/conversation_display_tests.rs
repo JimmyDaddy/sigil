@@ -9,10 +9,10 @@ use sigil_kernel::{
     ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
     JsonlSessionStore, MessageRole, ModelMessage, PermissionRisk, SecretRedactor, Session,
-    SessionLogEntry, SessionRef, SessionStreamRecord, StoredEvent, TaskId, TaskIsolationMode,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
+    SessionLogEntry, SessionRef, SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent,
+    TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
@@ -229,6 +229,43 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
             .map(|frontier| (frontier.run_id.as_str(), frontier.status,)),
         Some(("run-1", ConversationDisplayStatusV1::Succeeded))
     );
+    Ok(())
+}
+
+#[test]
+fn user_selected_skill_is_projected_on_its_durable_prompt() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    session.append_control(ControlEntry::SkillLoaded(SkillLoadEntry {
+        skill_id: "compat-skill-123".to_owned(),
+        display_name: Some("唐代城市研究".to_owned()),
+        sha256: "sha256:skill".to_owned(),
+        source: SkillSource::Workspace,
+        entrypoint: ".agents/skills/changan/SKILL.md".into(),
+        run_id: Some("run-skill".to_owned()),
+        call_id: None,
+        byte_count: 128,
+        line_count: 7,
+        loaded_at_ms: 9,
+    }))?;
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new("run-skill", 10)?)?;
+    session.append_user_message(ModelMessage::user("研究唐代长安城"))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 10)?;
+    let user = page
+        .items
+        .iter()
+        .find(|item| item.kind == ConversationDisplayItemKindV1::UserMessage)
+        .expect("durable user message");
+    assert!(matches!(
+        &user.content,
+        ConversationDisplayContentV1::Message {
+            skill: Some(skill),
+            ..
+        } if skill.id == "compat-skill-123" && skill.name == "唐代城市研究"
+    ));
     Ok(())
 }
 

@@ -3,7 +3,7 @@ use std::ops::Range;
 use ratatui::text::Line;
 
 use super::{
-    TimelineEntry,
+    TimelineEntry, TimelineRole,
     formatting::{hash_timeline_line, line_has_visible_content, plain_line_text},
 };
 
@@ -39,6 +39,7 @@ pub(crate) struct RenderedTimelineBlock {
     lines: Vec<Line<'static>>,
     plain_lines: Vec<String>,
     kind: TimelineBlockKind,
+    markdown_cursor: Option<crate::ui::MarkdownRenderCursor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,7 @@ pub(crate) struct TimelineRenderStore {
     prefix_line_counts: Vec<usize>,
     prefix_hashes: Vec<u64>,
     last_visible_block_index: Option<usize>,
+    last_reused_prefix_lines: usize,
     revision: u64,
 }
 
@@ -119,6 +121,7 @@ impl TimelineRenderStore {
             .collect();
         self.repair_separators();
         self.last_visible_block_index = self.find_last_visible_block_index();
+        self.last_reused_prefix_lines = 0;
         self.rebuild_indexes();
         self.revision = self.revision.saturating_add(1);
         debug_assert!(self.validate_invariants().is_ok());
@@ -145,6 +148,7 @@ impl TimelineRenderStore {
             self.restore_separator_on_block(previous_index);
         }
         self.blocks.push(block);
+        self.last_reused_prefix_lines = 0;
         if block_is_visible {
             self.last_visible_block_index = Some(index);
             self.rebuild_indexes_from(previous_last_visible.unwrap_or(0));
@@ -174,7 +178,9 @@ impl TimelineRenderStore {
             self.rebuild(timeline, options);
             return RerenderOutcome::Rebuilt;
         }
-        let next_block = render_block(entry, options, index);
+        let previous_markdown_cursor = self.blocks[index].markdown_cursor.take();
+        let mut next_block =
+            render_block_with_cursor(entry, options, index, previous_markdown_cursor);
         let was_visible = self.last_visible_block_index == Some(index);
         let is_visible = block_is_visible(&next_block);
         let previous_visible = if was_visible {
@@ -182,6 +188,9 @@ impl TimelineRenderStore {
         } else {
             self.last_visible_block_index
         };
+        self.last_reused_prefix_lines =
+            reuse_unchanged_prefix(&mut self.blocks[index], &mut next_block);
+        debug_assert!(self.last_reused_prefix_lines <= next_block.lines.len());
         self.blocks[index] = next_block;
         match (was_visible, is_visible) {
             (true, true) => self.rebuild_indexes_from(index),
@@ -211,6 +220,20 @@ impl TimelineRenderStore {
             total_lines: self.total_lines(),
             revision: self.revision,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_reused_prefix_lines(&self) -> usize {
+        self.last_reused_prefix_lines
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_reused_markdown_blocks(&self) -> usize {
+        self.blocks
+            .last()
+            .and_then(|block| block.markdown_cursor.as_ref())
+            .map(crate::ui::MarkdownRenderCursor::last_reused_stable_blocks)
+            .unwrap_or(0)
     }
 
     pub(crate) fn validate_invariants(&self) -> Result<(), TimelineRenderInvariantError> {
@@ -489,13 +512,30 @@ fn render_block(
     options: &crate::ui::TimelineRenderOptions,
     entry_index: usize,
 ) -> RenderedTimelineBlock {
-    let lines = crate::ui::render_timeline_entry_lines_with_options(entry, options, entry_index);
+    render_block_with_cursor(entry, options, entry_index, None)
+}
+
+fn render_block_with_cursor(
+    entry: &TimelineEntry,
+    options: &crate::ui::TimelineRenderOptions,
+    entry_index: usize,
+    previous_markdown_cursor: Option<crate::ui::MarkdownRenderCursor>,
+) -> RenderedTimelineBlock {
+    let mut markdown_cursor = (entry.role == TimelineRole::Assistant)
+        .then(|| previous_markdown_cursor.unwrap_or_default());
+    let lines = crate::ui::render_timeline_entry_lines_with_options_and_cursor(
+        entry,
+        options,
+        entry_index,
+        markdown_cursor.as_mut(),
+    );
     let plain_lines = lines.iter().map(plain_line_text).collect::<Vec<_>>();
     RenderedTimelineBlock {
         entry_index,
         kind: block_kind_for_lines(&lines),
         lines,
         plain_lines,
+        markdown_cursor,
     }
 }
 
@@ -509,6 +549,26 @@ fn push_separator(block: &mut RenderedTimelineBlock) {
 
 fn block_is_visible(block: &RenderedTimelineBlock) -> bool {
     block.lines.iter().any(line_has_visible_content)
+}
+
+fn reuse_unchanged_prefix(
+    previous: &mut RenderedTimelineBlock,
+    next: &mut RenderedTimelineBlock,
+) -> usize {
+    let common = previous
+        .plain_lines
+        .iter()
+        .zip(&next.plain_lines)
+        .take_while(|(left, right)| left == right)
+        .count();
+    for index in 0..common {
+        std::mem::swap(&mut previous.lines[index], &mut next.lines[index]);
+        std::mem::swap(
+            &mut previous.plain_lines[index],
+            &mut next.plain_lines[index],
+        );
+    }
+    common
 }
 
 fn block_kind_for_lines(lines: &[Line<'_>]) -> TimelineBlockKind {
@@ -527,6 +587,10 @@ fn clamp_range(range: Range<usize>, total_lines: usize) -> Range<usize> {
     let end = range.end.min(total_lines).max(start);
     start..end
 }
+
+#[cfg(test)]
+#[path = "tests/timeline_render_store_cursor_tests.rs"]
+mod cursor_tests;
 
 fn tail_trimmed_line_count(block: &RenderedTimelineBlock) -> usize {
     block

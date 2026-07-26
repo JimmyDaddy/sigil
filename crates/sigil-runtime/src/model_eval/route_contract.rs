@@ -19,6 +19,7 @@ use sigil_kernel::{
 };
 use sigil_provider_deepseek::{
     DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT, DEFAULT_DEEPSEEK_V4_FLASH_MODEL,
+    DeepSeekProviderConfig,
 };
 
 use super::{
@@ -31,8 +32,8 @@ use crate::{
     agent_supervisor::{planner_tools_with_discovery, task_discovery_system_prompt},
     application_run::constrain_application_tool_registry,
     build_role_tool_registry, build_tool_surface_without_eager_mcp_with_workspace_trust,
-    provider_capabilities_for_name, provider_config_key, resolve_deepseek_config,
-    unsupported_mcp_elicitation_handler, unsupported_mcp_runtime_event_handler,
+    provider_capabilities_for_name, provider_config_key, unsupported_mcp_elicitation_handler,
+    unsupported_mcp_runtime_event_handler,
 };
 
 const DEEPSEEK_ENDPOINT_FAMILY: &str = "openai_chat_completions";
@@ -60,16 +61,35 @@ pub fn build_model_eval_orchestration_route_contract(
 ) -> Result<ModelEvalOrchestrationRouteContractV1> {
     let source_config = RootConfig::load(&request.config_path)
         .context("route contract source config preflight failed")?;
-    let provider_kind = provider_config_key(&source_config.agent.provider);
+    let loaded = crate::provider_connections::load_provider_connections(&source_config);
+    anyhow::ensure!(
+        loaded.issues.is_empty(),
+        "route contract source config contains invalid provider connections"
+    );
+    let default_model = loaded
+        .default_model
+        .as_ref()
+        .context("route contract source config has no default model route")?;
+    let selected_connection = loaded
+        .connections
+        .get(&default_model.connection_id)
+        .context("route contract default connection is missing")?;
+    let runtime_provider =
+        crate::provider_connections::runtime_provider_name(&selected_connection.config);
+    let provider_kind = provider_config_key(runtime_provider);
     if provider_kind != "deepseek" {
         bail!(
             "automatic route-contract derivation currently supports only the pinned deepseek route"
         );
     }
-    if source_config.agent.model != DEFAULT_DEEPSEEK_V4_FLASH_MODEL {
+    if default_model.model_id != DEFAULT_DEEPSEEK_V4_FLASH_MODEL {
         bail!("route-contract derivation requires model {DEFAULT_DEEPSEEK_V4_FLASH_MODEL}");
     }
-    let deepseek = resolve_deepseek_config(&source_config)?;
+    let deepseek: DeepSeekProviderConfig =
+        crate::provider_factory::exact_connection_provider_config(
+            &selected_connection.config,
+            None,
+        )?;
     if deepseek.base_url.trim_end_matches('/') != DEEPSEEK_PRIMARY_BASE_URL
         || deepseek.beta_base_url.trim_end_matches('/') != DEEPSEEK_BETA_BASE_URL
     {
@@ -87,7 +107,11 @@ pub fn build_model_eval_orchestration_route_contract(
     let isolated =
         write_isolated_model_eval_config(&request.config_path, &materialized, &run_root)?;
     let isolated_config = RootConfig::load(&isolated.config_path)?;
-    let capabilities = provider_capabilities_for_name(&isolated_config.agent.provider)
+    let (isolated_provider, _) =
+        crate::provider_connections::resolve_default_model_route(&isolated_config)
+            .map_err(anyhow::Error::new)
+            .context("route-contract isolated model route is invalid")?;
+    let capabilities = provider_capabilities_for_name(&isolated_provider)
         .context("route-contract provider has no registered capabilities")?;
     let surface = build_tool_surface_without_eager_mcp_with_workspace_trust(
         &isolated_config,

@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fmt};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const SIGIL_GEMINI_API_KEY_ENV: &str = "SIGIL_GEMINI_API_KEY";
 pub const SIGIL_GEMINI_BASE_URL_ENV: &str = "SIGIL_GEMINI_BASE_URL";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeminiProviderConfig {
     #[serde(default = "default_base_url")]
@@ -20,6 +20,17 @@ pub struct GeminiProviderConfig {
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+impl fmt::Debug for GeminiProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl GeminiProviderConfig {

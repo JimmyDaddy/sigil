@@ -1,80 +1,25 @@
-use std::{
-    collections::BTreeMap,
-    env,
-    path::Path,
-    sync::{Mutex, mpsc},
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform,
-    DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS, McpServerConfig, McpServerStartup,
-    McpTrustClass, ModelRequestConfig, RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
-    SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
-    SyntaxThemeId, TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId,
-    UsageCostCurrency, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchRoute,
+    ConfigPublishError, DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS, McpServerConfig,
+    McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
+    SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement,
+    TerminalNotificationMethod, ThemeId, UsageCostCurrency, WebPolicyCap, WebProxyMode,
+    WebRedirectPolicy, WebSearchRoute, atomic_publish_private_config_with_parent_sync,
     default_user_config_dir, default_user_config_path, preferred_config_path,
     preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
+    windows_replace_error_requires_recovery,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS,
-    DEFAULT_SESSION_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_MAX_SESSIONS,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCapability,
-    ExecutionIsolationPolicy, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
-    TaskMode, TaskRoutingPolicy, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, CredentialStorageMode,
+    DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS, DEFAULT_SESSION_RETENTION_MAX_BYTES,
+    DEFAULT_SESSION_RETENTION_MAX_SESSIONS, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig,
+    StorageRoot, TaskConfig, TaskMode, TaskRoutingPolicy, WorkspaceConfig,
 };
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvScope {
-    previous: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvScope {
-    fn set_many(values: &[(&'static str, &'static str)]) -> Self {
-        let previous = values
-            .iter()
-            .map(|(name, _)| (*name, env::var(name).ok()))
-            .collect::<Vec<_>>();
-        for (name, value) in values {
-            // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
-            unsafe { env::set_var(name, value) };
-        }
-        Self { previous }
-    }
-
-    fn clear_model_request() -> Self {
-        let names = [
-            SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
-            SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
-            SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
-        ];
-        let previous = names
-            .iter()
-            .map(|name| (*name, env::var(name).ok()))
-            .collect::<Vec<_>>();
-        for name in names {
-            // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
-            unsafe { env::remove_var(name) };
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for EnvScope {
-    fn drop(&mut self) {
-        for (name, value) in &self.previous {
-            if let Some(value) = value {
-                // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
-                unsafe { env::set_var(name, value) };
-            } else {
-                // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
-                unsafe { env::remove_var(name) };
-            }
-        }
-    }
-}
 
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
@@ -233,7 +178,22 @@ fn skill_config_defaults_and_toml_overrides_are_stable() {
     assert!(defaults.enabled);
     assert!(defaults.user_skills);
     assert!(defaults.user_agents);
+    assert!(defaults.compatibility_auto_discover);
     assert!(defaults.compatibility_sources.is_empty());
+
+    let previous_alpha: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[skills]
+compatibility_sources = []
+"#,
+    )
+    .expect("previous alpha skills config should retain automatic compatibility discovery");
+    assert!(previous_alpha.skills.compatibility_auto_discover);
+    assert!(previous_alpha.skills.compatibility_sources.is_empty());
 
     let raw = r#"
 [agent]
@@ -244,6 +204,7 @@ model = "deepseek-v4-pro"
 enabled = false
 user_skills = false
 user_agents = false
+compatibility_auto_discover = false
 compatibility_sources = ["opencode"]
 "#;
 
@@ -251,6 +212,7 @@ compatibility_sources = ["opencode"]
     assert!(!config.skills.enabled);
     assert!(!config.skills.user_skills);
     assert!(!config.skills.user_agents);
+    assert!(!config.skills.compatibility_auto_discover);
     assert_eq!(config.skills.compatibility_sources, vec!["opencode"]);
 }
 
@@ -393,12 +355,10 @@ fn model_request_config_rejects_zero_values_when_resolved() {
 
 #[test]
 fn root_config_load_applies_provider_neutral_model_request_env_overrides() {
-    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
-    let _clear = EnvScope::clear_model_request();
-    let _scope = EnvScope::set_many(&[
-        (SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "13"),
-        (SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "29"),
-        (SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, "31"),
+    let environment = BTreeMap::from([
+        (SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "13".to_owned()),
+        (SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "29".to_owned()),
+        (SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, "31".to_owned()),
     ]);
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("sigil.toml");
@@ -416,18 +376,24 @@ stream_idle_timeout_secs = 11
     )
     .expect("config should write");
 
-    let config = RootConfig::load(&path).expect("config should load");
+    let config =
+        RootConfig::load_with_model_request_env(&path, |name| environment.get(name).cloned())
+            .expect("config should load");
 
     assert_eq!(config.model_request.request_timeout_secs, 13);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 29);
     assert_eq!(config.model_request.stream_total_timeout_secs, Some(31));
+
+    let persisted = RootConfig::load_persisted(&path)
+        .expect("persisted config should ignore runtime overrides");
+    assert_eq!(persisted.model_request.request_timeout_secs, 7);
+    assert_eq!(persisted.model_request.stream_idle_timeout_secs, 11);
+    assert_eq!(persisted.model_request.stream_total_timeout_secs, None);
 }
 
 #[test]
 fn root_config_load_rejects_invalid_model_request_env_override() {
-    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
-    let _clear = EnvScope::clear_model_request();
-    let _scope = EnvScope::set_many(&[(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "0")]);
+    let environment = BTreeMap::from([(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "0".to_owned())]);
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("sigil.toml");
     std::fs::write(
@@ -440,7 +406,9 @@ model = "deepseek-v4-pro"
     )
     .expect("config should write");
 
-    let error = RootConfig::load(&path).expect_err("invalid override should fail");
+    let error =
+        RootConfig::load_with_model_request_env(&path, |name| environment.get(name).cloned())
+            .expect_err("invalid override should fail");
 
     assert!(
         error
@@ -478,6 +446,11 @@ fn storage_root_toml_parses_auto_paths_and_rejects_empty_values() {
 #[test]
 fn storage_mutation_artifact_retention_has_user_visible_defaults_and_overrides() {
     let config = StorageConfig::default();
+    assert_eq!(
+        config.credential_store,
+        CredentialStorageMode::Auto,
+        "credential storage should prefer the portable auto policy"
+    );
     assert_eq!(
         config.mutation_artifact_retention.max_artifacts,
         Some(crate::DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS)
@@ -526,6 +499,24 @@ expire_older_than_ms = 60000
 }
 
 #[test]
+fn storage_credential_store_policy_parses_each_supported_mode() {
+    for (wire, expected) in [
+        ("auto", CredentialStorageMode::Auto),
+        ("keyring", CredentialStorageMode::Keyring),
+        ("file", CredentialStorageMode::File),
+    ] {
+        let parsed: StorageConfig = toml::from_str(&format!("credential_store = \"{wire}\""))
+            .expect("credential store mode should parse");
+        assert_eq!(parsed.credential_store, expected);
+        assert_eq!(parsed.credential_store.as_str(), wire);
+    }
+    assert!(
+        toml::from_str::<StorageConfig>("credential_store = \"plaintext\"").is_err(),
+        "unsupported storage policy must be rejected"
+    );
+}
+
+#[test]
 fn preferred_config_path_uses_explicit_or_user_config_file() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let explicit = temp.path().join("explicit.toml");
@@ -540,15 +531,20 @@ fn preferred_config_path_uses_explicit_or_user_config_file() {
         preferred_config_path(None, temp.path()).expect("user config path should win"),
         default_user_config_path().expect("default user config path should resolve")
     );
+
+    assert_eq!(
+        preferred_config_path(Some(Path::new("relative.toml")), temp.path())
+            .expect("relative explicit path should resolve"),
+        temp.path().join("relative.toml")
+    );
 }
 
 #[test]
 fn root_config_save_roundtrips() {
-    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
-    let _clear = EnvScope::clear_model_request();
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("nested").join("sigil.toml");
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
@@ -556,6 +552,7 @@ fn root_config_save_roundtrips() {
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(32),
             tool_timeout_secs: 30,
@@ -572,14 +569,509 @@ fn root_config_save_roundtrips() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     };
 
     config.save(&path).expect("config should save");
-    let loaded = RootConfig::load(&path).expect("config should reload");
+    let loaded =
+        RootConfig::load_with_model_request_env(&path, |_| None).expect("config should reload");
     assert_eq!(loaded.workspace.root, "/tmp/workspace");
     assert_eq!(loaded.agent.provider, "deepseek");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            std::fs::metadata(path.parent().expect("config parent should exist"))
+                .expect("config parent metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("saved config metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert!(
+        std::fs::read_dir(path.parent().expect("nested config should have a parent"))
+            .expect("config parent should remain readable")
+            .all(|entry| {
+                !entry
+                    .expect("config parent entry should read")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp")
+            })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn root_config_save_replaces_public_files_privately_and_rejects_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    let target = temp.path().join("symlink-target.toml");
+    let link = temp.path().join("linked-sigil.toml");
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "openai_responses"
+model = "gpt-4.1"
+"#,
+    )
+    .expect("minimal config should parse");
+
+    std::fs::write(&path, "old config").expect("old config should write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("old config should become public for the regression");
+    config.save(&path).expect("existing config should replace");
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("replaced config metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        RootConfig::load_with_model_request_env(&path, |_| None)
+            .expect("replaced config should parse")
+            .agent
+            .provider,
+        "openai_responses"
+    );
+
+    std::fs::write(&target, "keep me").expect("symlink target should write");
+    symlink(&target, &link).expect("config symlink should create");
+    let error = config
+        .save(&link)
+        .expect_err("symbolic-link destination must be rejected");
+    assert!(error.to_string().contains("failed to write config at"));
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("symlink target should remain readable"),
+        "keep me"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("config symlink should remain")
+            .file_type()
+            .is_symlink()
+    );
+
+    let real_parent = temp.path().join("real-parent");
+    let linked_parent = temp.path().join("linked-parent");
+    std::fs::create_dir(&real_parent).expect("real parent should create");
+    symlink(&real_parent, &linked_parent).expect("parent symlink should create");
+    let linked_path = linked_parent.join("sigil.toml");
+    config
+        .save(&linked_path)
+        .expect_err("symbolic-link parent must be rejected");
+    assert!(!real_parent.join("sigil.toml").exists());
+    assert!(
+        !real_parent.join(".sigil.toml.update.lock").exists(),
+        "rejecting a symlink parent must not create a lock through the link"
+    );
+
+    std::fs::create_dir(real_parent.join("nested")).expect("nested real parent should create");
+    let escaped_path = linked_parent.join("nested").join("sigil.toml");
+    config
+        .save(&escaped_path)
+        .expect_err("symbolic-link ancestor must be rejected");
+    assert!(!real_parent.join("nested").join("sigil.toml").exists());
+    assert!(
+        !real_parent
+            .join("nested")
+            .join(".sigil.toml.update.lock")
+            .exists(),
+        "rejecting a symlink ancestor must not create a nested lock through the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_config_parent_policy_does_not_chmod_the_working_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("test directory mode should set");
+
+    super::secure_config_parent(temp.path())
+        .expect("working-directory parent should validate without chmod");
+
+    assert_eq!(
+        std::fs::metadata(temp.path())
+            .expect("test directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_publish_tightens_an_existing_owned_parent_when_policy_requires_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let parent = temp.path().join("existing-sigil-home");
+    std::fs::create_dir(&parent).expect("existing parent should create");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+        .expect("test directory mode should set");
+    let path = parent.join("credentials.json");
+
+    super::atomic_publish_private_config_with_parent_policy(
+        &path,
+        b"{\"version\":1}",
+        true,
+        |_| Ok(()),
+    )
+    .expect("private file should publish");
+
+    assert_eq!(
+        std::fs::metadata(&parent)
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn private_windows_acl_excludes_broad_read_principals_for_files_and_directories() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let directory = temp.path().join("private");
+    std::fs::create_dir(&directory).expect("private directory should create");
+    let file = directory.join("state.json");
+    std::fs::write(&file, b"private").expect("private file should write");
+    let current_user_sid =
+        super::windows_current_process_user_sid().expect("current user SID should resolve");
+
+    for path in [&directory, &file] {
+        super::secure_private_path_permissions(path).expect("private ACL should apply");
+        let sddl = super::windows_private_dacl_sddl(path).expect("private ACL should render");
+        assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
+        assert!(
+            sddl.contains(&format!("O:{current_user_sid}")),
+            "current user must own the path: {sddl}"
+        );
+        assert!(
+            sddl.contains(";;;SY)"),
+            "Local System must retain access: {sddl}"
+        );
+        assert!(
+            sddl.contains(&format!(";;;{current_user_sid})")),
+            "the current user must retain access: {sddl}"
+        );
+        for broad_principal in [";;;OW)", ";;;WD)", ";;;BU)", ";;;AU)", ";;;AN)"] {
+            assert!(
+                !sddl.contains(broad_principal),
+                "broad principal {broad_principal} retained access: {sddl}"
+            );
+        }
+    }
+}
+
+#[test]
+fn root_config_load_dispatches_v1_v2_mixed_and_future_schema() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "legacy-secret"
+"#,
+    )
+    .expect("legacy config should write");
+    let legacy = RootConfig::load(&path).expect("legacy config should load");
+    assert_eq!(legacy.config_version, None);
+
+    std::fs::write(
+        &path,
+        r#"
+config_version = 2
+
+[agent]
+connection = "openai-personal"
+model = "gpt-4.1"
+
+[connections.openai-personal]
+label = "OpenAI"
+provider = "openai"
+protocol = "responses"
+base_url = "https://api.openai.com/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
+"#,
+    )
+    .expect("V2 config should write");
+    let v2 = RootConfig::load(&path).expect("V2 config shell should load");
+    assert_eq!(v2.config_version, Some(2));
+    assert_eq!(
+        v2.agent
+            .connection
+            .as_ref()
+            .expect("V2 route should exist")
+            .as_str(),
+        "openai-personal"
+    );
+
+    std::fs::write(
+        &path,
+        r#"
+config_version = 2
+[agent]
+provider = "deepseek"
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+"#,
+    )
+    .expect("mixed config should write");
+    assert!(
+        RootConfig::load(&path)
+            .expect_err("mixed config should fail closed")
+            .to_string()
+            .contains("cannot include legacy")
+    );
+
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+
+[connections]
+"#,
+    )
+    .expect("empty mixed table config should write");
+    assert!(
+        RootConfig::load(&path)
+            .expect_err("an explicitly empty connections table must still select V2 schema")
+            .to_string()
+            .contains("config_version = 2 is required")
+    );
+
+    std::fs::write(
+        &path,
+        r#"
+config_version = 2
+
+[agent]
+connection = "openai-personal"
+model = "gpt-4.1"
+
+[providers]
+
+[connections.openai-personal]
+label = "OpenAI"
+provider = "openai"
+protocol = "responses"
+base_url = "https://api.openai.com/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
+"#,
+    )
+    .expect("empty legacy table in V2 config should write");
+    assert!(
+        RootConfig::load(&path)
+            .expect_err("an explicitly empty providers table must still be rejected in V2")
+            .to_string()
+            .contains("cannot include legacy")
+    );
+
+    std::fs::write(
+        &path,
+        r#"
+config_version = 3
+[agent]
+connection = "openai-personal"
+model = "gpt-4.1"
+"#,
+    )
+    .expect("future config should write");
+    assert!(
+        RootConfig::load(&path)
+            .expect_err("future config should fail closed")
+            .to_string()
+            .contains("unsupported config_version 3")
+    );
+}
+
+#[test]
+fn root_config_v2_requires_compound_task_role_routes_and_rejects_legacy_provider() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    let v2_prefix = r#"
+config_version = 2
+
+[agent]
+connection = "primary"
+model = "primary-model"
+
+[connections.primary]
+label = "Primary"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#;
+
+    for (role, expected) in [
+        (
+            r#"
+[task.planner]
+provider = "deepseek"
+model = "planner-model"
+"#,
+            "cannot include legacy [task.planner].provider",
+        ),
+        (
+            r#"
+[task.planner]
+connection = "primary"
+"#,
+            "connection and [task.planner].model to be configured together",
+        ),
+        (
+            r#"
+[task.planner]
+model = "planner-model"
+"#,
+            "connection and [task.planner].model to be configured together",
+        ),
+    ] {
+        std::fs::write(&path, format!("{v2_prefix}{role}"))
+            .expect("invalid role config should write");
+        let error = RootConfig::load(&path).expect_err("invalid V2 role route should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    std::fs::write(
+        &path,
+        format!(
+            r#"{v2_prefix}
+[task.planner]
+connection = "primary"
+model = "planner-model"
+reasoning_effort = "high"
+"#
+        ),
+    )
+    .expect("valid role config should write");
+    let config = RootConfig::load(&path).expect("compound V2 role route should load");
+    assert_eq!(
+        config
+            .task
+            .planner
+            .connection
+            .as_ref()
+            .map(crate::ConnectionId::as_str),
+        Some("primary")
+    );
+    assert_eq!(config.task.planner.model.as_deref(), Some("planner-model"));
+
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[task.planner]
+connection = "primary"
+model = "planner-model"
+"#,
+    )
+    .expect("legacy role config should write");
+    assert!(
+        RootConfig::load(&path)
+            .expect_err("role connection requires V2")
+            .to_string()
+            .contains("task role connection")
+    );
+}
+
+#[test]
+fn root_config_debug_redacts_legacy_provider_values() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+[providers.deepseek]
+api_key = "debug-must-not-leak"
+"#,
+    )
+    .expect("legacy config should parse");
+
+    let rendered = format!("{config:?}");
+    assert!(!rendered.contains("debug-must-not-leak"));
+    assert!(rendered.contains("redacted"));
+}
+
+#[test]
+fn atomic_config_publish_distinguishes_post_publish_durability_failure() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(&path, "old config").expect("old config should write");
+
+    let error = atomic_publish_private_config_with_parent_sync(&path, b"new config", |_| {
+        Err(std::io::Error::other("injected parent sync failure"))
+    })
+    .expect_err("post-publish sync failure should be surfaced");
+
+    assert!(matches!(
+        error.downcast_ref::<ConfigPublishError>(),
+        Some(ConfigPublishError::PublishedButDurabilityUncertain { path: error_path, .. })
+            if error_path == &path
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("published config should remain readable"),
+        "new config"
+    );
+}
+
+#[test]
+fn windows_partial_replace_errors_preserve_the_recovery_file() {
+    for error_code in 1175..=1177 {
+        assert!(windows_replace_error_requires_recovery(Some(error_code)));
+    }
+    assert!(!windows_replace_error_requires_recovery(Some(87)));
+    assert!(!windows_replace_error_requires_recovery(None));
 }
 
 #[test]
@@ -588,11 +1080,13 @@ fn root_config_save_handles_paths_without_parent() {
     let path = Path::new(&file_name);
 
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -609,6 +1103,7 @@ fn root_config_save_handles_paths_without_parent() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     };
@@ -619,178 +1114,63 @@ fn root_config_save_handles_paths_without_parent() {
 
     assert!(path.exists());
     std::fs::remove_file(path).expect("temporary config should clean up");
-    let mut lock_path = path.as_os_str().to_os_string();
-    lock_path.push(".lock");
-    std::fs::remove_file(Path::new(&lock_path)).expect("temporary config lease should clean up");
+    std::fs::remove_file(format!(".{file_name}.update.lock"))
+        .expect("temporary config lock should clean up");
 }
 
 #[test]
-fn root_config_update_file_holds_one_lease_across_read_modify_write() {
+fn root_config_save_rejects_legacy_inline_provider_secrets() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("sigil.toml");
     let config: RootConfig = toml::from_str(
         r#"
 [agent]
 provider = "deepseek"
-model = "initial"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key = "must-not-be-republished"
+"#,
+    )
+    .expect("legacy config should parse");
+
+    let error = config
+        .save(&path)
+        .expect_err("inline legacy secret must block ordinary publication");
+    assert!(format!("{error:#}").contains("legacy_secret_migration_required"));
+    assert!(!path.exists());
+}
+
+#[test]
+fn root_config_conditional_save_rejects_a_stale_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    let original: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
 "#,
     )
     .expect("minimal config should parse");
-    config.save(&path).expect("initial config should save");
+    original.save(&path).expect("original should save");
+    let mut live = original.clone();
+    live.agent.model = "deepseek-v4-pro".to_owned();
+    live.save(&path).expect("concurrent update should save");
+    let mut stale_update = original.clone();
+    stale_update.permission.mode = crate::PermissionMode::ReadOnly;
 
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let first_path = path.clone();
-    let first = std::thread::spawn(move || {
-        RootConfig::update_file(&first_path, |config| {
-            config.agent.model = "first-writer".to_owned();
-            started_tx.send(()).expect("start signal should send");
-            release_rx.recv().expect("release signal should arrive");
-            Ok(())
-        })
-    });
-    started_rx.recv().expect("first writer should hold lease");
-
-    let error = RootConfig::update_file(&path, |config| {
-        config.agent.model = "second-writer".to_owned();
-        Ok(())
-    })
-    .expect_err("second writer must fail closed while the lease is held");
-    assert!(error.to_string().contains("already being updated"));
-
-    release_tx.send(()).expect("first writer should release");
-    first
-        .join()
-        .expect("first writer thread should join")
-        .expect("first writer should publish");
+    let error = stale_update
+        .save_if_unchanged(&path, &original)
+        .expect_err("stale source must not overwrite the live config");
+    assert!(format!("{error:#}").contains("config changed since it was loaded"));
     assert_eq!(
         RootConfig::load(&path)
-            .expect("updated config should load")
+            .expect("live config should remain readable")
             .agent
             .model,
-        "first-writer"
-    );
-}
-
-#[test]
-fn root_config_update_file_does_not_materialize_environment_overrides() {
-    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
-    let _clear = EnvScope::clear_model_request();
-    let _scope = EnvScope::set_many(&[(SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "13")]);
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &path,
-        r#"
-[agent]
-provider = "deepseek"
-model = "initial"
-
-[model_request]
-request_timeout_secs = 7
-"#,
-    )
-    .expect("config should write");
-
-    RootConfig::update_file(&path, |config| {
-        config.agent.model = "updated".to_owned();
-        Ok(())
-    })
-    .expect("config should update");
-
-    let raw = std::fs::read_to_string(&path).expect("updated config should read");
-    let persisted: RootConfig = toml::from_str(&raw).expect("updated config should parse");
-    assert_eq!(persisted.agent.model, "updated");
-    assert_eq!(persisted.model_request.request_timeout_secs, 7);
-}
-
-#[cfg(unix)]
-#[test]
-fn root_config_atomic_save_preserves_symlink_target_and_permissions() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let target = temp.path().join("target.toml");
-    let link = temp.path().join("sigil.toml");
-    let mut config: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "initial"
-"#,
-    )
-    .expect("minimal config should parse");
-    config.save(&target).expect("target config should save");
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
-        .expect("target permissions should change");
-    symlink(&target, &link).expect("config symlink should create");
-
-    config.agent.model = "updated".to_owned();
-    config.save(&link).expect("symlinked config should save");
-
-    assert!(
-        std::fs::symlink_metadata(&link)
-            .expect("symlink metadata should load")
-            .file_type()
-            .is_symlink()
-    );
-    assert_eq!(
-        std::fs::metadata(&target)
-            .expect("target metadata should load")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o640
-    );
-    assert_eq!(
-        RootConfig::load(&link)
-            .expect("symlinked config should load")
-            .agent
-            .model,
-        "updated"
-    );
-    let names = std::fs::read_dir(temp.path())
-        .expect("config directory should list")
-        .map(|entry| {
-            entry
-                .expect("directory entry should load")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        names
-            .iter()
-            .all(|name| !name.starts_with(".tmp") && !name.starts_with("tmp"))
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn root_config_new_file_is_owner_only() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let path = temp.path().join("sigil.toml");
-    let config: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "initial"
-"#,
-    )
-    .expect("minimal config should parse");
-
-    config.save(&path).expect("new config should save");
-
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("config metadata should load")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
+        "deepseek-v4-pro"
     );
 }
 
@@ -1054,11 +1434,13 @@ fn root_config_serializes_appearance_theme_and_colors() {
     colors.insert("surface_base".to_owned(), "#07080a".to_owned());
     colors.insert("text_primary".to_owned(), "#ecf0f6".to_owned());
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -1081,6 +1463,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
         },
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     };
@@ -2441,6 +2824,7 @@ fn root_config_load_reports_missing_paths_with_context() {
 fn root_config_save_reports_parent_creation_and_write_errors() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
@@ -2448,6 +2832,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(32),
             tool_timeout_secs: 30,
@@ -2464,6 +2849,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     };
@@ -2473,7 +2859,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
     let create_error = config
         .save(&blocking_parent.join("sigil.toml"))
         .expect_err("file parent should fail directory creation");
-    assert!(create_error.to_string().contains("failed to create"));
+    assert!(format!("{create_error:#}").contains("failed to create"));
 
     let output_dir = temp.path().join("output-dir");
     std::fs::create_dir(&output_dir).expect("output dir should create");

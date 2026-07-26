@@ -19,6 +19,7 @@ import type {
   PermissionMode,
   RunContext,
   RunStreamStatus,
+  ProviderSetupCatalog,
   SessionSummary,
   TaskIntegrationReview,
   TimelineEvent,
@@ -32,6 +33,7 @@ const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia")
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  vi.restoreAllMocks();
   if (originalMatchMedia === undefined) delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
   else Object.defineProperty(window, "matchMedia", originalMatchMedia);
 });
@@ -59,24 +61,37 @@ const defaultAppearance: AppearanceSnapshot = {
 };
 
 const defaultRunContext: RunContext = {
+  modelRef: {
+    connectionId: "deepseek-default",
+    modelId: "deepseek-v4-flash",
+  },
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
-  availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
   modelOptions: [
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      displayName: "DeepSeek V4 Flash",
+      availability: "available",
+      recommendation: "recommended",
+      provenance: "bundled",
       modelName: "deepseek-v4-flash",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding-deepseek-v4-flash",
     },
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+      displayName: "DeepSeek V4 Pro",
+      availability: "available",
+      recommendation: "standard",
+      provenance: "bundled",
       modelName: "deepseek-v4-pro",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
     },
   ],
-  modelSelection: "per_run",
+  modelSelection: "fresh_session",
   modelSelectionBinding: "model-binding-deepseek-v4-flash",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -129,6 +144,92 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },
     }),
     exportSupportBundle: async () => ({ cancelled: false, fileName: "sigil-support-test.json" }),
+    providerConnections: async () => ({
+      configMode: "v2",
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "environment",
+        readiness: "ready",
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      }],
+      issues: [],
+    }),
+    migrateLegacyProviderConnections: async () => ({
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      inventory: {
+        configMode: "v2",
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+        connections: [{
+          id: "deepseek-default",
+          label: "DeepSeek",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "stored",
+          readiness: "ready",
+          defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+        }],
+        issues: [],
+      },
+      migratedConnectionCount: 1,
+      movedInlineCredentialCount: 1,
+      preservedEnvironmentReferenceCount: 0,
+      outcome: "published",
+      warnings: [],
+    }),
+    recheckLegacyProviderMigration: async () => ({
+      configMode: "v2",
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "stored",
+        readiness: "ready",
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      }],
+      issues: [],
+    }),
+    providerSetupCatalog: async () => ({
+      connectionId: "deepseek-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "deepseek-v4-flash",
+        displayName: "DeepSeek V4 Flash",
+        availability: "available",
+        recommended: true,
+        provenance: "remote",
+      }],
+      suggestedModel: "deepseek-v4-flash",
+      manualEntryAllowed: false,
+    }),
+    saveProviderSetup: async () => ({
+      defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      inventory: {
+        configMode: "v2",
+        defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+        connections: [{
+          id: "deepseek-1",
+          label: "DeepSeek 1",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "system_keyring",
+          readiness: "ready",
+          defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+        }],
+        issues: [],
+      },
+      saveWarning: false,
+    }),
     pickWorkspace: async () => ({ cancelled: false, workspace }),
     openRecentWorkspace: async () => workspace,
     closeWorkspace: async () => [],
@@ -396,7 +497,7 @@ describe("desktop coding-agent components", () => {
 
     expect(document.querySelector("script")).toBeNull();
     expect(document.querySelector("img")).toBeNull();
-    expect(screen.getByText("<script>alert(1)</script>")).toBeTruthy();
+    expect(screen.queryByText("<script>alert(1)</script>")).toBeNull();
     expect(screen.getByRole("list")).toBeTruthy();
     expect(screen.getByText("item").tagName).toBe("CODE");
     expect(screen.getByRole("heading", { name: "Result" }).tagName).toBe("H1");
@@ -461,6 +562,23 @@ describe("desktop coding-agent components", () => {
     expect(disclosure.open).toBe(true);
     expect(screen.getByText("Hide details")).toBeTruthy();
     unmount();
+  });
+
+  it("shows a user-selected skill as durable message context", () => {
+    render(
+      <Message
+        message={{
+          key: "user-skill",
+          kind: "user",
+          label: "You",
+          text: "Research Chang'an",
+          skill: { id: "compat-skill-123", name: "唐代城市研究" },
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("Used skill: 唐代城市研究")).toBeTruthy();
+    expect(screen.getByText("唐代城市研究")).toBeTruthy();
   });
 
   it("renders read-only bounded tool and diff surfaces", async () => {
@@ -698,6 +816,7 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.type(composer, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText(/Use environment variable · api\.deepseek\.com/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Solarized Light" }));
 
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("solarized_light"));
@@ -705,6 +824,27 @@ describe("desktop workspace and history shell", () => {
     expect(setAppearance).toHaveBeenCalledWith("solarized_light");
     await user.click(screen.getByLabelText("Sigil desktop home"));
     expect((screen.getByLabelText("Message Sigil") as HTMLTextAreaElement).value).toBe("Keep this draft");
+  });
+
+  it("opens explicit provider setup from Settings without an existing conversation", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText(/Use environment variable · api\.deepseek\.com/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add connection" }));
+
+    expect(await screen.findByRole("heading", { name: "Add connection" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /DeepSeek/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "Add connection" })).toBeNull();
   });
 
   it("keeps the proven theme on save failure and exposes a scoped retry", async () => {
@@ -750,6 +890,26 @@ describe("desktop workspace and history shell", () => {
     expect(document.documentElement.dataset.theme).toBe("sigil_light");
     expect(document.documentElement.dataset.colorScheme).toBe("light");
     expect(screen.getByRole("button", { name: "System theme" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("tolerates stale native appearance cleanup after a WebView reload", async () => {
+    let resolveSubscription: (unsubscribe: () => void) => void = () => undefined;
+    const subscribeAppearance = vi.fn(
+      () =>
+        new Promise<() => void>((resolve) => {
+          resolveSubscription = resolve;
+        }),
+    );
+    const view = render(<App bridge={bridgeWith({ subscribeAppearance })} />);
+
+    await screen.findByRole("heading", { name: "Open a workspace" });
+    view.unmount();
+    resolveSubscription(() => {
+      throw new Error("listener registry was already reset");
+    });
+    await act(async () => Promise.resolve());
+
+    expect(subscribeAppearance).toHaveBeenCalledOnce();
   });
 
   it("uses the topbar theme control as a bounded shortcut for named palettes", async () => {
@@ -815,6 +975,1091 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
   });
 
+  it("shows the first-run path before a workspace is selected", async () => {
+    render(<App bridge={bridgeWith()} />);
+
+    expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Getting started" }).textContent).toContain(
+      "Open a project",
+    );
+    expect(screen.getByRole("list", { name: "Getting started" }).textContent).toContain(
+      "Connect a provider and choose a model",
+    );
+    expect(screen.getByRole("list", { name: "Getting started" }).textContent).toContain(
+      "Start the first conversation",
+    );
+  });
+
+  it("blocks the first conversation on explicit provider setup and saves the chosen route", async () => {
+    const user = userEvent.setup();
+    const providerSetupCatalog = vi.fn(async () => ({
+      connectionId: "deepseek-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "deepseek-v4-flash",
+        displayName: "DeepSeek V4 Flash",
+        availability: "available" as const,
+        recommended: true,
+        provenance: "remote" as const,
+      }],
+      suggestedModel: "deepseek-v4-flash",
+      manualEntryAllowed: false,
+    }));
+    const saveProviderSetup = vi.fn(async () => ({
+      defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      inventory: {
+        configMode: "v2" as const,
+        defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+        connections: [{
+          id: "deepseek-1",
+          label: "DeepSeek 1",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "system_keyring" as const,
+          readiness: "ready" as const,
+          defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+        }],
+        issues: [],
+      },
+      saveWarning: false,
+    }));
+    const createSession = vi.fn();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+      providerSetupCatalog,
+      saveProviderSetup,
+      createSession,
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Connect a model provider" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New conversation" }).hasAttribute("disabled"))
+      .toBe(true);
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "secret-canary");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    expect(await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save and continue" }));
+
+    await waitFor(() => expect(saveProviderSetup).toHaveBeenCalledWith(
+      workspace.id,
+      expect.objectContaining({
+        template: "deep_seek",
+        credentialSource: "secure_store",
+        apiKey: "secret-canary",
+        modelId: "deepseek-v4-flash",
+      }),
+    ));
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves provider setup for migration recovery when the setup gate changes", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+      providerSetupCatalog: async () => Promise.reject({
+        code: "provider_migration_recovery_unavailable",
+        recoveryActions: ["open_diagnostics"],
+      }),
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Connect a model provider" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "recovery-gate-secret-canary");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+
+    expect(await screen.findByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    )).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("remains blocked");
+    expect(screen.queryByRole("button", { name: "Continue to models" })).toBeNull();
+  });
+
+  it("ignores a completed first-run provider setup after switching workspaces", async () => {
+    const user = userEvent.setup();
+    const betaWorkspace: WorkspaceSummary = {
+      id: "workspace-beta-provider-setup",
+      displayName: "beta",
+      serverVersion: "0.0.1-alpha.5",
+      state: "ready",
+    };
+    const betaInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      connections: [{
+        id: "beta",
+        label: "Beta Provider",
+        providerLabel: "OpenAI",
+        protocolLabel: "Responses",
+        endpointDisplay: "beta.example",
+        credentialSource: "environment" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      }],
+      issues: [],
+    };
+    const alphaSavedInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      connections: [{
+        id: "deepseek-1",
+        label: "Alpha Provider",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "stored" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      }],
+      issues: [],
+    };
+    let resolveSave: ((result: Awaited<
+      ReturnType<DesktopBridge["saveProviderSetup"]>
+    >) => void) | undefined;
+    const saveProviderSetup = vi.fn(() =>
+      new Promise<Awaited<ReturnType<DesktopBridge["saveProviderSetup"]>>>((resolve) => {
+        resolveSave = resolve;
+      })
+    );
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace, betaWorkspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async (workspaceId) =>
+        workspaceId === workspace.id
+          ? { configMode: "v2", connections: [], issues: [] }
+          : betaInventory,
+      providerSetupCatalog: async () => ({
+        connectionId: "deepseek-1",
+        providerLabel: "DeepSeek",
+        state: "remote",
+        models: [{
+          modelId: "deepseek-v4-flash",
+          displayName: "DeepSeek V4 Flash",
+          availability: "available",
+          recommended: true,
+          provenance: "remote",
+        }],
+        suggestedModel: "deepseek-v4-flash",
+        manualEntryAllowed: false,
+      }),
+      saveProviderSetup,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Connect a model provider" });
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "alpha-secret");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ });
+    await user.click(screen.getByRole("button", { name: "Save and continue" }));
+    await waitFor(() => expect(saveProviderSetup).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    await user.click(screen.getByRole("button", { name: "beta" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Switch workspace: beta" })).toBeTruthy()
+    );
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText("Beta Provider")).toBeTruthy();
+
+    await act(async () => resolveSave?.({
+      defaultModel: alphaSavedInventory.defaultModel,
+      inventory: alphaSavedInventory,
+      saveWarning: false,
+    }));
+
+    expect(screen.getByText("Beta Provider")).toBeTruthy();
+    expect(screen.queryByText("Alpha Provider")).toBeNull();
+    expect(screen.queryByText("Provider connection saved")).toBeNull();
+  });
+
+  it("suppresses a stale provider reload failure after switching workspaces", async () => {
+    const user = userEvent.setup();
+    const betaWorkspace: WorkspaceSummary = {
+      id: "workspace-beta-provider-reload",
+      displayName: "beta",
+      serverVersion: "0.0.1-alpha.5",
+      state: "ready",
+    };
+    const betaInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      connections: [{
+        id: "beta",
+        label: "Beta Provider",
+        providerLabel: "OpenAI",
+        protocolLabel: "Responses",
+        endpointDisplay: "beta.example",
+        credentialSource: "environment" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      }],
+      issues: [],
+    };
+    let rejectReload: ((error: Error) => void) | undefined;
+    let alphaLoads = 0;
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace, betaWorkspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async (workspaceId) => {
+        if (workspaceId === betaWorkspace.id) return betaInventory;
+        alphaLoads += 1;
+        if (alphaLoads === 1) {
+          return {
+            configMode: "mixed" as const,
+            connections: [],
+            issues: [{
+              code: "mixed_provider_schema",
+              message: "mixed provider schema",
+            }],
+          };
+        }
+        return new Promise<never>((_resolve, reject) => {
+          rejectReload = reject;
+        });
+      },
+    })} />);
+
+    await screen.findByRole("heading", { name: "Provider configuration needs repair" });
+    await user.click(screen.getAllByRole("button", { name: "Open settings" }).at(-1)!);
+    await user.click(await screen.findByRole("button", { name: "Recheck configuration" }));
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    await user.click(screen.getByRole("button", { name: "beta" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Switch workspace: beta" })).toBeTruthy()
+    );
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText("Beta Provider")).toBeTruthy();
+
+    await act(async () => rejectReload?.(new Error("alpha reload failed")));
+
+    expect(screen.getByText("Beta Provider")).toBeTruthy();
+    expect(screen.queryByText("Provider settings are unavailable")).toBeNull();
+  });
+
+  it("shows the Sigil environment variable required by the selected provider", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^OpenAI(?!-compatible)/ }));
+    await user.selectOptions(screen.getByLabelText("Authentication"), "environment");
+
+    expect(screen.getByText(/SIGIL_OPENAI_RESPONSES_API_KEY/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(screen.getByRole("button", { name: /OpenAI-compatible/ }));
+    await user.selectOptions(screen.getByLabelText("API protocol"), "responses");
+    await user.selectOptions(screen.getByLabelText("Authentication"), "environment");
+
+    expect(screen.getByText(/SIGIL_OPENAI_RESPONSES_API_KEY/)).toBeTruthy();
+  });
+
+  it("offers a complete legacy migration before onboarding and preserves a continue-for-now path", async () => {
+    const user = userEvent.setup();
+    const migrateLegacyProviderConnections = vi.fn(async () => ({
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      inventory: {
+        configMode: "v2" as const,
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+        connections: [{
+          id: "deepseek-default",
+          label: "DeepSeek",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "private.deepseek.example",
+          credentialSource: "stored" as const,
+          readiness: "ready" as const,
+          defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+        }],
+        issues: [],
+      },
+      migratedConnectionCount: 1,
+      movedInlineCredentialCount: 1,
+      preservedEnvironmentReferenceCount: 0,
+      outcome: "published" as const,
+      warnings: [],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "legacy_v1",
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+        connections: [{
+          id: "deepseek-default",
+          label: "DeepSeek",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "private.deepseek.example",
+          credentialSource: "legacy_plaintext",
+          readiness: "unverified",
+          defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+          issue: {
+            code: "legacy_plaintext_migration_required",
+            message: "legacy plaintext credential requires migration",
+          },
+        }],
+        issues: [],
+        legacyMigration: {
+          revision: "legacy-revision",
+          connectionCount: 1,
+          inlineCredentialCount: 1,
+          environmentReferenceCount: 0,
+        },
+      }),
+      migrateLegacyProviderConnections,
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Migrate your existing provider setup" }))
+      .toBeTruthy();
+    expect(screen.getByText("DeepSeek / deepseek-private")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add connection" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Continue for now" }));
+    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(migrateLegacyProviderConnections).not.toHaveBeenCalled();
+  });
+
+  it("migrates legacy settings through the native bridge and retries without opening Add connection", async () => {
+    const user = userEvent.setup();
+    const legacyInventory = {
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [],
+      legacyMigration: {
+        revision: "legacy-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    };
+    const refreshedInventory = {
+      ...legacyInventory,
+      legacyMigration: {
+        ...legacyInventory.legacyMigration,
+        revision: "fresh-revision",
+      },
+    };
+    const migratedInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "stored" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      }],
+      issues: [],
+    };
+    const migrateLegacyProviderConnections = vi.fn()
+      .mockRejectedValueOnce(new Error("credential store unavailable"))
+      .mockResolvedValueOnce({
+        defaultModel: migratedInventory.defaultModel,
+        inventory: migratedInventory,
+        migratedConnectionCount: 1,
+        movedInlineCredentialCount: 1,
+        preservedEnvironmentReferenceCount: 0,
+        outcome: "published",
+        warnings: [],
+      });
+    let resolveReload: ((inventory: typeof refreshedInventory) => void) | undefined;
+    const providerConnections = vi.fn()
+      .mockResolvedValueOnce(legacyInventory)
+      .mockImplementationOnce(() => new Promise<typeof refreshedInventory>((resolve) => {
+        resolveReload = resolve;
+      }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections,
+      migrateLegacyProviderConnections,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Migrate your existing provider setup" });
+    await user.click(screen.getByRole("button", { name: "Continue for now" }));
+    await screen.findByRole("heading", { name: "Select a conversation" });
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add connection" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Migrate securely" }));
+    const migration = screen.getByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    ).closest("section");
+    expect(migration).not.toBeNull();
+    expect((await within(migration as HTMLElement).findByRole("status")).textContent)
+      .toContain("Reloading the current provider configuration");
+    expect(screen.queryByRole("button", { name: "Retry migration" })).toBeNull();
+    await act(async () => resolveReload?.(refreshedInventory));
+    expect((await screen.findByRole("alert")).textContent)
+      .toContain("reloaded the current configuration");
+    await user.click(screen.getByRole("button", { name: "Retry migration" }));
+    expect(await screen.findByRole("button", { name: "Add connection" })).toBeTruthy();
+    expect(migrateLegacyProviderConnections).toHaveBeenNthCalledWith(
+      2,
+      workspace.id,
+      "fresh-revision",
+    );
+  });
+
+  it("keeps migration retry unavailable until a failed inventory reload succeeds", async () => {
+    const user = userEvent.setup();
+    const legacyInventory = {
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [],
+      legacyMigration: {
+        revision: "legacy-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    };
+    const refreshedInventory = {
+      ...legacyInventory,
+      legacyMigration: {
+        ...legacyInventory.legacyMigration,
+        revision: "fresh-revision",
+      },
+    };
+    const providerConnections = vi.fn()
+      .mockResolvedValueOnce(legacyInventory)
+      .mockRejectedValueOnce(new Error("config read unavailable"))
+      .mockResolvedValueOnce(refreshedInventory);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections,
+      migrateLegacyProviderConnections: async () => Promise.reject(
+        new Error("credential store unavailable"),
+      ),
+    })} />);
+
+    await screen.findByRole("heading", { name: "Migrate your existing provider setup" });
+    await user.click(screen.getByRole("button", { name: "Migrate securely" }));
+    expect((await screen.findByRole("alert")).textContent)
+      .toContain("could not reload the current configuration");
+    expect(screen.queryByRole("button", { name: "Retry migration" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Recheck configuration" }));
+    expect((await screen.findByRole("alert")).textContent)
+      .toContain("reloaded the current configuration");
+    expect(screen.getByRole("button", { name: "Retry migration" })).toBeTruthy();
+    expect(providerConnections).toHaveBeenCalledTimes(3);
+  });
+
+  it("blocks blind retries when legacy migration recovery is unavailable", async () => {
+    const user = userEvent.setup();
+    const legacyInventory = {
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [],
+      legacyMigration: {
+        revision: "legacy-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    };
+    const migratedInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "stored" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      }],
+      issues: [],
+    };
+    const providerConnections = vi.fn().mockResolvedValueOnce(legacyInventory);
+    const recheckLegacyProviderMigration = vi.fn().mockResolvedValue(migratedInventory);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections,
+      recheckLegacyProviderMigration,
+      migrateLegacyProviderConnections: async () => Promise.reject({
+        code: "provider_migration_recovery_unavailable",
+      }),
+    })} />);
+
+    const migrationHeading = await screen.findByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    );
+    const migration = migrationHeading.closest("section");
+    expect(migration).not.toBeNull();
+    await user.click(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Migrate securely" },
+    ));
+    expect((await within(migration as HTMLElement).findByRole("alert")).textContent)
+      .toContain("remains blocked");
+    expect(within(migration as HTMLElement).queryByRole(
+      "button",
+      { name: "Retry migration" },
+    )).toBeNull();
+    expect(within(migration as HTMLElement).queryByRole(
+      "button",
+      { name: "Continue for now" },
+    )).toBeNull();
+    expect(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Open support and diagnostics" },
+    )).toBeTruthy();
+
+    await user.click(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Open support and diagnostics" },
+    ));
+    expect(await screen.findByRole(
+      "heading",
+      { name: "Support & diagnostics" },
+    )).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const persistedMigration = (await screen.findByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    )).closest("section");
+    expect(persistedMigration).not.toBeNull();
+    expect(within(persistedMigration as HTMLElement).getByRole("alert").textContent)
+      .toContain("remains blocked");
+    expect(within(persistedMigration as HTMLElement).queryByRole(
+      "button",
+      { name: "Retry migration" },
+    )).toBeNull();
+
+    await user.click(within(persistedMigration as HTMLElement).getByRole(
+      "button",
+      { name: "Recheck configuration" },
+    ));
+    expect(await screen.findByRole("button", { name: "Add connection" })).toBeTruthy();
+    expect(providerConnections).toHaveBeenCalledTimes(1);
+    expect(recheckLegacyProviderMigration).toHaveBeenCalledWith(workspace.id);
+  });
+
+  it("clears the local recovery block after a valid legacy rollback recheck", async () => {
+    const user = userEvent.setup();
+    const recoveryInventory = {
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [{
+        code: "provider_migration_rollback_incomplete",
+        message: "provider migration credential cleanup must be rechecked",
+      }],
+      legacyMigration: {
+        revision: "legacy-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    };
+    const recoveredLegacyInventory = {
+      ...recoveryInventory,
+      issues: [],
+      legacyMigration: {
+        ...recoveryInventory.legacyMigration,
+        revision: "legacy-revision-after-cleanup",
+      },
+    };
+    const recheckLegacyProviderMigration = vi.fn().mockResolvedValue(
+      recoveredLegacyInventory,
+    );
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => recoveryInventory,
+      recheckLegacyProviderMigration,
+    })} />);
+
+    const migration = (await screen.findByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    )).closest("section");
+    expect(migration).not.toBeNull();
+    expect(within(migration as HTMLElement).getByRole("alert").textContent)
+      .toContain("remains blocked");
+
+    await user.click(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Recheck configuration" },
+    ));
+
+    await waitFor(() => expect(within(migration as HTMLElement).queryByRole("alert")).toBeNull());
+    expect(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Migrate securely" },
+    )).toBeTruthy();
+    expect(recheckLegacyProviderMigration).toHaveBeenCalledWith(workspace.id);
+  });
+
+  it("rebuilds a durable migration recovery block from inventory after restart", async () => {
+    const user = userEvent.setup();
+    const recheckLegacyProviderMigration = vi.fn(async () => ({
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "DeepSeek",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "private.deepseek.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [{
+        code: "provider_migration_reconcile_required",
+        message: "provider migration recovery requires an explicit healthy V2 recheck",
+      }],
+      legacyMigration: {
+        revision: "restart-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: recheckLegacyProviderMigration,
+      recheckLegacyProviderMigration,
+    })} />);
+
+    const migration = (await screen.findByRole(
+      "heading",
+      { name: "Migrate your existing provider setup" },
+    )).closest("section");
+    expect(migration).not.toBeNull();
+    expect(within(migration as HTMLElement).getByRole("alert").textContent)
+      .toContain("remains blocked");
+    expect(within(migration as HTMLElement).queryByRole(
+      "button",
+      { name: "Continue for now" },
+    )).toBeNull();
+    expect(within(migration as HTMLElement).queryByRole(
+      "button",
+      { name: "Migrate securely" },
+    )).toBeNull();
+
+    await user.click(within(migration as HTMLElement).getByRole(
+      "button",
+      { name: "Recheck configuration" },
+    ));
+    expect(recheckLegacyProviderMigration).toHaveBeenCalledTimes(2);
+    expect(within(migration as HTMLElement).getByRole("alert").textContent)
+      .toContain("remains blocked");
+  });
+
+  it("ignores a completed migration after the user switches workspaces", async () => {
+    const user = userEvent.setup();
+    const betaWorkspace: WorkspaceSummary = {
+      id: "workspace-beta-012345",
+      displayName: "beta",
+      serverVersion: "0.0.1-alpha.5",
+      state: "ready",
+    };
+    const legacyInventory = {
+      configMode: "legacy_v1" as const,
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      connections: [{
+        id: "deepseek-default",
+        label: "Alpha Provider",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "alpha.example",
+        credentialSource: "legacy_plaintext" as const,
+        readiness: "unverified" as const,
+      }],
+      issues: [],
+      legacyMigration: {
+        revision: "alpha-revision",
+        connectionCount: 1,
+        inlineCredentialCount: 1,
+        environmentReferenceCount: 0,
+      },
+    };
+    const betaInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      connections: [{
+        id: "beta",
+        label: "Beta Provider",
+        providerLabel: "OpenAI",
+        protocolLabel: "Responses",
+        endpointDisplay: "beta.example",
+        credentialSource: "environment" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "beta", modelId: "beta-model" },
+      }],
+      issues: [],
+    };
+    let resolveMigration: ((result: Awaited<
+      ReturnType<DesktopBridge["migrateLegacyProviderConnections"]>
+    >) => void) | undefined;
+    const migrateLegacyProviderConnections = vi.fn(() =>
+      new Promise<Awaited<
+        ReturnType<DesktopBridge["migrateLegacyProviderConnections"]>
+      >>((resolve) => {
+        resolveMigration = resolve;
+      })
+    );
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace, betaWorkspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async (workspaceId) =>
+        workspaceId === workspace.id ? legacyInventory : betaInventory,
+      migrateLegacyProviderConnections,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Migrate your existing provider setup" });
+    await user.click(screen.getByRole("button", { name: "Migrate securely" }));
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    await user.click(screen.getByRole("button", { name: "beta" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Switch workspace: beta" })).toBeTruthy()
+    );
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText("Beta Provider")).toBeTruthy();
+
+    await act(async () => resolveMigration?.({
+      defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+      inventory: {
+        configMode: "v2",
+        defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+        connections: [{
+          id: "deepseek-default",
+          label: "Alpha Provider",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "alpha.example",
+          credentialSource: "stored",
+          readiness: "ready",
+          defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-private" },
+        }],
+        issues: [],
+      },
+      migratedConnectionCount: 1,
+      movedInlineCredentialCount: 1,
+      preservedEnvironmentReferenceCount: 0,
+      outcome: "published",
+      warnings: [],
+    }));
+
+    expect(screen.getByText("Beta Provider")).toBeTruthy();
+    expect(screen.queryByText("Alpha Provider")).toBeNull();
+    expect(screen.getByRole("button", { name: "Switch workspace: beta" })).toBeTruthy();
+  });
+
+  it("routes mixed provider configurations to a localized repair and recheck view", async () => {
+    const user = userEvent.setup();
+    const providerConnections = vi.fn(async () => ({
+      configMode: "mixed" as const,
+      connections: [],
+      issues: [{
+        code: "mixed_provider_schema",
+        message: "Legacy providers and V2 connections cannot be combined.",
+      }],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections,
+    })} />);
+
+    const repairView = (await screen.findByRole(
+      "heading",
+      { name: "Provider configuration needs repair" },
+    )).closest("[role='alert']");
+    expect(repairView).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "Connect a model provider" })).toBeNull();
+    await user.click(within(repairView as HTMLElement).getByRole(
+      "button",
+      { name: "Open settings" },
+    ));
+    expect(await screen.findByText(
+      "Legacy providers and V2 connections are mixed in sigil.toml. Remove the schema conflict before adding a connection, then recheck this page.",
+    )).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Recheck configuration" }));
+    await waitFor(() => expect(providerConnections).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "Add connection" })).toBeNull();
+  });
+
+  it("keeps future provider schemas out of setup and directs users to a compatible Sigil", async () => {
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "unsupported_future",
+        connections: [],
+        issues: [],
+      }),
+    })} />);
+
+    expect(await screen.findByRole(
+      "heading",
+      { name: "Provider configuration is newer than this Sigil version" },
+    )).toBeTruthy();
+    expect(screen.getByText(
+      "Do not rewrite a newer provider schema here. Upgrade Sigil or open the project with a compatible version, then recheck this page.",
+    )).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Connect a model provider" })).toBeNull();
+  });
+
+  it("explains a rejected credential without collapsing provider failures together", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+      providerSetupCatalog: async () => ({
+        connectionId: "deepseek-1",
+        providerLabel: "DeepSeek",
+        state: "auth_rejected",
+        models: [],
+        manualEntryAllowed: false,
+      }),
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "rejected-secret-canary");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The API key was rejected. Update the selected credential and try again.",
+    );
+    expect(screen.getByLabelText("API key")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save and continue" })).toBeNull();
+  });
+
+  it("keeps a stale catalog visible but disables save until refresh succeeds", async () => {
+    const user = userEvent.setup();
+    let now = 1_784_505_600_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let resolveRefresh: ((catalog: ProviderSetupCatalog) => void) | undefined;
+    const catalog: ProviderSetupCatalog = {
+      connectionId: "local-stale-1",
+      providerLabel: "OpenAI-compatible",
+      state: "remote",
+      models: [{
+        modelId: "local-stale-coder",
+        displayName: "Local Stale Coder",
+        availability: "available",
+        recommended: true,
+        provenance: "remote",
+      }],
+      suggestedModel: "local-stale-coder",
+      manualEntryAllowed: true,
+    };
+    const providerSetupCatalog = vi.fn()
+      .mockResolvedValueOnce(catalog)
+      .mockImplementationOnce(() => new Promise<ProviderSetupCatalog>((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+      providerSetupCatalog,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /OpenAI-compatible/ }));
+    await user.type(screen.getByLabelText("API endpoint"), "http://127.0.0.1:11438/v1");
+    await user.selectOptions(screen.getByLabelText("Authentication"), "none");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    expect(await screen.findByRole("radio", { name: /Local Stale Coder/ })).toBeTruthy();
+
+    now += 10 * 60 * 1_000 + 1;
+    await user.click(screen.getByRole("button", { name: "Change connection" }));
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+
+    expect(await screen.findByText(/Stale cached catalog/)).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Local Stale Coder/ })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Save and continue" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    expect(await screen.findByRole("button", { name: "Refreshing models…" })).toBeTruthy();
+    expect(providerSetupCatalog).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Change connection" }));
+    await act(async () => {
+      resolveRefresh?.(catalog);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByLabelText("API endpoint")).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: /Local Stale Coder/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save and continue" })).toBeNull();
+  });
+
+  it("drops an in-flight catalog and staged key when the provider changes", async () => {
+    const user = userEvent.setup();
+    let resolveCatalog: ((catalog: ProviderSetupCatalog) => void) | undefined;
+    const providerSetupCatalog = vi.fn(() => new Promise<ProviderSetupCatalog>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        connections: [],
+        issues: [],
+      }),
+      providerSetupCatalog,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "deepseek-secret-canary");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(screen.getByRole("button", { name: /^OpenAI(?!-compatible)/ }));
+
+    expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("");
+    await act(async () => {
+      resolveCatalog?.({
+        connectionId: "deepseek-1",
+        providerLabel: "DeepSeek",
+        state: "remote",
+        models: [{
+          modelId: "deepseek-v4-flash",
+          displayName: "DeepSeek V4 Flash",
+          availability: "available",
+          recommended: true,
+          provenance: "remote",
+        }],
+        suggestedModel: "deepseek-v4-flash",
+        manualEntryAllowed: false,
+      });
+    });
+
+    expect(screen.queryByRole("radio", { name: /DeepSeek V4 Flash/ })).toBeNull();
+    expect(providerSetupCatalog).toHaveBeenCalledTimes(1);
+  });
+
   it("persists a provider-validated default model for newly created desktop conversations", async () => {
     const user = userEvent.setup();
     let sequence = 0;
@@ -834,14 +2079,21 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Default model for new conversations" }),
-      "deepseek-v4-pro",
+      "deepseek-default/deepseek-v4-pro",
     );
-    expect(window.localStorage.getItem("sigil.desktop.default-models.v1")).toContain("deepseek-v4-pro");
+    expect(window.localStorage.getItem("sigil.desktop.default-models.v2")).toContain("deepseek-v4-pro");
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
-    expect(createSession.mock.calls[1]).toEqual([workspace.id, "New conversation", "deepseek-v4-pro"]);
+    expect(createSession.mock.calls[1]).toEqual([
+      workspace.id,
+      "New conversation",
+      {
+        connectionId: "deepseek-default",
+        modelId: "deepseek-v4-pro",
+      },
+    ]);
   });
 
   it("restores the most recent workspace after native bootstrap", async () => {
@@ -1418,7 +2670,7 @@ describe("desktop workspace and history shell", () => {
     });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
     expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
-    expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
     expect(within(workspaceRegion).getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
   });
@@ -2421,11 +3673,11 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText(/side effects that already happened are not undone/)).toBeTruthy();
     const keepRunning = screen.getByRole("button", { name: "Keep running" });
     const interruptRuns = screen.getByRole("button", { name: "Close workspace and interrupt runs" });
-    expect(document.activeElement).toBe(keepRunning);
-    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(interruptRuns);
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(document.activeElement).toBe(keepRunning);
+    await waitFor(() => expect(document.activeElement).toBe(keepRunning));
+    await user.tab({ shift: true });
+    await waitFor(() => expect(document.activeElement).toBe(interruptRuns));
+    await user.tab();
+    await waitFor(() => expect(document.activeElement).toBe(keepRunning));
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("alertdialog")).toBeNull();
     const workspaceTrigger = screen.getByRole("button", { name: "Switch workspace: sigil" });
@@ -3004,7 +4256,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
     const composer = await readyComposer();
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
@@ -3019,9 +4271,9 @@ describe("desktop workspace and history shell", () => {
     expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
-  it("selects a model for the next run without creating another conversation", async () => {
+  it("creates a fresh exact-model conversation before starting a switched-model run", async () => {
     const user = userEvent.setup();
-    const selectedModels: Array<string | undefined> = [];
+    const selectedModels: Array<RunContext["modelRef"] | undefined> = [];
     const runSelections: Array<{
       sessionId: string;
       modelName?: string;
@@ -3035,8 +4287,8 @@ describe("desktop workspace and history shell", () => {
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
-      createSession: async (_workspaceId, _label, modelName) => {
-        selectedModels.push(modelName);
+      createSession: async (_workspaceId, _label, modelRef) => {
+        selectedModels.push(modelRef);
         return {
           id: `http-session-${selectedModels.length}`,
           label: "New conversation",
@@ -3077,18 +4329,24 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Model" }),
-      "deepseek-v4-pro",
+      "deepseek-default/deepseek-v4-pro",
     );
     expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     expect(screen.queryByRole("option", { name: "Effort unavailable" })).toBeNull();
     await user.type(composer, "Continue with pro");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(selectedModels).toEqual([undefined]);
+    expect(selectedModels).toEqual([
+      undefined,
+      {
+        connectionId: "deepseek-default",
+        modelId: "deepseek-v4-pro",
+      },
+    ]);
     expect(runSelections).toEqual([{
-      sessionId: "http-session-1",
-      modelName: "deepseek-v4-pro",
-      binding: "model-binding-deepseek-v4-flash",
+      sessionId: "http-session-2",
+      modelName: undefined,
+      binding: undefined,
       effort: "max",
       effortBinding: "effort-binding-deepseek-v4-pro",
     }]);

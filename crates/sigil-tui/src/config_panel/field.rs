@@ -137,9 +137,9 @@ impl ConfigField {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::ProviderName => "provider",
+            Self::ProviderName => "connection",
             Self::ProviderModel => "model",
-            Self::ProviderApiKey => "api_key",
+            Self::ProviderApiKey => "credential",
             Self::ModelRequestTimeoutSecs => "request_start_timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
             Self::ProviderBaseUrl => "base_url",
@@ -184,9 +184,9 @@ impl ConfigField {
 
     pub(crate) fn display_label(self) -> &'static str {
         match self {
-            Self::ProviderName => "Provider",
+            Self::ProviderName => "Connection",
             Self::ProviderModel => "Model",
-            Self::ProviderApiKey => "API key",
+            Self::ProviderApiKey => "Credential",
             Self::ModelRequestTimeoutSecs => "Request start timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
             Self::ProviderBaseUrl => "Endpoint",
@@ -232,13 +232,13 @@ impl ConfigField {
     pub(crate) fn help_text(self) -> &'static str {
         match self {
             Self::ProviderName => {
-                "Runtime provider used for new sessions. Switching provider starts later runs with that provider."
+                "Connection being edited. Enter opens saved connections and explicit provider templates; A jumps to Add."
             }
             Self::ProviderModel => {
                 "Chat model used for new runs. Switching the saved default does not rewrite the current session."
             }
             Self::ProviderApiKey => {
-                "Saved locally when entered here. Provider-specific environment variables override it at runtime."
+                "Credential reference for this connection. New keys are staged in memory and saved only to the configured secure credential store."
             }
             Self::ModelRequestTimeoutSecs => {
                 "Seconds to wait for the model provider to accept a request and return response headers."

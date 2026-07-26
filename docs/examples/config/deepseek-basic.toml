@@ -1,14 +1,26 @@
+config_version = 2
+
 [workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [permission]
 mode = "manual"
 
-[providers.deepseek]
-# Prefer SIGIL_API_KEY in your shell.
-# api_key = "sk-..."
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-default.options]
+beta_base_url = "https://api.deepseek.com/beta"
+anthropic_base_url = "https://api.deepseek.com/anthropic"
+user_id_strategy = "stable_per_end_user"
+strict_tools_mode = "auto"
+fim_model = "deepseek-v4-pro"

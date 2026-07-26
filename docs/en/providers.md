@@ -1,10 +1,14 @@
-<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
+<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,migrate-a-legacy-configuration,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
 
 # Provider Guide
 
 [Docs home](README.md) · [Configuration](configuration.md) · [简体中文](../zh-CN/providers.md)
 
-Choose the model service here, then use its page for setup and visible limits. Shared permissions, sessions, and tools do not need to be relearned for each provider.
+Choose the model service here, then create a named connection for the account or endpoint you
+actually use. A connection owns its provider protocol, endpoint, credential source, and model
+catalog. The saved default and every running session refer to the compound
+`connection-id/model-id` identity, so changing providers cannot reuse another connection's model
+fallback.
 
 ## Choose A Provider
 
@@ -16,21 +20,81 @@ Choose the model service here, then use its page for setup and visible limits. S
 | [Anthropic](provider-anthropic.md) | Claude through Anthropic Messages | Recognized Claude IDs | `anthropic` |
 | [Gemini](provider-gemini.md) | Gemini and function calling | Recognized Gemini IDs | `gemini` |
 
-Quick Setup is the shortest first-use path. Use manual config for repeatable local or CI defaults.
+Quick Setup is the shortest first-use path: choose provider, credential source, and model, then
+review and save. Use manual V2 config for repeatable local or CI defaults.
+In `/config` → **Provider**, Enter on **Connection** opens an explicit chooser for saved
+connections and provider templates; `A` opens the add-provider group directly. Up/Down works on
+standard macOS keyboards, and adding never guesses the next provider.
+The model chooser is scoped to the selected connection: it starts with that provider's bundled
+default and refreshes a remote list only when discovery is supported. `M` is offered only after
+an authoritative remote/fresh-cache response, a confirmed empty catalog, or an explicit
+unsupported-discovery result; transport, authentication, TLS, protocol, malformed-response, and
+stale-cache failures must be repaired or retried first. Loading, authenticated remote results, confirmed empty results, authentication
+rejection, offline/TLS failure, unsupported discovery, and malformed responses are distinct
+states; Sigil does not fill another provider's models into the list. A confirmed empty remote
+catalog clears the candidates and permits acknowledged manual entry.
+After a successful catalog load, leaving and reopening the picker reuses the exact
+connection/fingerprint view for ten minutes. An older in-process view remains visible as
+unverified while Sigil refreshes it in the background, so menu navigation does not repeatedly
+replace the list with a blocking loading state.
+
+## Migrate A Legacy Configuration
+
+When Sigil finds a valid V1 `[providers]` configuration, it keeps the old route usable but asks
+before upgrading it. Migration is local: it preserves every projected connection, endpoint,
+provider option, active default model, and role route without loading a model catalog or contacting
+the provider.
+
+- Desktop shows **Migrate your existing provider setup** both when opening the project and in
+  Settings. Review the connection/key/environment counts and default route, then choose
+  **Migrate securely**. **Continue for now** leaves the compatible V1 route unchanged for that
+  launch; adding a connection stays unavailable until migration succeeds.
+- TUI shows **Legacy migration** as the first Provider row in `/config`. Press Enter once to
+  migrate all legacy connections atomically. No PageUp/PageDown sequence or separate save is
+  required. If the file changed after `/config` opened, close and reopen `/config`, review it
+  again, and retry.
+
+Inline V1 keys move directly from the runtime-loaded config to the configured protected credential
+store; they do not pass through the Desktop renderer or a TUI field. Existing environment-variable
+references remain references. Existing conversations and the current TUI session keep their
+resolved route; the migrated saved default applies to new conversations.
+
+Before writing each migrated credential, Sigil publishes a bounded, typed, secret-free,
+owner-only recovery record beside the config. The record can contain only the opaque credential
+IDs that the native owner must reconcile plus the original credential-storage mode; those values
+never enter the renderer, HTTP responses, logs, or diagnostics. Recheck holds the config update
+lock and confirms that both the config bytes and recovery record are still the reviewed versions
+before cleanup. `auto` does not claim cleanup while the system credential store is unavailable.
+The record is removed after a confirmed publish or complete rollback. If either result is
+uncertain, the block survives Desktop/TUI restarts and project switches. Desktop changes the
+primary action to **Recheck configuration**; TUI changes the first row to
+**Migration recovery** / **Enter recheck**. Repair the current config or credential source, then
+use that explicit action. Recheck preserves IDs referenced by a healthy V2 config, deletes tracked
+unreferenced credentials, and can return an exact unchanged valid V1 config to migration-ready
+state after rollback cleanup. Publication reconciliation still requires a complete healthy V2
+config. If the config is missing or malformed while a recovery record remains, TUI setup also
+stays fail-closed. Sigil never converts the action into a blind retry.
 
 ## Authentication Priority
 
-Prefer environment variables. A config `api_key` fallback is plaintext in `sigil.toml`.
+V2 never writes a newly entered API key to `sigil.toml`. Choose one credential source per
+connection:
 
-| Provider | Environment variable | Config fallback |
+| Source | Use it for | Stored in config |
 | --- | --- | --- |
-| DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
-| OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
-| OpenAI Responses | `SIGIL_OPENAI_RESPONSES_API_KEY` | `[providers.openai_responses].api_key` |
-| Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `[providers.anthropic].api_key` |
-| Gemini | `SIGIL_GEMINI_API_KEY` | `[providers.gemini].api_key` |
+| Secure credential store | Normal local use | Random `source = "stored"` reference only; `auto` prefers the system store and falls back only when it is unavailable |
+| Environment | CI or an already managed shell secret | Allowlisted variable name only |
+| No authentication | Explicit loopback custom endpoints | `source = "none"`; rejected for credentialed remote HTTP |
 
-Run `sigil doctor` after changing a credential. It reports the source without printing the value.
+Provider environment names are `SIGIL_API_KEY`, `SIGIL_OPENAI_COMPATIBLE_API_KEY`,
+`SIGIL_OPENAI_RESPONSES_API_KEY`, `SIGIL_ANTHROPIC_API_KEY`, and `SIGIL_GEMINI_API_KEY`.
+`[storage].credential_store` accepts `auto`, `keyring`, or `file`. The default `auto` uses macOS
+Keychain, Windows Credential Manager, or Linux Secret Service when available, and otherwise uses
+the owner-only `~/.sigil/credentials.json`. That dedicated file contains protected plaintext
+credential material; it is not encryption. Strict `keyring` mode fails closed when the system
+store is unavailable. No mode writes a newly pasted secret to `sigil.toml`, workspace data,
+sessions, model cache, logs, snapshots, or support output. Run `sigil doctor` after changing a
+credential; it reports source and readiness without printing the value or identifier.
 
 ## Copyable Starting Points
 
@@ -38,7 +102,13 @@ Templates are available under [`docs/examples/config`](../examples/config). Revi
 
 ## Troubleshooting Path
 
-Check, in order: the `[agent].provider` value, selected model, provider block, base URL, credential visibility in the launching shell, and provider-specific limits. Keep `permission.mode = "manual"` while diagnosing, then use [Troubleshooting](troubleshooting.md) for shared symptoms.
+Check, in order: `[agent].connection`, `[agent].model`, the matching
+`[connections.<id>]` block, endpoint, credential-source readiness, and provider-specific limits.
+`/config` shows the current session route separately from the saved default. Existing V1
+`[providers]` configuration remains readable; follow **Migrate A Legacy Configuration** above
+instead of adding a duplicate connection or hand-editing credential IDs. Keep
+`permission.mode = "manual"` while diagnosing, then use
+[Troubleshooting](troubleshooting.md) for shared symptoms.
 
 <!-- public-doc-cta: open-provider-guide -->
 Next: [Set up DeepSeek or choose another provider](provider-deepseek.md).

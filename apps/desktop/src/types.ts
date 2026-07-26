@@ -337,7 +337,7 @@ export interface CheckpointRestoreReview {
 export type ConversationRecoveryAction =
   | { kind: "apply_compaction"; previewId: string }
   | { kind: "restore_checkpoint"; checkpointId: string; checkpointDigest: string }
-  | { kind: "fork_conversation"; sourceTurnDigest: string };
+  | { kind: "fork_conversation"; sourceTurnDigest: string; modelRef: ProviderModelRef };
 
 export interface ConversationRecoveryCommandInput {
   sessionId: string;
@@ -545,6 +545,10 @@ export type ConversationDisplayContent =
       type: "message";
       role: "user" | "assistant";
       text?: string;
+      skill?: {
+        id: string;
+        name: string;
+      };
       assistantPhase?: "tool_preamble" | "progress" | "final_answer";
       imageAttachmentCount: number;
       truncated: boolean;
@@ -729,6 +733,7 @@ export interface SkillCatalogEntry {
 export interface AgentCatalogEntry {
   id: string;
   invocationToken: string;
+  name: string;
   description: string;
   source: string;
   kind: string;
@@ -796,11 +801,11 @@ export interface ExtensionCatalog {
 }
 
 export interface RunContext {
+  modelRef: ProviderModelRef;
   providerName: string;
   modelName: string;
-  availableModels: string[];
   modelOptions: ModelOption[];
-  modelSelection: "per_run";
+  modelSelection: "fresh_session";
   modelSelectionBinding: string;
   defaultPermissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
@@ -813,11 +818,144 @@ export interface RunContext {
   extensionCatalog: ExtensionCatalog;
 }
 
+export interface ProviderModelRef {
+  connectionId: string;
+  modelId: string;
+}
+
+export type ProviderConfigMode = "legacy_v1" | "v2" | "mixed" | "unsupported_future";
+export type ProviderCredentialSource =
+  | "environment"
+  | "system_keyring"
+  | "stored"
+  | "none"
+  | "legacy_plaintext";
+export type ProviderConnectionReadiness =
+  | "ready"
+  | "needs_credential"
+  | "credential_unavailable"
+  | "needs_model"
+  | "unverified"
+  | "invalid";
+
+export interface ProviderConnectionIssue {
+  code: string;
+  message: string;
+}
+
+export interface ProviderConnection {
+  id: string;
+  label: string;
+  providerLabel: string;
+  protocolLabel: string;
+  endpointDisplay: string;
+  credentialSource: ProviderCredentialSource;
+  readiness: ProviderConnectionReadiness;
+  defaultModel?: ProviderModelRef;
+  issue?: ProviderConnectionIssue;
+}
+
+export interface ProviderConnectionInventory {
+  configMode: ProviderConfigMode;
+  defaultModel?: ProviderModelRef;
+  connections: ProviderConnection[];
+  issues: ProviderConnectionIssue[];
+  legacyMigration?: {
+    revision: string;
+    connectionCount: number;
+    inlineCredentialCount: number;
+    environmentReferenceCount: number;
+  };
+}
+
+export type ProviderSetupTemplate =
+  | "deep_seek"
+  | "open_ai"
+  | "anthropic"
+  | "gemini"
+  | "open_ai_compatible";
+export type ProviderSetupCredentialSource = "environment" | "secure_store" | "none";
+export type ProviderSetupProtocol = "responses" | "chat_completions";
+
+export interface ProviderSetupCatalogInput {
+  template: ProviderSetupTemplate;
+  protocol?: ProviderSetupProtocol;
+  endpoint?: string;
+  credentialSource: ProviderSetupCredentialSource;
+  apiKey?: string;
+}
+
+export interface ProviderSetupModel {
+  modelId: string;
+  displayName: string;
+  availability: "available" | "unverified" | "configured_unavailable";
+  recommended: boolean;
+  provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
+}
+
+export interface ProviderSetupCatalog {
+  connectionId: string;
+  providerLabel: string;
+  state: string;
+  models: ProviderSetupModel[];
+  suggestedModel?: string;
+  manualEntryAllowed: boolean;
+}
+
+export interface ProviderSetupSaveInput extends ProviderSetupCatalogInput {
+  modelId: string;
+  label?: string;
+}
+
+export interface ProviderSetupSaveResult {
+    defaultModel: ProviderModelRef;
+    inventory: ProviderConnectionInventory;
+    saveWarning: boolean;
+}
+
+export interface ProviderLegacyMigrationResult {
+  defaultModel: ProviderModelRef;
+  inventory: ProviderConnectionInventory;
+  migratedConnectionCount: number;
+  movedInlineCredentialCount: number;
+  preservedEnvironmentReferenceCount: number;
+  outcome: "published" | "published_with_warning";
+  warnings: Array<
+    "filesystem_durability_uncertain" | "publication_visibility_reconciled"
+  >;
+}
+
+export function providerInventoryNeedsLegacyMigration(
+  inventory: ProviderConnectionInventory | undefined,
+): boolean {
+  return inventory?.configMode === "legacy_v1" && inventory.legacyMigration !== undefined;
+}
+
+export function providerInventoryIsUsable(
+  inventory: ProviderConnectionInventory | undefined,
+): boolean {
+  if (inventory?.defaultModel === undefined) return false;
+  return inventory.connections.some(
+    (connection) =>
+      connection.id === inventory.defaultModel?.connectionId
+      && ["ready", "unverified"].includes(connection.readiness),
+  );
+}
+
 export interface ModelOption {
+  modelRef: ProviderModelRef;
+  displayName: string;
+  availability: "available" | "unverified" | "configured_unavailable";
+  recommendation: "recommended" | "standard";
+  provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
   modelName: string;
   availableReasoningEfforts: ReasoningEffort[];
   defaultReasoningEffort?: ReasoningEffort;
   reasoningEffortBinding?: string;
+}
+
+export function modelOptionIsSelectable(option: ModelOption): boolean {
+  return option.availability !== "configured_unavailable";
 }
 
 export interface RunSummary {

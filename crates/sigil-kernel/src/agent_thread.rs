@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    model_route::{ConnectionId, ModelRef},
     permission::PermissionConfig,
     provider::ReasoningEffort,
     session::{ControlEntry, SessionLogEntry},
@@ -308,6 +309,8 @@ pub struct AgentProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub tool_scope: ToolRegistryScope,
@@ -362,6 +365,8 @@ struct AgentProfileWire {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    connection: Option<ConnectionId>,
+    #[serde(default)]
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     tool_scope: ToolRegistryScope,
@@ -409,6 +414,7 @@ impl<'de> Deserialize<'de> for AgentProfile {
             instructions: wire.instructions,
             model: wire.model,
             provider: wire.provider,
+            connection: wire.connection,
             reasoning_effort: wire.reasoning_effort,
             tool_scope: wire.tool_scope,
             permission_policy: wire.permission_policy,
@@ -605,6 +611,8 @@ pub struct AgentRunContextSnapshot {
     pub profile_snapshot_id: AgentProfileSnapshotId,
     pub provider: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_root: WorkspaceRootSnapshot,

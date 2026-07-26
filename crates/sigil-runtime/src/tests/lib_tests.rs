@@ -74,6 +74,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         _ => "deepseek-v4-flash",
     };
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -84,6 +85,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         },
         agent: AgentConfig {
             provider: provider.to_owned(),
+            connection: None,
             model: model.to_owned(),
             max_turns: Some(12),
             tool_timeout_secs: 45,
@@ -144,6 +146,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                 }),
             ),
         ]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }

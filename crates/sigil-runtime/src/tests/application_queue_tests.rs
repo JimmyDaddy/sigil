@@ -46,6 +46,7 @@ fn queue_fixture(root: &Path, exact_prompt: &str) -> Result<QueueFixture> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     let queue_id = ConversationInputQueueId::new("queue-1")?;
     let projection = project_conversation_prompt_for_persistence(exact_prompt);

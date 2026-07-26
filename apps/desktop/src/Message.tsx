@@ -11,6 +11,10 @@ export interface MessageView {
   kind: "user" | "assistant" | "reasoning" | "progress" | "notice" | "error";
   label: string;
   text: string;
+  skill?: {
+    readonly id: string;
+    readonly name: string;
+  };
   status?: string;
 }
 
@@ -48,7 +52,12 @@ export function Message({
         {!disclosureOpen && preview !== "" ? (
           <p className="message-disclosure-preview">{preview}</p>
         ) : null}
-        <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
+        <MessageContent
+          text={message.text}
+          phase={streaming ? "streaming" : "complete"}
+          contentId={message.key}
+          onOpenExternalUrl={onOpenExternalUrl}
+        />
       </details>
     );
   }
@@ -58,7 +67,24 @@ export function Message({
       data-display-id={displayId}
     >
       <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}</header>
-      <MessageContent text={message.text} onOpenExternalUrl={onOpenExternalUrl} />
+      {message.skill !== undefined ? (
+        <div
+          className="message-context"
+          aria-label={t("usedSkill", { name: message.skill.name })}
+          title={t("usedSkill", { name: message.skill.name })}
+        >
+          <span className="message-skill-chip">
+            <span aria-hidden="true">$</span>
+            <span>{message.skill.name}</span>
+          </span>
+        </div>
+      ) : null}
+      <MessageContent
+        text={message.text}
+        phase={streaming ? "streaming" : "complete"}
+        contentId={message.key}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />
     </article>
   );
 }

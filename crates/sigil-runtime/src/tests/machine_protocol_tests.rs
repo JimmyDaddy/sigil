@@ -110,6 +110,10 @@ fn exit_codes_are_stable_for_terminal_status_and_error_class() {
         MachineExitCode::InvalidInput
     );
     assert_eq!(
+        MachineExitCode::for_error(MachineErrorCode::ModelRouteNotConfigured),
+        MachineExitCode::InvalidInput
+    );
+    assert_eq!(
         MachineExitCode::for_error(MachineErrorCode::ExecutionFailed),
         MachineExitCode::ExecutionFailed
     );

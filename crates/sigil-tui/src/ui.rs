@@ -25,8 +25,11 @@ pub use shell::render;
 
 pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 
+pub(crate) use markdown::MarkdownRenderCursor;
+pub(crate) use markdown::contains_mermaid_diagram as markdown_contains_mermaid_diagram;
 pub(crate) use timeline::{
-    TimelineRenderOptions, render_timeline_entry_lines_with_options, thinking_has_collapsed_content,
+    TimelineRenderOptions, render_timeline_entry_lines_with_options,
+    render_timeline_entry_lines_with_options_and_cursor, thinking_has_collapsed_content,
 };
 pub(crate) use tool_card::tool_activity_view;
 

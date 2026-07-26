@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -12,9 +11,10 @@ use sigil_kernel::{
 };
 
 use super::{
-    discovery::{SkillCandidateKind, valid_skill_id},
+    discovery::{SkillCandidateKind, compatibility_stable_id, valid_skill_id},
     namespaced_plugin_skill_id,
 };
+use crate::definition_file_io::read_definition_file;
 
 #[derive(Debug, Clone, Default)]
 struct SkillFrontmatter {
@@ -67,6 +67,13 @@ impl SkillFrontmatter {
             .string_list("allowed_tools")?
             .or(self.string_list("tools")?)
             .unwrap_or_default();
+        let trust = self.trust_state()?.unwrap_or_else(|| {
+            if kind.is_foreign_compatibility() {
+                SkillTrustState::Trusted
+            } else {
+                SkillTrustState::default()
+            }
+        });
 
         Ok(SkillDescriptor {
             id,
@@ -78,15 +85,16 @@ impl SkillFrontmatter {
             source: kind.source(),
             sha256,
             enabled: self.bool("enabled")?.unwrap_or(true),
-            trust: self.trust_state()?.unwrap_or_default(),
+            trust,
             model_invocable,
             user_invocable: self.bool("user_invocable")?.unwrap_or(true),
             run_as: self.run_mode()?.unwrap_or_else(|| kind.default_run_mode()),
             agent: self.string("agent")?,
             argument_hint: self.string("argument_hint")?,
-            allowed_tools: tool_scope_from_items(allowed_tools),
+            allowed_tools: tool_scope_from_items(allowed_tools, kind),
             disallowed_tools: tool_scope_from_items(
                 self.string_list("disallowed_tools")?.unwrap_or_default(),
+                kind,
             ),
             path_patterns: self.string_list("paths")?.unwrap_or_default(),
         })
@@ -228,9 +236,13 @@ fn descriptor_id(
         .string("id")?
         .or(frontmatter.string("name")?)
         .unwrap_or_else(|| fallback_id.to_owned());
-    if !valid_skill_id(&base_id) {
+    let base_id = if valid_skill_id(&base_id) {
+        base_id
+    } else if kind.supports_derived_id() {
+        compatibility_stable_id(kind.derived_id_prefix(), &base_id)
+    } else {
         bail!("invalid skill id {base_id:?}");
-    }
+    };
     if let SkillSource::Plugin { plugin_id } = kind.source() {
         return namespaced_plugin_skill_id(&plugin_id, &base_id);
     }
@@ -244,7 +256,7 @@ pub(super) fn descriptor_from_entrypoint(
     fallback_id: &str,
     kind: &SkillCandidateKind,
 ) -> Result<SkillDescriptor> {
-    let bytes = fs::read(entrypoint)
+    let bytes = read_definition_file(entrypoint)
         .with_context(|| format!("failed to read skill entrypoint {}", entrypoint.display()))?;
     let raw = std::str::from_utf8(&bytes)
         .with_context(|| format!("skill entrypoint is not utf-8: {}", entrypoint.display()))?;
@@ -360,12 +372,21 @@ pub(super) fn parse_inline_list(value: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-fn tool_scope_from_items(items: Vec<String>) -> ToolRegistryScope {
+fn tool_scope_from_items(items: Vec<String>, kind: &SkillCandidateKind) -> ToolRegistryScope {
     let mut allow_all = false;
     let mut names = BTreeSet::new();
     let mut prefixes = Vec::new();
     for item in items {
-        let trimmed = item.trim();
+        let normalized;
+        let trimmed = if kind.is_foreign_compatibility() {
+            let Some(value) = compatibility_tool_name(&item) else {
+                continue;
+            };
+            normalized = value;
+            normalized.as_str()
+        } else {
+            item.trim()
+        };
         if trimmed.is_empty() {
             continue;
         }
@@ -382,4 +403,43 @@ fn tool_scope_from_items(items: Vec<String>) -> ToolRegistryScope {
         names,
         prefixes,
     }
+}
+
+fn compatibility_tool_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "*" || trimmed.eq_ignore_ascii_case("all") || trimmed.starts_with("mcp__") {
+        return Some(trimmed.to_owned());
+    }
+    let family = trimmed
+        .split_once('(')
+        .map(|(family, _)| family)
+        .unwrap_or(trimmed)
+        .trim();
+    let normalized = family
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let mapped = match normalized.as_str() {
+        "read" | "readfile" | "read_file" => "read_file",
+        "write" | "edit" | "multiedit" | "applypatch" | "writefile" | "write_file" => "write_file",
+        "list" | "ls" => "ls",
+        "glob" => "glob",
+        "grep" | "search" => "grep",
+        "bash" | "shell" => "bash",
+        "websearch" | "web_search" => "websearch",
+        "webfetch" | "web_fetch" => "webfetch",
+        "task" | "agent" | "spawnagent" | "spawn_agent" => "spawn_agent",
+        "skill" | "loadskill" | "load_skill" => "load_skill",
+        "code_symbols"
+        | "code_workspace_symbols"
+        | "code_definition"
+        | "code_references"
+        | "code_diagnostics" => normalized.as_str(),
+        _ => return None,
+    };
+    Some(mapped.to_owned())
 }

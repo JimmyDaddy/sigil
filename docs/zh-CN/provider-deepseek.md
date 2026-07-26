@@ -12,12 +12,20 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
 base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-default.options]
 fim_model = "deepseek-v4-pro"
 ```
 
@@ -25,22 +33,22 @@ fim_model = "deepseek-v4-pro"
 
 ## 认证
 
-`SIGIL_API_KEY` 优先于 `[providers.deepseek].api_key`。本机和 CI 中请优先使用环境变量；配置中保存的密钥是明文。
+示例只把当前连接绑定到 `SIGIL_API_KEY`。也可以在首次设置或 `/config` 中选择**安全凭据存储**；此时 `sigil.toml` 只保存不透明的 `stored` ID。默认 `auto` 优先系统存储，仅在不可用时使用 owner-only 的 `~/.sigil/credentials.json`。粘贴的密钥不是合法 connection 字段。
 
 ## 选项与可见限制
 
-`base_url`、`beta_base_url`、`anthropic_base_url`、`fim_model`、`strict_tools_mode` 和 `user_id_strategy` 属于 DeepSeek 专项选项。环境覆盖分别使用 `SIGIL_BASE_URL`、`SIGIL_BETA_BASE_URL`、`SIGIL_ANTHROPIC_BASE_URL`、`SIGIL_FIM_MODEL`、`SIGIL_STRICT_TOOLS_MODE` 与 `SIGIL_USER_ID_STRATEGY`。
+`base_url` 属于这条精确连接。`beta_base_url`、`anthropic_base_url`、`fim_model`、`strict_tools_mode` 和 `user_id_strategy` 放在 `[connections.deepseek-default.options]` 下，只作用于该 DeepSeek 路由。
 
 DeepSeek 图片输入尚未启用。附加图片会在发送请求前被拒绝；需要处理图片时，请选择支持图片的模型服务。
 
 ## 验证
 
-运行 `sigil doctor`，确认模型服务、具体模型、基础 URL 和凭据来源。
+运行 `sigil doctor`，确认 `default=deepseek-default/deepseek-v4-flash`、端点、凭据来源和就绪状态。
 
 ## 常见问题
 
 - 认证失败：在启动 Sigil 的同一 Shell 中导出 `SIGIL_API_KEY`。
-- 模型错误：检查 `[agent].model` 和任务角色覆盖设置。
+- 模型错误：检查 `[agent].connection` 与 `[agent].model` 组成的精确路由，以及任务角色覆盖设置。
 - FIM 不可用：确认 `fim_model` 和端点都支持该能力。
 - 流式响应较慢：检查网络和模型请求超时设置。
 

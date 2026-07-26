@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
-    ExternalProvenanceEntry, JsonlSessionStore, Session, SessionLogEntry, SessionRef,
-    SessionStreamRecord, StoredEvent, stable_event_hash, stable_event_uuid,
+    ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session, SessionLogEntry,
+    SessionRef, SessionStreamRecord, StoredEvent, stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -123,6 +123,7 @@ pub struct ConversationForkRequest {
     pub destination_path: PathBuf,
     pub provider_name: String,
     pub model_name: String,
+    pub resolved_model_route: Option<ResolvedModelRoute>,
 }
 
 /// Exact source-turn binding and destination identity for a general local conversation fork.
@@ -133,6 +134,7 @@ pub struct ConversationTurnForkRequest {
     pub destination_path: PathBuf,
     pub provider_name: String,
     pub model_name: String,
+    pub resolved_model_route: Option<ResolvedModelRoute>,
 }
 
 /// Durable provenance written into the destination before its safe conversation prefix.
@@ -209,6 +211,7 @@ pub fn fork_conversation_at_checkpoint(
         request.destination_path.clone(),
         request.provider_name.clone(),
         request.model_name.clone(),
+        request.resolved_model_route.clone(),
         point,
         Some((
             checkpoint.checkpoint_id.clone(),
@@ -244,6 +247,7 @@ pub fn fork_conversation_at_turn(
         request.destination_path.clone(),
         request.provider_name.clone(),
         request.model_name.clone(),
+        request.resolved_model_route.clone(),
         point,
         None,
     )
@@ -257,16 +261,30 @@ fn create_conversation_fork(
     destination_path: PathBuf,
     provider_name: String,
     model_name: String,
+    resolved_model_route: Option<ResolvedModelRoute>,
     point: ConversationForkPoint,
     checkpoint: Option<(String, String)>,
 ) -> Result<ConversationForkOutput> {
     validate_source_and_destination(source_store.path(), &source_session_ref, &destination_path)?;
     let prefix = safe_prefix_for_complete_turn(records, &point)?;
+    if let Some(route) = resolved_model_route.as_ref() {
+        anyhow::ensure!(
+            route.model_ref.model_id == model_name,
+            "conversation fork route model does not match destination identity"
+        );
+    }
     let destination_store = JsonlSessionStore::new(&destination_path)?;
-    let mut destination = Session::new(&provider_name, &model_name).with_store(destination_store);
+    let mut destination = resolved_model_route
+        .clone()
+        .map_or_else(
+            || Session::new(&provider_name, &model_name),
+            |route| Session::new_with_route(&provider_name, route),
+        )
+        .with_store(destination_store);
     destination.append_control(ControlEntry::SessionIdentity {
         provider_name: provider_name.clone(),
         model_name: model_name.clone(),
+        resolved_model_route,
     })?;
     let destination_session_id = destination.session_scope_id().to_owned();
     let destination_session_ref = SessionRef::new_relative(

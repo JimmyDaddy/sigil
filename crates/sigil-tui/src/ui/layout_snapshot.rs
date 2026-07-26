@@ -493,8 +493,8 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
         return None;
     }
 
-    let field_rows = [5usize, 6, 7, 8];
-    let fields = field_rows
+    let fields = app
+        .setup_field_line_indices()
         .into_iter()
         .enumerate()
         .filter_map(|(index, line_index)| {

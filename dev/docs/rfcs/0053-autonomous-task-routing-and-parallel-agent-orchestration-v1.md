@@ -998,7 +998,9 @@ allow_write_subagents = true
 2. 显式 legacy `default_mode = "chat"` 映射 `routing_policy = "manual"`，避免升级后突然自动编排。
 3. 显式 legacy `default_mode = "plan"` 只映射 composer Plan-mode preference，不隐式启动 Task。
 4. 未配置的新安装只有在 O8d rollout gate 完成后才默认
-   `routing_policy = "auto"`、`multi_agent_mode = "proactive"`；此前继续保持 manual/explicit。
+   `routing_policy = "auto"`、`multi_agent_mode = "proactive"`；runtime 仍只对 candidate release
+   qualified-route manifest 中的 exact route 生效，其他 route 保持 manual/explicit；此前所有
+   route 继续保持 manual/explicit。
 5. 旧 session 缺 phase/attempt/batch entries 时使用 legacy projection；running legacy step 恢复为 Interrupted/Paused。
 6. 不扫描旧 prompt 猜测并补建 task。
 7. unfinished legacy task 只能显式 continue，不自动重放。

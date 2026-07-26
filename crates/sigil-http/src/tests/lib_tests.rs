@@ -52,7 +52,9 @@ use super::{
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
     HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
+    HttpProtocolVersionError, HttpProviderModelRef, HttpProviderSetupCatalogRequest,
+    HttpProviderSetupCredentialSource, HttpProviderSetupProtocol, HttpProviderSetupSaveRequest,
+    HttpProviderSetupTemplate, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
     HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
     HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
     HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunEventSequencer, HttpRunStartRequest,
@@ -69,7 +71,24 @@ use super::{
 #[tokio::test]
 async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
     let temp = tempfile::tempdir().expect("temporary directory should open");
-    let config_path = temp.path().join("missing-sigil.toml");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[agent]
+connection = "local"
+model = "local-model"
+
+[connections.local]
+label = "Local loopback"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+"#,
+    )
+    .expect("provider settings fixture should write");
     let server = HttpLocalServer::bind(
         HttpServerConfig::default(),
         Some("secret-token"),
@@ -129,11 +148,566 @@ async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
     serde_json::from_str::<Value>(content).expect("support bundle should be valid json");
     assert!(!content.contains(&temp.path().display().to_string()));
 
+    let (status, body) = http_raw_request(
+        address,
+        http_get("/settings/provider-connections", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["config_mode"], "v2");
+    assert_eq!(body["default_model"]["connection_id"], "local");
+    assert_eq!(body["default_model"]["model_id"], "local-model");
+    assert_eq!(body["connections"][0]["credential_source"], "none");
+    assert_eq!(body["connections"][0]["readiness"], "ready");
+    assert!(body["connections"][0].get("credential_id").is_none());
+    assert!(
+        !body
+            .to_string()
+            .contains(&temp.path().display().to_string())
+    );
+
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
         .await
         .expect("server should join")
         .expect("server should stop cleanly");
+}
+
+#[tokio::test]
+async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catalog() {
+    let (provider_base_url, request_count, provider_server) =
+        spawn_provider_catalog_server(200, r#"{"data":[{"id":"local-coder"}]}"#).await;
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, inventory) = http_raw_request(
+        address,
+        http_get("/settings/provider-connections", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(inventory["config_mode"], "v2");
+    assert_eq!(inventory["connections"], json!([]));
+    assert!(!config_path.exists());
+
+    let catalog_request = json!({
+        "template": "open_ai_compatible",
+        "protocol": "chat_completions",
+        "endpoint": provider_base_url,
+        "credential_source": "none"
+    });
+    let (status, catalog) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/catalog",
+            Some("secret-token"),
+            &catalog_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(catalog["connection_id"], "openai-compatible-1");
+    assert_eq!(catalog["models"][0]["model_id"], "local-coder");
+
+    let mut save_request = catalog_request;
+    save_request["model_id"] = json!("local-coder");
+    let (status, saved) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections",
+            Some("secret-token"),
+            &save_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        saved["default_model"],
+        json!({
+            "connection_id": "openai-compatible-1",
+            "model_id": "local-coder"
+        })
+    );
+    assert_eq!(saved["save_warning"], false);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert!(config_path.exists());
+    let persisted = fs::read_to_string(&config_path).expect("saved config should read");
+    assert!(persisted.contains("openai-compatible-1"));
+    assert!(persisted.contains("local-coder"));
+    assert!(!persisted.contains("api_key"));
+
+    let secret_canary = "setup-secret-canary";
+    let (status, invalid) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/catalog",
+            Some("secret-token"),
+            &json!({
+                "template": "deep_seek",
+                "credential_source": "secure_store",
+                "api_key": secret_canary,
+                "unexpected": true
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(!invalid.to_string().contains(secret_canary));
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+    provider_server.abort();
+}
+
+#[tokio::test]
+async fn provider_legacy_migration_is_local_typed_and_idempotently_rejected_after_publish() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+"#,
+    )
+    .expect("legacy config should write");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, inventory) = http_raw_request(
+        address,
+        http_get("/settings/provider-connections", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let revision = inventory["legacy_migration"]["revision"]
+        .as_str()
+        .expect("legacy inventory should expose an opaque revision");
+    assert_eq!(
+        inventory["legacy_migration"]["environment_reference_count"],
+        1
+    );
+    let recovery_marker = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    fs::write(&recovery_marker, b"invalid-recovery-state")
+        .expect("invalid recovery marker should write");
+    let (status, recovery_unavailable) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/migrate-legacy",
+            Some("secret-token"),
+            &json!({ "expected_revision": revision }).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(
+        recovery_unavailable["error"]["code"],
+        "provider_migration_recovery_unavailable"
+    );
+    for (path, body) in [
+        (
+            "/settings/provider-connections/catalog",
+            json!({
+                "template": "open_ai_compatible",
+                "protocol": "chat_completions",
+                "endpoint": "http://127.0.0.1:11434/v1",
+                "credential_source": "none"
+            }),
+        ),
+        (
+            "/settings/provider-connections",
+            json!({
+                "template": "open_ai_compatible",
+                "protocol": "chat_completions",
+                "endpoint": "http://127.0.0.1:11434/v1",
+                "credential_source": "none",
+                "model_id": "local-model"
+            }),
+        ),
+    ] {
+        let (status, setup_recovery_unavailable) = http_raw_request(
+            address,
+            http_post(path, Some("secret-token"), &body.to_string()),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert_eq!(
+            setup_recovery_unavailable["error"]["code"],
+            "provider_migration_recovery_unavailable"
+        );
+    }
+    fs::remove_file(recovery_marker).expect("invalid recovery marker should remove");
+    let (status, migrated) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/migrate-legacy",
+            Some("secret-token"),
+            &json!({ "expected_revision": revision }).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(migrated["migrated_connection_count"], 1);
+    assert_eq!(migrated["moved_inline_credential_count"], 0);
+    assert_eq!(migrated["preserved_environment_reference_count"], 1);
+    assert_eq!(migrated["outcome"], "published");
+    assert_eq!(migrated["inventory"]["config_mode"], "v2");
+    assert_eq!(
+        migrated["default_model"],
+        json!({
+            "connection_id": "deepseek-default",
+            "model_id": "deepseek-private"
+        })
+    );
+    let persisted = fs::read_to_string(&config_path).expect("migrated config should read");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("https://private.deepseek.example/v1"));
+    assert!(!persisted.contains("[providers.deepseek]"));
+
+    let (status, rejected) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/migrate-legacy",
+            Some("secret-token"),
+            &json!({ "expected_revision": revision }).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(rejected["error"]["code"], "provider_migration_stale");
+
+    fs::remove_file(&config_path).expect("published config should remove for stale-read coverage");
+    let (status, missing) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/migrate-legacy",
+            Some("secret-token"),
+            &json!({ "expected_revision": revision }).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(missing["error"]["code"], "provider_migration_stale");
+
+    let (status, invalid) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/migrate-legacy",
+            Some("secret-token"),
+            r#"{"unexpected":true}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        invalid["error"]["code"],
+        "invalid_provider_migration_request"
+    );
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+}
+
+#[test]
+fn provider_migration_recovery_survives_context_restart_until_healthy_recheck() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[agent]
+connection = "local"
+model = "local-model"
+
+[connections.local]
+label = "Local loopback"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+"#,
+    )
+    .expect("healthy V2 config should write");
+    fs::write(
+        temp.path()
+            .join("sigil.toml.provider-migration-recovery-v1"),
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )
+    .expect("recovery marker should write");
+    let build = || SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug");
+
+    let first = HttpSupportContext::new(&config_path, temp.path(), build());
+    assert!(
+        first
+            .provider_connections()
+            .expect("first context inventory")
+            .issues
+            .iter()
+            .any(|issue| issue.code == "provider_migration_reconcile_required")
+    );
+    drop(first);
+
+    let restarted = HttpSupportContext::new(&config_path, temp.path(), build());
+    assert!(
+        restarted
+            .provider_connections()
+            .expect("restarted context inventory")
+            .issues
+            .iter()
+            .any(|issue| issue.code == "provider_migration_reconcile_required")
+    );
+    let rechecked = restarted
+        .recheck_legacy_provider_migration()
+        .expect("healthy V2 recheck should clear marker");
+    assert!(rechecked.issues.is_empty());
+
+    let after_clear = HttpSupportContext::new(&config_path, temp.path(), build());
+    assert!(
+        after_clear
+            .provider_connections()
+            .expect("cleared context inventory")
+            .issues
+            .iter()
+            .all(|issue| !issue.code.starts_with("provider_migration_"))
+    );
+}
+
+#[test]
+fn provider_migration_recovery_blocks_setup_when_config_is_missing_or_malformed() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    let marker_path = temp
+        .path()
+        .join("sigil.toml.provider-migration-recovery-v1");
+    fs::write(
+        &marker_path,
+        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
+    )
+    .expect("recovery marker should write");
+    let context = HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    );
+
+    let missing_inventory = context
+        .provider_connections()
+        .expect("missing config recovery should remain inspectable");
+    assert!(missing_inventory.connections.is_empty());
+    assert!(
+        missing_inventory
+            .issues
+            .iter()
+            .any(|issue| issue.code == "provider_migration_reconcile_required")
+    );
+    let catalog_error = context
+        .provider_setup_catalog(HttpProviderSetupCatalogRequest {
+            template: HttpProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
+            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
+            credential_source: HttpProviderSetupCredentialSource::None,
+            api_key: None,
+        })
+        .expect_err("recovery block must prevent Add connection catalog");
+    assert!(
+        catalog_error
+            .to_string()
+            .contains("provider migration recovery must be resolved")
+    );
+    let save_error = context
+        .save_provider_setup(HttpProviderSetupSaveRequest {
+            template: HttpProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
+            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
+            credential_source: HttpProviderSetupCredentialSource::None,
+            api_key: None,
+            model_id: "local-model".to_owned(),
+            label: None,
+        })
+        .expect_err("recovery block must prevent Add connection save");
+    assert!(
+        save_error
+            .to_string()
+            .contains("provider migration recovery must be resolved")
+    );
+
+    fs::write(&config_path, b"not valid toml = [")
+        .expect("malformed config should write beside recovery record");
+    let malformed_inventory = context
+        .provider_connections()
+        .expect("malformed config recovery should remain inspectable");
+    assert!(
+        malformed_inventory
+            .issues
+            .iter()
+            .any(|issue| issue.code == "provider_migration_reconcile_required")
+    );
+
+    fs::write(&marker_path, b"invalid recovery record")
+        .expect("invalid recovery record should replace");
+    let unavailable_inventory = context
+        .provider_connections()
+        .expect("invalid recovery state should remain actionable");
+    assert!(
+        unavailable_inventory
+            .issues
+            .iter()
+            .any(|issue| issue.code == "provider_migration_recovery_unavailable")
+    );
+    let invalid_recovery_setup_error = context
+        .provider_setup_catalog(HttpProviderSetupCatalogRequest {
+            template: HttpProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
+            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
+            credential_source: HttpProviderSetupCredentialSource::None,
+            api_key: None,
+        })
+        .expect_err("invalid recovery state must keep setup diagnostics-only");
+    assert_eq!(
+        invalid_recovery_setup_error.to_string(),
+        "provider migration recovery state is unavailable"
+    );
+
+    fs::remove_file(marker_path).expect("recovery marker should remove");
+    assert!(
+        context.provider_connections().is_err(),
+        "malformed config without a recovery record must still fail closed"
+    );
+}
+
+#[tokio::test]
+async fn provider_setup_rejects_save_when_the_catalog_is_not_admitted() {
+    let secret_canary = "provider-upstream-secret-canary";
+    let (provider_base_url, _, provider_server) = spawn_provider_catalog_server(
+        401,
+        r#"{"error":{"message":"provider-upstream-secret-canary"}}"#,
+    )
+    .await;
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let catalog_request = json!({
+        "template": "open_ai_compatible",
+        "protocol": "chat_completions",
+        "endpoint": provider_base_url,
+        "credential_source": "none"
+    });
+
+    let (status, catalog) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/catalog",
+            Some("secret-token"),
+            &catalog_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(catalog["state"], "auth_rejected");
+    assert!(!catalog.to_string().contains(secret_canary));
+
+    let mut save_request = catalog_request;
+    save_request["model_id"] = json!("local-coder");
+    let (status, rejected) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections",
+            Some("secret-token"),
+            &save_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(rejected["error"]["code"], "provider_setup_invalid");
+    assert!(!rejected.to_string().contains(secret_canary));
+    assert!(!config_path.exists());
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+    provider_server.abort();
 }
 
 #[test]
@@ -539,6 +1113,9 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.run_context);
     assert!(server_info.capabilities.agent_activity);
     assert!(server_info.capabilities.support_diagnostics);
+    assert!(server_info.capabilities.provider_connections);
+    assert!(server_info.capabilities.provider_setup);
+    assert!(server_info.capabilities.provider_migration);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -1193,6 +1770,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
             content: HttpConversationDisplayContent::Message {
                 role: HttpConversationDisplayMessageRole::User,
                 text: Some("hello".to_owned()),
+                skill: None,
                 assistant_phase: None,
                 image_attachment_count: 0,
                 truncated: false,
@@ -1343,11 +1921,22 @@ async fn local_server_projects_typed_run_context() {
     assert_eq!(status, 201);
     let session_id = session["id"].as_str().expect("session id");
     driver.set_run_context_view(HttpRunContextView {
+        model_ref: HttpProviderModelRef {
+            connection_id: "deepseek-default".to_owned(),
+            model_id: "deepseek-v4-flash".to_owned(),
+        },
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
-        available_models: vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
         model_options: vec![
             HttpApplicationModelOption {
+                model_ref: HttpProviderModelRef {
+                    connection_id: "deepseek-default".to_owned(),
+                    model_id: "deepseek-v4-flash".to_owned(),
+                },
+                display_name: "DeepSeek V4 Flash".to_owned(),
+                availability: "available".to_owned(),
+                recommendation: "recommended".to_owned(),
+                provenance: "bundled".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
                 available_reasoning_efforts: vec![
                     HttpReasoningEffort::Low,
@@ -1359,6 +1948,14 @@ async fn local_server_projects_typed_run_context() {
                 reasoning_effort_binding: Some("effort-binding-flash".to_owned()),
             },
             HttpApplicationModelOption {
+                model_ref: HttpProviderModelRef {
+                    connection_id: "deepseek-default".to_owned(),
+                    model_id: "deepseek-v4-pro".to_owned(),
+                },
+                display_name: "DeepSeek V4 Pro".to_owned(),
+                availability: "available".to_owned(),
+                recommendation: "standard".to_owned(),
+                provenance: "bundled".to_owned(),
                 model_name: "deepseek-v4-pro".to_owned(),
                 available_reasoning_efforts: vec![
                     HttpReasoningEffort::Low,
@@ -1370,7 +1967,7 @@ async fn local_server_projects_typed_run_context() {
                 reasoning_effort_binding: Some("effort-binding-pro".to_owned()),
             },
         ],
-        model_selection: HttpModelSelectionPolicy::PerRun,
+        model_selection: HttpModelSelectionPolicy::FreshSession,
         model_selection_binding: "model-binding".to_owned(),
         default_permission_mode: HttpPermissionMode::Manual,
         available_permission_modes: vec![
@@ -1402,14 +1999,17 @@ async fn local_server_projects_typed_run_context() {
         http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
     assert_eq!(status, 200);
     assert_eq!(body["model_name"], "deepseek-v4-flash");
-    assert_eq!(body["available_models"][1], "deepseek-v4-pro");
     assert_eq!(body["model_options"][1]["model_name"], "deepseek-v4-pro");
+    assert_eq!(
+        body["model_options"][1]["model_ref"]["connection_id"],
+        "deepseek-default"
+    );
     assert_eq!(body["model_options"][1]["default_reasoning_effort"], "max");
     assert_eq!(
         body["model_options"][1]["reasoning_effort_binding"],
         "effort-binding-pro"
     );
-    assert_eq!(body["model_selection"], "per_run");
+    assert_eq!(body["model_selection"], "fresh_session");
     assert_eq!(body["model_selection_binding"], "model-binding");
     assert_eq!(body["default_permission_mode"], "manual");
     assert_eq!(body["available_permission_modes"][2], "auto-edit");
@@ -2345,10 +2945,52 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/support/doctor"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/support/bundle"]["post"]["responses"]["200"].is_object());
+    assert!(
+        document["paths"]["/settings/provider-connections"]["get"]["responses"]["200"].is_object()
+    );
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["support_diagnostics"]
             ["type"],
         "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_connections"]
+            ["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_setup"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_migration"]
+            ["type"],
+        "boolean"
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections"]["post"]["responses"]["201"].is_object()
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections/catalog"]["post"]["responses"]["200"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections/migrate-legacy"]["post"]["responses"]
+            ["200"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections/migrate-legacy"]["post"]["responses"]
+            ["422"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProviderSetupCatalogRequest"]["properties"]["api_key"]["writeOnly"],
+        true
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProviderConnectionInventory"]["additionalProperties"],
+        false
     );
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
@@ -2435,6 +3077,21 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(
         document["paths"]["/sessions/{session_id}/run-context"]["get"]["responses"]["200"]
             .is_object()
+    );
+    assert!(
+        document["components"]["schemas"]["RunContextView"]["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "model_ref"))
+    );
+    assert_eq!(
+        document["components"]["schemas"]["RunContextView"]["properties"]["model_selection"]["enum"]
+            [0],
+        "fresh_session"
+    );
+    assert!(
+        document["components"]["schemas"]["ProviderCredentialSource"]["enum"]
+            .as_array()
+            .is_some_and(|sources| sources.iter().any(|source| source == "stored"))
     );
     assert!(
         document["paths"]["/sessions/{session_id}/agent-activity"]["get"]["responses"]["200"]
@@ -3966,7 +4623,10 @@ fn session_create_get_returns_stable_snapshot() {
         &registry,
         HttpSessionCreateRequest {
             label: Some("mobile-client".to_owned()),
-            model_name: Some("deepseek-v4-pro".to_owned()),
+            model_ref: Some(HttpProviderModelRef {
+                connection_id: "deepseek-default".to_owned(),
+                model_id: "deepseek-v4-pro".to_owned(),
+            }),
         },
     );
 
@@ -3974,7 +4634,10 @@ fn session_create_get_returns_stable_snapshot() {
     assert_eq!(session.label.as_deref(), Some("mobile-client"));
     assert_eq!(
         driver.bound_models(),
-        vec![Some("deepseek-v4-pro".to_owned())]
+        vec![Some(HttpProviderModelRef {
+            connection_id: "deepseek-default".to_owned(),
+            model_id: "deepseek-v4-pro".to_owned(),
+        })]
     );
     assert!(session.run_ids.is_empty());
     assert_eq!(session.durable_session_scope_id, "scope-http-session-1");
@@ -4814,7 +5477,7 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
         &registry,
         HttpSessionCreateRequest {
             label: Some("desktop".to_owned()),
-            model_name: None,
+            model_ref: None,
         },
     );
     let prompt = format!("{}{}", "x".repeat(120), "tail");
@@ -6189,9 +6852,9 @@ impl HttpRunDriver for QueueTestDriver {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        self.recording.bind_session(session_id, model_name)
+        self.recording.bind_session(session_id, model_ref)
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
@@ -6366,7 +7029,7 @@ impl HttpRunDriver for QueueTestDriver {
 
 #[derive(Default)]
 struct RecordingRunDriver {
-    bound_models: Mutex<Vec<Option<String>>>,
+    bound_models: Mutex<Vec<Option<HttpProviderModelRef>>>,
     purged_session_scopes: Mutex<Vec<String>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
@@ -6399,7 +7062,7 @@ struct RecordingRunDriver {
 }
 
 impl RecordingRunDriver {
-    fn bound_models(&self) -> Vec<Option<String>> {
+    fn bound_models(&self) -> Vec<Option<HttpProviderModelRef>> {
         lock(&self.bound_models).clone()
     }
 
@@ -6533,9 +7196,9 @@ impl HttpRunDriver for RecordingRunDriver {
     fn bind_session(
         &self,
         session_id: &str,
-        model_name: Option<&str>,
+        model_ref: Option<&HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        lock(&self.bound_models).push(model_name.map(str::to_owned));
+        lock(&self.bound_models).push(model_ref.cloned());
         if let Some(message) = lock(&self.next_binding_error).take() {
             return Err(HttpRunDriverError::new(message));
         }
@@ -6813,6 +7476,7 @@ fn write_catalog_session(path: &std::path::Path, prompt: &str, provider: &str, m
         .append_control(ControlEntry::SessionIdentity {
             provider_name: provider.to_owned(),
             model_name: model.to_owned(),
+            resolved_model_route: None,
         })
         .expect("identity should persist");
     session
@@ -6880,6 +7544,36 @@ async fn spawn_test_http_server_with_registry_and_events() -> (
             .await;
     });
     (address, shutdown_tx, driver, registry, event_bus)
+}
+
+async fn spawn_provider_catalog_server(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider catalog listener should bind");
+    let address = listener.local_addr().expect("provider catalog address");
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_for_task = Arc::clone(&count);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            count_for_task.fetch_add(1, Ordering::SeqCst);
+            let mut request = vec![0_u8; 8192];
+            let _ = stream.read(&mut request).await;
+            let reason = if status == 200 { "OK" } else { "Unauthorized" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    (format!("http://{address}/v1"), count, task)
 }
 
 fn http_post(path: &str, token: Option<&str>, body: &str) -> String {

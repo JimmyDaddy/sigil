@@ -1,24 +1,28 @@
+use std::env;
+
 use serde_json::json;
 use sigil_kernel::{AgentConfig, ModelRequestConfig, RootConfig};
 
 use super::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
     GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
-    ProviderConfigFields, ProviderStrictToolsMode, deepseek_provider_config_fields,
-    default_provider_config_fields, default_provider_model, next_provider_name,
-    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
-    provider_balance_status_config, provider_config_fields, provider_model_status_config,
-    provider_model_status_config_from_fields, provider_status_config_from_fields,
-    set_provider_config_fields,
+    ProviderConfigFields, ProviderStrictToolsMode, bundled_provider_models,
+    deepseek_provider_config_fields, default_provider_config_fields, default_provider_model,
+    next_provider_name, normalize_provider_model_alias, normalize_provider_name,
+    provider_api_key_env_name, provider_balance_status_config, provider_config_fields,
+    provider_model_status_config, provider_model_status_config_from_fields,
+    provider_status_config_from_fields, set_provider_config_fields,
 };
 
 fn test_root_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: Default::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: DEEPSEEK_PROVIDER_KEY.to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -35,6 +39,7 @@ fn test_root_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        connections: Default::default(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -129,6 +134,21 @@ fn provider_defaults_are_available_to_provider_neutral_setup_flows() {
         Some("gemini-2.5-pro")
     );
     assert_eq!(default_provider_model("unknown"), None);
+
+    assert_eq!(
+        bundled_provider_models("deepseek"),
+        vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+    );
+    for (provider, expected) in [
+        ("openai_compat", "gpt-4.1"),
+        ("openai_responses", "gpt-4.1"),
+        ("anthropic", "claude-sonnet-4-5"),
+        ("gemini", "gemini-2.5-pro"),
+    ] {
+        let bundled = bundled_provider_models(provider);
+        assert_eq!(bundled, vec![expected]);
+        assert!(bundled.iter().all(|model| !model.starts_with("deepseek-")));
+    }
 }
 
 #[test]
@@ -290,6 +310,8 @@ fn provider_status_config_from_fields_validates_common_status_surface() {
 
 #[test]
 fn provider_status_helpers_expose_supported_status_surfaces() {
+    let _env_lock = crate::test_env::lock();
+    let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", "https://api.deepseek.com");
     let mut config = test_root_config();
     let balance = provider_balance_status_config(&config)
         .expect("balance status should resolve")
@@ -329,4 +351,124 @@ fn provider_status_helpers_expose_supported_status_surfaces() {
         .expect("anthropic model status should resolve")
         .is_none()
     );
+}
+
+#[test]
+fn model_status_discovery_uses_the_current_provider_environment_credential() {
+    let _env_lock = crate::test_env::lock();
+    for (provider_name, model, api_key_env, base_url_env) in [
+        (
+            DEEPSEEK_PROVIDER_KEY,
+            "deepseek-v4-flash",
+            "SIGIL_API_KEY",
+            "SIGIL_BASE_URL",
+        ),
+        (
+            OPENAI_COMPAT_PROVIDER_KEY,
+            "gpt-4.1",
+            "SIGIL_OPENAI_COMPATIBLE_API_KEY",
+            "SIGIL_OPENAI_COMPATIBLE_BASE_URL",
+        ),
+        (
+            OPENAI_RESPONSES_PROVIDER_KEY,
+            "gpt-4.1",
+            "SIGIL_OPENAI_RESPONSES_API_KEY",
+            "SIGIL_OPENAI_RESPONSES_BASE_URL",
+        ),
+    ] {
+        let expected_base_url = format!("https://{provider_name}.models.example/v1");
+        let _api_key = EnvironmentGuard::set(api_key_env, "environment-model-list-secret");
+        let _base_url = EnvironmentGuard::set(base_url_env, &expected_base_url);
+        let fields = ProviderConfigFields {
+            model: model.to_owned(),
+            api_key: "inline-secret".to_owned(),
+            base_url: "https://default.invalid/v1".to_owned(),
+        };
+
+        let status = provider_model_status_config_from_fields(
+            provider_name,
+            &fields,
+            &ModelRequestConfig::default(),
+        )
+        .expect("model status should resolve")
+        .expect("provider should support model discovery");
+
+        assert_eq!(
+            status.api_key.as_deref(),
+            Some("environment-model-list-secret")
+        );
+        assert_eq!(status.base_url, expected_base_url);
+        let debug = format!("{status:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("environment-model-list-secret"));
+    }
+}
+
+#[test]
+fn root_model_status_discovery_fails_closed_on_malformed_provider_config() {
+    let _env_lock = crate::test_env::lock();
+    for (provider_name, model, api_key_env, base_url_env) in [
+        (
+            DEEPSEEK_PROVIDER_KEY,
+            "deepseek-v4-flash",
+            "SIGIL_API_KEY",
+            "SIGIL_BASE_URL",
+        ),
+        (
+            OPENAI_COMPAT_PROVIDER_KEY,
+            "gpt-4.1",
+            "SIGIL_OPENAI_COMPATIBLE_API_KEY",
+            "SIGIL_OPENAI_COMPATIBLE_BASE_URL",
+        ),
+        (
+            OPENAI_RESPONSES_PROVIDER_KEY,
+            "gpt-4.1",
+            "SIGIL_OPENAI_RESPONSES_API_KEY",
+            "SIGIL_OPENAI_RESPONSES_BASE_URL",
+        ),
+    ] {
+        let _api_key = EnvironmentGuard::set(api_key_env, "must-not-be-routed");
+        let _base_url = EnvironmentGuard::set(base_url_env, "https://environment.example/v1");
+        let mut root_config = test_root_config();
+        root_config.agent.provider = provider_name.to_owned();
+        root_config.agent.model = model.to_owned();
+        root_config.providers.insert(
+            provider_name.to_owned(),
+            json!({
+                "base_url": "https://custom-gateway.example/v1",
+                "unknown_field": true
+            }),
+        );
+
+        let error = provider_model_status_config(&root_config)
+            .expect_err("malformed provider config must fail before model discovery");
+        assert!(format!("{error:#}").contains("invalid"));
+        assert!(!format!("{error:#}").contains("must-not-be-routed"));
+    }
+}
+
+struct EnvironmentGuard {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvironmentGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = env::var(name).ok();
+        // SAFETY: this test holds the crate-wide environment lock for the guard lifetime.
+        unsafe { env::set_var(name, value) };
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            // SAFETY: this test holds the crate-wide environment lock for the guard lifetime.
+            unsafe { env::set_var(self.name, previous) };
+        } else {
+            // SAFETY: this test holds the crate-wide environment lock for the guard lifetime.
+            unsafe { env::remove_var(self.name) };
+        }
+    }
 }

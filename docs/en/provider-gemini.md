@@ -12,29 +12,35 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "gemini"
+connection = "gemini-default"
 model = "gemini-2.5-pro"
 
-[providers.gemini]
+[connections.gemini-default]
+label = "Google Gemini"
+provider = "gemini"
+protocol = "generate_content"
 base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = { source = "environment", name = "SIGIL_GEMINI_API_KEY" }
 ```
 
 See [gemini.toml](../examples/config/gemini.toml) for a copyable file.
 
 ## Authentication
 
-`SIGIL_GEMINI_API_KEY` takes priority over `[providers.gemini].api_key` and avoids changing credentials used by other Google tools.
+The example binds only this connection to `SIGIL_GEMINI_API_KEY`, avoiding credentials used by other Google tools. You can choose the secure credential store instead; `sigil.toml` stores only an opaque credential reference.
 
 ## Options And Visible Limits
 
-`SIGIL_GEMINI_BASE_URL` temporarily overrides `base_url`. Keep `[agent].model` explicit because model availability can vary by account and region.
+Keep the exact `[agent].connection` and `[agent].model` route explicit because model availability can vary by account and region. A second Gemini account is a second connection with its own endpoint, credential, and catalog.
 
 Images work only with recognized Gemini model IDs. Floating `latest` names, unknown IDs, and aliases are rejected before sending.
 
 ## Verify
 
-Run `sigil doctor` and confirm provider, model, base URL, and credential source.
+Run `sigil doctor` and confirm `default=gemini-default/gemini-2.5-pro`, endpoint, credential source, and readiness.
 
 ## Common Problems
 

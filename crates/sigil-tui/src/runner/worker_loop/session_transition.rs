@@ -74,9 +74,8 @@ where
 {
     ensure_session_transition_allowed(kind, state)?;
 
-    let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
-        &root_config.agent.model,
+    let mut session = load_routed_session_with_runtime_attachments(
+        root_config,
         &session_log_path,
         state.session.current.as_ref(),
     )

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use sigil_kernel::{
     Agent, EgressAuditRecorder, EgressDisclosurePresenter, ExtensionProcessNetworkAdmission,
     InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder,
-    ProviderCapabilities, RootConfig, Session, SessionLogEntry, WorkspaceTrust,
+    ProviderCapabilities, ResolvedModelRoute, RootConfig, Session, SessionLogEntry, WorkspaceTrust,
     workspace_trust_from_entries,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
@@ -30,11 +30,6 @@ pub fn spawn_agent_worker(
     let (command_tx, command_rx) = mpsc::channel();
     let (message_tx, message_rx) = mpsc::channel();
 
-    let options =
-        sigil_runtime::build_run_options(&root_config, workspace_root.clone(), interaction_mode);
-    let extension_network_admission =
-        ExtensionProcessNetworkAdmission::new(options.permission_context.network_policy, false);
-
     thread::Builder::new()
         .name("sigil-agent-worker".to_owned())
         .spawn(move || {
@@ -43,13 +38,32 @@ pub fn spawn_agent_worker(
                 return;
             };
 
-            let provider = match sigil_runtime::build_provider(&root_config) {
+            let (_, route) = match initialize_worker_session_route(&root_config, &session_log_path)
+            {
+                Ok(route) => route,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
+            let provider = match runtime.block_on(
+                sigil_runtime::build_provider_for_model_ref_async(&root_config, &route.model_ref),
+            ) {
                 Ok(provider) => provider,
                 Err(error) => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                     return;
                 }
             };
+            let options = sigil_runtime::build_run_options(
+                &root_config,
+                workspace_root.clone(),
+                interaction_mode,
+            );
+            let extension_network_admission = ExtensionProcessNetworkAdmission::new(
+                options.permission_context.network_policy,
+                false,
+            );
             let provider_capabilities = provider.capabilities();
             let elicitation_handler =
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
@@ -161,6 +175,45 @@ pub fn spawn_agent_worker(
         .context("failed to spawn sigil agent worker")?;
 
     Ok((command_tx, message_rx))
+}
+
+fn initialize_worker_session_route(
+    root_config: &RootConfig,
+    session_log_path: &Path,
+) -> Result<(String, ResolvedModelRoute)> {
+    let (fallback_provider_name, fallback_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(root_config)
+            .map_err(anyhow::Error::new)
+            .context("model_route_not_configured: complete provider setup before starting")?;
+    let existing_entries = JsonlSessionStore::read_entries(session_log_path)
+        .context("failed to inspect durable session route")?;
+    let fallback_route_for_new_session = existing_entries
+        .is_empty()
+        .then_some(fallback_route.clone());
+    let store = JsonlSessionStore::new(session_log_path)?;
+    let session = Session::load_from_store_with_route(
+        fallback_provider_name,
+        fallback_route.model_ref.model_id.clone(),
+        fallback_route_for_new_session,
+        store,
+    )?;
+    let route = session.resolved_model_route().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "session_route_missing: legacy durable session has no frozen connection route; \
+             start a new session or fork with the current route"
+        )
+    })?;
+    let provider_name =
+        sigil_runtime::provider_connections::validate_persisted_model_route(root_config, &route)
+            .map_err(anyhow::Error::new)
+            .context(
+                "session route cannot be restored; restore the referenced connection or fork with the current route",
+            )?;
+    anyhow::ensure!(
+        route.model_ref.model_id == session.model_name(),
+        "session_route_drift: durable model identity does not match its frozen route"
+    );
+    Ok((provider_name, route))
 }
 
 pub(super) fn load_session_entries_with_workspace_trust(

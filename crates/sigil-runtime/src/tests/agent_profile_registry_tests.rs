@@ -9,7 +9,7 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentInvocationPolicy, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileSource, AgentProfileTrustEntry, AgentResultPolicy, AgentTrustState, ApprovalMode,
-    ControlEntry, MemoryConfig, PermissionConfig, PermissionPolicy, PermissionRule,
+    ConnectionId, ControlEntry, MemoryConfig, PermissionConfig, PermissionPolicy, PermissionRule,
     PluginTrustDecision, PluginTrustEntry, RootConfig, SessionConfig, SessionLogEntry,
     SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, ToolAccess,
     ToolAllowlistConfig, ToolCategory, ToolPreviewCapability, ToolRegistryScope, ToolSpec,
@@ -25,9 +25,11 @@ use super::{
     parse_reasoning_effort, parse_result_policy, parse_trust_state, plugin_agent_profile_format,
     plugin_agent_profile_from_raw, sorted_dir_entries, workspace_path,
 };
+use crate::skills::compatibility_stable_id;
 
 fn root_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -38,6 +40,7 @@ fn root_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(12),
             tool_timeout_secs: 45,
@@ -59,6 +62,7 @@ fn root_config() -> RootConfig {
                 "base_url": "https://example.com",
             }),
         )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -709,6 +713,129 @@ Review code through grep only.
 }
 
 #[test]
+fn registry_prefers_codex_over_duplicate_opencode_and_claude_unicode_agents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join(".codex/agents"))?;
+    fs::create_dir_all(workspace.join(".opencode/commands"))?;
+    fs::create_dir_all(workspace.join(".opencode/agents"))?;
+    fs::create_dir_all(workspace.join(".claude/agents"))?;
+    fs::write(
+        workspace.join(".codex/agents/规划师.toml"),
+        r#"
+name = "规划师"
+description = "Codex planning agent."
+developer_instructions = "Plan the novel without drafting prose."
+"#,
+    )?;
+    fs::write(
+        workspace.join(".opencode/commands/继续写.md"),
+        r#"---
+name: 继续写
+description: Continue drafting.
+---
+Continue the current chapter.
+"#,
+    )?;
+    fs::write(
+        workspace.join(".opencode/agents/规划师.md"),
+        r#"---
+description: OpenCode planning agent.
+mode: subagent
+---
+Plan through OpenCode.
+"#,
+    )?;
+    fs::write(
+        workspace.join(".claude/agents/规划师.md"),
+        r#"---
+name: 规划师
+description: Claude planning agent.
+tools: Read, Grep
+---
+Plan through Claude.
+"#,
+    )?;
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let id = compatibility_stable_id("compat-agent", "规划师");
+    let profile = registry
+        .get(&AgentProfileId::new(id.clone())?)
+        .expect("Codex compatibility profile should exist");
+
+    assert_eq!(
+        profile.source,
+        AgentProfileSource::Compatibility {
+            provider: "codex".to_owned()
+        }
+    );
+    assert_eq!(profile.trust_state, AgentTrustState::Trusted);
+    assert_eq!(profile.profile.nickname_candidates, vec!["规划师"]);
+    assert_eq!(profile.profile.description, "Codex planning agent.");
+    assert_eq!(
+        profile.profile.instructions,
+        "Plan the novel without drafting prose."
+    );
+    assert_eq!(
+        profile.profile.invocation_policy,
+        AgentInvocationPolicy::ManualOnly
+    );
+    assert!(profile.profile.user_invocation_allowed());
+    assert!(!profile.profile.model_invocation_allowed());
+    assert!(profile.profile.tool_scope.allows("read_file"));
+    assert!(!profile.profile.tool_scope.allows("write_file"));
+    assert_eq!(
+        registry
+            .profiles()
+            .iter()
+            .filter(|candidate| candidate.profile.id.as_str() == id)
+            .count(),
+        1
+    );
+    assert!(registry.warnings().iter().any(|warning| {
+        warning.contains(&id)
+            && warning.contains("shadowed")
+            && warning.contains(".opencode/agents")
+    }));
+    let catalog = crate::application_extension_catalog_view(&root_config(), &workspace, &[])?;
+    let catalog_agent = catalog
+        .agents
+        .iter()
+        .find(|agent| agent.id == id)
+        .expect("compatibility agent should be visible in the shared catalog");
+    assert_eq!(catalog_agent.invocation_token, "@规划师");
+    assert!(catalog_agent.available);
+    assert!(catalog_agent.binding.is_some());
+    assert!(
+        catalog
+            .skills
+            .iter()
+            .all(|skill| skill.run_mode == SkillRunMode::Inline.as_str())
+    );
+    assert!(
+        catalog.skills.iter().all(|skill| skill.id != id),
+        "child-session compatibility agents must not be duplicated in the skill catalog"
+    );
+    let command = catalog
+        .skills
+        .iter()
+        .find(|skill| skill.name == "继续写")
+        .expect("compatibility command should be visible in the skill catalog");
+    assert_eq!(command.invocation_token, "/继续写");
+    assert!(command.available);
+    assert!(command.binding.is_some());
+
+    let mut disabled_config = root_config();
+    disabled_config.skills.compatibility_auto_discover = false;
+    disabled_config.skills.compatibility_sources.clear();
+    let disabled =
+        AgentProfileRegistry::from_root_config_with_workspace(&disabled_config, &workspace)?;
+    assert!(disabled.get(&AgentProfileId::new(id)?).is_none());
+    Ok(())
+}
+
+#[test]
 fn registry_projects_reasonix_agents_only_when_compatibility_source_is_enabled() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -1320,6 +1447,42 @@ fn registry_projects_existing_task_roles_to_builtin_profiles() -> Result<()> {
     assert!(!worker.profile.tool_scope.allows("apply_changeset"));
     assert!(!worker.profile.tool_scope.allows("bash"));
     assert!(registry.warnings().is_empty());
+    Ok(())
+}
+
+#[test]
+fn builtin_task_role_source_hash_binds_the_exact_connection() -> Result<()> {
+    let mut first = root_config();
+    first.task.planner.connection = Some(ConnectionId::new("planner-primary")?);
+    let first_registry = AgentProfileRegistry::from_root_config(&first)?;
+    let first_plan = first_registry
+        .get(&AgentProfileId::new(PLAN_PROFILE_ID)?)
+        .expect("plan profile");
+
+    let mut second = first.clone();
+    second.task.planner.connection = Some(ConnectionId::new("planner-secondary")?);
+    let second_registry = AgentProfileRegistry::from_root_config(&second)?;
+    let second_plan = second_registry
+        .get(&AgentProfileId::new(PLAN_PROFILE_ID)?)
+        .expect("plan profile");
+
+    assert_eq!(
+        first_plan
+            .profile
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("planner-primary")
+    );
+    assert_eq!(
+        second_plan
+            .profile
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("planner-secondary")
+    );
+    assert_ne!(first_plan.source_hash, second_plan.source_hash);
     Ok(())
 }
 

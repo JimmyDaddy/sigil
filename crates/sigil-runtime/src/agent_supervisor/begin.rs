@@ -49,15 +49,17 @@ impl AgentSupervisor {
         )?;
         let attempt_id = begin_attempt_id(&thread_id)?;
         let prompt_hash = hash_child_input(&start.child_input)?;
-        let (provider_name, model_name) = resolved_provider_model(
+        let (provider_name, model_name, model_ref) = resolved_provider_model(
             session,
             resolved_profile.profile.provider.as_deref(),
+            resolved_profile.profile.connection.as_ref(),
             resolved_profile.profile.model.as_deref(),
-        );
+        )?;
         let run_context = AgentRunContextSnapshot {
             profile_snapshot_id: snapshot.snapshot_id.clone(),
             provider: provider_name.clone(),
             model: model_name.clone(),
+            model_ref,
             reasoning_effort: resolved_profile.profile.reasoning_effort.clone(),
             workspace_root: WorkspaceRootSnapshot::new(start.workspace_root.display().to_string())?,
             effective_tool_scope_hash: snapshot.resolved_tool_scope_hash.clone(),
@@ -202,15 +204,17 @@ impl AgentSupervisor {
         let thread_id = chat_agent_thread_id_for_call(&start.call_id, &start.profile_id)?;
         let attempt_id = begin_attempt_id(&thread_id)?;
         let prompt_hash = hash_text(&sigil_kernel::safe_persistence_text(&start.prompt));
-        let (provider_name, model_name) = resolved_provider_model(
+        let (provider_name, model_name, model_ref) = resolved_provider_model(
             session,
             resolved_profile.profile.provider.as_deref(),
+            resolved_profile.profile.connection.as_ref(),
             resolved_profile.profile.model.as_deref(),
-        );
+        )?;
         let run_context = AgentRunContextSnapshot {
             profile_snapshot_id: snapshot.snapshot_id.clone(),
             provider: provider_name.clone(),
             model: model_name.clone(),
+            model_ref,
             reasoning_effort: resolved_profile.profile.reasoning_effort.clone(),
             workspace_root: WorkspaceRootSnapshot::new(start.workspace_root.display().to_string())?,
             effective_tool_scope_hash: snapshot.resolved_tool_scope_hash.clone(),
@@ -466,16 +470,25 @@ pub(super) fn begin_attempt_id(thread_id: &AgentThreadId) -> Result<AgentRunAtte
 fn resolved_provider_model(
     session: &Session,
     profile_provider: Option<&str>,
+    profile_connection: Option<&sigil_kernel::ConnectionId>,
     profile_model: Option<&str>,
-) -> (String, String) {
-    (
-        profile_provider
-            .map(str::to_owned)
-            .unwrap_or_else(|| session.provider_name().to_owned()),
-        profile_model
-            .map(str::to_owned)
-            .unwrap_or_else(|| session.model_name().to_owned()),
-    )
+) -> Result<(String, String, Option<sigil_kernel::ModelRef>)> {
+    let provider = profile_provider
+        .filter(|provider| !provider.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| session.provider_name().to_owned());
+    let model = profile_model
+        .map(str::to_owned)
+        .unwrap_or_else(|| session.model_name().to_owned());
+    let connection = profile_connection.cloned().or_else(|| {
+        session
+            .resolved_model_route()
+            .map(|route| route.model_ref.connection_id.clone())
+    });
+    let model_ref = connection
+        .map(|connection| sigil_kernel::ModelRef::new(connection, model.clone()))
+        .transpose()?;
+    Ok((provider, model, model_ref))
 }
 
 fn append_thread_failed<H>(

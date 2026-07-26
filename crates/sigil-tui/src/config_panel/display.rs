@@ -12,7 +12,7 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&self.draft.provider_name),
             ConfigField::ProviderModel => Some(&self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => Some(self.draft.provider_api_key.expose_secret()),
             ConfigField::ModelRequestTimeoutSecs => Some(&self.draft.model_request_timeout_secs),
             ConfigField::ModelRequestStreamIdleTimeoutSecs => {
                 Some(&self.draft.model_request_stream_idle_timeout_secs)
@@ -82,7 +82,7 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&mut self.draft.provider_name),
             ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&mut self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => None,
             ConfigField::ModelRequestTimeoutSecs => {
                 Some(&mut self.draft.model_request_timeout_secs)
             }
@@ -148,12 +148,32 @@ impl ConfigState {
 
     pub(crate) fn display_value(&self, field: ConfigField) -> String {
         let text_value = match field {
+            ConfigField::ProviderName
+                if self.legacy_migration_recovery
+                    == Some(
+                        sigil_runtime::provider_connections::LegacyMigrationRecoveryState::RollbackIncomplete,
+                    ) =>
+            {
+                return "credential rollback incomplete · repair, then recheck".to_owned();
+            }
+            ConfigField::ProviderName
+                if self.legacy_migration_recovery
+                    == Some(
+                        sigil_runtime::provider_connections::LegacyMigrationRecoveryState::ReconcileRequired,
+                    ) =>
+            {
+                return "published state uncertain · repair, then recheck".to_owned();
+            }
+            ConfigField::ProviderName if self.draft.requires_legacy_config_migration() => {
+                return self.draft.legacy_config_migration_summary();
+            }
+            ConfigField::ProviderName => return self.draft.selected_connection_summary(),
             ConfigField::ProviderFimModel
                 if normalize_provider_name(&self.draft.provider_name) != DEEPSEEK_PROVIDER_KEY =>
             {
                 return "not supported".to_owned();
             }
-            ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
+            ConfigField::ProviderApiKey => return self.draft.selected_credential_summary(),
             ConfigField::SkillId => {
                 if self.selected_section == ConfigSection::Agents {
                     return self
@@ -289,21 +309,32 @@ pub(crate) fn render_config_value_row(state: &ConfigState, field: ConfigField) -
     let selected = !state.footer_selected && state.selected_field == Some(field);
     let marker = if selected { ">" } else { " " };
     let action = if selected && state.editing_field() != Some(field) {
-        field.action_label()
+        if field == ConfigField::ProviderName && state.legacy_migration_recovery.is_some() {
+            "Enter recheck"
+        } else if field == ConfigField::ProviderName
+            && state.draft.requires_legacy_config_migration()
+        {
+            "Enter migrate"
+        } else {
+            field.action_label()
+        }
     } else {
         ""
     };
 
+    let label = if field == ConfigField::ProviderName && state.legacy_migration_recovery.is_some() {
+        "Migration recovery"
+    } else if field == ConfigField::ProviderName && state.draft.requires_legacy_config_migration() {
+        "Legacy migration"
+    } else {
+        field.display_label()
+    };
     if action.is_empty() {
-        format!(
-            "{marker} {}: {}",
-            field.display_label(),
-            state.display_value(field)
-        )
+        format!("{marker} {}: {}", label, state.display_value(field))
     } else {
         format!(
             "{marker} {}: {}  [{}]",
-            field.display_label(),
+            label,
             state.display_value(field),
             action
         )
@@ -357,14 +388,6 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpName => false,
         ConfigField::AppearanceUsageCostCurrency => false,
         ConfigField::AppearanceColorGroup | ConfigField::AppearanceColorToken => false,
-    }
-}
-
-fn mask_secret(value: &str) -> String {
-    if value.is_empty() {
-        "not set".to_owned()
-    } else {
-        "set (hidden)".to_owned()
     }
 }
 

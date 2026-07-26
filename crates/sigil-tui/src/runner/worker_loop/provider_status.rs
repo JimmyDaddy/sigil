@@ -31,6 +31,11 @@ pub(in crate::runner) fn drain_provider_status_results(
                     });
                 }
             }
+            ProviderStatusTaskResult::ConnectionModels { request_id, result } => {
+                if provider_status_tasks.accept_models_result(request_id) {
+                    let _ = message_tx.send(WorkerMessage::ConnectionModelsRefreshed { result });
+                }
+            }
         }
     }
 }

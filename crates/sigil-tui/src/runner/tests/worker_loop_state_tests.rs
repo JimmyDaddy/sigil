@@ -18,7 +18,7 @@ use super::{
             validate_task_pause_request,
         },
     },
-    common::{PlannedProvider, test_root_config},
+    common::{PlannedProvider, routed_session_identity, routed_test_root_config, test_root_config},
 };
 
 fn provider_capabilities() -> ProviderCapabilities {
@@ -359,12 +359,18 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     let target_path = temp.path().join("target.jsonl");
     let current_store = JsonlSessionStore::new(&current_path)?;
     let target_store = JsonlSessionStore::new(&target_path)?;
-    target_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "planned".to_owned(),
-        model_name: "planned-model".to_owned(),
-    }))?;
-    let current_session = Session::new("planned", "planned-model").with_store(current_store);
-    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let root_config = routed_test_root_config(temp.path(), "planned-model");
+    target_store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "planned-model",
+    )?))?;
+    let current_session = Session::new_with_route(
+        "deepseek",
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?
+            .1,
+    )
+    .with_store(current_store);
     let registry = sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace(
         &root_config,
         temp.path(),
@@ -483,12 +489,18 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
     let target_path = temp.path().join("fork.jsonl");
     let current_store = JsonlSessionStore::new(&current_path)?;
     let target_store = JsonlSessionStore::new(&target_path)?;
-    target_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "planned".to_owned(),
-        model_name: "planned-model".to_owned(),
-    }))?;
-    let current_session = Session::new("planned", "planned-model").with_store(current_store);
-    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let root_config = routed_test_root_config(temp.path(), "planned-model");
+    target_store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "planned-model",
+    )?))?;
+    let current_session = Session::new_with_route(
+        "deepseek",
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?
+            .1,
+    )
+    .with_store(current_store);
     let capabilities = provider_capabilities();
     let registry = sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace(
         &root_config,
@@ -580,7 +592,7 @@ allowed_tools = ["grep"]
 "#,
     )?;
 
-    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let root_config = routed_test_root_config(temp.path(), "planned-model");
     let capabilities = provider_capabilities();
     let profile_id = AgentProfileId::new("scope-canary")?;
     let base_registry = sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace(
@@ -594,10 +606,7 @@ allowed_tools = ["grep"]
     let current_store = JsonlSessionStore::new(&current_path)?;
     for path in [&trusted_path, &untrusted_path] {
         JsonlSessionStore::new(path)?.append(&SessionLogEntry::Control(
-            ControlEntry::SessionIdentity {
-                provider_name: "planned".to_owned(),
-                model_name: "planned-model".to_owned(),
-            },
+            routed_session_identity(&root_config, "planned-model")?,
         ))?;
     }
     JsonlSessionStore::new(&trusted_path)?.append(&SessionLogEntry::Control(
@@ -610,7 +619,13 @@ allowed_tools = ["grep"]
             reviewed_at_ms: 42,
         }),
     ))?;
-    let current_session = Session::new("planned", "planned-model").with_store(current_store);
+    let current_session = Session::new_with_route(
+        "deepseek",
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?
+            .1,
+    )
+    .with_store(current_store);
     let supervisor = sigil_runtime::AgentSupervisor::new(
         base_registry,
         sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),

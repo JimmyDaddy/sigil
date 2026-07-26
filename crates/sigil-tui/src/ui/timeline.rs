@@ -11,9 +11,10 @@ use crate::app::{TimelineEntry, TimelineRole};
 use super::{
     command_text::known_slash_command_token,
     markdown::{
-        MarkdownRenderOptions, MarkdownRenderState, render_code_line_spans_with_bg,
-        render_inline_markdown_spans_with_palette, render_markdown_spans_with_palette,
-        render_markdown_timeline_lines_with_palette,
+        MarkdownPhase, MarkdownRenderCursor, MarkdownRenderOptions, MarkdownRenderState,
+        render_code_line_spans_with_bg, render_inline_markdown_spans_with_palette,
+        render_markdown_spans_with_palette, render_markdown_timeline_lines_with_palette,
+        render_markdown_timeline_lines_with_palette_and_cursor,
     },
     primitives::{
         spans_with_background, timeline_content_line, timeline_header_line_with_palette,
@@ -48,6 +49,7 @@ pub(crate) struct TimelineRenderOptions {
     pub intermediate_assistant_indices: BTreeSet<usize>,
     pub expanded_thinking_entry_indices: BTreeSet<usize>,
     pub collapsed_thinking_entry_indices: BTreeSet<usize>,
+    pub expanded_diagram_entry_indices: BTreeSet<usize>,
     pub hovered_thinking_entry_index: Option<usize>,
     pub theme: theme::Theme,
 }
@@ -57,18 +59,34 @@ pub(crate) fn render_timeline_entry_lines_with_options(
     options: &TimelineRenderOptions,
     entry_index: usize,
 ) -> Vec<Line<'static>> {
+    render_timeline_entry_lines_with_options_and_cursor(entry, options, entry_index, None)
+}
+
+pub(crate) fn render_timeline_entry_lines_with_options_and_cursor(
+    entry: &TimelineEntry,
+    options: &TimelineRenderOptions,
+    entry_index: usize,
+    markdown_cursor: Option<&mut MarkdownRenderCursor>,
+) -> Vec<Line<'static>> {
     let lines = if entry.role == TimelineRole::User {
         render_user_entry_lines(entry, options.max_content_width, &options.theme.palette)
     } else if entry.role == TimelineRole::Assistant {
+        let streaming = options.streaming_assistant_index == Some(entry_index);
         render_assistant_entry_lines(
             entry,
             options.max_content_width,
-            options.streaming_assistant_index != Some(entry_index),
+            !streaming,
+            streaming,
+            options
+                .expanded_diagram_entry_indices
+                .contains(&entry_index),
             options
                 .intermediate_assistant_indices
                 .contains(&entry_index),
             options.theme.syntax_theme,
             &options.theme.palette,
+            entry_index,
+            markdown_cursor,
         )
     } else if entry.role == TimelineRole::Phase {
         render_phase_entry_lines(entry, &options.theme.palette)
@@ -271,25 +289,49 @@ fn render_assistant_entry_lines(
     entry: &TimelineEntry,
     max_content_width: usize,
     highlight_code: bool,
+    streaming: bool,
+    show_diagram_source: bool,
     intermediate_info: bool,
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
+    entry_index: usize,
+    markdown_cursor: Option<&mut MarkdownRenderCursor>,
 ) -> Vec<Line<'static>> {
     let accent = palette.accent_info;
     if entry.text.trim().is_empty() {
         return Vec::new();
     }
-    let mut lines = render_markdown_timeline_lines_with_palette(
-        accent,
-        Style::default().fg(palette.text_primary),
-        &entry.text,
-        MarkdownRenderOptions {
-            highlight_code,
-            ..MarkdownRenderOptions::timeline(max_content_width)
-        }
-        .with_syntax_theme(syntax_theme),
-        palette,
-    );
+    let markdown_options = MarkdownRenderOptions {
+        highlight_code,
+        ..MarkdownRenderOptions::timeline(max_content_width)
+    }
+    .with_syntax_theme(syntax_theme)
+    .with_phase(if streaming {
+        MarkdownPhase::Streaming
+    } else {
+        MarkdownPhase::Complete
+    })
+    .with_diagram_source(show_diagram_source);
+    let body_style = Style::default().fg(palette.text_primary);
+    let mut lines = if let Some(cursor) = markdown_cursor {
+        render_markdown_timeline_lines_with_palette_and_cursor(
+            accent,
+            body_style,
+            &entry.text,
+            markdown_options,
+            palette,
+            &format!("timeline-assistant:{entry_index}"),
+            cursor,
+        )
+    } else {
+        render_markdown_timeline_lines_with_palette(
+            accent,
+            body_style,
+            &entry.text,
+            markdown_options,
+            palette,
+        )
+    };
     if intermediate_info {
         mark_first_visible_assistant_line(&mut lines, palette);
     }

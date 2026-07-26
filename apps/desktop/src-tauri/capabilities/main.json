@@ -21,6 +21,7 @@
     "allow-desktop-approval",
     "allow-desktop-verification",
     "allow-desktop-support",
+    "allow-desktop-provider-setup",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

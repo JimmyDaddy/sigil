@@ -18,6 +18,7 @@ fn finalized_session(path: &Path, prompt: &str, provider: &str, model: &str) -> 
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: provider.to_owned(),
         model_name: model.to_owned(),
+        resolved_model_route: None,
     })?;
     session.append_user_message(ModelMessage::user(prompt))?;
     session.append_assistant_message(ModelMessage::assistant_with_kind(

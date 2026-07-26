@@ -37,6 +37,17 @@ describe("canonical conversation rows", () => {
     expect(projectConversationRows([terminal], [], translateEnglish)).toEqual([]);
   });
 
+  it("preserves the user-selected skill on its message row", () => {
+    const message = durableMessage("user-skill", "user", "research Chang'an");
+    if (message.item.content.type !== "message") throw new Error("expected message content");
+    message.item.content.skill = { id: "compat-skill-123", name: "唐代城市研究" };
+
+    expect(projectConversationRows([message], [], translateEnglish)[0]).toMatchObject({
+      kind: "user",
+      skill: { id: "compat-skill-123", name: "唐代城市研究" },
+    });
+  });
+
   it("interleaves reasoning deltas with semantic live items by exact run sequence", () => {
     const assistant: ConversationTimelineItem = {
       identity: "assistant-live",

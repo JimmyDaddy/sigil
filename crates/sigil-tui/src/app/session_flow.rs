@@ -484,6 +484,13 @@ impl AppState {
         self.session_log_path = session_log_path;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_name;
+        self.runtime.model_route = entries.iter().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route: Some(route),
+                ..
+            }) => Some(route.clone()),
+            _ => None,
+        });
         self.session_id = session_id_from_path(&self.session_log_path)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         self.agent_panel.active_view = super::AgentView::Main;
@@ -498,6 +505,7 @@ impl AppState {
         self.timeline_state.tool_activity_visible_rows.clear();
         self.timeline_state.expanded_thinking_entry_indices.clear();
         self.timeline_state.collapsed_thinking_entry_indices.clear();
+        self.timeline_state.expanded_diagram_entry_indices.clear();
         self.events.clear();
         self.reset_scroll();
 

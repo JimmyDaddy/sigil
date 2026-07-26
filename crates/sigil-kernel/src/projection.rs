@@ -3,9 +3,11 @@
 //! JSONL remains the source of truth. This module stores rebuildable projection views together
 //! with their cursor so event application and cursor advancement persist as one atomic replace.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -1617,6 +1619,7 @@ fn apply_control_entry_to_session_list(
         ControlEntry::SessionIdentity {
             provider_name,
             model_name,
+            ..
         } => {
             projection.provider_name = Some(provider_name.clone());
             projection.model_name = Some(model_name.clone());

@@ -294,7 +294,7 @@ jobs:
         run: cargo test --locked -p sigil-http --all-targets
 
   oauth-keyring-conformance:
-    name: OAuth keyring conformance (${{ matrix.name }})
+    name: Provider and OAuth keyring conformance (${{ matrix.name }})
     needs: check
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -329,14 +329,19 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # The single-quoted script is expanded by the nested bash, not this shell.
+          # shellcheck disable=SC2016
           dbus-run-session -- bash -eu -o pipefail -c '
             eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
             cargo test --locked -p sigil-mcp native_system_keyring_round_trip_is_exact_and_cleanup_safe -- --ignored
+            cargo test --locked -p sigil-runtime native_provider_credential_store_roundtrip_and_cleanup -- --ignored
           '
 
       - name: Test native credential-store round trip
         if: runner.os != 'Linux'
-        run: cargo test --locked -p sigil-mcp native_system_keyring_round_trip_is_exact_and_cleanup_safe -- --ignored
+        run: |
+          cargo test --locked -p sigil-mcp native_system_keyring_round_trip_is_exact_and_cleanup_safe -- --ignored
+          cargo test --locked -p sigil-runtime native_provider_credential_store_roundtrip_and_cleanup -- --ignored
 
   test:
     needs: check

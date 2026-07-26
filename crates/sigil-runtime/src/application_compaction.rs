@@ -203,7 +203,7 @@ pub async fn prepare_application_compaction(
         )
     );
 
-    let provider = crate::build_provider(&root_config)?;
+    let provider = crate::build_provider_async(&root_config).await?;
     let workspace_trust = workspace_trust_from_entries(session.entries(), &workspace_root)?;
     let options = crate::build_run_options(
         &root_config,

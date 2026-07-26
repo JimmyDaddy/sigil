@@ -29,8 +29,9 @@ use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
     RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
-    drain_provider_stream, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
-    render_run_event, render_serve_startup_json, render_serve_startup_plan, render_version,
+    cli_application_run_request, drain_provider_stream, load_serve_root_config,
+    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
+    render_serve_startup_json, render_serve_startup_plan, render_version,
     run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
@@ -75,6 +76,45 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
         paths.session_catalog_db.parent(),
         Some(paths.projections_root.as_path())
     );
+    Ok(())
+}
+
+#[test]
+fn serve_root_config_uses_setup_shell_only_for_an_absent_config() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("missing-sigil.toml");
+
+    let config = load_serve_root_config(&config_path)?;
+
+    assert_eq!(config.workspace.root, ".");
+    assert!(config.agent.provider.is_empty());
+    assert!(config.agent.connection.is_none());
+    assert!(config.agent.model.is_empty());
+    assert!(config.providers.is_empty());
+    assert!(config.connections.is_empty());
+    assert!(!config_path.exists());
+    Ok(())
+}
+
+#[test]
+fn serve_root_config_loads_valid_config_and_rejects_malformed_existing_config() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+
+    let config = load_serve_root_config(&config_path)?;
+    assert_eq!(config.agent.provider, "deepseek");
+    assert_eq!(config.agent.model, "deepseek-v4-flash");
+
+    fs::write(&config_path, "[agent\nprovider = \"deepseek\"")?;
+    assert!(load_serve_root_config(&config_path).is_err());
     Ok(())
 }
 
@@ -780,8 +820,52 @@ fn cli_parses_run_command_with_explicit_config() -> Result<()> {
         Some(Commands::Run {
             ref prompt,
             output: RunOutput::Text,
+            ..
         }) if prompt == "hello"
     ));
+    Ok(())
+}
+
+#[test]
+fn cli_requires_and_preserves_compound_model_route() -> Result<()> {
+    assert!(
+        Cli::try_parse_from(["sigil", "run", "hello", "--connection", "openai-personal"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["sigil", "run", "hello", "--model", "gpt-4.1"]).is_err());
+    let cli = Cli::try_parse_from([
+        "sigil",
+        "run",
+        "hello",
+        "--connection",
+        "openai-personal",
+        "--model",
+        "gpt-4.1",
+    ])?;
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Run {
+            connection: Some(ref connection),
+            model: Some(ref model),
+            ..
+        }) if connection == "openai-personal" && model == "gpt-4.1"
+    ));
+
+    let request = cli_application_run_request(
+        Path::new("sigil.toml"),
+        Path::new("."),
+        "hello".to_owned(),
+        Some("openai-personal"),
+        Some("gpt-4.1"),
+    )
+    .expect("compound route should become one application request");
+    assert_eq!(
+        request
+            .model_connection_id
+            .as_ref()
+            .map(sigil_kernel::ConnectionId::as_str),
+        Some("openai-personal")
+    );
+    assert_eq!(request.model_name.as_deref(), Some("gpt-4.1"));
     Ok(())
 }
 
@@ -1411,9 +1495,9 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
     let workspace = create_test_workspace("run-command");
     let config_path = workspace.join("sigil.toml");
-    write_test_config(&config_path, &server)?;
+    write_application_run_test_config(&config_path, &server)?;
 
-    super::run_command(&config_path, &workspace, "Say hi".to_owned()).await?;
+    super::run_command(&config_path, &workspace, "Say hi".to_owned(), None, None).await?;
 
     let raw_request = requests
         .lock()
@@ -1470,7 +1554,7 @@ async fn run_json_emits_exactly_one_terminal_result_record() -> Result<()> {
     let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
     let workspace = create_test_workspace("run-json");
     let config_path = workspace.join("sigil.toml");
-    write_test_config(&config_path, &server)?;
+    write_application_run_test_config(&config_path, &server)?;
     let mut stdout = Vec::new();
 
     let exit = run_machine_command_with_writer(
@@ -1514,7 +1598,7 @@ async fn run_jsonl_emits_ordered_events_then_one_terminal_result() -> Result<()>
     let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
     let workspace = create_test_workspace("run-jsonl");
     let config_path = workspace.join("sigil.toml");
-    write_test_config(&config_path, &server)?;
+    write_application_run_test_config(&config_path, &server)?;
     let mut stdout = Vec::new();
 
     let exit = run_machine_command_with_writer(
@@ -1578,11 +1662,8 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
     assert_eq!(exit, MachineExitCode::InvalidInput);
     let record: serde_json::Value = serde_json::from_slice(&stdout)?;
     assert_eq!(record["record_type"], "error");
-    assert_eq!(record["error"]["code"], "configuration_invalid");
-    assert_eq!(
-        record["error"]["message"],
-        "application configuration is invalid"
-    );
+    assert_eq!(record["error"]["code"], "model_route_not_configured");
+    assert_eq!(record["error"]["message"], "model route is not configured");
     assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
     Ok(())
 }
@@ -1591,7 +1672,7 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
 async fn run_json_cancellation_during_preparation_emits_error_and_exit_130() -> Result<()> {
     let workspace = create_test_workspace("run-json-cancelled");
     let config_path = workspace.join("sigil.toml");
-    write_test_config(&config_path, "http://127.0.0.1:9")?;
+    write_application_run_test_config(&config_path, "http://127.0.0.1:9")?;
     let mut stdout = Vec::new();
 
     let exit = run_machine_command_with_cancellation(
@@ -1662,6 +1743,44 @@ anthropic_base_url = "{base_url}"
 fim_model = "deepseek-v4-pro"
 api_key = "test-key"
 strict_tools_mode = "auto"
+"#,
+        state_root.display(),
+        cache_root.display()
+    );
+    fs::write(path, config)?;
+    Ok(())
+}
+
+fn write_application_run_test_config(path: &std::path::Path, base_url: &str) -> Result<()> {
+    let workspace = path
+        .parent()
+        .ok_or_else(|| anyhow!("test config path should have a parent"))?;
+    let state_root = workspace.join("state");
+    let cache_root = workspace.join("cache");
+    let config = format!(
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[storage]
+state_root = "{}"
+cache_root = "{}"
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[model_request]
+request_timeout_secs = 5
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "{base_url}"
+credential = {{ source = "none" }}
 "#,
         state_root.display(),
         cache_root.display()

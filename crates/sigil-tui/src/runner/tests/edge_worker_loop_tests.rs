@@ -562,6 +562,7 @@ fn test_agent_thread_started_entry(
             profile_snapshot_id: snapshot_id,
             provider: "planned".to_owned(),
             model: "planned-model".to_owned(),
+            model_ref: None,
             reasoning_effort: None,
             workspace_root: WorkspaceRootSnapshot::new(workspace_root.display().to_string())?,
             effective_tool_scope_hash: String::new(),
@@ -892,6 +893,7 @@ fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
             profile_snapshot_id: snapshot_id,
             provider: "planned".to_owned(),
             model: "planned-model".to_owned(),
+            model_ref: None,
             reasoning_effort: None,
             workspace_root: WorkspaceRootSnapshot::new(temp.path().display().to_string())?,
             effective_tool_scope_hash: String::new(),
@@ -1939,6 +1941,7 @@ fn cancel_run_reports_load_error_if_session_log_cannot_be_reloaded() -> Result<(
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "planned".to_owned(),
         model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
     }))?;
 
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");

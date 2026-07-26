@@ -19,6 +19,7 @@ use super::super::{
 
 fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -29,6 +30,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -55,6 +57,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
                 "strict_tools_mode": "auto"
             }),
         )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -158,7 +161,7 @@ fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Re
 
     assert!(matches!(
         failure,
-        WorkerMessage::RunFailed(ref error) if error.contains("unsupported provider other")
+        WorkerMessage::RunFailed(ref error) if error.contains("model_route_not_configured")
     ));
     Ok(())
 }

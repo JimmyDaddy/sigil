@@ -1,4 +1,5 @@
 use super::*;
+use crate::ResolvedModelRoute;
 
 /// In-memory session state backed by an optional append-only JSONL store.
 #[derive(Debug)]
@@ -6,6 +7,7 @@ pub struct Session {
     pub(super) session_scope_id: String,
     pub(super) provider_name: String,
     pub(super) model_name: String,
+    pub(super) resolved_model_route: Option<ResolvedModelRoute>,
     pub(super) entries: Vec<SessionLogEntry>,
     pub(super) store: Option<JsonlSessionStore>,
     pub(super) stats: SessionStats,
@@ -52,6 +54,21 @@ impl Session {
             session_scope_id: uuid::Uuid::new_v4().to_string(),
             provider_name: provider_name.into(),
             model_name: model_name.into(),
+            resolved_model_route: None,
+            entries: Vec::new(),
+            store: None,
+            stats: SessionStats::default(),
+            runtime_attachments: SessionRuntimeAttachments::default(),
+        }
+    }
+
+    /// Creates a new in-memory session bound to one exact secret-free provider route.
+    pub fn new_with_route(provider_name: impl Into<String>, route: ResolvedModelRoute) -> Self {
+        Self {
+            session_scope_id: uuid::Uuid::new_v4().to_string(),
+            provider_name: provider_name.into(),
+            model_name: route.model_ref.model_id.clone(),
+            resolved_model_route: Some(route),
             entries: Vec::new(),
             store: None,
             stats: SessionStats::default(),
@@ -82,6 +99,7 @@ impl Session {
             session_scope_id,
             provider_name: provider_name.into(),
             model_name: model_name.into(),
+            resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: None,
             stats,
@@ -95,13 +113,26 @@ impl Session {
         model_name: impl Into<String>,
         store: JsonlSessionStore,
     ) -> Result<Self> {
+        Self::load_from_store_with_route(provider_name, model_name, None, store)
+    }
+
+    /// Loads a durable session while supplying the exact route for a newly initialized stream.
+    pub fn load_from_store_with_route(
+        provider_name: impl Into<String>,
+        model_name: impl Into<String>,
+        fallback_route: Option<ResolvedModelRoute>,
+        store: JsonlSessionStore,
+    ) -> Result<Self> {
         let fallback_provider_name = provider_name.into();
         let fallback_model_name = model_name.into();
         // Establish the V2 session envelope (including tail repair and identity) before the
         // continuation coordinator reads the stream. Otherwise coordinator recovery can expose
         // a repaired-but-not-yet-initialized file to concurrent readers during startup.
-        let (entries, provider_name, model_name) =
-            store.load_entries_writer_reconciled(fallback_provider_name, fallback_model_name)?;
+        let (entries, provider_name, model_name) = store.load_entries_writer_reconciled(
+            fallback_provider_name,
+            fallback_model_name,
+            fallback_route,
+        )?;
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover()
             .context("failed to recover provider continuation payload lifecycle")?;
@@ -113,6 +144,7 @@ impl Session {
             session_scope_id,
             provider_name,
             model_name,
+            resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: Some(store),
             stats,
@@ -514,6 +546,10 @@ impl Session {
 
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    pub fn resolved_model_route(&self) -> Option<&ResolvedModelRoute> {
+        self.resolved_model_route.as_ref()
     }
 
     /// Selects the provider model used by subsequent runs without forking the durable session.
@@ -1633,6 +1669,7 @@ impl Session {
         self.append_control(ControlEntry::SessionIdentity {
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
+            resolved_model_route: self.resolved_model_route.clone(),
         })
     }
 

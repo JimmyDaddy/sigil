@@ -3,8 +3,12 @@
 use std::{
     fs,
     io::{Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -14,8 +18,8 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, DurableEventType, EventClass, JsonlSessionStore,
-    ModelMessage, RootConfig, Session, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    stable_workspace_id,
+    ModelMessage, ResolvedModelRoute, RootConfig, Session, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, stable_workspace_id,
 };
 use sigil_runtime::{SessionExportV1, resolve_sigil_paths};
 
@@ -32,12 +36,63 @@ fn test_workspace() -> Result<PathBuf> {
 
 fn write_config(path: &Path, workspace: &Path, session_dir: &Path) -> Result<()> {
     let config = format!(
+        r#"config_version = 2
+
+[workspace]
+root = "{}"
+
+[storage]
+state_root = "{}"
+cache_root = "{}"
+
+[session]
+log_dir = "{}"
+
+[agent]
+connection = "deepseek-test"
+model = "deepseek-v4-flash"
+tool_timeout_secs = 5
+
+[model_request]
+request_timeout_secs = 2
+
+[terminal]
+keyboard_enhancement = "off"
+mouse_capture = false
+osc52_clipboard = false
+
+[connections.deepseek-test]
+label = "DeepSeek test"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#,
+        workspace.display(),
+        workspace.join("state").display(),
+        workspace.join("cache").display(),
+        session_dir.display()
+    );
+    fs::write(path, config)?;
+    Ok(())
+}
+
+fn write_config_with_endpoints(
+    path: &Path,
+    workspace: &Path,
+    session_dir: &Path,
+    base_url: &str,
+    beta_base_url: &str,
+    anthropic_base_url: &str,
+) -> Result<()> {
+    let config = format!(
         r#"[workspace]
 root = "{}"
 
 [storage]
 state_root = "{}"
 cache_root = "{}"
+credential_store = "file"
 
 [session]
 log_dir = "{}"
@@ -56,9 +111,9 @@ mouse_capture = false
 osc52_clipboard = false
 
 [providers.deepseek]
-base_url = "http://127.0.0.1:9"
-beta_base_url = "http://127.0.0.1:9"
-anthropic_base_url = "http://127.0.0.1:9"
+base_url = "{base_url}"
+beta_base_url = "{beta_base_url}"
+anthropic_base_url = "{anthropic_base_url}"
 api_key = "test-key"
 strict_tools_mode = "auto"
 "#,
@@ -71,12 +126,17 @@ strict_tools_mode = "auto"
     Ok(())
 }
 
-fn write_trusted_finalized_session(path: &Path, workspace: &Path) -> Result<()> {
+fn write_trusted_finalized_session(
+    path: &Path,
+    workspace: &Path,
+    resolved_model_route: Option<ResolvedModelRoute>,
+) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route,
     })?;
     let workspace_id = stable_workspace_id(workspace)?;
     session.append_control(ControlEntry::WorkspaceTrustDecision(
@@ -153,6 +213,7 @@ fn write_compaction_session(path: &Path, workspace: &Path) -> Result<()> {
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
     })?;
     let workspace_id = stable_workspace_id(workspace)?;
     session.append_control(ControlEntry::WorkspaceTrustDecision(
@@ -248,9 +309,70 @@ fn write_input(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn spawn_openai_responses_catalog_fixture()
+-> Result<(String, Arc<AtomicBool>, thread::JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let responded = Arc::new(AtomicBool::new(false));
+    let server_responded = Arc::clone(&responded);
+    let server = thread::spawn(move || -> Result<()> {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        bail!("catalog fixture did not receive a request");
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        stream.set_read_timeout(Some(PROCESS_TIMEOUT))?;
+        let mut request = [0_u8; 8 * 1024];
+        let read = stream.read(&mut request)?;
+        let request = String::from_utf8_lossy(&request[..read]);
+        assert!(
+            request.starts_with("GET /v1/models "),
+            "unexpected catalog request: {request}"
+        );
+        let body =
+            r#"{"object":"list","data":[{"id":"gpt-4.1","object":"model","owned_by":"openai"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        stream.flush()?;
+        server_responded.store(true, Ordering::Release);
+        Ok(())
+    });
+    Ok((format!("http://{address}/v1"), responded, server))
+}
+
+fn configure_isolated_process_home(command: &mut CommandBuilder, workspace: &Path) -> Result<()> {
+    let home = workspace.join(".process-home");
+    let config_home = home.join(".config");
+    let cache_home = home.join(".cache");
+    let state_home = home.join(".local").join("state");
+    let runtime_home = home.join(".runtime");
+    for path in [&home, &config_home, &cache_home, &state_home, &runtime_home] {
+        fs::create_dir_all(path)?;
+    }
+    command.env("HOME", home.as_os_str());
+    command.env("XDG_CONFIG_HOME", config_home.as_os_str());
+    command.env("XDG_CACHE_HOME", cache_home.as_os_str());
+    command.env("XDG_STATE_HOME", state_home.as_os_str());
+    command.env("XDG_RUNTIME_DIR", runtime_home.as_os_str());
+    Ok(())
+}
+
 fn run_tui_process(
     config_path: &Path,
     workspace: &Path,
+    ready_text: &str,
     interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
 ) -> Result<()> {
     let pty_system = native_pty_system();
@@ -268,7 +390,9 @@ fn run_tui_process(
         config_path.to_str().context("UTF-8 config path")?,
     ]);
     command.cwd(workspace);
+    configure_isolated_process_home(&mut command, workspace)?;
     command.env("TERM", "xterm-256color");
+    command.env("SIGIL_API_KEY", "test-key");
     command.env("SIGIL_BASE_URL", "https://api.deepseek.com");
     command.env("SIGIL_BETA_BASE_URL", "https://api.deepseek.com/beta");
     command.env(
@@ -297,7 +421,7 @@ fn run_tui_process(
     let mut writer = master.take_writer()?;
 
     let result = (|| -> Result<()> {
-        wait_for_text(&output, "deepseek-v4-flash")?;
+        wait_for_text(&output, ready_text)?;
         interact(&output, writer.as_mut())?;
         write_input(writer.as_mut(), &[0x01, 0x0b])?;
         write_input(writer.as_mut(), b"/quit\r")?;
@@ -314,7 +438,10 @@ fn run_tui_process(
                 break;
             }
             if Instant::now() >= deadline {
-                return Err(anyhow!("sigil TUI process did not exit after /quit"));
+                return Err(anyhow!(
+                    "sigil TUI process did not exit after /quit: {}",
+                    captured_text(&output)
+                ));
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -332,6 +459,222 @@ fn run_tui_process(
 }
 
 #[test]
+fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = test_workspace()?;
+    let config_path = workspace.join("config").join("sigil.toml");
+    let (catalog_base_url, catalog_responded, catalog_server) =
+        spawn_openai_responses_catalog_fixture()?;
+
+    let result = (|| -> Result<()> {
+        run_tui_process(
+            &config_path,
+            &workspace,
+            "Set up a model connection",
+            |output, writer| {
+                wait_for_text(output, "Set up a model connection")?;
+                wait_for_text(output, "SIGIL_API_KEY detected")?;
+
+                // Use an explicit custom connection so this real-process fixture can exercise a
+                // loopback Responses endpoint without weakening hosted-provider HTTPS policy.
+                for _ in 0..4 {
+                    write_input(writer, b"\x1b[B")?;
+                    thread::sleep(Duration::from_millis(50));
+                }
+                write_input(writer, b"\r")?;
+                thread::sleep(Duration::from_millis(150));
+
+                // Custom starts on Chat Completions; choose Responses before editing the endpoint.
+                write_input(writer, b"\r")?;
+                thread::sleep(Duration::from_millis(150));
+
+                write_input(writer, b"\x1b[B\r")?;
+                thread::sleep(Duration::from_millis(100));
+                write_input(writer, &[0x7f; 64])?;
+                write_input(writer, catalog_base_url.as_bytes())?;
+                write_input(writer, b"\r")?;
+                thread::sleep(Duration::from_millis(150));
+
+                write_input(writer, b"\x1b[B\x1b[C")?;
+                thread::sleep(Duration::from_millis(150));
+
+                write_input(writer, b"\x1b[B\r")?;
+                let deadline = Instant::now() + PROCESS_TIMEOUT;
+                while !catalog_responded.load(Ordering::Acquire) {
+                    if Instant::now() >= deadline {
+                        return Err(anyhow!(
+                            "model picker did not query the loopback catalog; captured={}",
+                            captured_text(output)
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                thread::sleep(Duration::from_millis(300));
+                write_input(writer, b"\r")?;
+                thread::sleep(Duration::from_millis(150));
+
+                write_input(writer, b"\x1b[B\r")?;
+
+                let deadline = Instant::now() + PROCESS_TIMEOUT;
+                while !config_path.exists() {
+                    if Instant::now() >= deadline {
+                        return Err(anyhow!(
+                            "first-run setup did not publish {}; captured={}",
+                            config_path.display(),
+                            captured_text(output)
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+
+                let root = RootConfig::load(&config_path)?;
+                assert_eq!(root.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+                assert_eq!(
+                    root.agent.connection.as_ref().map(|id| id.as_str()),
+                    Some("custom-default")
+                );
+                assert_eq!(root.agent.model, "gpt-4.1");
+                assert!(root.agent.provider.is_empty());
+                assert!(root.providers.is_empty());
+                assert!(root.connections.contains_key("custom-default"));
+                assert_eq!(
+                    fs::metadata(&config_path)?.permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    fs::metadata(config_path.parent().expect("config parent"))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+                assert!(!fs::read_to_string(&config_path)?.contains("test-key"));
+                assert!(!captured_text(output).contains("test-key"));
+                Ok(())
+            },
+        )?;
+
+        for entry in walkdir::WalkDir::new(&workspace) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                assert!(
+                    !fs::read(entry.path())?
+                        .windows(b"test-key".len())
+                        .any(|window| window == b"test-key"),
+                    "environment secret leaked to {}",
+                    entry.path().display()
+                );
+            }
+        }
+        Ok(())
+    })();
+
+    let catalog_result = catalog_server
+        .join()
+        .map_err(|_| anyhow!("catalog fixture thread panicked"))?;
+    let cleanup = fs::remove_dir_all(&workspace);
+    result?;
+    catalog_result?;
+    cleanup?;
+    Ok(())
+}
+
+#[test]
+fn real_tui_migrates_legacy_inline_secret_to_protected_store_without_backup() -> Result<()> {
+    let workspace = test_workspace()?;
+    let config_path = workspace.join("sigil.toml");
+    let session_dir = workspace.join("sessions");
+    fs::create_dir(&session_dir)?;
+    write_config_with_endpoints(
+        &config_path,
+        &workspace,
+        &session_dir,
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/beta",
+        "https://api.deepseek.com/anthropic",
+    )?;
+    let legacy_config = RootConfig::load(&config_path)?;
+    let legacy_connections =
+        sigil_runtime::provider_connections::load_provider_connections(&legacy_config);
+    let legacy_default = legacy_connections.default_model.as_ref().with_context(|| {
+        format!(
+            "legacy provider projection must retain the default model: {:?}",
+            legacy_connections.issues
+        )
+    })?;
+    assert_eq!(legacy_default.connection_id.as_str(), "deepseek-default");
+    assert_eq!(legacy_default.model_id, "deepseek-v4-flash");
+    write_trusted_finalized_session(
+        &session_dir.join("session-migration-process-e2e.jsonl"),
+        &workspace,
+        None,
+    )?;
+
+    let result = (|| -> Result<()> {
+        run_tui_process(
+            &config_path,
+            &workspace,
+            "deepseek-v4-flash",
+            |output, writer| {
+                write_input(writer, b"/config\r")?;
+                wait_for_text(output, "Legacy migration")?;
+                write_input(writer, b"\r")?;
+                wait_for_text(output, "migrated 1 legacy connection(s)")?;
+
+                let root = RootConfig::load(&config_path)?;
+                assert_eq!(root.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+                assert_eq!(
+                    root.agent.connection.as_ref().map(|id| id.as_str()),
+                    Some("deepseek-default")
+                );
+                assert_eq!(root.agent.model, "deepseek-v4-flash");
+                assert!(root.agent.provider.is_empty());
+                assert!(root.providers.is_empty());
+                let serialized = fs::read_to_string(&config_path)?;
+                assert!(!serialized.contains("test-key"));
+                assert!(serialized.contains("source = \"stored\""));
+                let credential_wire: serde_json::Value = serde_json::from_slice(&fs::read(
+                    workspace
+                        .join(".process-home")
+                        .join(".sigil")
+                        .join("credentials.json"),
+                )?)?;
+                assert_eq!(
+                    credential_wire["records"]
+                        .as_object()
+                        .context("credential records should be an object")?
+                        .len(),
+                    1
+                );
+                write_input(writer, &[0x1b])?;
+                thread::sleep(Duration::from_millis(200));
+                Ok(())
+            },
+        )?;
+
+        for entry in walkdir::WalkDir::new(&workspace) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                assert!(
+                    !fs::read(entry.path())?
+                        .windows(b"test-key".len())
+                        .any(|window| window == b"test-key"),
+                    "legacy secret survived migration in {}",
+                    entry.path().display()
+                );
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup = fs::remove_dir_all(&workspace);
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+#[test]
 #[ignore = "release acceptance requires an installed checksum-pinned DeepSeek V4 tokenizer"]
 fn real_tui_process_compacts_and_reloads_the_durable_boundary() -> Result<()> {
     let workspace = test_workspace()?;
@@ -346,23 +689,33 @@ fn real_tui_process_compacts_and_reloads_the_durable_boundary() -> Result<()> {
     require_installed_compaction_tokenizer(&paths.cache_root)?;
 
     let result = (|| -> Result<()> {
-        run_tui_process(&config_path, &workspace, |output, writer| {
-            write_input(writer, b"/resume release compaction acceptance objective\r")?;
-            wait_for_text(output, "verified-state")?;
-            write_input(writer, b"/compact\r")?;
-            wait_for_text(output, "verified locally")?;
-            write_input(writer, b"\r")?;
-            wait_for_text(output, "Context compacted:")?;
-            Ok(())
-        })?;
+        run_tui_process(
+            &config_path,
+            &workspace,
+            "deepseek-v4-flash",
+            |output, writer| {
+                write_input(writer, b"/resume release compaction acceptance objective\r")?;
+                wait_for_text(output, "verified-state")?;
+                write_input(writer, b"/compact\r")?;
+                wait_for_text(output, "verified locally")?;
+                write_input(writer, b"\r")?;
+                wait_for_text(output, "Context compacted:")?;
+                Ok(())
+            },
+        )?;
 
-        run_tui_process(&config_path, &workspace, |output, writer| {
-            write_input(writer, b"/resume release compaction acceptance objective\r")?;
-            wait_for_text(output, "verified-state")?;
-            write_input(writer, b"/compact\r")?;
-            wait_for_text(output, "no newly foldable history:")?;
-            Ok(())
-        })?;
+        run_tui_process(
+            &config_path,
+            &workspace,
+            "deepseek-v4-flash",
+            |output, writer| {
+                write_input(writer, b"/resume release compaction acceptance objective\r")?;
+                wait_for_text(output, "verified-state")?;
+                write_input(writer, b"/compact\r")?;
+                wait_for_text(output, "no newly foldable history:")?;
+                Ok(())
+            },
+        )?;
 
         let records = JsonlSessionStore::read_event_records(&session_path)?;
         assert_eq!(
@@ -391,8 +744,15 @@ fn real_tui_process_opens_session_actions_and_exports_safe_transcript() -> Resul
     let session_dir = workspace.join("sessions");
     fs::create_dir(&session_dir)?;
     write_config(&config_path, &workspace, &session_dir)?;
-    write_trusted_finalized_session(&session_dir.join("session-process-e2e.jsonl"), &workspace)?;
     let root_config = RootConfig::load(&config_path)?;
+    let (_, model_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    write_trusted_finalized_session(
+        &session_dir.join("session-process-e2e.jsonl"),
+        &workspace,
+        Some(model_route),
+    )?;
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
 
     let pty_system = native_pty_system();
@@ -410,7 +770,9 @@ fn real_tui_process_opens_session_actions_and_exports_safe_transcript() -> Resul
         config_path.to_str().context("UTF-8 config path")?,
     ]);
     command.cwd(&workspace);
+    configure_isolated_process_home(&mut command, &workspace)?;
     command.env("TERM", "xterm-256color");
+    command.env("SIGIL_API_KEY", "test-key");
     let mut child = slave.spawn_command(command)?;
     drop(slave);
 

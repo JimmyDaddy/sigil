@@ -42,6 +42,15 @@ impl OpenAiCompatibleProvider {
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
         let config = config.resolved()?;
+        Self::new_exact(config, timeouts)
+    }
+
+    /// Builds a provider from an already resolved connection snapshot without applying
+    /// process-environment overrides.
+    pub fn new_exact(
+        config: OpenAiCompatibleProviderConfig,
+        timeouts: ModelRequestTimeouts,
+    ) -> Result<Self> {
         Ok(Self {
             timeouts,
             client: build_http_client()?,
@@ -50,13 +59,27 @@ impl OpenAiCompatibleProvider {
         })
     }
 
-    fn api_key(&self) -> Result<String> {
+    fn api_key(&self) -> Result<Option<&str>> {
         if let Some(api_key) = &self.config.api_key
             && !api_key.trim().is_empty()
         {
-            return Ok(api_key.clone());
+            return Ok(Some(api_key));
+        }
+        if self.allows_unauthenticated_loopback() {
+            return Ok(None);
         }
         Err(OpenAiCompatibleProviderError::MissingApiKey.into())
+    }
+
+    fn allows_unauthenticated_loopback(&self) -> bool {
+        reqwest::Url::parse(&self.config.base_url)
+            .ok()
+            .is_some_and(|url| {
+                url.scheme() == "http"
+                    && url
+                        .host_str()
+                        .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+            })
     }
 
     fn chat_completions_url(&self) -> String {
@@ -106,7 +129,7 @@ impl Provider for OpenAiCompatibleProvider {
         let error_body = read_error_response_body(
             response,
             self.timeouts.request_timeout,
-            &SecretRedactor::from_values([self.api_key()?]),
+            &SecretRedactor::from_values(self.api_key()?),
             self.name(),
             &request.model_name,
             status_code,
@@ -128,11 +151,13 @@ impl OpenAiCompatibleProvider {
     ) -> Result<reqwest::Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let auth = format!("Bearer {}", self.api_key()?);
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth).context("invalid auth header")?,
-        );
+        if let Some(api_key) = self.api_key()? {
+            let auth = format!("Bearer {api_key}");
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&auth).context("invalid auth header")?,
+            );
+        }
         if let Some(organization) = header_value(self.config.organization.as_deref())? {
             headers.insert("OpenAI-Organization", organization);
         }

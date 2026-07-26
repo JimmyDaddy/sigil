@@ -486,6 +486,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
         profile_snapshot_id: snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
             temp.path().display().to_string(),
@@ -649,6 +650,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         profile_snapshot_id: snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
             temp.path().display().to_string(),
@@ -975,6 +977,7 @@ fn agent_graph_summary_uses_synced_entries_without_render_time_file_replay() -> 
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
                         temp.path().display().to_string(),
@@ -1031,6 +1034,7 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
         profile_snapshot_id: snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
             temp.path().display().to_string(),
@@ -2271,7 +2275,10 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
         "/model".to_owned(),
     )?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("usage: /model <flash|pro|id>"));
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /model <model-id|connection-id/model-id>")
+    );
 
     let action = app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
@@ -2322,6 +2329,16 @@ fn model_command_updates_openai_compat_provider_block() -> Result<()> {
         }),
     );
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let connection_id = app
+        .runtime
+        .model_route
+        .as_ref()
+        .expect("legacy route should resolve")
+        .model_ref
+        .connection_id
+        .clone();
+    app.recent_model_refs
+        .push(sigil_kernel::ModelRef::new(connection_id, "gpt-new")?);
 
     let action = app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
@@ -2331,7 +2348,10 @@ fn model_command_updates_openai_compat_provider_block() -> Result<()> {
         "/model gpt-new".to_owned(),
     )?;
 
-    let Some(AppAction::RuntimeConfigUpdated { root_config }) = action else {
+    let Some(AppAction::StartNewModelSession {
+        runtime_config: root_config,
+    }) = action
+    else {
         panic!("expected runtime config update");
     };
     assert_eq!(root_config.agent.provider, "openai_compat");

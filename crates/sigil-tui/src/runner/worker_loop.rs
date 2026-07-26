@@ -59,8 +59,9 @@ use super::{
         WorkerApprovalCommand, WorkerCommand, WorkerMessage,
     },
     session_flow::{
-        CapturedSessionRuntimeAttachments, load_session,
-        load_session_with_captured_runtime_attachments, load_session_with_runtime_attachments,
+        CapturedSessionRuntimeAttachments, load_routed_session_with_runtime_attachments,
+        load_session, load_session_with_captured_runtime_attachments,
+        load_session_with_runtime_attachments,
     },
 };
 

@@ -29,7 +29,8 @@ use crate::{
     dto::{
         HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest,
         HttpConversationQueueCommandRequest, HttpConversationRecoveryCommandAction,
-        HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
+        HttpProviderLegacyMigrationRequest, HttpProviderSetupCatalogRequest,
+        HttpProviderSetupSaveRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
         HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
         HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
         HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
@@ -45,7 +46,7 @@ use crate::{
         HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpLiveEventRecvError, HttpProtocolEvent,
         HttpSseEvent,
     },
-    support::HttpSupportContext,
+    support::{HttpProviderMigrationFailure, HttpProviderSetupFailure, HttpSupportContext},
 };
 
 const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -481,6 +482,113 @@ fn route_http_request(
                 503,
                 "support_unavailable",
                 "desktop support diagnostics could not be projected",
+            ),
+        };
+    }
+
+    if request.method == "GET" && request.path == "/settings/provider-connections" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_connections_unavailable",
+                "provider connection inventory is unavailable",
+            );
+        };
+        return match support_context.provider_connections() {
+            Ok(inventory) => json_response(200, json!(inventory)),
+            Err(_) => http_error_response(
+                503,
+                "provider_connections_unavailable",
+                "provider connection inventory could not be projected",
+            ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/settings/provider-connections/catalog" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_setup_unavailable",
+                "provider setup is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpProviderSetupCatalogRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_provider_setup_request",
+                "invalid provider setup catalog body",
+            );
+        };
+        return match support_context.provider_setup_catalog(body) {
+            Ok(catalog) => json_response(200, json!(catalog)),
+            Err(error) => provider_setup_error_response(
+                error,
+                "provider setup could not be validated; review provider, authentication, endpoint, and model",
+            ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/settings/provider-connections/migrate-legacy" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_migration_unavailable",
+                "legacy provider migration is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpProviderLegacyMigrationRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_provider_migration_request",
+                "invalid legacy provider migration body",
+            );
+        };
+        return match support_context.migrate_legacy_provider_connections(&body.expected_revision) {
+            Ok(result) => json_response(200, json!(result)),
+            Err(error) => provider_migration_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && request.path == "/settings/provider-connections/recheck-migration"
+    {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_migration_unavailable",
+                "provider migration recheck is unavailable",
+            );
+        };
+        return match support_context.recheck_legacy_provider_migration() {
+            Ok(inventory) => json_response(200, json!(inventory)),
+            Err(_) => http_error_response(
+                503,
+                "provider_migration_recheck_unavailable",
+                "provider migration recovery could not be rechecked",
+            ),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/settings/provider-connections" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_setup_unavailable",
+                "provider setup is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpProviderSetupSaveRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_provider_setup_request",
+                "invalid provider setup save body",
+            );
+        };
+        return match support_context.save_provider_setup(body) {
+            Ok(result) => json_response(201, json!(result)),
+            Err(error) => provider_setup_error_response(
+                error,
+                "provider setup could not be saved; review provider, authentication, endpoint, and model",
             ),
         };
     }
@@ -1089,6 +1197,97 @@ fn route_http_request(
     }
 
     http_error_response(404, "not_found", "http route not found")
+}
+
+fn provider_migration_error_response(error: HttpProviderMigrationFailure) -> HttpResponse {
+    let (status, code, message) = match error {
+        HttpProviderMigrationFailure::InvalidRequest => (
+            400,
+            "invalid_provider_migration_request",
+            "invalid legacy provider migration revision",
+        ),
+        HttpProviderMigrationFailure::Stale => (
+            409,
+            "provider_migration_stale",
+            "provider configuration changed; reload migration details and retry",
+        ),
+        HttpProviderMigrationFailure::NotRequired => (
+            409,
+            "provider_migration_not_required",
+            "provider configuration no longer requires legacy migration",
+        ),
+        HttpProviderMigrationFailure::Blocked => (
+            422,
+            "provider_migration_blocked",
+            "legacy provider configuration must be repaired before migration",
+        ),
+        HttpProviderMigrationFailure::ConfigUnavailable => (
+            503,
+            "provider_migration_config_unavailable",
+            "provider configuration is temporarily unavailable; reload migration details",
+        ),
+        HttpProviderMigrationFailure::RecoveryStateUnavailable => (
+            503,
+            "provider_migration_recovery_unavailable",
+            "provider migration recovery state is unavailable; open diagnostics before retrying",
+        ),
+        HttpProviderMigrationFailure::CredentialStoreUnavailable => (
+            503,
+            "credential_store_unavailable",
+            "protected credential storage is unavailable",
+        ),
+        HttpProviderMigrationFailure::CredentialStoreRejected => (
+            503,
+            "credential_store_rejected",
+            "protected credential storage rejected the migration",
+        ),
+        HttpProviderMigrationFailure::CredentialReadbackMismatch => (
+            503,
+            "credential_readback_mismatch",
+            "protected credential verification failed",
+        ),
+        HttpProviderMigrationFailure::PublishFailed => (
+            503,
+            "provider_migration_publish_failed",
+            "provider migration could not publish configuration",
+        ),
+        HttpProviderMigrationFailure::RollbackIncomplete => (
+            503,
+            "provider_migration_rollback_incomplete",
+            "provider migration stopped and credential cleanup requires diagnostics",
+        ),
+        HttpProviderMigrationFailure::ReconcileRequired => (
+            503,
+            "provider_migration_reconcile_required",
+            "provider migration result is uncertain; reload configuration before continuing",
+        ),
+    };
+    http_error_response(status, code, message)
+}
+
+fn provider_setup_error_response(
+    error: HttpProviderSetupFailure,
+    invalid_message: &'static str,
+) -> HttpResponse {
+    match error {
+        HttpProviderSetupFailure::Invalid => {
+            http_error_response(422, "provider_setup_invalid", invalid_message)
+        }
+        HttpProviderSetupFailure::RecoveryRequired(state) => {
+            let migration_error = match state {
+                sigil_runtime::provider_connections::LegacyMigrationRecoveryState::RollbackIncomplete => {
+                    HttpProviderMigrationFailure::RollbackIncomplete
+                }
+                sigil_runtime::provider_connections::LegacyMigrationRecoveryState::ReconcileRequired => {
+                    HttpProviderMigrationFailure::ReconcileRequired
+                }
+            };
+            provider_migration_error_response(migration_error)
+        }
+        HttpProviderSetupFailure::RecoveryStateUnavailable => provider_migration_error_response(
+            HttpProviderMigrationFailure::RecoveryStateUnavailable,
+        ),
+    }
 }
 
 async fn stream_run_events(

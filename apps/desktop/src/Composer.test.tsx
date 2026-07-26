@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Composer } from "./Composer";
+import type { ComposerActivityState } from "./features/conversation/composerActivity";
 import { LocaleProvider } from "./i18n";
 import type { AgentBinding, ReasoningEffort, RunContext, SkillBinding } from "./types";
 
@@ -13,24 +14,37 @@ afterEach(() => {
 });
 
 const context: RunContext = {
+  modelRef: {
+    connectionId: "deepseek-default",
+    modelId: "deepseek-v4-flash",
+  },
   providerName: "deepseek",
   modelName: "deepseek-v4-flash",
-  availableModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
   modelOptions: [
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      displayName: "DeepSeek V4 Flash",
+      availability: "available",
+      recommendation: "recommended",
+      provenance: "bundled",
       modelName: "deepseek-v4-flash",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding",
     },
     {
+      modelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+      displayName: "DeepSeek V4 Pro",
+      availability: "available",
+      recommendation: "standard",
+      provenance: "bundled",
       modelName: "deepseek-v4-pro",
       availableReasoningEfforts: ["low", "medium", "high", "max"],
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "effort-binding-pro",
     },
   ],
-  modelSelection: "per_run",
+  modelSelection: "fresh_session",
   modelSelectionBinding: "model-binding",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -144,11 +158,27 @@ const context: RunContext = {
           indexFingerprint: "index-sha",
         },
       },
+      {
+        id: "compat-command-continue",
+        invocationToken: "/继续写",
+        name: "继续写",
+        description: "Continue drafting.",
+        source: "workspace",
+        runMode: "inline",
+        trust: "trusted",
+        available: true,
+        binding: {
+          skillId: "compat-command-continue",
+          skillSha256: "continue-sha",
+          indexFingerprint: "index-sha",
+        },
+      },
     ],
     agents: [
       {
         id: "explore",
         invocationToken: "@explore",
+        name: "Explore",
         description: "Read-only exploration agent.",
         source: "system",
         kind: "subagent",
@@ -164,6 +194,7 @@ const context: RunContext = {
       {
         id: "disabled",
         invocationToken: "@disabled",
+        name: "Disabled",
         description: "Disabled agent.",
         source: "workspace",
         kind: "subagent",
@@ -176,6 +207,7 @@ const context: RunContext = {
       {
         id: "plan",
         invocationToken: "@plan",
+        name: "Plan",
         description: "Planning agent.",
         source: "system",
         kind: "primary",
@@ -186,6 +218,22 @@ const context: RunContext = {
         binding: {
           profileId: "plan",
           snapshotId: "plan-snapshot",
+        },
+      },
+      {
+        id: "compat-agent-planner",
+        invocationToken: "@正典提升员",
+        name: "正典提升员",
+        description: "Improve story canon.",
+        source: "compatibility",
+        kind: "subagent",
+        trust: "trusted",
+        enabled: true,
+        userInvocable: true,
+        available: true,
+        binding: {
+          profileId: "compat-agent-planner",
+          snapshotId: "planner-snapshot",
         },
       },
     ],
@@ -209,6 +257,9 @@ function renderComposer(overrides: {
   onOpenSupport?: () => void;
   onPreviewCompaction?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
+  activityState?: ComposerActivityState;
+  runContext?: RunContext;
+  onModelChange?: (modelName: string) => void;
 } = {}) {
   const onSubmit = overrides.onSubmit ?? vi.fn(async (
     _prompt: string,
@@ -224,6 +275,9 @@ function renderComposer(overrides: {
   const onOpenSupport = overrides.onOpenSupport ?? vi.fn(() => undefined);
   const onPreviewCompaction = overrides.onPreviewCompaction ?? vi.fn(() => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
+  const runContext = overrides.runContext ?? context;
+  const onModelChange =
+    overrides.onModelChange ?? vi.fn((_modelName: string) => undefined);
   render(
     <LocaleProvider>
       <Composer
@@ -233,16 +287,17 @@ function renderComposer(overrides: {
         submitting={false}
         controlBusy={false}
         composerRef={createRef<HTMLTextAreaElement>()}
-        runContext={context}
+        runContext={runContext}
         runContextBusy={false}
-        selectedModelName={context.modelName}
+        selectedModelName={runContext.modelName}
         permissionMode="manual"
         reasoningEffort="max"
         queueCount={overrides.queueCount ?? 0}
         queuePaused={overrides.queuePaused ?? false}
         queueBusy={overrides.queueBusy ?? false}
+        activityState={overrides.activityState}
         queuePanel={overrides.queuePanel}
-        onModelChange={() => undefined}
+        onModelChange={onModelChange}
         onPermissionModeChange={() => undefined}
         onReasoningEffortChange={onReasoningEffortChange}
         onNewSession={async () => true}
@@ -270,10 +325,44 @@ function renderComposer(overrides: {
     onOpenSupport,
     onPreviewCompaction,
     onNotice,
+    onModelChange,
   };
 }
 
 describe("structured composer", () => {
+  it("labels unverified exact models and keeps them selectable", async () => {
+    const onModelChange = vi.fn();
+    const unverifiedContext: RunContext = {
+      ...context,
+      modelOptions: context.modelOptions.map((option) =>
+        option.modelName === "deepseek-v4-pro"
+          ? { ...option, availability: "unverified", provenance: "bundled" }
+          : option,
+      ),
+    };
+    renderComposer({ runContext: unverifiedContext, onModelChange });
+
+    const model = screen.getByRole("combobox", { name: "Model" });
+    const unverified = within(model).getByRole("option", {
+      name: /DeepSeek V4 Pro.*Unverified/,
+    }) as HTMLOptionElement;
+    expect(unverified.disabled).toBe(false);
+
+    await userEvent.setup().selectOptions(
+      model,
+      "deepseek-default/deepseek-v4-pro",
+    );
+    expect(onModelChange).toHaveBeenCalledWith("deepseek-v4-pro");
+  });
+
+  it("keeps the current task state visible above the composer", () => {
+    renderComposer({ active: true, activityState: "running" });
+
+    const status = screen.getByRole("status");
+    expect(within(status).getByText("Sigil is working")).toBeTruthy();
+    expect(within(status).getByText("Live output is updating. New messages will be queued.")).toBeTruthy();
+  });
+
   it("focuses the editor without asking WebKit to reveal it by scrolling", () => {
     renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
@@ -299,8 +388,13 @@ describe("structured composer", () => {
     expect(input.getAttribute("aria-controls")).toBe(listbox.id);
     expect(input.getAttribute("aria-activedescendant")).toBe(firstOption.id);
 
+    const secondOption = screen.getAllByRole("option")[1];
+    Object.defineProperty(listbox, "clientHeight", { configurable: true, value: 80 });
+    Object.defineProperty(secondOption, "offsetTop", { configurable: true, value: 96 });
+    Object.defineProperty(secondOption, "offsetHeight", { configurable: true, value: 48 });
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(screen.getAllByRole("option")[1].id);
+    expect(input.getAttribute("aria-activedescendant")).toBe(secondOption.id);
+    expect(listbox.scrollTop).toBe(64);
     fireEvent.keyDown(input, { key: "Escape" });
     expect(input.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -340,6 +434,23 @@ describe("structured composer", () => {
     }, undefined);
   });
 
+  it("invokes a workspace compatibility command through its human slash token", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    await user.type(input, "/继续写");
+    expect(screen.getByRole("option", { name: /Continue drafting/ })).toBeTruthy();
+    await user.type(input, " 下一章");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("下一章", {
+      skillId: "compat-command-continue",
+      skillSha256: "continue-sha",
+      indexFingerprint: "index-sha",
+    }, undefined);
+  });
+
   it("selects an exact agent snapshot and submits only the task prompt", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderComposer();
@@ -353,6 +464,20 @@ describe("structured composer", () => {
     expect(onSubmit).toHaveBeenCalledWith("inspect src/lib.rs", undefined, {
       profileId: "explore",
       snapshotId: "agent-snapshot",
+    });
+  });
+
+  it("invokes a workspace compatibility agent through its human mention token", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    await user.type(input, "@正典提升员 检查本章");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("检查本章", undefined, {
+      profileId: "compat-agent-planner",
+      snapshotId: "planner-snapshot",
     });
   });
 

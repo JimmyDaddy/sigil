@@ -72,22 +72,63 @@ struct FailingTaskPreparation {
     requests: Mutex<Vec<ApplicationTaskContinuationRequest>>,
 }
 
+fn write_production_test_config(path: &std::path::Path, workspace_root: &str) {
+    let config = format!(
+        r#"config_version = 2
+
+[workspace]
+root = "{workspace_root}"
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = {{ source = "none" }}
+"#
+    );
+    std::fs::write(path, config).expect("production test config should write");
+}
+
+fn write_reasoning_test_config(path: &std::path::Path) {
+    let config = r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "deepseek-test"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-test]
+label = "DeepSeek test"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#;
+    std::fs::write(path, config).expect("reasoning test config should write");
+}
+
+fn production_test_model_route(
+    temp: &tempfile::TempDir,
+) -> (String, sigil_kernel::ResolvedModelRoute) {
+    let config = sigil_kernel::RootConfig::load(&temp.path().join("sigil.toml"))
+        .expect("config should load");
+    sigil_runtime::provider_connections::resolve_default_model_route(&config)
+        .expect("V2 model route should resolve")
+}
+
 fn production_queue_driver(
     temp: &tempfile::TempDir,
     journal_suffix: &str,
 ) -> Arc<HttpProductionRunDriver> {
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("queue test config should write");
+    write_production_test_config(&config_path, ".");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(
             temp.path().join(format!("protocol-{journal_suffix}.json")),
@@ -133,12 +174,21 @@ async fn production_supervisor_routes_typed_task_continuation_to_shared_preparer
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = { source = "none" }
 
 [task]
 enabled = true
@@ -229,12 +279,10 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
     let session_path = temp.path().join(format!("{name}.jsonl"));
     let store = sigil_kernel::JsonlSessionStore::new(&session_path)
         .expect("queue session store should initialize");
-    let mut session = sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let (provider_name, route) = production_test_model_route(temp);
+    let mut session = sigil_kernel::Session::new_with_route(provider_name, route).with_store(store);
     session
-        .append_control(ControlEntry::SessionIdentity {
-            provider_name: "deepseek".to_owned(),
-            model_name: "deepseek-v4-flash".to_owned(),
-        })
+        .ensure_identity_entry()
         .expect("queue session identity should append");
     let durable_session_scope_id = session.session_scope_id().to_owned();
     drop(session);
@@ -788,6 +836,7 @@ async fn production_queue_exact_prompt_is_process_local_and_requires_reentry_aft
 async fn production_queue_restart_rebinds_persisted_reasoning_effort_before_dispatch() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "effort-owner-1");
+    write_reasoning_test_config(&temp.path().join("sigil.toml"));
     let mut session = production_queue_session(&temp);
     let initial = driver
         .conversation_queue_view(&session, None)
@@ -810,6 +859,7 @@ async fn production_queue_restart_rebinds_persisted_reasoning_effort_before_disp
     drop(driver);
 
     let restarted = production_queue_driver(&temp, "effort-owner-2");
+    write_reasoning_test_config(&temp.path().join("sigil.toml"));
     let admission = restarted
         .next_queued_run_admission(&session)
         .expect("restarted admission should project")
@@ -1580,17 +1630,7 @@ async fn production_queue_orphan_reconciliation_retries_frontier_drift() {
 async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation_failure_once() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("queue scheduler config should write");
+    write_production_test_config(&config_path, ".");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("scheduler-protocol.json"), 16)
             .expect("queue scheduler protocol journal should initialize"),
@@ -1850,23 +1890,17 @@ async fn production_driver_rejects_an_in_memory_only_event_bus() {
 async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_truth() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("test config should write");
+    write_production_test_config(&config_path, ".");
     let sessions = temp.path().join("sessions");
     std::fs::create_dir(&sessions).expect("session directory should create");
     let session_path = sessions.join("session-history.jsonl");
     let store = sigil_kernel::JsonlSessionStore::new(&session_path)
         .expect("durable session store should open");
-    let mut session = sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let (provider_name, route) = production_test_model_route(&temp);
+    let mut session = sigil_kernel::Session::new_with_route(provider_name, route).with_store(store);
+    session
+        .ensure_identity_entry()
+        .expect("durable session identity should append");
     session
         .append_user_message(sigil_kernel::ModelMessage::user("history"))
         .expect("durable message should append");
@@ -1932,6 +1966,8 @@ model = "deepseek-v4-flash"
         .expect("paused task run should append");
     let durable_session_id = session.session_scope_id().to_owned();
     drop(session);
+    bind_existing_application_session(&config_path, &session_path)
+        .expect("V2 fixture session should bind directly before HTTP reopen");
 
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 8)
@@ -1996,7 +2032,7 @@ model = "deepseek-v4-flash"
     assert_eq!(display.through_session_stream_sequence, "7");
     assert_eq!(display.total_items, "2");
     assert_eq!(display.items.len(), 2);
-    assert_eq!(display.items[1].display_order.session_stream_sequence, "2");
+    assert_eq!(display.items[1].display_order.session_stream_sequence, "3");
     assert!(display.live_provisional_anchor.is_none());
     let task = display
         .task_control
@@ -2049,17 +2085,7 @@ async fn production_driver_projects_and_executes_real_verification_rerun() {
     std::fs::write(workspace.join("note.txt"), "current\n").expect("fixture should write");
     let workspace = workspace.canonicalize().expect("workspace should resolve");
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "workspace"
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("test config should write");
+    write_production_test_config(&config_path, "workspace");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 16)
             .expect("protocol journal should initialize"),
@@ -2090,8 +2116,9 @@ model = "deepseek-v4-flash"
         .expect("session should bind");
     let store = sigil_kernel::JsonlSessionStore::new(&adapter_session.session_log_path)
         .expect("session store should open");
+    let (provider_name, route) = production_test_model_route(&temp);
     let mut session =
-        sigil_kernel::Session::load_from_store("deepseek", "deepseek-v4-flash", store)
+        sigil_kernel::Session::load_from_store(provider_name, route.model_ref.model_id, store)
             .expect("session should load");
     let task_id = TaskId::new("task_1").expect("task id");
     let step_id = TaskStepId::new("verify_1").expect("step id");
@@ -2246,17 +2273,7 @@ model = "deepseek-v4-flash"
 async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_reaping() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("test config should write");
+    write_production_test_config(&config_path, ".");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 16)
             .expect("protocol journal should initialize"),
@@ -2454,17 +2471,7 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
 async fn production_driver_uses_shared_runtime_preparation_and_records_typed_failure() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
-    std::fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )
-    .expect("test config should write");
+    write_production_test_config(&config_path, ".");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 32)
             .expect("protocol journal should initialize"),

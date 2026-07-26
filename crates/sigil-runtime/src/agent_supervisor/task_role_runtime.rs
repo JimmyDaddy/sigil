@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use sigil_kernel::{
     Agent, AgentRole, AgentRunOptions, Provider, RootConfig, SequentialTaskOrchestrator,
     TaskConfig, ToolRegistry,
@@ -7,16 +8,18 @@ use sigil_kernel::{
 use super::{AgentSupervisor, AgentSupervisorTaskChildRunner};
 
 /// Provider construction seam shared by TUI, application adapters, and evaluation harnesses.
+#[async_trait]
 pub trait TaskRoleProviderBuilder: Send + Sync {
-    fn build(&self, root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>>;
+    async fn build(&self, root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>>;
 }
 
 /// Default role-provider builder backed by the configured runtime provider registry.
 pub struct RuntimeTaskRoleProviderBuilder;
 
+#[async_trait]
 impl TaskRoleProviderBuilder for RuntimeTaskRoleProviderBuilder {
-    fn build(&self, root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
-        crate::build_role_provider(root_config, role)
+    async fn build(&self, root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+        crate::build_role_provider_async(root_config, role).await
     }
 }
 
@@ -35,7 +38,7 @@ pub struct TaskRoleRuntime {
 ///
 /// Returns an error when any configured role provider, scoped tool registry, or execution backend
 /// cannot be constructed before task participant dispatch.
-pub fn build_task_role_runtime(
+pub async fn build_task_role_runtime(
     root_config: &RootConfig,
     options: &AgentRunOptions,
     base_registry: &ToolRegistry,
@@ -43,15 +46,15 @@ pub fn build_task_role_runtime(
     role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> Result<TaskRoleRuntime> {
     let planner_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Planner)?;
+        build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
     let executor_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Executor)?;
+        build_role_provider(role_provider_builder, root_config, AgentRole::Executor).await?;
     let synthesis_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Planner)?;
+        build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
     let subagent_read_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentRead)?;
+        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentRead).await?;
     let subagent_write_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentWrite)?;
+        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentWrite).await?;
     let planner_registry =
         crate::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
             .into_registry();
@@ -118,13 +121,14 @@ pub fn build_task_role_runtime(
     })
 }
 
-fn build_role_provider(
+async fn build_role_provider(
     builder: &dyn TaskRoleProviderBuilder,
     root_config: &RootConfig,
     role: AgentRole,
 ) -> Result<Box<dyn Provider>> {
     builder
         .build(root_config, role)
+        .await
         .with_context(|| format!("failed to build {} task provider", role.as_str()))
 }
 

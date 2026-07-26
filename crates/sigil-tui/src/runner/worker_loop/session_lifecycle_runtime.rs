@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use sigil_kernel::{
-    ConversationForkOutput, ConversationForkProjection, ConversationTurnForkRequest,
-    JsonlSessionStore, RootConfig, fork_conversation_at_turn,
+    ControlEntry, ConversationForkOutput, ConversationForkProjection, ConversationTurnForkRequest,
+    JsonlSessionStore, ResolvedModelRoute, RootConfig, SessionLogEntry, fork_conversation_at_turn,
 };
 use sigil_runtime::{
     LocalSessionCatalogEntry, LocalSessionCatalogState, LocalSessionLifecycleService,
@@ -51,6 +51,8 @@ pub(in crate::runner) fn inspect_local_session(
 pub(in crate::runner) fn fork_local_session(
     service: &LocalSessionLifecycleService,
     source_path: &Path,
+    root_config: &RootConfig,
+    current_model_route: &ResolvedModelRoute,
 ) -> Result<ConversationForkOutput> {
     let entry = inspect_local_session(service, source_path)?;
     let records = JsonlSessionStore::read_event_records(&entry.path)
@@ -65,6 +67,12 @@ pub(in crate::runner) fn fork_local_session(
         .ok_or_else(|| anyhow!("source session has no parent directory"))?;
     let destination_path = allocate_fork_path(parent, current_unix_time_ms());
     let source_store = JsonlSessionStore::new(&entry.path)?;
+    let resolved_model_route = source_route_for_fork(&records, root_config, current_model_route)?;
+    let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
+        root_config,
+        &resolved_model_route,
+    )
+    .map_err(anyhow::Error::new)?;
     fork_conversation_at_turn(
         &source_store,
         &records,
@@ -72,14 +80,42 @@ pub(in crate::runner) fn fork_local_session(
             source_turn_digest: point.source_turn_digest,
             source_session_ref: entry.session_ref,
             destination_path,
-            provider_name: entry
-                .provider_name
-                .ok_or_else(|| anyhow!("source session has no provider identity"))?,
-            model_name: entry
-                .model_name
-                .ok_or_else(|| anyhow!("source session has no model identity"))?,
+            provider_name,
+            model_name: resolved_model_route.model_ref.model_id.clone(),
+            resolved_model_route: Some(resolved_model_route),
         },
     )
+}
+
+fn source_route_for_fork(
+    records: &[sigil_kernel::SessionStreamRecord],
+    root_config: &RootConfig,
+    current_model_route: &ResolvedModelRoute,
+) -> Result<ResolvedModelRoute> {
+    let mut persisted = None;
+    for record in records {
+        if let Some(SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            resolved_model_route: Some(route),
+            ..
+        })) = sigil_kernel::conversation_transcript_entry_from_record(record)?
+        {
+            persisted = Some(route);
+            break;
+        }
+    }
+    if let Some(route) = persisted
+        && sigil_runtime::provider_connections::validate_persisted_model_route(root_config, &route)
+            .is_ok()
+    {
+        return Ok(route);
+    }
+    sigil_runtime::provider_connections::validate_persisted_model_route(
+        root_config,
+        current_model_route,
+    )
+    .map_err(anyhow::Error::new)
+    .context("fork with current route requires the explicit current route to remain configured")?;
+    Ok(current_model_route.clone())
 }
 
 pub(in crate::runner) fn export_local_session(

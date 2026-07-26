@@ -48,6 +48,41 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
 }
 
 #[tokio::test]
+async fn provider_allows_unauthenticated_loopback_without_authorization_header() -> Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: [DONE]\n\n",
+    )
+    .await?;
+    let provider = OpenAiCompatibleProvider::new_exact(
+        OpenAiCompatibleProviderConfig {
+            base_url: server.base_url(),
+            api_key: None,
+            ..OpenAiCompatibleProviderConfig::default()
+        },
+        ModelRequestTimeouts::default(),
+    )?;
+
+    let chunks = provider
+        .stream(test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(matches!(
+        chunks[0].as_ref().expect("done"),
+        ProviderChunk::Done
+    ));
+    assert!(
+        !server
+            .request_text()
+            .to_ascii_lowercase()
+            .contains("authorization:")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_stream_surfaces_sse_events_from_http_response() -> Result<()> {
     let server = TinySseServer::start(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\

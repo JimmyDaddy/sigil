@@ -12,6 +12,7 @@ mod discovery;
 mod frontmatter;
 mod load;
 use discovery::{SkillCandidateKind, valid_skill_id};
+pub(crate) use discovery::{compatibility_source_enabled, compatibility_stable_id};
 pub use discovery::{discover_skill_index, discover_skill_index_with_user_dir};
 #[cfg(test)]
 use frontmatter::{clean_scalar, parse_inline_list};

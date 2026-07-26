@@ -2,7 +2,10 @@ use super::{AppAction, AppState, PaneFocus, SetupField};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config_panel::{ConfigField, ConfigFooterAction, ConfigSection};
+use crate::{
+    config_panel::{ConfigField, ConfigFooterAction, ConfigSection},
+    setup::SETUP_PROVIDER_ORDER,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ToolCardMouseAnchor {
@@ -535,7 +538,36 @@ impl AppState {
     }
 
     fn handle_setup_mouse_field(&mut self, index: usize) -> Result<crate::mouse::AppMouseOutcome> {
-        let Some(field) = SetupField::from_index(index) else {
+        if self
+            .setup_state
+            .as_ref()
+            .is_some_and(|state| state.selected_field == SetupField::Provider)
+        {
+            if index >= SETUP_PROVIDER_ORDER.len() {
+                return Ok(crate::mouse::AppMouseOutcome::Noop);
+            }
+            let activate = self
+                .setup_state
+                .as_ref()
+                .is_some_and(|state| state.provider_index() == index);
+            let state = self
+                .setup_state
+                .as_mut()
+                .expect("setup mouse target requires setup state");
+            state.select_provider_index(index);
+            self.last_notice = Some(format!("provider -> {}", state.provider_label()));
+            if activate {
+                return Ok(mouse_action_outcome(
+                    self.handle_setup_key_event(enter_key())?,
+                ));
+            }
+            return Ok(crate::mouse::AppMouseOutcome::Redraw);
+        }
+        let custom = self
+            .setup_state
+            .as_ref()
+            .is_some_and(|state| state.is_custom());
+        let Some(field) = SetupField::from_index(index, custom) else {
             return Ok(crate::mouse::AppMouseOutcome::Noop);
         };
         let activate = self

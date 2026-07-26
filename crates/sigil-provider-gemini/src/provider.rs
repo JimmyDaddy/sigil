@@ -45,6 +45,12 @@ impl GeminiProvider {
     /// Returns an error when environment overrides are invalid or the HTTP client cannot be built.
     pub fn new(config: GeminiProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
         let config = config.resolved()?;
+        Self::new_exact(config, timeouts)
+    }
+
+    /// Builds a provider from an already resolved connection snapshot without applying
+    /// process-environment overrides.
+    pub fn new_exact(config: GeminiProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
         Ok(Self {
             timeouts,
             client: build_http_client()?,

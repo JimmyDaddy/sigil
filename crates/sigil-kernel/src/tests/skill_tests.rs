@@ -231,6 +231,7 @@ fn sample_descriptor(id: &str, source: SkillSource) -> SkillDescriptor {
 fn sample_load_entry(skill_id: &str) -> SkillLoadEntry {
     SkillLoadEntry {
         skill_id: skill_id.to_owned(),
+        display_name: None,
         sha256: format!("sha256-{skill_id}"),
         source: SkillSource::Workspace,
         entrypoint: format!(".sigil/skills/{skill_id}/SKILL.md").into(),

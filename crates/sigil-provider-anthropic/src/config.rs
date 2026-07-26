@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fmt};
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
 pub const SIGIL_ANTHROPIC_VERSION_ENV: &str = "SIGIL_ANTHROPIC_VERSION";
 pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnthropicProviderConfig {
     #[serde(default = "default_base_url")]
@@ -28,6 +28,20 @@ pub struct AnthropicProviderConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub beta_headers: Vec<String>,
+}
+
+impl fmt::Debug for AnthropicProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("anthropic_version", &self.anthropic_version)
+            .field("max_tokens", &self.max_tokens)
+            .field("beta_headers", &self.beta_headers)
+            .finish()
+    }
 }
 
 impl AnthropicProviderConfig {

@@ -468,7 +468,8 @@ where
         &base_registry,
         agent_supervisor,
         role_provider_builder,
-    )?;
+    )
+    .await?;
     orchestrator
         .with_cancellation(cancellation_handle)
         .run(
@@ -542,7 +543,8 @@ where
         &base_registry,
         agent_supervisor,
         role_provider_builder,
-    )?;
+    )
+    .await?;
     let task_request = SequentialTaskRequest {
         task_id: task.task_id,
         parent_session_ref: task.parent_session_ref,

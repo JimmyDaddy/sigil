@@ -142,6 +142,14 @@ pub enum ConversationDisplayAssistantPhaseV1 {
     FinalAnswer,
 }
 
+/// User-selected skill bound to one durable prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationDisplaySkillReferenceV1 {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationDisplayApprovalDecisionV1 {
@@ -189,6 +197,8 @@ pub enum ConversationDisplayContentV1 {
         role: ConversationDisplayMessageRoleV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill: Option<ConversationDisplaySkillReferenceV1>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<ConversationDisplayAssistantPhaseV1>,
         image_attachment_count: usize,
@@ -696,6 +706,7 @@ pub fn conversation_display_page_from_records(
     let mut active_run: Option<ActiveRunProjection> = None;
     let mut tools = HashMap::<String, ToolProjection>::new();
     let mut approval_items = HashMap::<String, String>::new();
+    let mut run_skills = HashMap::<String, ConversationDisplaySkillReferenceV1>::new();
     let mut terminal_frontier = None;
     let mut task_control = ConversationTaskControlProjection::default();
     let mut total_items = 0_u64;
@@ -712,6 +723,7 @@ pub fn conversation_display_page_from_records(
             &mut active_run,
             &mut tools,
             &mut approval_items,
+            &mut run_skills,
             &mut terminal_frontier,
             &mut task_control,
         )?;
@@ -889,6 +901,7 @@ fn project_record(
     active_run: &mut Option<ActiveRunProjection>,
     tools: &mut HashMap<String, ToolProjection>,
     approval_items: &mut HashMap<String, String>,
+    run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
     task_control: &mut ConversationTaskControlProjection,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
@@ -915,6 +928,7 @@ fn project_record(
             active_run,
             tools,
             approval_items,
+            run_skills,
         );
     }
 
@@ -1095,10 +1109,16 @@ fn project_session_entry(
     active_run: &mut Option<ActiveRunProjection>,
     tools: &mut HashMap<String, ToolProjection>,
     approval_items: &mut HashMap<String, String>,
+    run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match entry {
         SessionLogEntry::User(message) => {
-            project_durable_user_message(record, expected_scope, message, active_run_id(active_run))
+            let run_id = active_run_id(active_run);
+            let skill = run_id
+                .as_ref()
+                .and_then(|run_id| run_skills.get(run_id))
+                .cloned();
+            project_durable_user_message(record, expected_scope, message, run_id, skill)
         }
         SessionLogEntry::Assistant(message) => {
             if message.role != MessageRole::Assistant {
@@ -1154,6 +1174,7 @@ fn project_session_entry(
                         run_id.clone(),
                         ConversationDisplayMessageRoleV1::Assistant,
                         Some(content),
+                        None,
                         map_assistant_phase(message.assistant_kind),
                         message.image_attachments.len(),
                     );
@@ -1255,9 +1276,14 @@ fn project_session_entry(
             }
             Ok(vec![item])
         }
-        SessionLogEntry::Control(control) => {
-            project_control(record, expected_scope, control, active_run, approval_items)
-        }
+        SessionLogEntry::Control(control) => project_control(
+            record,
+            expected_scope,
+            control,
+            active_run,
+            approval_items,
+            run_skills,
+        ),
     }
 }
 
@@ -1267,8 +1293,25 @@ fn project_control(
     control: ControlEntry,
     active_run: &Option<ActiveRunProjection>,
     approval_items: &mut HashMap<String, String>,
+    run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match control {
+        ControlEntry::SkillLoaded(entry) => {
+            if let Some(run_id) = entry.run_id {
+                let name = entry
+                    .display_name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| entry.skill_id.clone());
+                run_skills.insert(
+                    run_id,
+                    ConversationDisplaySkillReferenceV1 {
+                        id: bound_identity(&entry.skill_id),
+                        name: bound_identity(&name),
+                    },
+                );
+            }
+            Ok(Vec::new())
+        }
         ControlEntry::ConversationInputPromoted(promotion) => {
             project_promoted_user_message(record, expected_scope, promotion, active_run)
         }
@@ -1375,6 +1418,7 @@ fn project_promoted_user_message(
         expected_scope,
         promotion.durable_user_message,
         Some(promotion.dispatch_run_id),
+        None,
     )
 }
 
@@ -1383,6 +1427,7 @@ fn project_durable_user_message(
     expected_scope: &str,
     message: ModelMessage,
     run_id: Option<String>,
+    skill: Option<ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     if message.role != MessageRole::User {
         bail!("conversation display user entry has a non-user role");
@@ -1398,6 +1443,7 @@ fn project_durable_user_message(
         run_id.clone(),
         ConversationDisplayMessageRoleV1::User,
         content,
+        skill,
         None,
         message.image_attachments.len(),
     );
@@ -1444,6 +1490,7 @@ fn new_message_item(
     run_id: Option<String>,
     role: ConversationDisplayMessageRoleV1,
     text: Option<ProjectedText>,
+    skill: Option<ConversationDisplaySkillReferenceV1>,
     assistant_phase: Option<ConversationDisplayAssistantPhaseV1>,
     image_attachment_count: usize,
 ) -> ConversationDisplayItemV1 {
@@ -1464,6 +1511,7 @@ fn new_message_item(
         ConversationDisplayContentV1::Message {
             role,
             text: text.as_ref().map(|text| text.text.clone()),
+            skill,
             assistant_phase,
             image_attachment_count,
             truncated: text.as_ref().is_some_and(|text| text.truncated),

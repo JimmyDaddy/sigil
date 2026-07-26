@@ -18,6 +18,7 @@ pub(crate) fn test_config() -> RootConfig {
     };
 
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -33,6 +34,7 @@ pub(crate) fn test_config() -> RootConfig {
         session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -48,10 +50,37 @@ pub(crate) fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: std::collections::BTreeMap::new(),
+        providers: std::collections::BTreeMap::from([(
+            "deepseek".to_owned(),
+            serde_json::json!({
+                "base_url": "https://api.deepseek.com"
+            }),
+        )]),
+        connections: std::collections::BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
+}
+
+pub(crate) fn v2_test_config() -> RootConfig {
+    let base = test_config();
+    let connection_id =
+        sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id");
+    let (connection, model_id) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::DeepSeek,
+        sigil_runtime::provider_connections::ProviderProtocol::DeepSeek,
+        connection_id.clone(),
+        "DeepSeek",
+    )
+    .expect("test provider connection");
+    let default_model =
+        sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
+    sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &std::collections::BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )
+    .expect("test V2 config")
 }
 
 pub(crate) fn resolved_session_log_dir(config: &RootConfig, workspace_root: &Path) -> PathBuf {
@@ -64,6 +93,7 @@ pub(crate) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<Ses
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: provider_name.to_owned(),
             model_name: model_name.to_owned(),
+            resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("restored user prompt")),
         SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "restored tool output")),
@@ -473,6 +503,7 @@ pub(crate) fn child_agent_entries_with(
                     profile_snapshot_id: snapshot_id,
                     provider: "deepseek".to_owned(),
                     model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
                     reasoning_effort: None,
                     workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
                     effective_tool_scope_hash: "sha256:tools".to_owned(),

@@ -1,31 +1,37 @@
 use anyhow::{Result, anyhow, bail};
-use sigil_kernel::{CodeIntelligenceConfig, RootConfig};
+use sigil_kernel::{CodeIntelligenceConfig, RootConfig, SecretString};
 use sigil_runtime::{
-    DeepSeekProviderConfigFields, ModelRequestConfigFields, ProviderConfigFields,
-    deepseek_provider_config_fields, model_request_config_fields, set_model_request_config_fields,
-    set_provider_config_fields, supported_provider_name,
+    ModelRequestConfigFields, deepseek_provider_config_fields, model_request_config_fields,
+    provider_connections::materialize_v2_root_config, set_model_request_config_fields,
+    supported_provider_name,
 };
 
 use super::appearance::{first_appearance_color_group_index, first_appearance_color_token_index};
-use super::provider::{current_provider_field_draft, provider_drafts_from_root_config};
+use super::connections::{connection_drafts_from_root_config, provider_key_for_connection};
 use super::{ConfigDraft, DEEPSEEK_PROVIDER_KEY, McpServerDraft, normalize_provider_name};
 
 impl ConfigDraft {
     pub(crate) fn from_root_config(root_config: &RootConfig) -> Self {
-        let provider_name = normalize_provider_name(&root_config.agent.provider).to_owned();
+        let (connection_drafts, default_model, selected_connection_id) =
+            connection_drafts_from_root_config(root_config)
+                .expect("validated runtime config must expose a default provider connection");
+        let selected_connection = connection_drafts
+            .get(&selected_connection_id)
+            .expect("default provider connection must be present");
+        let provider_name = provider_key_for_connection(&selected_connection.config).to_owned();
         let deepseek_fields =
             deepseek_provider_config_fields(root_config, &root_config.agent.model);
-        let provider_drafts = provider_drafts_from_root_config(root_config);
-        let current_provider_draft =
-            current_provider_field_draft(root_config, &provider_name, &provider_drafts);
         let model_request_fields = model_request_config_fields(root_config);
-        Self {
+        let mut draft = Self {
             base_root_config: root_config.clone(),
             provider_name: provider_name.clone(),
-            provider_model: current_provider_draft.model,
-            provider_api_key: current_provider_draft.api_key,
-            provider_base_url: current_provider_draft.base_url,
-            provider_drafts,
+            provider_model: selected_connection.model.clone(),
+            provider_api_key: SecretString::default(),
+            provider_base_url: selected_connection.config.base_url.clone(),
+            connection_drafts,
+            selected_connection_id,
+            default_model,
+            confirmed_legacy_environment: Default::default(),
             provider_beta_base_url: deepseek_fields.beta_base_url,
             provider_anthropic_base_url: deepseek_fields.anthropic_base_url,
             provider_user_id_strategy: deepseek_fields.user_id_strategy,
@@ -81,17 +87,30 @@ impl ConfigDraft {
                 .iter()
                 .map(McpServerDraft::from_config)
                 .collect(),
-        }
+        };
+        draft
+            .load_selected_connection()
+            .expect("default provider connection must load");
+        draft
     }
 
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
+        let root_config = self.to_base_root_config()?;
+        let connection_save = self.connection_save_draft()?;
+        materialize_v2_root_config(
+            &root_config,
+            &connection_save.connections,
+            &connection_save.default_model,
+        )
+    }
+
+    pub(crate) fn to_base_root_config(&self) -> Result<RootConfig> {
         let provider_name = normalize_provider_name(&self.provider_name);
         supported_provider_name(provider_name)?;
         let model = self.provider_model.trim();
         if model.is_empty() {
             bail!("model cannot be empty");
         }
-        let api_key = self.provider_api_key.trim();
         let base_url = self.provider_base_url.trim();
         if base_url.is_empty() {
             bail!("base_url cannot be empty");
@@ -174,8 +193,6 @@ impl ConfigDraft {
             })?;
 
         let mut root_config = self.base_root_config.clone();
-        root_config.agent.provider = provider_name.to_owned();
-        root_config.agent.model = model.to_owned();
         root_config.permission.mode = self.permission_mode;
         root_config.web.enabled = self.web_enabled;
         root_config.web.network_mode = self.web_network_mode;
@@ -213,29 +230,11 @@ impl ConfigDraft {
             .map(|(index, server)| server.to_config(index))
             .collect::<Result<Vec<_>>>()?;
 
-        let provider_fields = ProviderConfigFields {
-            model: model.to_owned(),
-            api_key: api_key.to_owned(),
-            base_url: base_url.to_owned(),
-        };
         let model_request_fields = ModelRequestConfigFields {
             request_timeout_secs: self.model_request_timeout_secs.clone(),
             stream_idle_timeout_secs: self.model_request_stream_idle_timeout_secs.clone(),
         };
         set_model_request_config_fields(&mut root_config, &model_request_fields)?;
-        let deepseek_fields = DeepSeekProviderConfigFields {
-            beta_base_url: self.provider_beta_base_url.trim().to_owned(),
-            anthropic_base_url: self.provider_anthropic_base_url.trim().to_owned(),
-            user_id_strategy: self.provider_user_id_strategy.trim().to_owned(),
-            strict_tools_mode: self.provider_strict_tools_mode,
-            fim_model: self.provider_fim_model.trim().to_owned(),
-        };
-        set_provider_config_fields(
-            &mut root_config,
-            provider_name,
-            &provider_fields,
-            Some(&deepseek_fields),
-        )?;
         Ok(root_config)
     }
 

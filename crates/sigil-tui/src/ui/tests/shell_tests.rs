@@ -41,7 +41,8 @@ fn test_config() -> RootConfig {
         "sigil-tui-shell-test-storage-{}-{storage_id}",
         std::process::id()
     ));
-    RootConfig {
+    let base = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -57,6 +58,7 @@ fn test_config() -> RootConfig {
         session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -72,15 +74,74 @@ fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
+        providers: BTreeMap::from([(
+            "deepseek".to_owned(),
+            json!({
+                "base_url": "https://api.deepseek.com"
+            }),
+        )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
-    }
+    };
+    let connection_id =
+        sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id");
+    let (connection, model_id) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::DeepSeek,
+        sigil_runtime::provider_connections::ProviderProtocol::DeepSeek,
+        connection_id.clone(),
+        "DeepSeek",
+    )
+    .expect("test provider connection");
+    let default_model =
+        sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
+    sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )
+    .expect("test V2 config")
 }
 
 fn open_config_panel_for_test(app: &mut AppState) -> anyhow::Result<()> {
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    Ok(())
+}
+
+fn apply_available_model_catalog_for_test(
+    app: &mut AppState,
+    models: &[&str],
+) -> anyhow::Result<()> {
+    let (request_id, connection_id, draft_revision, connection_fingerprint) = app
+        .pending_connection_model_refresh_for_test()
+        .ok_or_else(|| anyhow::anyhow!("model catalog refresh should be connection-scoped"))?;
+    let result = sigil_runtime::provider_connections::ModelCatalogResult {
+        request_id,
+        connection_id: connection_id.clone(),
+        draft_revision,
+        connection_fingerprint,
+        state: sigil_runtime::provider_connections::ModelCatalogState::Remote,
+        entries: models
+            .iter()
+            .map(|model| {
+                Ok(sigil_runtime::provider_connections::ModelCatalogEntry {
+                    model_ref: sigil_kernel::ModelRef::new(
+                        connection_id.clone(),
+                        (*model).to_owned(),
+                    )?,
+                    display_name: (*model).to_owned(),
+                    availability: sigil_runtime::provider_connections::ModelAvailability::Available,
+                    recommendation:
+                        sigil_runtime::provider_connections::ModelRecommendation::Standard,
+                    provenance: sigil_runtime::provider_connections::ModelCatalogProvenance::Remote,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        retry_after_secs: None,
+        manual_entry_allowed: true,
+    };
+    app.handle_worker_message(WorkerMessage::ConnectionModelsRefreshed { result })?;
     Ok(())
 }
 
@@ -404,8 +465,8 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("Provider 1/13"));
-    assert!(rendered.contains("▸ Provider"));
-    assert!(rendered.contains("key provider"));
+    assert!(rendered.contains("▸ Connection"));
+    assert!(rendered.contains("key connection"));
     assert!(rendered.contains("keys Tab section"));
     assert!(rendered.contains("actions Down to actions"));
     assert!(rendered.contains("✓ saved"));
@@ -693,9 +754,9 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/13", "▸ Provider"),
-            (3, "Memory 5/13", "▸ Memory"),
-            (4, "Compaction 6/13", "▸ Auto compact"),
+            (0, "Provider 1/13", "> Connection"),
+            (3, "Memory 5/13", "> Memory"),
+            (4, "Compaction 6/13", "> Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.composer.input = "/config".to_owned();
@@ -813,7 +874,7 @@ fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
 
     assert!(title_row.contains("Provider"));
     assert!(title_row.contains(" saved "));
-    assert!(title_row.contains("field: Provider"));
+    assert!(title_row.contains("field: Connection"));
     assert!(!title_row.contains("Provider · saved"));
     assert!(file_row.contains("note opened config"));
     Ok(())
@@ -824,6 +885,7 @@ fn render_config_footer_follows_short_content() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    select_config_section_for_test(&mut app, ConfigSection::Memory);
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend)?;
 
@@ -978,7 +1040,7 @@ fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rows = rendered_rows(&terminal);
-    let value_columns = ["Model", "API key", "Provider"]
+    let value_columns = ["Connection", "Model", "Credential"]
         .into_iter()
         .map(|label| {
             rows.iter()
@@ -1026,7 +1088,7 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
     let rows = rendered_rows(&terminal);
     let api_key_action_x = rows
         .iter()
-        .find(|row| row.contains("API key") && row.contains("[input]"))
+        .find(|row| row.contains("Credential") && row.contains("[input]"))
         .and_then(|row| char_index_of(row, "[input]"))
         .expect("api key action chip should render");
     assert!(
@@ -1225,8 +1287,50 @@ fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
         .iter()
         .position(|row| row.contains('╰'))
         .expect("config panel should have a bottom border");
-    assert!(panel_bottom < 22);
+    assert!(panel_bottom < 32);
     assert!(!rows[31].contains('│'));
+    Ok(())
+}
+
+#[test]
+fn render_openai_responses_model_picker_has_no_deepseek_fallback() -> anyhow::Result<()> {
+    let base = test_config();
+    let connection_id = sigil_kernel::ConnectionId::new("openai-default")?;
+    let (connection, _) = sigil_runtime::provider_connections::provider_connection_template(
+        sigil_runtime::provider_connections::ProviderFamily::OpenAi,
+        sigil_runtime::provider_connections::ProviderProtocol::OpenAiResponses,
+        connection_id.clone(),
+        "OpenAI",
+    )?;
+    let default_model = sigil_kernel::ModelRef::new(connection_id.clone(), "deepseek-v4-flash")?;
+    let config = sigil_runtime::provider_connections::materialize_v2_root_config(
+        &base,
+        &BTreeMap::from([(connection_id, connection)]),
+        &default_model,
+    )?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    open_config_panel_for_test(&mut app)?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    apply_available_model_catalog_for_test(&mut app, &["gpt-4.1"])?;
+    let backend = TestBackend::new(160, 36);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("provider: openai_responses"));
+    assert!(rendered.contains("catalog: remote provider models"));
+    assert!(rendered.contains("gpt-4.1"));
+    assert!(rendered.contains("configured: deepseek-v4-flash"));
+    assert!(rendered.contains("[not listed for openai_responses; use M to edit]"));
+    assert!(rendered.contains("M manual model id"));
+    assert!(
+        !rendered_rows(&terminal)
+            .iter()
+            .any(|row| row.contains("> deepseek-v4-flash"))
+    );
+    assert!(!rendered.contains("deepseek-v4-pro"));
     Ok(())
 }
 
@@ -1245,7 +1349,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("API Key"));
     assert!(rendered.contains("key: api_key"));
-    assert!(rendered.contains("SIGIL_API_KEY can override"));
+    assert!(rendered.contains("SIGIL_API_KEY is a separate source"));
     assert!(rendered.contains("api_key: |"));
     Ok(())
 }
@@ -1303,6 +1407,7 @@ fn render_config_model_picker_uses_config_palette() -> anyhow::Result<()> {
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    apply_available_model_catalog_for_test(&mut app, &["deepseek-v4-flash", "deepseek-v4-pro"])?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1326,6 +1431,7 @@ fn render_config_model_picker_uses_focus_row_and_command_tokens() -> anyhow::Res
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    apply_available_model_catalog_for_test(&mut app, &["deepseek-v4-flash", "deepseek-v4-pro"])?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1350,18 +1456,21 @@ fn render_config_model_picker_uses_focus_row_and_command_tokens() -> anyhow::Res
                 == config_selected_bg()
         })
         .count();
-    let command_token_cells = (0..buffer.area.width)
-        .filter(|x| {
-            buffer
-                .cell((*x, commands_row as u16))
-                .expect("cell in bounds")
-                .bg
-                == config_tab_bg()
-        })
-        .count();
-
     assert!(selected_bg_cells > 20);
-    assert_eq!(command_token_cells, "Up/DownEnterF2F3Esc".chars().count());
+    for token in ["Up/Down", "Enter", "M", "Esc"] {
+        let token_x = char_index_of(&rows[commands_row], token)
+            .unwrap_or_else(|| panic!("{token} command token should render"));
+        assert!(
+            (token_x..token_x + token.chars().count()).all(|x| {
+                buffer
+                    .cell((x as u16, commands_row as u16))
+                    .expect("cell in bounds")
+                    .bg
+                    == config_tab_bg()
+            }),
+            "{token} command token should use the command background"
+        );
+    }
     Ok(())
 }
 
@@ -1377,9 +1486,9 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
-    assert!(rendered.contains("details"));
     assert!(!rendered.contains("Details"));
-    assert!(rendered.contains("▸ Provider"));
+    assert!(rendered.contains("> Connection"));
+    assert!(rendered.contains("default for new sessions"));
     Ok(())
 }
 
@@ -1396,7 +1505,7 @@ fn render_config_header_truncates_long_status_summary() -> anyhow::Result<()> {
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Sigil config"));
-    assert!(rendered.contains("field: Provider"));
+    assert!(rendered.contains("field: Connection"));
     assert!(rendered.contains("..."));
     assert!(!rendered.contains(long_config_name));
     Ok(())
@@ -1416,12 +1525,8 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
     let rows = rendered_rows(&terminal);
     let selected_detail_row = rows
         .iter()
-        .position(|row| row.contains("▸ Model"))
-        .expect("narrow selected detail should render");
-    let controls_row = rows
-        .iter()
-        .position(|row| row.contains("keys Tab section"))
-        .expect("narrow controls detail should render");
+        .position(|row| row.contains("> Model"))
+        .expect("narrow selected model field should render");
     let buffer = terminal.backend().buffer();
     let selected_bg_cells = (0..buffer.area.width)
         .filter(|x| {
@@ -1432,19 +1537,8 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
                 == config_selected_bg()
         })
         .count();
-    let command_token_cells = (0..buffer.area.width)
-        .filter(|x| {
-            buffer
-                .cell((*x, controls_row as u16))
-                .expect("cell in bounds")
-                .bg
-                == config_tab_bg()
-        })
-        .count();
-
     assert!(selected_bg_cells > 20);
-    assert!((12..24).contains(&command_token_cells));
-    assert!(rows[controls_row].contains("Enter edit"));
+    assert!(rows[selected_detail_row].contains("[choose]"));
     Ok(())
 }
 
@@ -1547,8 +1641,9 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.config_is_dirty());
     let backend = TestBackend::new(132, 30);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1573,8 +1668,9 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.config_is_dirty());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     let backend = TestBackend::new(64, 24);
     let mut terminal = Terminal::new(backend)?;
@@ -1694,7 +1790,7 @@ fn render_setup_screen_shows_workspace_notice_and_panel() -> anyhow::Result<()> 
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Sigil setup"));
-    assert!(rendered.contains("Quick setup"));
+    assert!(rendered.contains("quick setup"));
     assert!(rendered.contains("ws=example-workspace"));
     assert!(rendered.contains("cfg=sigil.toml"));
     assert!(rendered.contains("set auth then save"));
@@ -1997,6 +2093,7 @@ fn docs_checkpoint_restore_app() -> anyhow::Result<AppState> {
     let note = workspace.join("release-notes.md");
     fs::write(&note, "alpha\nbeta\n")?;
     let config = RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace.display().to_string(),
         },

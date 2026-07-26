@@ -38,7 +38,10 @@ use crate::{
         DesktopConversationDisplayRequest, DesktopConversationQueueCommandInput,
         DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandInput, DesktopConversationRecoveryCommandReceipt,
-        DesktopConversationRecoveryView, DesktopExternalUrlInput, DesktopRunAttachInput,
+        DesktopConversationRecoveryView, DesktopExternalUrlInput,
+        DesktopProviderConnectionInventorySummary, DesktopProviderLegacyMigrationSummary,
+        DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
+        DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
         DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
         DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
         DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
@@ -132,6 +135,110 @@ pub(crate) async fn desktop_support_doctor(
         .await
         .map(Into::into)
         .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_provider_connections(
+    workspace_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderConnectionInventorySummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .provider_connections()
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_migrate_legacy_provider_connections(
+    workspace_id: String,
+    expected_revision: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderLegacyMigrationSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    if expected_revision.is_empty() || expected_revision.len() > 128 {
+        return Err(DesktopCommandError::new(
+            "invalid_provider_migration_request",
+            "invalid provider migration revision",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .migrate_legacy_provider_connections(expected_revision)
+        .await
+        .map(Into::into)
+        .map_err(project_provider_migration_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_recheck_legacy_provider_migration(
+    workspace_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderConnectionInventorySummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .recheck_legacy_provider_migration()
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_provider_setup_catalog(
+    workspace_id: String,
+    input: DesktopProviderSetupCatalogInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderSetupCatalogSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .provider_setup_catalog(input.into_native())
+        .await
+        .map(Into::into)
+        .map_err(project_provider_migration_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_save_provider_setup(
+    workspace_id: String,
+    input: DesktopProviderSetupSaveInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderSetupSaveSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .save_provider_setup(input.into_native())
+        .await
+        .map(Into::into)
+        .map_err(project_provider_migration_client_error)
 }
 
 #[tauri::command]
@@ -1248,7 +1355,10 @@ pub(crate) async fn desktop_create_session(
 ) -> Result<DesktopSessionSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
     validate_optional_label(input.label.as_deref())?;
-    validate_optional_model(input.model_name.as_deref())?;
+    if let Some(model_ref) = input.model_ref.as_ref() {
+        validate_connection_id(&model_ref.connection_id)?;
+        validate_optional_model(Some(&model_ref.model_id))?;
+    }
     let client = state
         .manager
         .lock()
@@ -1258,7 +1368,12 @@ pub(crate) async fn desktop_create_session(
     client
         .create_session(DesktopSessionCreateRequest {
             label: input.label,
-            model_name: input.model_name,
+            model_ref: input
+                .model_ref
+                .map(|model_ref| sigil_desktop::DesktopProviderModelRef {
+                    connection_id: model_ref.connection_id,
+                    model_id: model_ref.model_id,
+                }),
         })
         .await
         .map(Into::into)
@@ -1605,6 +1720,21 @@ fn validate_optional_model(value: Option<&str>) -> Result<(), DesktopCommandErro
     Ok(())
 }
 
+fn validate_connection_id(value: &str) -> Result<(), DesktopCommandError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(DesktopCommandError::new(
+            "session_connection_invalid",
+            "The selected provider connection is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_display_name(value: &str) -> Result<(), DesktopCommandError> {
     if value.is_empty()
         || value.trim() != value
@@ -1790,7 +1920,12 @@ fn validate_recovery_action(
         }
         crate::ipc::DesktopConversationRecoveryActionInput::ForkConversation {
             source_turn_digest,
-        } => validate_recovery_token(source_turn_digest),
+            model_ref,
+        } => {
+            validate_recovery_token(source_turn_digest)?;
+            validate_recovery_token(&model_ref.connection_id)?;
+            validate_recovery_token(&model_ref.model_id)
+        }
     }
 }
 
@@ -2084,6 +2219,67 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
             DesktopRecoveryAction::OpenDiagnostics,
             DesktopRecoveryAction::ShowDetails,
         ]),
+    }
+}
+
+fn project_provider_migration_client_error(error: DesktopClientError) -> DesktopCommandError {
+    let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
+    else {
+        return project_client_error(error);
+    };
+    match code.as_str() {
+        "provider_migration_stale" => DesktopCommandError::new(
+            "provider_migration_stale",
+            "Provider configuration changed. Reload the migration details before retrying.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+        "provider_migration_not_required" => DesktopCommandError::new(
+            "provider_migration_not_required",
+            "Provider configuration no longer requires legacy migration.",
+        ),
+        "credential_store_unavailable"
+        | "credential_store_rejected"
+        | "credential_readback_mismatch"
+        | "provider_migration_publish_failed"
+        | "provider_migration_config_unavailable" => DesktopCommandError::new(
+            match code.as_str() {
+                "credential_store_unavailable" => "credential_store_unavailable",
+                "credential_store_rejected" => "credential_store_rejected",
+                "credential_readback_mismatch" => "credential_readback_mismatch",
+                "provider_migration_config_unavailable" => {
+                    "provider_migration_config_unavailable"
+                }
+                _ => "provider_migration_publish_failed",
+            },
+            "Provider migration did not complete. Review protected credential storage and retry.",
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenDiagnostics,
+        ]),
+        "provider_migration_rollback_incomplete" => DesktopCommandError::new(
+            "provider_migration_rollback_incomplete",
+            "Provider migration stopped, but credential cleanup requires diagnostics.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
+        "provider_migration_reconcile_required" => DesktopCommandError::new(
+            "provider_migration_reconcile_required",
+            "Provider migration publication is uncertain. Reload configuration and open diagnostics before continuing.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
+        "provider_migration_recovery_unavailable" => DesktopCommandError::new(
+            "provider_migration_recovery_unavailable",
+            "Provider migration recovery state is unavailable. Open diagnostics before retrying.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
+        "provider_migration_blocked" => DesktopCommandError::new(
+            "provider_migration_blocked",
+            "The legacy provider configuration must be repaired before migration.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
+        _ => project_client_error(error),
     }
 }
 

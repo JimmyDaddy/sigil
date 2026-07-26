@@ -71,6 +71,7 @@ fn append_context_window_rejection(
 
 fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -78,6 +79,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
             state_root: StorageRoot::Path(workspace_root.join("state").display().to_string()),
             cache_root: StorageRoot::Path(cache_root.display().to_string()),
             mutation_artifact_retention: Default::default(),
+            credential_store: Default::default(),
         },
         session: SessionConfig {
             log_dir: Some(workspace_root.join("sessions").display().to_string()),
@@ -85,6 +87,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -102,6 +105,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
         task: Default::default(),
         web: Default::default(),
         providers: Default::default(),
+        connections: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

@@ -95,8 +95,8 @@ export function WorkspaceSwitcher({
                   aria-label={t("closeWorkspace", { name: workspace.displayName })}
                   icon={<Icon name="close" />}
                   onClick={() => {
+                    setOpen(false);
                     onClose(workspace.id);
-                    closeAndRestore();
                   }}
                 />
               </li>

@@ -20,7 +20,9 @@ fn test_workspace(name: &str) -> PathBuf {
 fn write_config(path: &Path, base_url: &str) {
     let workspace = path.parent().expect("config should have a parent");
     let config = format!(
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [storage]
@@ -28,19 +30,19 @@ state_root = "{}"
 cache_root = "{}"
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
+connection = "local-test"
+model = "gpt-4.1"
 tool_timeout_secs = 5
 
 [model_request]
 request_timeout_secs = 5
 
-[providers.deepseek]
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{base_url}"
-beta_base_url = "{base_url}"
-anthropic_base_url = "{base_url}"
-api_key = "test-key"
-strict_tools_mode = "auto"
+credential = {{ source = "none" }}
 "#,
         workspace.join("state").display(),
         workspace.join("cache").display()
@@ -51,7 +53,52 @@ strict_tools_mode = "auto"
 fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("provider fixture should bind");
     let address = listener.local_addr().expect("provider fixture address");
-    let server = thread::spawn(move || {
+    (
+        format!("http://{address}"),
+        spawn_provider_fixture_with_listener(listener, answer),
+    )
+}
+
+fn spawn_model_catalog_fixture(model_id: &'static str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("model catalog fixture should bind");
+    let address = listener
+        .local_addr()
+        .expect("model catalog fixture address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("catalog request should reach fixture");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("catalog read timeout should configure");
+        read_http_message(&mut stream);
+        let body = serde_json::json!({ "data": [{ "id": model_id }] }).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("catalog response should write");
+    });
+    (format!("http://{address}/v1"), handle)
+}
+
+fn restart_provider_fixture(base_url: &str, answer: &'static str) -> thread::JoinHandle<()> {
+    let address = base_url
+        .strip_prefix("http://")
+        .expect("fixture URL should use http")
+        .parse::<std::net::SocketAddr>()
+        .expect("fixture URL should contain a socket address");
+    let listener = TcpListener::bind(address).expect("provider fixture should rebind");
+    spawn_provider_fixture_with_listener(listener, answer)
+}
+
+fn spawn_provider_fixture_with_listener(
+    listener: TcpListener,
+    answer: &'static str,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         let (mut stream, _) = listener
             .accept()
             .expect("provider request should reach fixture");
@@ -69,8 +116,7 @@ fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<(
         stream
             .write_all(response.as_bytes())
             .expect("provider response should write");
-    });
-    (format!("http://{address}"), server)
+    })
 }
 
 fn read_http_message(stream: &mut TcpStream) {
@@ -181,11 +227,21 @@ fn spawn_serve(workspace: &Path, config_path: &Path, token: &str) -> ServeProces
 }
 
 fn spawn_desktop_serve(workspace: &Path, config_path: &Path, token: &str) -> DesktopServeProcess {
+    spawn_desktop_serve_with_home(workspace, config_path, token, None)
+}
+
+fn spawn_desktop_serve_with_home(
+    workspace: &Path,
+    config_path: &Path,
+    token: &str,
+    user_home: Option<&Path>,
+) -> DesktopServeProcess {
     let stdout_path = workspace.join("desktop-serve.stdout");
     let stderr_path = workspace.join("desktop-serve.stderr");
     let stdout = File::create(&stdout_path).expect("desktop serve stdout should create");
     let stderr = File::create(&stderr_path).expect("desktop serve stderr should create");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    command
         .current_dir(workspace)
         .env("SIGIL_HTTP_TOKEN", token)
         .args([
@@ -198,9 +254,11 @@ fn spawn_desktop_serve(workspace: &Path, config_path: &Path, token: &str) -> Des
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .expect("desktop sigil serve should spawn");
+        .stderr(Stdio::from(stderr));
+    if let Some(user_home) = user_home {
+        command.env("HOME", user_home);
+    }
+    let mut child = command.spawn().expect("desktop sigil serve should spawn");
     let owner_stdin = child
         .stdin
         .take()
@@ -415,6 +473,41 @@ fn desktop_owner_channel_json_bootstrap_and_pipe_close_are_secret_free() {
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
+#[test]
+fn desktop_server_starts_first_run_without_config_and_exposes_empty_provider_setup() {
+    let workspace = test_workspace("desktop-first-run");
+    let config_path = workspace.join("missing-sigil.toml");
+    let token = "desktop-first-run-token";
+
+    let server = spawn_desktop_serve(&workspace, &config_path, token);
+
+    assert_eq!(server.server_info["capabilities"]["provider_setup"], true);
+    assert_eq!(
+        server.server_info["capabilities"]["provider_migration"],
+        true
+    );
+    let (status, body) = http_request(
+        server.address,
+        "GET",
+        "/settings/provider-connections",
+        Some(token),
+        None,
+    );
+    assert_eq!(status, 200);
+    let inventory =
+        serde_json::from_str::<serde_json::Value>(&body).expect("inventory should be JSON");
+    assert_eq!(inventory["config_mode"], "v2");
+    assert_eq!(inventory["connections"], serde_json::json!([]));
+    assert!(inventory["default_model"].is_null());
+    assert!(!config_path.exists());
+
+    let output = close_desktop_owner_and_wait(server);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
     let workspace = test_workspace("desktop-launcher");
@@ -558,7 +651,7 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
     let session = client
         .create_session(sigil_desktop::DesktopSessionCreateRequest {
             label: Some("desktop smoke".to_owned()),
-            model_name: None,
+            model_ref: None,
         })
         .await
         .expect("typed create route should use the production runtime binding");
@@ -613,6 +706,317 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_typed_client_completes_first_run_provider_setup_against_real_server() {
+    let workspace = test_workspace("desktop-provider-first-run");
+    let config_path = workspace.join("missing-sigil.toml");
+    let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-first-run-coder");
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let opened = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(
+                env!("CARGO_BIN_EXE_sigil"),
+                &config_path,
+                &workspace,
+            ),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch setup-capable sigil serve");
+    let client = manager
+        .client(&opened.id)
+        .expect("ready workspace should expose a typed client");
+
+    let inventory = client
+        .provider_connections()
+        .await
+        .expect("missing config should return setup inventory");
+    assert!(inventory.connections.is_empty());
+    assert!(inventory.default_model.is_none());
+    let catalog = client
+        .provider_setup_catalog(sigil_desktop::DesktopProviderSetupCatalogRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint.clone()),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+        })
+        .await
+        .expect("typed client should load the exact real-server catalog");
+    assert_eq!(catalog.state, "remote");
+    assert_eq!(catalog.models[0].model_id, "local-first-run-coder");
+
+    let saved = client
+        .save_provider_setup(sigil_desktop::DesktopProviderSetupSaveRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            model_id: "local-first-run-coder".to_owned(),
+            label: Some("Local first run".to_owned()),
+        })
+        .await
+        .expect("typed client should atomically save the selected real-server route");
+    assert_eq!(
+        saved.default_model.model_id.as_str(),
+        "local-first-run-coder"
+    );
+    assert_eq!(saved.inventory.connections.len(), 1);
+    assert_eq!(saved.inventory.connections[0].label, "Local first run");
+    let persisted = fs::read_to_string(&config_path).expect("first-run config should persist");
+    assert!(persisted.contains("local-first-run-coder"));
+    assert!(!persisted.contains("api_key"));
+
+    let report = manager
+        .close(&opened.id)
+        .await
+        .expect("manager should gracefully close setup server");
+    assert!(report.success);
+    provider.join().expect("catalog fixture should join");
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_typed_client_migrates_legacy_provider_config_against_real_server() {
+    let workspace = test_workspace("desktop-provider-legacy-migration");
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"
+[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+"#,
+    )
+    .expect("legacy config should write");
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let opened = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(
+                env!("CARGO_BIN_EXE_sigil"),
+                &config_path,
+                &workspace,
+            ),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch legacy-capable sigil serve");
+    let client = manager
+        .client(&opened.id)
+        .expect("ready workspace should expose a typed client");
+
+    let inventory = client
+        .provider_connections()
+        .await
+        .expect("typed client should project legacy migration");
+    let preview = inventory
+        .legacy_migration
+        .expect("valid legacy config should expose migration preview");
+    assert_eq!(preview.connection_count, 1);
+    assert_eq!(preview.inline_credential_count, 0);
+    assert_eq!(preview.environment_reference_count, 1);
+    let migrated = client
+        .migrate_legacy_provider_connections(preview.revision)
+        .await
+        .expect("typed client should migrate the exact reviewed source");
+    assert_eq!(
+        migrated.outcome,
+        sigil_desktop::DesktopProviderLegacyMigrationOutcome::Published
+    );
+    assert_eq!(migrated.default_model.model_id, "deepseek-private");
+    assert_eq!(migrated.migrated_connection_count, 1);
+    assert_eq!(migrated.moved_inline_credential_count, 0);
+    assert_eq!(migrated.preserved_environment_reference_count, 1);
+    assert_eq!(
+        migrated.inventory.config_mode,
+        sigil_desktop::DesktopProviderConfigMode::V2
+    );
+    assert!(migrated.inventory.legacy_migration.is_none());
+    let persisted = fs::read_to_string(&config_path).expect("migrated config should read");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("deepseek-private"));
+    assert!(persisted.contains("https://private.deepseek.example/v1"));
+    assert!(!persisted.contains("[providers.deepseek]"));
+
+    let report = manager
+        .close(&opened.id)
+        .await
+        .expect("manager should gracefully close migration server");
+    assert!(report.success);
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[test]
+fn desktop_real_server_migrates_inline_legacy_secrets_and_restarts_from_v2() {
+    let workspace = test_workspace("desktop-provider-inline-migration");
+    let user_home = workspace.join("home");
+    fs::create_dir(&user_home).expect("isolated user home should create");
+    let config_path = workspace.join("sigil.toml");
+    let first_secret = "desktop-inline-deepseek-canary";
+    let second_secret = "desktop-inline-anthropic-canary";
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+[storage]
+credential_store = "file"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-private"
+
+[providers.deepseek]
+base_url = "https://private.deepseek.example/v1"
+api_key = "{first_secret}"
+
+[providers.anthropic]
+base_url = "https://private.anthropic.example"
+api_key = "{second_secret}"
+
+[providers.gemini]
+base_url = "https://private.gemini.example"
+"#
+        ),
+    )
+    .expect("inline legacy config should write");
+    let token = "desktop-inline-migration-token";
+    let server = spawn_desktop_serve_with_home(&workspace, &config_path, token, Some(&user_home));
+
+    let (status, body) = http_request(
+        server.address,
+        "GET",
+        "/settings/provider-connections",
+        Some(token),
+        None,
+    );
+    assert_eq!(status, 200);
+    let inventory =
+        serde_json::from_str::<serde_json::Value>(&body).expect("inventory should be JSON");
+    let preview = inventory["legacy_migration"]
+        .as_object()
+        .expect("valid legacy config should expose migration");
+    assert_eq!(preview["connection_count"], 3);
+    assert_eq!(preview["inline_credential_count"], 2);
+    assert_eq!(preview["environment_reference_count"], 1);
+    let revision = preview["revision"]
+        .as_str()
+        .expect("migration preview should carry an opaque revision");
+    assert!(!body.contains(first_secret));
+    assert!(!body.contains(second_secret));
+    assert!(!body.contains("credential_id"));
+
+    let request = serde_json::json!({ "expected_revision": revision }).to_string();
+    let (status, body) = http_request(
+        server.address,
+        "POST",
+        "/settings/provider-connections/migrate-legacy",
+        Some(token),
+        Some(&request),
+    );
+    assert_eq!(status, 200);
+    let migrated =
+        serde_json::from_str::<serde_json::Value>(&body).expect("migration should return JSON");
+    assert_eq!(migrated["outcome"], "published");
+    assert_eq!(migrated["migrated_connection_count"], 3);
+    assert_eq!(migrated["moved_inline_credential_count"], 2);
+    assert_eq!(migrated["preserved_environment_reference_count"], 1);
+    assert!(!body.contains(first_secret));
+    assert!(!body.contains(second_secret));
+    assert!(!body.contains("credential_id"));
+    let migration_body = body.clone();
+
+    let first_output = close_desktop_owner_and_wait(server);
+    assert_eq!(first_output.status.code(), Some(0));
+    let first_stdout = String::from_utf8_lossy(&first_output.stdout);
+    let first_stderr = String::from_utf8_lossy(&first_output.stderr);
+    for secret in [first_secret, second_secret] {
+        assert!(!first_stdout.contains(secret));
+        assert!(!first_stderr.contains(secret));
+    }
+    let persisted = fs::read_to_string(&config_path).expect("migrated config should read");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("deepseek-private"));
+    assert!(!persisted.contains("[providers."));
+    assert!(!persisted.contains(first_secret));
+    assert!(!persisted.contains(second_secret));
+    let credential_path = user_home.join(".sigil").join("credentials.json");
+    let credential_wire: serde_json::Value = serde_json::from_slice(
+        &fs::read(&credential_path).expect("private credential file should exist"),
+    )
+    .expect("credential file should be JSON");
+    let credential_records = credential_wire["records"]
+        .as_object()
+        .expect("credential records should be an object");
+    assert_eq!(credential_records.len(), 2);
+    let credential_ids = credential_records.keys().cloned().collect::<Vec<_>>();
+    for credential_id in &credential_ids {
+        assert!(!migration_body.contains(credential_id));
+        assert!(!first_stdout.contains(credential_id));
+        assert!(!first_stderr.contains(credential_id));
+    }
+
+    let restarted =
+        spawn_desktop_serve_with_home(&workspace, &config_path, token, Some(&user_home));
+    let (status, body) = http_request(
+        restarted.address,
+        "GET",
+        "/settings/provider-connections",
+        Some(token),
+        None,
+    );
+    assert_eq!(status, 200);
+    let inventory =
+        serde_json::from_str::<serde_json::Value>(&body).expect("V2 inventory should be JSON");
+    assert_eq!(inventory["config_mode"], "v2");
+    assert!(inventory["legacy_migration"].is_null());
+    assert_eq!(
+        inventory["connections"]
+            .as_array()
+            .expect("connections should be an array")
+            .len(),
+        3
+    );
+    for connection_id in ["deepseek-default", "anthropic-default"] {
+        let connection = inventory["connections"]
+            .as_array()
+            .expect("connections should be an array")
+            .iter()
+            .find(|entry| entry["id"] == connection_id)
+            .expect("migrated stored connection should remain visible");
+        assert_eq!(connection["credential_source"], "stored");
+        assert_eq!(connection["readiness"], "ready");
+        assert!(connection["issue"].is_null());
+    }
+    assert_eq!(inventory["issues"], serde_json::json!([]));
+    assert!(!body.contains(first_secret));
+    assert!(!body.contains(second_secret));
+    assert!(!body.contains("credential_id"));
+    for credential_id in &credential_ids {
+        assert!(!body.contains(credential_id));
+    }
+    let restart_output = close_desktop_owner_and_wait(restarted);
+    assert_eq!(restart_output.status.code(), Some(0));
+    let restart_stdout = String::from_utf8_lossy(&restart_output.stdout);
+    let restart_stderr = String::from_utf8_lossy(&restart_output.stderr);
+    for secret in [first_secret, second_secret] {
+        assert!(!restart_stdout.contains(secret));
+        assert!(!restart_stderr.contains(secret));
+    }
+    for credential_id in &credential_ids {
+        assert!(!restart_stdout.contains(credential_id));
+        assert!(!restart_stderr.contains(credential_id));
+    }
+
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_typed_client_streams_and_replays_real_run_events() {
     let workspace = test_workspace("desktop-run-events");
     let config_path = workspace.join("sigil.toml");
@@ -636,7 +1040,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
     let session = client
         .create_session(sigil_desktop::DesktopSessionCreateRequest {
             label: Some("desktop run".to_owned()),
-            model_name: None,
+            model_ref: None,
         })
         .await
         .expect("session should create");
@@ -696,7 +1100,10 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
                 .kind,
         );
     }
-    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted));
+    assert!(
+        kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted),
+        "run stream omitted start event: {kinds:?}"
+    );
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantMessage));
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
@@ -856,7 +1263,10 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     );
     assert_eq!(events_status, 200);
     assert!(events_body.contains("event: run_event"));
-    assert!(events_body.contains("\"type\":\"run_finished\""));
+    assert!(
+        events_body.contains("\"type\":\"run_finished\""),
+        "run stream omitted terminal event: {events_body}"
+    );
     assert!(events_body.contains("serve process answer"));
     let last_event_id = events_body
         .lines()
@@ -898,8 +1308,7 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
     assert!(startup.contains("status: listening; press Ctrl-C for graceful shutdown"));
     assert!(!startup.contains(token));
 
-    let (restart_base_url, restart_provider) = spawn_provider_fixture("reopened process answer");
-    write_config(&config_path, &restart_base_url);
+    let restart_provider = restart_provider_fixture(&base_url, "reopened process answer");
     let restarted = spawn_serve(&workspace, &config_path, token);
     let (catalog_status, catalog_body) = http_request(
         restarted.address,

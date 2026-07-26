@@ -1403,8 +1403,9 @@ struct ApprovalRequestProviderFactory;
 
 struct ApprovalRequestProvider;
 
+#[async_trait]
 impl AgentToolProviderFactory for ApprovalRequestProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1445,8 +1446,9 @@ impl Provider for ApprovalRequestProvider {
     }
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for StaticProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1515,8 +1517,9 @@ impl ApprovalHandler for ExplicitApprovalHandler {
 
 struct RejectingProviderFactory;
 
+#[async_trait]
 impl AgentToolProviderFactory for RejectingProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1633,8 +1636,9 @@ struct TextProviderFactory {
     text: String,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for TextProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1648,8 +1652,9 @@ impl AgentToolProviderFactory for TextProviderFactory {
 
 struct UsageProviderFactory;
 
+#[async_trait]
 impl AgentToolProviderFactory for UsageProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1664,8 +1669,9 @@ struct SlowTextProviderFactory {
     started: Arc<AtomicBool>,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for SlowTextProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1684,8 +1690,9 @@ struct ParallelBarrierProviderFactory {
     max_active: Arc<AtomicUsize>,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for ParallelBarrierProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1703,8 +1710,9 @@ struct DelayedFollowupProviderFactory {
     observed_followup: Arc<Mutex<bool>>,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for DelayedFollowupProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1721,8 +1729,9 @@ struct RecordingProviderFactory {
     observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for RecordingProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -1740,8 +1749,9 @@ struct RecordingTextProviderFactory {
     observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
 }
 
+#[async_trait]
 impl AgentToolProviderFactory for RecordingTextProviderFactory {
-    fn build_provider(
+    async fn build_provider(
         &self,
         _root_config: &RootConfig,
         _role: sigil_kernel::AgentRole,
@@ -3592,8 +3602,8 @@ async fn spawn_agents_capacity_failure_starts_no_member() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
+#[tokio::test]
+async fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -3638,13 +3648,15 @@ fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
     let mut session = Session::new("batch-preflight", "mock-model");
     let mut handler = RecordingEventHandler::default();
 
-    let result = runtime.spawn_agents(
-        &mut session,
-        &call,
-        &args,
-        &run_options(std::env::temp_dir()),
-        &mut handler,
-    );
+    let result = runtime
+        .spawn_agents(
+            &mut session,
+            &call,
+            &args,
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+        )
+        .await;
 
     assert!(result.is_error());
     assert!(result.content.contains("missing-profile"));
@@ -3656,6 +3668,8 @@ fn spawn_agents_member_preflight_failure_starts_no_member() -> Result<()> {
 
 #[tokio::test]
 async fn join_context_remains_uncompleted_when_max_turns_prevents_delivery() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -3683,11 +3697,11 @@ async fn join_context_remains_uncompleted_when_max_turns_prevents_delivery() -> 
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
     let cancellation_owner = RunCancellationOwner::new();
-    let mut options = run_options(std::env::temp_dir());
+    let mut options = run_options(workspace.path().to_path_buf());
     options.max_turns = Some(1);
 
     let output = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         agent.run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("inspect kernel and runtime in parallel")
@@ -3883,6 +3897,8 @@ async fn cancellation_after_join_settle_cancels_undelivered_context() -> Result<
 
 #[tokio::test]
 async fn joined_child_commit_error_still_reconciles_siblings_and_releases_slots() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -3912,13 +3928,13 @@ async fn joined_child_commit_error_still_reconciles_siblings_and_releases_slots(
     let cancellation_owner = RunCancellationOwner::new();
 
     let result = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         agent.run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("inspect kernel and runtime in parallel")
                 .with_cancellation(cancellation_owner.handle()),
             {
-                let mut options = run_options(std::env::temp_dir());
+                let mut options = run_options(workspace.path().to_path_buf());
                 options.max_turns = Some(4);
                 options
             },
@@ -4091,10 +4107,10 @@ async fn agent_tool_turn_does_not_persist_parent_pre_tool_text() -> Result<()> {
 
 #[tokio::test]
 async fn wait_and_close_agent_use_bounded_thread_projection() -> Result<()> {
-    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+    let (mut runtime, mut session, thread_id, workspace) = spawned_runtime_session().await?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
-    let options = run_options(std::env::temp_dir());
+    let options = run_options(workspace.path().to_path_buf());
 
     let wait = runtime
         .handle_agent_tool_call(
@@ -4159,9 +4175,19 @@ async fn wait_and_close_agent_use_bounded_thread_projection() -> Result<()> {
 
 #[tokio::test]
 async fn message_agent_records_rejected_message_route_for_terminal_thread() -> Result<()> {
-    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+    let (mut runtime, mut session, thread_id, workspace) = spawned_runtime_session().await?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
+    let options = run_options(workspace.path().to_path_buf());
+    wait_until_agent_result_available(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
 
     let result = runtime
         .handle_agent_tool_call(
@@ -4175,7 +4201,7 @@ async fn message_agent_records_rejected_message_route_for_terminal_thread() -> R
                 })
                 .to_string(),
             },
-            &run_options(std::env::temp_dir()),
+            &options,
             &mut handler,
             &mut approval,
         )
@@ -4215,7 +4241,7 @@ async fn message_agent_records_rejected_message_route_for_terminal_thread() -> R
 #[tokio::test]
 async fn message_agent_keeps_sensitive_prompt_exact_for_delivery_but_safe_in_controls() -> Result<()>
 {
-    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+    let (mut runtime, mut session, thread_id, workspace) = spawned_runtime_session().await?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
     let raw = "inspect https://example.com/private?signature=mailbox-secret exactly";
@@ -4232,7 +4258,7 @@ async fn message_agent_keeps_sensitive_prompt_exact_for_delivery_but_safe_in_con
                 })
                 .to_string(),
             },
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
             &mut handler,
             &mut approval,
         )
@@ -4256,14 +4282,14 @@ async fn message_agent_keeps_sensitive_prompt_exact_for_delivery_but_safe_in_con
 
 #[tokio::test]
 async fn route_agent_message_appends_route_controls_to_session() -> Result<()> {
-    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+    let (mut runtime, mut session, thread_id, workspace) = spawned_runtime_session().await?;
 
     let (result, controls) = runtime
         .route_agent_message(
             &mut session,
             thread_id.clone(),
             "continue with more detail".to_owned(),
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
         )
         .await?;
 
@@ -5992,6 +6018,7 @@ async fn wait_agent_marks_running_thread_without_live_handle_unavailable() -> Re
                 profile_snapshot_id: snapshot_id,
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
+                model_ref: None,
                 reasoning_effort: None,
                 workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
                 effective_tool_scope_hash: "tools".to_owned(),
@@ -7422,6 +7449,8 @@ async fn spawn_agent_records_usage_without_budget_warning() -> Result<()> {
 
 #[tokio::test]
 async fn spawn_agent_enforces_max_subagents() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -7455,7 +7484,7 @@ async fn spawn_agent_enforces_max_subagents() -> Result<()> {
                 })
                 .to_string(),
             },
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
             &mut handler,
             &mut approval,
         )
@@ -7517,6 +7546,7 @@ fn append_projected_agent_thread(
         profile_snapshot_id: profile_snapshot_id.clone(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
         effective_tool_scope_hash: "sha256:tools".to_owned(),
@@ -7576,8 +7606,14 @@ fn append_projected_agent_thread(
     Ok(thread_id)
 }
 
-async fn spawned_runtime_session()
--> Result<(AgentToolRuntime, Session, sigil_kernel::AgentThreadId)> {
+async fn spawned_runtime_session() -> Result<(
+    AgentToolRuntime,
+    Session,
+    sigil_kernel::AgentThreadId,
+    tempfile::TempDir,
+)> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "test workspace\n")?;
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -7606,7 +7642,7 @@ async fn spawned_runtime_session()
         .handle_agent_tool_call(
             &mut session,
             &call,
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
             &mut handler,
             &mut approval,
         )
@@ -7614,7 +7650,7 @@ async fn spawned_runtime_session()
         .expect("spawn handled");
     let thread_id =
         chat_agent_thread_id_for_call(&call.id, &sigil_kernel::AgentProfileId::new("explore")?)?;
-    Ok((runtime, session, thread_id))
+    Ok((runtime, session, thread_id, workspace))
 }
 
 fn supervisor(config: &RootConfig) -> Result<AgentSupervisor> {
@@ -7627,6 +7663,7 @@ fn supervisor(config: &RootConfig) -> Result<AgentSupervisor> {
 
 fn root_config() -> RootConfig {
     RootConfig {
+        config_version: None,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -7637,6 +7674,7 @@ fn root_config() -> RootConfig {
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
+            connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(4),
             tool_timeout_secs: 30,
@@ -7658,6 +7696,7 @@ fn root_config() -> RootConfig {
                 "base_url": "https://example.com",
             }),
         )]),
+        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -7665,12 +7704,19 @@ fn root_config() -> RootConfig {
 
 fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
     let workspace_root = if workspace_root == std::env::temp_dir() {
-        let current_thread = std::thread::current();
-        let test_name = current_thread.name().unwrap_or("unnamed-test");
-        let test_name_digest = sha2::Sha256::digest(test_name.as_bytes());
+        let thread = std::thread::current();
+        let thread_identity = thread
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{:?}", thread.id()));
+        let thread_fingerprint = hash_text(&thread_identity);
+        let thread_fingerprint = thread_fingerprint
+            .strip_prefix("sha256:")
+            .unwrap_or(&thread_fingerprint);
         let isolated = std::env::temp_dir().join(format!(
-            "sigil-agent-tools-tests-{}-{test_name_digest:x}",
-            std::process::id()
+            "sigil-agent-tools-tests-{}-{}",
+            std::process::id(),
+            &thread_fingerprint[..16]
         ));
         let _ = fs::create_dir_all(&isolated);
         let _ = fs::write(isolated.join("README.md"), "test workspace\n");

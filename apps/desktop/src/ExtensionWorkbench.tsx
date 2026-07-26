@@ -73,7 +73,7 @@ export function ExtensionWorkbench({
               onClick={() => setSelectedId(item.id)}
             >
               <span>
-                <strong>{item.id}</strong>
+                <strong>{item.name}</strong>
                 <small>{item.description || t("noDescription")}</small>
               </span>
               <span className={`extension-status${item.available ? " is-available" : ""}`}>
@@ -120,7 +120,7 @@ function ExtensionDetail({
           {item.available ? t("available") : t("unavailable")}
         </span>
       </header>
-      <h3>{skill?.name || item.id}</h3>
+      <h3>{item.name}</h3>
       <p>{item.description || t("noDescription")}</p>
       <dl>
         <div><dt>{t("source")}</dt><dd>{item.source}</dd></div>
@@ -161,6 +161,6 @@ function filterExtensions(
   const normalized = query.trim().toLocaleLowerCase();
   if (normalized === "") return items;
   return items.filter((item) =>
-    `${item.id}\n${item.description}\n${item.source}`.toLocaleLowerCase().includes(normalized),
+    `${item.id}\n${item.name}\n${item.description}\n${item.source}`.toLocaleLowerCase().includes(normalized),
   );
 }

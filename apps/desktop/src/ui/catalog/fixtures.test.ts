@@ -209,7 +209,7 @@ describe("desktop UI catalog contract", () => {
 
     expect(await screen.findByRole("heading", { name: "Review parser recovery and verification" })).toBeTruthy();
     await waitFor(() => {
-      expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+      expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
       expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     });
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();

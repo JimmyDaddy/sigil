@@ -11,9 +11,10 @@ use sigil_kernel::{
 };
 
 use crate::{
-    OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_PORTABLE_TARGET_CONTEXT_WINDOW_TOKENS,
-    OPENAI_RESPONSES_PORTABLE_TARGET_MODEL, OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS,
-    OpenAiResponsesProvider, OpenAiResponsesProviderConfig,
+    OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_BASE_URL_ENV,
+    OPENAI_RESPONSES_PORTABLE_TARGET_CONTEXT_WINDOW_TOKENS, OPENAI_RESPONSES_PORTABLE_TARGET_MODEL,
+    OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS, OpenAiResponsesProvider,
+    OpenAiResponsesProviderConfig,
 };
 
 use super::{
@@ -68,6 +69,28 @@ fn only_the_official_openai_endpoint_is_eligible_for_the_proof_contract() {
     assert!(!is_official_openai_base_url(
         "https://proxy.example.test/v1"
     ));
+}
+
+#[test]
+fn exact_constructor_does_not_reapply_process_environment_overrides() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set(
+        OPENAI_RESPONSES_BASE_URL_ENV,
+        "https://ambient-redirect.invalid/v1",
+    );
+    let provider = OpenAiResponsesProvider::new_exact(
+        OpenAiResponsesProviderConfig {
+            base_url: "https://selected-connection.example/v1".to_owned(),
+            ..OpenAiResponsesProviderConfig::default()
+        },
+        ModelRequestTimeouts::default(),
+    )?;
+
+    assert_eq!(
+        provider.config.base_url,
+        "https://selected-connection.example/v1"
+    );
+    Ok(())
 }
 
 #[tokio::test]

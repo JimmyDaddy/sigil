@@ -1,0 +1,66 @@
+mod catalog;
+mod catalog_cache;
+mod config;
+mod configured_store;
+mod credential;
+mod dto;
+mod file_store;
+mod inventory;
+mod keyring_store;
+mod migration;
+mod persistence;
+mod recent;
+mod route;
+mod setup;
+
+#[cfg(test)]
+pub(crate) use catalog::seed_unauthenticated_catalog_cache_for_test;
+pub use catalog::{
+    ConnectionProbeResult, ConnectionProbeState, ModelAvailability, ModelCatalogEntry,
+    ModelCatalogProvenance, ModelCatalogRequest, ModelCatalogResult, ModelCatalogState,
+    ModelRecommendation, ProviderModelCatalogService, bundled_model_entries,
+    connection_semantic_fingerprint, fresh_cached_model_entries_native,
+};
+pub use config::{
+    CredentialId, CredentialRefConfig, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
+    provider_connection_template,
+};
+pub use configured_store::ConfiguredProviderCredentialStore;
+pub use credential::{
+    CredentialAuthKind, CredentialEnvironment, CredentialGenerationId, LoadedCredentialRef,
+    PreparedCredential, ProcessCredentialEnvironment, ProviderCredentialError,
+    ProviderCredentialErrorCode, ProviderCredentialRecord, ProviderCredentialStore,
+    ResolvedCredential, ResolvedCredentialSource, resolve_connection_credential,
+};
+pub use dto::{
+    ConfigMode, ConnectionConfigIssue, ConnectionInventory, ConnectionInventoryEntry,
+    ConnectionIssueView, ConnectionReadiness, CredentialSourceView, LoadedConnection,
+    LoadedProviderConnections,
+};
+pub use file_store::FileProviderCredentialStore;
+pub use inventory::{
+    connection_inventory, connection_inventory_native, connection_inventory_offline,
+    connection_inventory_with_cancellation,
+};
+pub use keyring_store::SystemProviderCredentialStore;
+pub use migration::{load_provider_connections, materialize_v2_root_config};
+pub use persistence::{
+    ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, ConnectionSaveError,
+    ConnectionSaveOutcome, LegacyConnectionMigrationError, LegacyConnectionMigrationOutcome,
+    LegacyConnectionMigrationPreview, LegacyConnectionMigrationPublishStatus,
+    LegacyConnectionMigrationTransactionError, LegacyMigrationRecoveryError,
+    LegacyMigrationRecoveryState, ProviderConfigPublisher, RootConfigPublisher,
+    legacy_connection_migration_preview, legacy_migration_recovery_state,
+    migrate_legacy_provider_config, recheck_legacy_migration_recovery_native,
+    save_connection_config, save_connection_config_with_base,
+};
+pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
+pub use route::{
+    ResolvedRouteError, ensure_route_is_current, resolve_default_model_route, resolve_model_route,
+    runtime_provider_name, validate_persisted_model_route,
+};
+pub use setup::default_setup_root_config;
+
+#[cfg(test)]
+#[path = "../tests/provider_connections_tests.rs"]
+mod tests;

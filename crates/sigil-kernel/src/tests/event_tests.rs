@@ -1392,6 +1392,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             ControlEntry::SessionIdentity {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-chat".to_owned(),
+                resolved_model_route: None,
             },
             "session_identity",
         ),
@@ -1507,6 +1508,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
         (
             ControlEntry::SkillLoaded(SkillLoadEntry {
                 skill_id: "repo-review".to_owned(),
+                display_name: None,
                 sha256: "hash".to_owned(),
                 source: SkillSource::Workspace,
                 entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
@@ -2330,6 +2332,7 @@ fn agent_run_context() -> AgentRunContextSnapshot {
         profile_snapshot_id: agent_snapshot_id(),
         provider: "deepseek".to_owned(),
         model: "deepseek-v4-pro".to_owned(),
+        model_ref: None,
         reasoning_effort: None,
         workspace_root: WorkspaceRootSnapshot::new("/workspace").expect("valid workspace root"),
         effective_tool_scope_hash: "sha256:tools".to_owned(),

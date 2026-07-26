@@ -12,12 +12,20 @@ sigil
 ```
 
 ```toml
+config_version = 2
+
 [agent]
-provider = "anthropic"
+connection = "anthropic-default"
 model = "claude-sonnet-4-5"
 
-[providers.anthropic]
+[connections.anthropic-default]
+label = "Anthropic"
+provider = "anthropic"
+protocol = "anthropic_messages"
 base_url = "https://api.anthropic.com"
+credential = { source = "environment", name = "SIGIL_ANTHROPIC_API_KEY" }
+
+[connections.anthropic-default.options]
 anthropic_version = "2023-06-01"
 max_tokens = 4096
 ```
@@ -26,23 +34,23 @@ See [anthropic.toml](../examples/config/anthropic.toml) for a copyable file.
 
 ## Authentication
 
-`SIGIL_ANTHROPIC_API_KEY` takes priority over `[providers.anthropic].api_key`. Prefer the environment; a saved key is plaintext.
+The example binds this connection to `SIGIL_ANTHROPIC_API_KEY`. Setup and `/config` can save the secret to the secure credential store instead; `sigil.toml` then contains only an opaque `stored` ID. Default `auto` prefers the system store and uses the owner-only credential file only when that store is unavailable.
 
 ## Options And Visible Limits
 
-`SIGIL_ANTHROPIC_BASE_URL`, `SIGIL_ANTHROPIC_VERSION`, and `SIGIL_ANTHROPIC_MAX_TOKENS` override their config fields. Use `beta_headers` only when a known Anthropic feature requires them.
+`anthropic_version`, `max_tokens`, and `beta_headers` are provider-owned fields under `[connections.anthropic-default.options]`. Use `beta_headers` only when a known Anthropic feature requires them.
 
 Images work only with recognized Claude model IDs and accepted dated variants. Unknown names and aliases are rejected before sending.
 
 ## Verify
 
-Run `sigil doctor` and confirm provider, model, base URL, API version, token limit, and credential source.
+Run `sigil doctor` and confirm `default=anthropic-default/claude-sonnet-4-5`, endpoint, credential source, and readiness.
 
 ## Common Problems
 
 - Version/header rejection: check `anthropic_version` and `beta_headers`.
 - Output stops early: review `max_tokens` and model limits.
-- Authentication: check the environment variable or config fallback.
+- Authentication: check the bound environment variable or repair this connection in `/config`.
 - Tool behavior differs: confirm the selected Claude model supports tool use.
 
 <!-- public-doc-cta: return-providers -->

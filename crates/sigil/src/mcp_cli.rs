@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::Path,
 };
 
@@ -84,6 +85,15 @@ pub(crate) fn execute_mcp_command(config_path: &Path, command: McpCommand) -> Re
             command,
         } => {
             validate_server_name(&name)?;
+            let mut loaded = load_config_for_update(config_path)?;
+            if loaded
+                .config
+                .mcp_servers
+                .iter()
+                .any(|server| server.name == name)
+            {
+                bail!("MCP server {name:?} is already configured");
+            }
             inherit_env.sort();
             inherit_env.dedup();
             normalize_environment_variable_names(&inherit_env)
@@ -136,16 +146,12 @@ pub(crate) fn execute_mcp_command(config_path: &Path, command: McpCommand) -> Re
                     ..McpServerTrustPolicy::default()
                 },
             };
-            update_config(config_path, |config| {
-                if config.mcp_servers.iter().any(|server| server.name == name) {
-                    bail!("MCP server {name:?} is already configured");
-                }
-                config.mcp_servers.push(server);
-                config
-                    .mcp_servers
-                    .sort_by(|left, right| left.name.cmp(&right.name));
-                Ok(())
-            })?;
+            loaded.config.mcp_servers.push(server);
+            loaded
+                .config
+                .mcp_servers
+                .sort_by(|left, right| left.name.cmp(&right.name));
+            publish_config_update(config_path, loaded)?;
             Ok(format!(
                 "Added MCP server {}. It will be available on the next Sigil run.\n",
                 quoted(&name)
@@ -202,14 +208,16 @@ pub(crate) fn execute_mcp_command(config_path: &Path, command: McpCommand) -> Re
             }
         }
         McpCommand::Remove { name } => {
-            update_config(config_path, |config| {
-                let original_len = config.mcp_servers.len();
-                config.mcp_servers.retain(|server| server.name != name);
-                if config.mcp_servers.len() == original_len {
-                    bail!("MCP server {name:?} is not configured");
-                }
-                Ok(())
-            })?;
+            let mut loaded = load_config_for_update(config_path)?;
+            let original_len = loaded.config.mcp_servers.len();
+            loaded
+                .config
+                .mcp_servers
+                .retain(|server| server.name != name);
+            if loaded.config.mcp_servers.len() == original_len {
+                bail!("MCP server {name:?} is not configured");
+            }
+            publish_config_update(config_path, loaded)?;
             Ok(format!("Removed MCP server {}.\n", quoted(&name)))
         }
     }
@@ -424,14 +432,38 @@ fn joined_or_none(values: &[String]) -> String {
     }
 }
 
-fn update_config<T>(path: &Path, update: impl FnOnce(&mut RootConfig) -> Result<T>) -> Result<T> {
+struct LoadedConfigForUpdate {
+    config: RootConfig,
+    source_bytes: Vec<u8>,
+}
+
+fn load_config_for_update(path: &Path) -> Result<LoadedConfigForUpdate> {
     if !path.is_file() {
         bail!(
             "Sigil config does not exist at {}; finish Quick Setup or pass --config first",
             path.display()
         );
     }
-    RootConfig::update_file(path, update)
+    let source_bytes =
+        fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    RootConfig::load(path)
+        .with_context(|| format!("failed to validate Sigil config at {}", path.display()))?;
+    let config =
+        toml::from_str(std::str::from_utf8(&source_bytes).context("Sigil config is not UTF-8")?)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+    if fs::read(path).ok().as_deref() != Some(source_bytes.as_slice()) {
+        bail!("Sigil config changed while it was being loaded; retry the command");
+    }
+    Ok(LoadedConfigForUpdate {
+        config,
+        source_bytes,
+    })
+}
+
+fn publish_config_update(path: &Path, loaded: LoadedConfigForUpdate) -> Result<()> {
+    loaded
+        .config
+        .save_if_source_bytes_unchanged(path, &loaded.source_bytes)
 }
 
 fn quoted(value: &str) -> String {

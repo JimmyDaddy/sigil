@@ -157,6 +157,7 @@ pub async fn prepare_application_task_continuation(
         session_path: Some(request.session_path),
         interaction: request.interaction,
         permission_mode: request.permission_mode,
+        model_connection_id: None,
         model_name: None,
         model_selection_binding: None,
         reasoning_effort: None,
@@ -185,7 +186,7 @@ pub async fn prepare_application_task_continuation(
         cancellation_owner,
         cancellation_handle,
         root_task_guard,
-        provider,
+        model_ref,
         options,
         run_id,
         interaction,
@@ -220,6 +221,9 @@ pub async fn prepare_application_task_continuation(
         .ok_or_else(|| ApplicationRunPrepareError::Internal {
             source: anyhow!("attached Task executor disappeared during preparation"),
         })?;
+    let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+        .await
+        .map_err(ApplicationRunPrepareError::configuration)?;
     let provider_capabilities = provider.capabilities();
     let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
         session.provider_name(),

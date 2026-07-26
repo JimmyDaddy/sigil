@@ -6,15 +6,17 @@ use sigil_kernel::{
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
-    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskPauseRequest,
-    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
+    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort,
+    ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest,
+    TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
     McpListChangedNotification, McpProgressNotification, ProviderStatusConfig, SessionDeleteOutput,
     SessionDeletePreview, SessionExportOutput, SessionRetentionOutput, SessionRetentionPolicy,
     SessionRetentionPreview, TaskCompletionProgressSnapshot, TaskProviderRouteDiagnosticsSnapshot,
+    provider_connections::{ModelCatalogRequest, ModelCatalogResult, PreparedCredential},
 };
 use tokio::sync::oneshot;
 
@@ -283,6 +285,7 @@ pub enum WorkerCommand {
     ForkLocalSession {
         request_id: u64,
         source_path: PathBuf,
+        current_model_route: ResolvedModelRoute,
     },
     ExportLocalSession {
         request_id: u64,
@@ -316,6 +319,12 @@ pub enum WorkerCommand {
     RefreshProviderModels {
         request_id: u64,
         provider_config: ProviderStatusConfig,
+    },
+    RefreshConnectionModels {
+        cache_root: PathBuf,
+        root_config: Box<sigil_kernel::RootConfig>,
+        request: ModelCatalogRequest,
+        prepared_credential: Option<PreparedCredential>,
     },
     CancelProviderModelsRefresh {
         request_id: u64,
@@ -583,6 +592,9 @@ pub enum WorkerMessage {
         request_id: u64,
         base_url: String,
         result: Result<Vec<String>, String>,
+    },
+    ConnectionModelsRefreshed {
+        result: ModelCatalogResult,
     },
     McpElicitationRequest {
         request: McpElicitationRequest,
