@@ -12,6 +12,18 @@ pub trait TaskChildSessionRunner: Send + Sync {
         false
     }
 
+    /// Returns host-proven worktree planning capability for this exact run surface and workspace.
+    async fn planner_worktree_availability(
+        &self,
+        options: &AgentRunOptions,
+    ) -> TaskPlannerWorktreeAvailability {
+        if options.interaction_mode == crate::InteractionMode::Headless {
+            TaskPlannerWorktreeAvailability::UnavailableHeadless
+        } else {
+            TaskPlannerWorktreeAvailability::UnavailableRunner
+        }
+    }
+
     /// Runs the task planner in an isolated transcript and returns its accepted plan artifact.
     async fn run_planner_session<H, A>(
         &self,

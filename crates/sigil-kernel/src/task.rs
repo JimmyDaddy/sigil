@@ -541,6 +541,42 @@ impl TaskStepSpec {
     }
 }
 
+/// Host-proven availability of private worktree execution for one planner run.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPlannerWorktreeAvailability {
+    AvailableWithInteractiveReview,
+    UnavailableHeadless,
+    UnavailableWorkspace,
+    #[default]
+    UnavailableRunner,
+}
+
+impl TaskPlannerWorktreeAvailability {
+    #[must_use]
+    pub fn is_available(self) -> bool {
+        self == Self::AvailableWithInteractiveReview
+    }
+
+    #[must_use]
+    pub fn planner_material(self) -> &'static str {
+        match self {
+            Self::AvailableWithInteractiveReview => {
+                "available: this workspace supports private Git worktrees and this interactive run can present the required integration review and promotion. Use worktree only when parallel physical isolation materially benefits the objective."
+            }
+            Self::UnavailableHeadless => {
+                "unavailable: this headless run cannot complete the required integration review and promotion. Use executor with sequential_workspace_write for implementation changes."
+            }
+            Self::UnavailableWorkspace => {
+                "unavailable: the host did not prove this workspace can materialize private Git worktrees. Use executor with sequential_workspace_write for implementation changes."
+            }
+            Self::UnavailableRunner => {
+                "unavailable: this runtime cannot materialize and integrate private worktrees. Use executor with sequential_workspace_write for implementation changes."
+            }
+        }
+    }
+}
+
 /// Bound task context for the internal planner tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -548,6 +584,8 @@ pub struct TaskPlanUpdateContext {
     pub task_id: TaskId,
     pub max_plan_steps: usize,
     pub max_plan_versions: usize,
+    #[serde(default)]
+    pub worktree_availability: TaskPlannerWorktreeAvailability,
 }
 
 /// Host-owned facts exposed to one model-driven task-guidance review.
@@ -741,10 +779,28 @@ pub fn task_guidance_apply_result_content(entry: &TaskGuidanceAppliedEntry) -> S
 
 /// Model-visible schema for the internal planner plan-update tool.
 pub fn task_plan_update_tool_spec() -> ToolSpec {
+    task_plan_update_tool_spec_for_worktree(
+        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
+    )
+}
+
+pub(crate) fn task_plan_update_tool_spec_for_worktree(
+    worktree_availability: TaskPlannerWorktreeAvailability,
+) -> ToolSpec {
+    let mut isolation_modes = vec![
+        "shared_read_only",
+        "sequential_workspace_write",
+        "changeset_only",
+    ];
+    if worktree_availability.is_available() {
+        isolation_modes.push("worktree");
+    }
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation when a delegated child must implement and integrate changes."
-            .to_owned(),
+        description: format!(
+            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
+            worktree_availability.planner_material()
+        ),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -791,8 +847,8 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             },
                             "isolation": {
                                 "type": "string",
-                                "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
-                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only or worktree. changeset_only produces a proposal and pauses for manual merge review; use worktree for delegated implementation. Read/review/verify steps always use shared_read_only."
+                                "enum": isolation_modes,
+                                "description": format!("Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires an advertised child-write isolation. changeset_only produces a proposal and pauses for manual merge review. Read/review/verify steps always use shared_read_only. Worktree planning capability: {}", worktree_availability.planner_material())
                             }
                         },
                         "required": ["step_id", "title", "role"],
@@ -887,6 +943,15 @@ pub fn task_plan_update_entry(
         })
         .collect::<Result<Vec<_>>>()?;
     validate_task_plan_graph_steps(&steps)?;
+    if !context.worktree_availability.is_available()
+        && steps
+            .iter()
+            .any(|step| step.effective_isolation() == TaskIsolationMode::Worktree)
+    {
+        bail!(
+            "worktree isolation is unavailable for this planning run; use executor with sequential_workspace_write"
+        );
+    }
     Ok(TaskPlanEntry {
         task_id: context.task_id.clone(),
         plan_version: args.plan_version,

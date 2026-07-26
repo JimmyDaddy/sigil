@@ -84,6 +84,10 @@ where
     {
         let has_accepted_plan = admit_or_validate_task_run(session, handler, &request)?;
         if !has_accepted_plan {
+            let worktree_availability = self
+                .child_runner
+                .planner_worktree_availability(&subagent_write_options)
+                .await;
             loop {
                 let projection = session.task_state_projection();
                 let task = projection
@@ -118,12 +122,13 @@ where
                 )?;
                 let planner_input = self.bind_cancellation(
                     AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                        planner_prompt(&request.objective),
+                        planner_prompt(&request.objective, worktree_availability),
                     )])
                     .with_task_plan_update(TaskPlanUpdateContext {
                         task_id: request.task_id.clone(),
                         max_plan_steps,
                         max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                        worktree_availability,
                     })
                     .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
                         task_id: request.task_id.clone(),
@@ -353,11 +358,16 @@ where
             eligible_pending_step_ids: eligible_pending_step_ids.clone(),
         };
         assessment.validate_shape()?;
+        let worktree_availability = self
+            .child_runner
+            .planner_worktree_availability(&subagent_write_options)
+            .await;
         let assessment_prompt = task_guidance_assessment_prompt(
             &request.objective,
             &accepted_plan,
             &eligible_pending_step_ids,
             &guidance,
+            worktree_availability,
         );
 
         loop {
@@ -399,6 +409,7 @@ where
                     task_id: request.task_id.clone(),
                     max_plan_steps,
                     max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                    worktree_availability,
                 })
                 .with_task_guidance_assessment(assessment.clone())
                 .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {

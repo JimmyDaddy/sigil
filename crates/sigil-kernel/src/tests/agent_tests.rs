@@ -34,15 +34,16 @@ use crate::{
     TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceApplyReason,
     TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
     TaskParticipantContext, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
-    TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
-    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
-    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
-    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected, plan_text_hash,
-    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
+    TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
+    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    plan_text_hash, task_participant_system_prompt_contract_material,
+    task_routing_system_prompt_contract_material,
 };
 
 use super::{
@@ -4641,6 +4642,8 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
                 task_id: TaskId::new("task_1")?,
                 max_plan_steps: 4,
                 max_plan_versions: 1,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             }),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
@@ -4747,6 +4750,8 @@ async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()>
                     task_id: TaskId::new("task_1")?,
                     max_plan_steps: 4,
                     max_plan_versions: 3,
+                    worktree_availability:
+                        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
                 })
                 .with_task_guidance_assessment(task_guidance_assessment_context()?),
             AgentRunOptions {
@@ -4832,6 +4837,8 @@ async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
                 task_id: TaskId::new("task_1")?,
                 max_plan_steps: 4,
                 max_plan_versions: 3,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
             .with_task_guidance_assessment(task_guidance_assessment_context()?),
             AgentRunOptions {
@@ -5473,6 +5480,8 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
                 task_id: TaskId::new("task_1")?,
                 max_plan_steps: 4,
                 max_plan_versions: 1,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             }),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),

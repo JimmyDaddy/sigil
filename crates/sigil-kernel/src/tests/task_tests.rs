@@ -13,11 +13,11 @@ use crate::{
     TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
     TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
     TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
+    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskReadyDeferredReason,
+    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
+    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall,
+    child_session_ref, normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
     task_final_message_id, task_guidance_applied_entry, task_guidance_apply_tool_spec,
     task_participant_attempt_id, task_participant_session_ref, task_plan_update_entry,
     task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
@@ -303,6 +303,7 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -429,6 +430,7 @@ fn task_plan_update_projects_sensitive_model_fields_before_durable_control() -> 
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let raw_url = "https://example.com/private?signature=task-plan-secret";
     let call = ToolCall {
@@ -468,6 +470,7 @@ fn task_replan_budget_rejects_plan_versions_beyond_limit() -> Result<()> {
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
         max_plan_versions: 2,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -519,11 +522,63 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
 }
 
 #[test]
+fn task_plan_update_hides_and_rejects_unavailable_worktree_isolation() -> Result<()> {
+    let spec = super::task_plan_update_tool_spec_for_worktree(
+        TaskPlannerWorktreeAvailability::UnavailableHeadless,
+    );
+    let isolation_modes =
+        spec.input_schema["properties"]["steps"]["items"]["properties"]["isolation"]["enum"]
+            .as_array()
+            .expect("isolation enum");
+    assert!(
+        isolation_modes
+            .iter()
+            .all(|value| value.as_str() != Some("worktree"))
+    );
+    assert!(
+        spec.description
+            .contains("this headless run cannot complete")
+    );
+
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::UnavailableHeadless,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[{
+                "step_id":"write",
+                "title":"Write",
+                "role":"subagent_write",
+                "mode":"write",
+                "isolation":"worktree"
+            }]
+        }"#
+        .to_owned(),
+    };
+    let error =
+        task_plan_update_entry(&context, &call).expect_err("unavailable worktree must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("worktree isolation is unavailable")
+    );
+    Ok(())
+}
+
+#[test]
 fn task_plan_update_rejects_subagent_write_without_changeset_only() -> Result<()> {
     let context = TaskPlanUpdateContext {
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -557,6 +612,7 @@ fn task_plan_update_rejects_changeset_only_without_subagent_write() -> Result<()
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -590,6 +646,7 @@ fn task_plan_update_normalizes_model_mode_isolation_mismatches() -> Result<()> {
         task_id: task_id("task_1")?,
         max_plan_steps: 3,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -646,6 +703,7 @@ fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
         task_id: task_id("task_1")?,
         max_plan_steps: 3,
         max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),

@@ -1597,6 +1597,15 @@ async fn validate_git_repository_root(parent_workspace_root: &Path) -> Result<()
     Ok(())
 }
 
+pub(crate) async fn git_worktree_planning_is_available(parent_workspace_root: &Path) -> bool {
+    let Ok(parent_workspace_root) = canonical_directory(parent_workspace_root).await else {
+        return false;
+    };
+    validate_git_repository_root(&parent_workspace_root)
+        .await
+        .is_ok()
+}
+
 async fn validate_clean_parent(parent_workspace_root: &Path) -> Result<()> {
     let status = git_bytes(
         parent_workspace_root,

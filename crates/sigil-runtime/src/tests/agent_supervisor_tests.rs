@@ -36,14 +36,15 @@ use sigil_kernel::{
     TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
     TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose,
     TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
-    ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
-    build_integration_plan, build_workspace_snapshot, child_session_ref,
-    decode_changeset_only_child_output, stable_workspace_id, task_participant_attempt_id,
-    task_participant_logical_run_id, task_participant_session_ref,
+    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
+    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
+    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_integration_plan,
+    build_workspace_snapshot, child_session_ref, decode_changeset_only_child_output,
+    stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
+    task_participant_session_ref,
 };
 
 use super::{
@@ -2808,6 +2809,41 @@ fn planner_runtime_tool_view_exposes_only_bounded_discovery() {
 }
 
 #[tokio::test]
+async fn planner_worktree_capability_requires_interactive_git_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let non_git = temp.path().join("non-git");
+    fs::create_dir(&non_git)?;
+    let git = temp.path().join("git");
+    initialize_worktree_test_repository(&git)?;
+    let runner = task_role_runner_with_rate_limited_participant(
+        supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?,
+        TaskParticipantPurpose::Step,
+        Arc::new(AtomicUsize::new(0)),
+    );
+
+    assert_eq!(
+        runner
+            .planner_worktree_availability(&run_options(non_git))
+            .await,
+        TaskPlannerWorktreeAvailability::UnavailableWorkspace
+    );
+
+    let mut headless = run_options(git.clone());
+    headless.interaction_mode = InteractionMode::Headless;
+    assert_eq!(
+        runner.planner_worktree_availability(&headless).await,
+        TaskPlannerWorktreeAvailability::UnavailableHeadless
+    );
+    assert_eq!(
+        runner
+            .planner_worktree_availability(&run_options(git))
+            .await,
+        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
@@ -2981,6 +3017,8 @@ async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<(
                     task_id: task_id.clone(),
                     max_plan_steps: 4,
                     max_plan_versions: 2,
+                    worktree_availability:
+                        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
                 })
                 .with_task_guidance_assessment(TaskGuidanceAssessmentContext {
                     queue_id: ConversationInputQueueId::new("queue_runtime_guidance")?,
@@ -3069,6 +3107,8 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
                 task_id: task_id.clone(),
                 max_plan_steps: 12,
                 max_plan_versions: 3,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
             .with_cancellation(cancellation.handle());
     let mut handler = RecordingEventHandler::default();
@@ -3222,6 +3262,8 @@ async fn planner_discovery_rejects_overlapping_batch_before_any_provider_start()
                 task_id: task_id.clone(),
                 max_plan_steps: 12,
                 max_plan_versions: 3,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
             .with_cancellation(cancellation.handle());
     let mut handler = RecordingEventHandler::default();
@@ -3319,6 +3361,8 @@ async fn planner_discovery_allows_only_one_batch_per_planning_attempt() -> Resul
                 task_id: task_id.clone(),
                 max_plan_steps: 12,
                 max_plan_versions: 3,
+                worktree_availability:
+                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
             .with_cancellation(cancellation.handle());
     let mut handler = RecordingEventHandler::default();

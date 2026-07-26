@@ -14,7 +14,7 @@ use sigil_kernel::{
     AgentRunOptions, AgentThreadId, AgentUsageSummary, ApprovalHandler, ChangeSetId, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope, ExecutionBackend,
     IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
-    IntegrationObservedEffect, IntegrationProjection, IntegrationProposalFacts,
+    IntegrationObservedEffect, IntegrationProjection, IntegrationProposalFacts, InteractionMode,
     IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus,
     IsolatedWorkspaceCreated, IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode,
     MutationEventRecorder, ProviderCapabilities, ProviderPhysicalAttemptOutcome,
@@ -24,9 +24,9 @@ use sigil_kernel::{
     TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
     TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskPromotionPreview,
-    TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
+    TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
     TaskSynthesisSessionRunRequest, ToolApproval, ToolApprovalContext, ToolCall, ToolErrorKind,
     ToolExecutionStatus, ToolOperation, ToolSpec, VerificationPolicy, WriteIsolationMode,
     build_task_promotion_preview, changeset_only_child_tool_registry,
@@ -46,7 +46,8 @@ use crate::{
     },
     isolated_workspace::{
         FrozenGitWorktreeBase, GitWorktreeBaseFreezeRequest, MaterializedGitWorktree,
-        freeze_git_worktree_base, materialize_git_worktree_from_frozen_base,
+        freeze_git_worktree_base, git_worktree_planning_is_available,
+        materialize_git_worktree_from_frozen_base,
     },
     provider_pressure::{
         TaskProviderPressure, TaskProviderRouteConsumer, wrap_task_agent_provider,
@@ -1850,6 +1851,20 @@ where
 
 #[async_trait]
 impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
+    async fn planner_worktree_availability(
+        &self,
+        options: &AgentRunOptions,
+    ) -> TaskPlannerWorktreeAvailability {
+        if options.interaction_mode == InteractionMode::Headless {
+            return TaskPlannerWorktreeAvailability::UnavailableHeadless;
+        }
+        if git_worktree_planning_is_available(&options.workspace_root).await {
+            TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview
+        } else {
+            TaskPlannerWorktreeAvailability::UnavailableWorkspace
+        }
+    }
+
     fn supports_integration_lanes(&self) -> bool {
         true
     }

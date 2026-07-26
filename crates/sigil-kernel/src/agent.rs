@@ -27,7 +27,7 @@ use crate::{
     task::{
         TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceAssessmentContext,
         TaskId, TaskParticipantAttemptId, TaskPlanUpdateContext, TaskStepId,
-        task_guidance_apply_tool_spec, task_plan_update_tool_spec,
+        task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
     },
     task_handoff::{
         CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef,
@@ -1540,8 +1540,10 @@ where
                     .collect::<Vec<_>>()
             };
             if !task_routing_decision_pending {
-                if task_plan_update.is_some() {
-                    tool_specs.push(task_plan_update_tool_spec());
+                if let Some(context) = task_plan_update.as_ref() {
+                    tool_specs.push(task_plan_update_tool_spec_for_worktree(
+                        context.worktree_availability,
+                    ));
                 }
                 if task_guidance_assessment.is_some() {
                     tool_specs.push(task_guidance_apply_tool_spec());

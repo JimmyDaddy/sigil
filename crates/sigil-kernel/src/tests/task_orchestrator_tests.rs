@@ -30,18 +30,18 @@ use crate::{
     TaskGuidancePromotedEntry, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
     TaskParticipantResultEntry, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-    TaskVerificationRerunRequest, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
-    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
-    WriteLeaseReleaseStatus, WriteLeaseScope, project_conversation_prompt_for_persistence,
-    stable_workspace_id, task_participant_attempt_id, task_participant_input_hash,
-    task_participant_session_ref, write_file_with_mutation,
+    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
+    TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceSnapshotId,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
+    project_conversation_prompt_for_persistence, stable_workspace_id, task_participant_attempt_id,
+    task_participant_input_hash, task_participant_session_ref, write_file_with_mutation,
 };
 
 use super::{
@@ -900,7 +900,10 @@ fn successful_read_child_output(request: TaskChildSessionRunRequest) -> TaskChil
 
 #[test]
 fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
-    let prompt = planner_prompt("review implementation");
+    let prompt = planner_prompt(
+        "review implementation",
+        TaskPlannerWorktreeAvailability::UnavailableHeadless,
+    );
 
     assert!(prompt.contains("request_task_discovery exactly once"));
     assert!(prompt.contains("spawn_agents, or wait_agent"));
@@ -914,8 +917,17 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     assert!(prompt.contains("role subagent_read"));
     assert!(prompt.contains("changeset_only is proposal-only"));
     assert!(prompt.contains("pauses for manual merge review"));
-    assert!(prompt.contains("role subagent_write with isolation worktree"));
+    assert!(prompt.contains("Host worktree planning capability"));
+    assert!(prompt.contains("this headless run cannot complete"));
+    assert!(prompt.contains("only when the host capability below marks it available"));
     assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
+
+    let interactive = planner_prompt(
+        "review implementation",
+        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
+    );
+    assert!(interactive.contains("supports private Git worktrees"));
+    assert!(interactive.contains("required integration review and promotion"));
 }
 
 #[test]
