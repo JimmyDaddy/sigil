@@ -7,9 +7,9 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolOperation, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
-    delete_file_with_mutation, write_file_with_mutation,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectScope, delete_file_with_mutation, write_file_with_mutation,
 };
 
 use crate::{
@@ -39,12 +39,18 @@ pub(crate) struct ListTool;
 pub(crate) struct GlobTool;
 pub(crate) struct GrepTool;
 
+enum ReadFileLoad {
+    File { content: String, bytes: u64 },
+    NotAFile,
+}
+
 #[async_trait]
 impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_file".to_owned(),
-            description: "Read a UTF-8 text file from the workspace.".to_owned(),
+            description: "Read one UTF-8 text file from the workspace. Pass a workspace-relative file path such as src/lib.rs; this tool does not list directories."
+                .to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -73,15 +79,33 @@ impl Tool for ReadFileTool {
             .unwrap_or(DEFAULT_READ_LIMIT_LINES)
             .min(HARD_READ_LIMIT_LINES);
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
-        let (content, bytes) = run_blocking_io("read_file", move || {
+        let loaded = run_blocking_io("read_file", move || {
+            let metadata = fs::metadata(&resolved)
+                .with_context(|| format!("failed to inspect {}", resolved.display()))?;
+            if !metadata.is_file() {
+                return Ok(ReadFileLoad::NotAFile);
+            }
             let content = fs::read_to_string(&resolved)
                 .with_context(|| format!("failed to read {}", resolved.display()))?;
-            let bytes = fs::metadata(&resolved)
-                .with_context(|| format!("failed to inspect {}", resolved.display()))?
-                .len();
-            Ok((content, bytes))
+            Ok(ReadFileLoad::File {
+                content,
+                bytes: metadata.len(),
+            })
         })
         .await?;
+        let (content, bytes) = match loaded {
+            ReadFileLoad::File { content, bytes } => (content, bytes),
+            ReadFileLoad::NotAFile => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    ToolErrorKind::InvalidInput,
+                    format!(
+                        "read_file path {path:?} is not a regular file; use a workspace-relative file path such as src/lib.rs"
+                    ),
+                ));
+            }
+        };
         let total_lines = content.lines().count();
         let selected = content.lines().skip(offset).collect::<Vec<_>>().join("\n");
         let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);

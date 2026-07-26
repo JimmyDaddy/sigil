@@ -3660,6 +3660,28 @@ async fn read_file_reports_code_preview_metadata() -> Result<()> {
 }
 
 #[tokio::test]
+async fn read_file_reports_directory_as_safe_invalid_input() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+
+    let result = ReadFileTool
+        .execute(ctx, "read-directory".to_owned(), json!({ "path": "." }))
+        .await?;
+
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("directory read should return a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+    assert!(error.message.contains("not a regular file"));
+    assert!(error.message.contains("src/lib.rs"));
+    assert!(
+        !error.message.contains(&temp.path().display().to_string()),
+        "model-visible invalid input must not disclose the absolute host workspace"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_glob_and_grep_report_limit_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     for index in 0..5 {
