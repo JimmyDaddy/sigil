@@ -152,7 +152,7 @@ for (let index = 1; index <= 4; index += 1) {
     id,
     caseClass: "positive",
     prompt:
-      "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, then wrap rendered values in square brackets. Coordinate the cross-module work and keep the public facade compiling.",
+      "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, and replace the formatter's existing `record:` output with square-bracket rendering. For input `  MiXeD-42  `, the final public render_record output must be exactly `[mixed-42]`, not `[record:mixed-42]`. Coordinate the cross-module work and keep the public facade compiling.",
     allowedTools: ["read_file", "edit_file"],
     sources: {
       ...unchangedSources,

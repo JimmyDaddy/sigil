@@ -301,6 +301,16 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
         if fixture.manifest.id.starts_with("orch-pos-cross-layer-") {
             assert!(
                 fixture
+                    .prompt
+                    .contains("replace the formatter's existing `record:` output")
+            );
+            assert!(
+                fixture
+                    .prompt
+                    .contains("must be exactly `[mixed-42]`, not `[record:mixed-42]`")
+            );
+            assert!(
+                fixture
                     .manifest
                     .checks
                     .iter()

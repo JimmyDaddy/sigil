@@ -1,7 +1,7 @@
 schema_version = 1
 id = "orch-pos-cross-layer-02"
 prompt_file = "prompt.txt"
-prompt_sha256 = "sha256:133d4803a47227f54c441e811635cb3fc97c79bed1f68b5a9c3d611abc286146"
+prompt_sha256 = "sha256:39e79f4925718d66c27bb4e9d437b36c7c78b448c1589bfddd784c800ea992ac"
 allowed_tools = ["read_file", "edit_file"]
 max_turns = 16
 max_output_tokens = 16384
